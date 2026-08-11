@@ -24048,6 +24048,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             "RuntimeUnlockActivationWindowGranted"));
 
+        transport.RuntimeUnlockRouteCommitSnapshot = snapshot with
+        {
+            Reason = "runtime_unlock_transaction_peer_proof",
+        };
         var logStart = GetOperationalLogLength();
         var exactAvailability =
             new FileTransferDataSessionAvailabilityChangedEventArgs(
@@ -24066,6 +24070,22 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         await Assert.IsAssignableFrom<Task>(availabilityHandler.Invoke(
             service,
             [dataSession, exactAvailability]));
+        await WaitUntilAsync(
+            () => GetPrivateProperty<FileTransferRouteSelection>(
+                      context,
+                      "RouteSelection").Route == FileTransferRoute.FileTunaV4,
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                      context,
+                      "CoordinatorPersistentState")
+                  .FileTransferRouteTransition.CurrentOperation is null,
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_live_route_epoch_recovered;",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
 
         var log = ReadOperationalLogTail(logStart);
         var handoff = log
@@ -24102,6 +24122,27 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             CountOccurrences(
                 log,
                 "event=filetransfer_route_transition_prepared;"));
+        Assert.Contains(
+            "event=filetransfer_route_transition_drain_receipt_decided;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_route_transition_committed;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_route_transition_committed;"));
+        Assert.Contains(
+            "event=filetransfer_live_route_epoch_recovered;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "filetransfer_route_transition_initial_responder_boundary_not_current",
+            log,
+            StringComparison.Ordinal);
         Assert.DoesNotContain(
             "decision_reason=data_session_unavailable",
             log,
@@ -24114,11 +24155,15 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "event=runtime_unlock_retry_dispatch_install_receipt_issued;",
             log,
             StringComparison.Ordinal);
+        var transitionState = GetPrivateProperty<
+            FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState")
+            .FileTransferRouteTransition;
+        Assert.Null(transitionState.CurrentOperation);
         var operation = Assert.IsType<FileTransferRouteTransitionOperation>(
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState")
-                .FileTransferRouteTransition.CurrentOperation);
+            transitionState.LastTerminalOperation);
+        Assert.Equal(FileTransferRouteTransitionState.Committed, operation.State);
         Assert.Equal(
             FileTransferRouteTransitionKind.RegularV4ToTunaV4,
             operation.Authority.Kind);

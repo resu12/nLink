@@ -28494,7 +28494,9 @@ internal static class FileTransferCoordinator
                 activation.InitialResponderPeerProbeObservation is
                     { } initialResponder &&
                 (state.Direction != FileTransferDirection.Inbound ||
-                 proof != activation.AcceptedLaunchBoundary ||
+                 !RuntimeUnlockInitialResponderCommitProofMatchesAcceptedBoundary(
+                     proof,
+                     activation.AcceptedLaunchBoundary) ||
                  initialResponder.LaunchGeneration !=
                      activation.LaunchGeneration ||
                  !TryValidateRuntimeUnlockInitialResponderPeerProbeRouteTransitionObservation(
@@ -28519,6 +28521,12 @@ internal static class FileTransferCoordinator
 
         return true;
     }
+
+    private static bool
+        RuntimeUnlockInitialResponderCommitProofMatchesAcceptedBoundary(
+            RuntimeUnlockRouteCommitProof current,
+            RuntimeUnlockRouteCommitProof accepted)
+        => current with { Reason = accepted.Reason } == accepted;
 
     private static bool FileTransferTunaActivationProofMatchesTarget(
         RuntimeUnlockRouteCommitProof proof)

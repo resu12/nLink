@@ -577,6 +577,56 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_InitialResponderDrainBoundaryRejectionUsesRouteTransitionOwnership(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildResponderInitialActivationPeerAcceptanceScopeFixture(
+                recovered ? "retry_drain_recovered" : "retry_drain_rejected"),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["filetransfer_route_transition_incomplete_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_route_transition_incomplete_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_route_transition_incomplete_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal("filetransfer_route_transition_incomplete", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "filetransfer_route_transition_drain_receipt_decided",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "filetransfer_route_transition_initial_responder_boundary_not_current",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("(none)", verdict["failure_variant"]);
+        }
+    }
+
     private static IReadOnlyList<string> BuildResponderInitialActivationPeerAcceptanceScopeFixture(
         string mode)
     {
@@ -644,7 +694,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "retry_handoff" or
             "retry_prepare" or
             "retry_commit" or
-            "retry_publication" ||
+            "retry_publication" or
+            "retry_drain_rejected" or
+            "retry_drain_recovered" ||
             recoveryLineageMutation;
         var includeAdopting = retryMode &&
             !string.Equals(mode, "retry_acked_no_adopting", StringComparison.Ordinal);
@@ -658,7 +710,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "retry_handoff" or
             "retry_prepare" or
             "retry_commit" or
-            "retry_publication" ||
+            "retry_publication" or
+            "retry_drain_rejected" or
+            "retry_drain_recovered" ||
             recoveryLineageMutation;
         var includePrepare = mode is
             "recovered" or
@@ -667,7 +721,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "recovered_then_replaced" or
             "retry_prepare" or
             "retry_commit" or
-            "retry_publication" ||
+            "retry_publication" or
+            "retry_drain_rejected" or
+            "retry_drain_recovered" ||
             recoveryLineageMutation;
         var includeCommit = mode is
             "recovered" or
@@ -677,6 +733,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "retry_commit" or
             "retry_publication" ||
             recoveryLineageMutation;
+        var includeDrain = includeCommit || mode is
+            "retry_drain_rejected" or
+            "retry_drain_recovered";
         var includeFullDisposition = mode is
             "recovered" or
             "recovered_exact_duplicates" or
@@ -933,12 +992,55 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includePrepare)
             {
-                lines.Add(LogLine($"event=filetransfer_route_transition_prepared; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; {sourceScope}; log_writer_id={writerId}", secondsOffset: 28));
+                lines.Add(LogLine($"event=filetransfer_route_transition_prepared; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Prepared; {sourceScope}; log_writer_id={writerId}", secondsOffset: 28));
+            }
+            if (includeDrain)
+            {
+                lines.Add(LogLine($"event=filetransfer_route_transition_draining; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Draining; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
             }
             if (includeCommit)
             {
-                lines.Add(LogLine($"event=filetransfer_route_transition_draining; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
                 lines.Add(LogLine($"event=filetransfer_route_transition_committed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; {sourceScope}; log_writer_id={writerId}", secondsOffset: 30));
+            }
+            if (mode is "retry_drain_rejected" or "retry_drain_recovered")
+            {
+                const string drainTuple =
+                    "transaction_generation=2; offer_generation=6; launch_generation=1; " +
+                    "tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; " +
+                    "proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; " +
+                    "activation_authority_mode=initial_responder; admission_generation=1; " +
+                    "pending_precommit_generation=1; retry_install_generation=0; " +
+                    "authority_id=fta2-initial-responder; transition_generation=1; " +
+                    "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna";
+                var rejectedReceipt = LogLine(
+                    $"event=filetransfer_route_transition_drain_receipt_decided; direction=inbound; " +
+                    $"transfer_id={transferId}; session_id={sessionId}; {drainTuple}; " +
+                    $"{sourceScope}; decision_status=Rejected; " +
+                    "decision_reason=filetransfer_route_transition_initial_responder_boundary_not_current; " +
+                    $"log_writer_id={writerId}",
+                    secondsOffset: 30);
+                lines.Add(rejectedReceipt);
+                lines.Add(rejectedReceipt);
+                if (string.Equals(mode, "retry_drain_recovered", StringComparison.Ordinal))
+                {
+                    lines.Add(LogLine(
+                        $"event=filetransfer_route_transition_drain_receipt_decided; direction=inbound; " +
+                        $"transfer_id={transferId}; session_id={sessionId}; {drainTuple}; {sourceScope}; " +
+                        "decision_status=Accepted; drain_outcome=Completed; captured_send_count=0; " +
+                        "completed_send_count=0; captured_send_fingerprint=empty-set; " +
+                        $"completed_send_fingerprint=empty-set; log_writer_id={writerId}",
+                        secondsOffset: 31));
+                    lines.Add(LogLine(
+                        $"event=filetransfer_route_transition_committed; direction=inbound; transfer_id={transferId}; " +
+                        $"session_id={sessionId}; {drainTuple}; {sourceScope}; decision_status=Committed; " +
+                        $"log_writer_id={writerId}",
+                        secondsOffset: 32));
+                    lines.Add(LogLine(
+                        $"event=filetransfer_route_transition_disposition_applied; direction=inbound; " +
+                        $"transfer_id={transferId}; session_id={sessionId}; {drainTuple}; {sourceScope}; " +
+                        $"decision_status=Applied; apply_status=Applied; disposition=committed; log_writer_id={writerId}",
+                        secondsOffset: 33));
+                }
             }
             if (includeFullDisposition)
             {

@@ -17451,21 +17451,83 @@ public sealed class FileTransferCoordinatorTests
         var command = Assert.IsType<
             FileTransferRouteTransitionPhysicalDrainCommand>(
                 draining.DrainCommand);
+        var finalProof = setup.FinalProof with
+        {
+            Reason = "runtime_unlock_transaction_peer_proof",
+        };
+        (string Name, RuntimeUnlockRouteCommitProof Proof)[] mutatedProofs =
+        [
+            ("session", finalProof with { SessionId = finalProof.SessionId + "-mutated" }),
+            ("transfer", finalProof with { TransferId = finalProof.TransferId + "-mutated" }),
+            ("transaction", finalProof with { TransactionGeneration = finalProof.TransactionGeneration + 1 }),
+            ("offer", finalProof with { OfferGeneration = finalProof.OfferGeneration + 1 }),
+            ("peer_visible", finalProof with { PeerVisibleProof = false }),
+            ("peer_received", finalProof with { PeerReceived = false }),
+            ("answer_received", finalProof with { AnswerReceived = false }),
+            ("target_route", finalProof with { TargetRoute = FileTransferRoute.PostTunaFallbackV6 }),
+            ("protocol", finalProof with { ProtocolVersion = FileTransferProtocol.ProtocolVersionV6 }),
+            ("handoff", finalProof with { HandoffKind = FileTransferTransportHandoffKind.TunaToNormalFallback }),
+            ("transport", finalProof with { TargetTransport = FileTransferTransportKind.RegularNkn }),
+            ("transaction_state", finalProof with { TransactionState = RuntimeUnlockTransactionState.AnswerReceived }),
+            ("probe_id", finalProof with { PathProbeId = finalProof.PathProbeId + "-mutated" }),
+            ("probe_state", finalProof with { PathProbeState = RuntimeUnlockPathProbeState.Started }),
+            ("probe_transport", finalProof with { PathProbeTransport = FileTransferTransportKind.RegularNkn }),
+            ("probe_time", finalProof with { PathProbeAckedUtcMs = finalProof.PathProbeAckedUtcMs + 1 }),
+            ("probe_failure", finalProof with { PathProbeFailureReason = "mutated" }),
+            ("lease_required", finalProof with { TunaPathLeaseRequired = false }),
+            ("lease_generation", finalProof with { TunaPathLeaseGeneration = finalProof.TunaPathLeaseGeneration + 1 }),
+            ("lease_state", finalProof with { TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.Retired }),
+            ("listener", finalProof with { TunaPathLeaseListenerRunId = finalProof.TunaPathLeaseListenerRunId + "-mutated" }),
+            ("lease_current", finalProof with { TunaPathLeaseCurrent = false }),
+            ("lease_failure", finalProof with { TunaPathLeaseFailureReason = "mutated" }),
+            ("admission", finalProof with
+            {
+                AdmissionToken = finalProof.AdmissionToken!.Value with
+                {
+                    AdmissionGeneration =
+                        finalProof.AdmissionToken.Value.AdmissionGeneration + 1,
+                },
+            }),
+            ("same_path_ack", finalProof with { SamePathTunaProbeAckId = finalProof.SamePathTunaProbeAckId + "-mutated" }),
+        ];
+        foreach (var mutation in mutatedProofs)
+        {
+            Assert.False(
+                FileTransferCoordinator.TryValidateFileTransferRouteTransitionCommitProof(
+                    draining.State,
+                    authority,
+                    mutation.Proof,
+                    out _),
+                mutation.Name);
+        }
+
+        var drainReceipt =
+            new FileTransferRouteTransitionPhysicalDrainReceipt(
+                command,
+                command.CapturedPhysicalSendLeaseIds,
+                command.CapturedPhysicalSendCount,
+                command.CapturedPhysicalSendFingerprint,
+                FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
+                "initial_responder_physical_drain_completed");
         var committed =
             FileTransferCoordinator.CommitFileTransferRouteTransition(
                 draining.State,
                 authority,
-                new FileTransferRouteTransitionPhysicalDrainReceipt(
-                    command,
-                    command.CapturedPhysicalSendLeaseIds,
-                    command.CapturedPhysicalSendCount,
-                    command.CapturedPhysicalSendFingerprint,
-                    FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
-                    "initial_responder_physical_drain_completed"),
-                setup.FinalProof);
+                drainReceipt,
+                finalProof);
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Committed,
             committed.Status);
+        var duplicate =
+            FileTransferCoordinator.CommitFileTransferRouteTransition(
+                committed.State,
+                authority,
+                drainReceipt,
+                finalProof);
+        Assert.Equal(
+            FileTransferRouteTransitionDecisionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Same(committed.State, duplicate.State);
 
         var wrongModeObservation = observation with
         {

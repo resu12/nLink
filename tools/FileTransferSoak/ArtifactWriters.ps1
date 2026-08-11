@@ -9557,6 +9557,61 @@ function Get-FileTransferRouteTransitionCorrelation {
         return $true
     }
 
+    function Test-InitialResponderRouteTransitionDrainTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Prepared,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-RouteTransitionAuthorityMatch `
+                -Authority $Prepared `
+                -Candidate $Candidate) -or
+            (Get-RouteTransitionField -Event $Prepared -Name 'direction') -ine 'inbound' -or
+            (Get-RouteTransitionField -Event $Prepared -Name 'transition_kind') -ne
+                'RegularV4ToTunaV4' -or
+            (Get-RouteTransitionField -Event $Prepared -Name 'responder_transition_mode') -ne
+                'initial_regular_v4' -or
+            (Get-RouteTransitionField -Event $Prepared -Name 'activation_authority_mode') -ne
+                'initial_responder') {
+            return $false
+        }
+
+        $preparedWriter = Get-RouteTransitionField -Event $Prepared -Name 'log_writer_id'
+        $candidateWriter = Get-RouteTransitionField -Event $Candidate -Name 'log_writer_id'
+        if ([string]::IsNullOrWhiteSpace($preparedWriter) -or
+            -not [string]::Equals(
+                $preparedWriter,
+                $candidateWriter,
+                [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'proof_boundary_kind',
+                'responder_transition_mode',
+                'activation_authority_mode',
+                'admission_generation',
+                'pending_precommit_generation',
+                'transaction_generation',
+                'offer_generation',
+                'launch_generation',
+                'tuna_path_lease_generation',
+                'retry_install_generation')) {
+            $expected = Get-RouteTransitionField -Event $Prepared -Name $fieldName
+            $actual = Get-RouteTransitionField -Event $Candidate -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($expected) -or
+                [string]::IsNullOrWhiteSpace($actual) -or
+                -not [string]::Equals(
+                    $expected,
+                    $actual,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
     function Test-RouteTransitionStatus {
         param(
             [Parameter(Mandatory = $true)]$Event,
@@ -10141,6 +10196,7 @@ function Get-FileTransferRouteTransitionCorrelation {
     $rawRecords = New-Object System.Collections.Generic.List[object]
     $distinctRecords = New-Object System.Collections.Generic.List[object]
     $distinctKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $genericRecoveredKeys = New-Object 'System.Collections.Generic.HashSet[string]'
     $fallbackBootstrapRawRecords = New-Object System.Collections.Generic.List[object]
     $fallbackBootstrapDistinctRecords = New-Object System.Collections.Generic.List[object]
     $fallbackBootstrapDistinctKeys = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -10176,6 +10232,9 @@ function Get-FileTransferRouteTransitionCorrelation {
         $rawRecords.Add($record) | Out-Null
         if ($distinctKeys.Add($Key)) {
             $distinctRecords.Add($record) | Out-Null
+        }
+        if ($Class -eq 'filetransfer_route_transition_incomplete' -and $Recovered) {
+            $genericRecoveredKeys.Add($Key) | Out-Null
         }
     }
 
@@ -10253,6 +10312,93 @@ function Get-FileTransferRouteTransitionCorrelation {
         $invalidationSequence = if ($invalidations.Count -gt 0) { [int64]$invalidations[0].Sequence } else { [int64]::MaxValue }
         $terminalSequence = if ($terminals.Count -gt 0) { [int64]$terminals[0].Sequence } else { [int64]::MaxValue }
         $operationEnd = [Math]::Min($terminalSequence, [Math]::Min($commitSequence, $invalidationSequence))
+
+        if ($draining.Count -gt 0 -and
+            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                -Prepared $prepared `
+                -Candidate $draining[0])) {
+            [object[]]$rejectedDrainReceipts = @($receiptEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+                    (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                        -Prepared $prepared `
+                        -Candidate $_) -and
+                    (Get-RouteTransitionField -Event $_ -Name 'status') -eq 'Rejected'
+                } | Sort-Object Sequence, LineNumber)
+            if ($rejectedDrainReceipts.Count -gt 0) {
+                [object[]]$reasonMutations = @($rejectedDrainReceipts | Where-Object {
+                        (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -ne
+                            'filetransfer_route_transition_initial_responder_boundary_not_current'
+                    })
+                [object[]]$exactRejectedDrainReceipts = @($rejectedDrainReceipts | Where-Object {
+                        (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -eq
+                            'filetransfer_route_transition_initial_responder_boundary_not_current'
+                    })
+                if ($reasonMutations.Count -eq 0 -and
+                    $exactRejectedDrainReceipts.Count -gt 0) {
+                    $lastRejectedSequence = [int64]$exactRejectedDrainReceipts[-1].Sequence
+                    [object[]]$completedRecoveryReceipts = @($receiptEvents | Where-Object {
+                            [int64]$_.Sequence -gt $lastRejectedSequence -and
+                            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                                -Prepared $prepared `
+                                -Candidate $_) -and
+                            (Test-RouteTransitionReceiptComplete `
+                                -Prepared $prepared `
+                                -Receipt $_)
+                        } | Sort-Object Sequence, LineNumber)
+                    $recovered = $false
+                    if ($completedRecoveryReceipts.Count -gt 0) {
+                        $recoveryReceipt = $completedRecoveryReceipts[0]
+                        [object[]]$recoveryCommits = @($commitEvents | Where-Object {
+                                [int64]$_.Sequence -gt [int64]$recoveryReceipt.Sequence -and
+                                (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                                    -Prepared $prepared `
+                                    -Candidate $_) -and
+                                (Test-RouteTransitionStatus `
+                                    -Event $_ `
+                                    -Allowed @('Committed', 'Idempotent'))
+                            } | Sort-Object Sequence, LineNumber)
+                        if ($recoveryCommits.Count -gt 0) {
+                            $recoveryCommit = $recoveryCommits[0]
+                            [object[]]$recoveryDispositions = @($dispositionEvents | Where-Object {
+                                    [int64]$_.Sequence -gt [int64]$recoveryCommit.Sequence -and
+                                    (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                                        -Prepared $prepared `
+                                        -Candidate $_) -and
+                                    ((Test-RouteTransitionStatus `
+                                            -Event $_ `
+                                            -Allowed @('Committed', 'Applied', 'Idempotent')) -or
+                                        (Get-RouteTransitionField -Event $_ -Name 'disposition') -eq
+                                            'committed')
+                                } | Sort-Object Sequence, LineNumber)
+                            if ($recoveryDispositions.Count -gt 0) {
+                                $recoveryEnd = [int64]$recoveryDispositions[0].Sequence
+                                $recoveryBlocked = @(
+                                    @($invalidationEvents) + @($supersessionEvents) +
+                                    @($terminalEvents) + @($ownerBoundaryEvents) | Where-Object {
+                                        [int64]$_.Sequence -gt $lastRejectedSequence -and
+                                        [int64]$_.Sequence -lt $recoveryEnd -and
+                                        (Test-RouteTransitionTransferScopeMatch `
+                                            -Authority $prepared `
+                                            -Candidate $_)
+                                    }
+                                ).Count -gt 0
+                                $recovered = -not $recoveryBlocked
+                            }
+                        }
+                    }
+
+                    $directCandidateKey = "$candidateKey|initial-responder-drain-rejected|$((Get-RouteTransitionField -Event $prepared -Name 'log_writer_id').ToLowerInvariant())"
+                    foreach ($rejectedDrainReceipt in $exactRejectedDrainReceipts) {
+                        Add-RouteTransitionCandidate `
+                            -Event $rejectedDrainReceipt `
+                            -Key $directCandidateKey `
+                            -Reason 'filetransfer_route_transition_initial_responder_boundary_not_current' `
+                            -Recovered:$recovered
+                    }
+                    continue
+                }
+            }
+        }
 
         if ($targetRoute -eq 'post_tuna_fallback_v6') {
             $routeTransitionBoundedLookupVisitCount += [int64]$proofEvents.Count
@@ -11048,15 +11194,22 @@ function Get-FileTransferRouteTransitionCorrelation {
     [object[]]$genericDistinctRecords = @($distinctRecords | Where-Object {
             $_.Class -eq 'filetransfer_route_transition_incomplete'
         })
+    [object[]]$genericUnresolvedRecords = @($genericDistinctRecords | Where-Object {
+            -not $genericRecoveredKeys.Contains($_.DistinctKey)
+        })
+    [object[]]$allUnresolvedRecords = @($distinctRecords | Where-Object {
+            $_.Class -ne 'filetransfer_route_transition_incomplete' -or
+            -not $genericRecoveredKeys.Contains($_.DistinctKey)
+        })
     return [pscustomobject]@{
         RawCount = $genericRawRecords.Count
         DistinctCount = $genericDistinctRecords.Count
-        RecoveredCount = 0
-        UnresolvedCount = $genericDistinctRecords.Count
-        Verdict = if ($genericDistinctRecords.Count -gt 0) { 'fail' } else { 'pass' }
+        RecoveredCount = $genericRecoveredKeys.Count
+        UnresolvedCount = $genericUnresolvedRecords.Count
+        Verdict = if ($genericUnresolvedRecords.Count -gt 0) { 'fail' } else { 'pass' }
         RawCandidateRecords = @($rawRecords.ToArray())
         CandidateRecords = @($distinctRecords.ToArray())
-        UnresolvedCandidateRecords = @($distinctRecords.ToArray())
+        UnresolvedCandidateRecords = $allUnresolvedRecords
         FallbackV6ProofBootstrapMissingRawCount = $fallbackBootstrapRawRecords.Count
         FallbackV6ProofBootstrapMissingDistinctCount = $fallbackBootstrapDistinctRecords.Count
         FallbackV6ProofBootstrapMissingRecoveredCount = $fallbackBootstrapRecoveredKeys.Count
@@ -47677,70 +47830,9 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                             -Candidate $_)
                     } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
                     if ($initialDrain.Count -eq 0) { continue }
-                    $initialCommit = @($committed | Where-Object {
-                        [int64]$_.Sequence -gt [int64]$initialDrain[0].Sequence -and
-                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
-                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq
-                            'RegularV4ToTunaV4' -and
-                        (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $initialAuthority -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
-                            $initialTransitionGeneration -and
-                        (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
-                            'initial_regular_v4' -and
-                        (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
-                            'initial_responder' -and
-                        [int64](Get-FileTransferEventField `
-                            -Event $_ `
-                            -Name 'retry_install_generation' `
-                            -Default '0') -eq 0 -and
-                        (Test-ResponderInitialSourceScopeMatch `
-                            -Admission $InitialAdmission `
-                            -Candidate $_)
-                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
-                    if ($initialCommit.Count -eq 0) { continue }
-                    $initialDisposition = @($dispositions | Where-Object {
-                        [int64]$_.Sequence -gt [int64]$initialCommit[0].Sequence -and
-                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
-                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq
-                            'RegularV4ToTunaV4' -and
-                        (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $initialAuthority -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
-                            $initialTransitionGeneration -and
-                        (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
-                            'initial_regular_v4' -and
-                        (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -eq
-                            'initial_responder' -and
-                        [int64](Get-FileTransferEventField `
-                            -Event $_ `
-                            -Name 'retry_install_generation' `
-                            -Default '0') -eq 0 -and
-                        (Test-ResponderInitialSourceScopeMatch `
-                            -Admission $InitialAdmission `
-                            -Candidate $_)
-                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
-                    if ($initialDisposition.Count -eq 0) { continue }
-                    $initialPublication = @($routePublications | Where-Object {
-                        [int64]$_.Sequence -gt [int64]$initialDisposition[0].Sequence -and
-                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
-                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
-                        (Get-ResponderProbeField -Event $_ -Names @(
-                                'transition_authority_id',
-                                'authority_id')) -eq $initialAuthority -and
-                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq
-                            $initialTransitionGeneration -and
-                        (Test-ResponderDispositionPublicationResultMatch `
-                            -Disposition $initialDisposition[0] `
-                            -Publication $_)
-                    } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
-                    if ($initialPublication.Count -eq 0) { continue }
-                    $initialTerminalBeforePublication = @($terminalEvents | Where-Object {
+                    $initialTerminalBeforeDrain = @($terminalEvents | Where-Object {
                         [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
-                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialDrain[0].Sequence -and
                         (Test-ResponderInboundTerminalMatch `
                             -Decision $InitialAdmission `
                             -Candidate $_ `
@@ -47748,9 +47840,9 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                             -SessionId $SessionId `
                             -TransferId $TransferId)
                     }).Count -gt 0
-                    $initialScopeReplacedBeforePublication = @($scopeReplacementEvents | Where-Object {
+                    $initialScopeReplacedBeforeDrain = @($scopeReplacementEvents | Where-Object {
                         [int64]$_.Sequence -gt [int64]$initialResponderDecision.Sequence -and
-                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialDrain[0].Sequence -and
                         (Test-ResponderRecoveryReplacementMatch `
                             -Decision $InitialAdmission `
                             -Candidate $_ `
@@ -47758,9 +47850,9 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                             -SessionId $SessionId `
                             -TransferId $TransferId)
                     }).Count -gt 0
-                    $initialLocalAnswerReplacedBeforePublication = @($transactionAnswers | Where-Object {
+                    $initialLocalAnswerReplacedBeforeDrain = @($transactionAnswers | Where-Object {
                         [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
-                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialDrain[0].Sequence -and
                         (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
                         (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
                         (Get-ResponderOptionalScopeField -Event $_ -Names @('transfer_id')) -in @(
@@ -47773,9 +47865,9 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                                     'tuna_path_lease_listener_run_id',
                                     'path_lease_listener_run_id')))
                     }).Count -gt 0
-                    $initialPendingAckReplacedBeforePublication = @($pendingAnswerAcks | Where-Object {
+                    $initialPendingAckReplacedBeforeDrain = @($pendingAnswerAcks | Where-Object {
                         [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
-                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialDrain[0].Sequence -and
                         (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
                         (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
                         (Get-ResponderOptionalScopeField -Event $_ -Names @('transfer_id')) -in @(
@@ -47784,24 +47876,24 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                             (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -ne $Payer -or
                             (Get-ResponderProbeField -Event $_ -Names @('lanes')) -ine 'file')
                     }).Count -gt 0
-                    $initialUnexpectedPairReleaseOrInstall = @($orderedEvents | Where-Object {
+                    $initialUnexpectedPairReleaseOrInstallBeforeDrain = @($orderedEvents | Where-Object {
                         $_.EventName -in @(
                             'filetransfer_fallback_tail_pairing_committed',
                             'filetransfer_fallback_tail_paired_release_reserved',
                             'filetransfer_fallback_tail_paired_release_consumed',
                             'runtime_unlock_retry_dispatch_install_committed') -and
                         [int64]$_.Sequence -gt [int64]$Bound.Sequence -and
-                        [int64]$_.Sequence -lt [int64]$initialPublication[0].Sequence -and
+                        [int64]$_.Sequence -lt [int64]$initialDrain[0].Sequence -and
                         (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $Writer -and
                         (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $SessionId -and
                         (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $TransferId -and
                         (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound'
                     }).Count -gt 0
-                    if (-not $initialTerminalBeforePublication -and
-                        -not $initialScopeReplacedBeforePublication -and
-                        -not $initialLocalAnswerReplacedBeforePublication -and
-                        -not $initialPendingAckReplacedBeforePublication -and
-                        -not $initialUnexpectedPairReleaseOrInstall) {
+                    if (-not $initialTerminalBeforeDrain -and
+                        -not $initialScopeReplacedBeforeDrain -and
+                        -not $initialLocalAnswerReplacedBeforeDrain -and
+                        -not $initialPendingAckReplacedBeforeDrain -and
+                        -not $initialUnexpectedPairReleaseOrInstallBeforeDrain) {
                         $initialRecovered = $true
                         break
                     }
