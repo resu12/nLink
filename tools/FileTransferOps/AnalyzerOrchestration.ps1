@@ -3318,7 +3318,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'incomplete_proof'
     }
-    elseif ($fileTransferReceiveRecoveryOperationProof.UnresolvedCount -gt 0 -or
+    elseif ($runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -gt 0 -or
+        $fileTransferReceiveRecoveryOperationProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryCompletedProvenSuccessorProof.UnresolvedCount -gt 0 -or
         $fileTransferReceiveRecoveryPostTunaRuntimeSuccessorLivenessHandoffProof.UnresolvedCount -gt 0 -or
@@ -3416,6 +3417,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
+                'runtime_unlock_retry_dispatch_held_after_authority_granted',
                 'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
                 'regular_v4_frontier_tail_repair_state_publication_missing',
@@ -3529,6 +3531,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
+            'runtime_unlock_retry_dispatch_held_after_authority_granted',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',

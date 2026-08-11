@@ -8078,6 +8078,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             verdict["first_proof_chain_failure_reason"]);
         Assert.Equal("(none)", verdict["failure_variant"]);
         Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
     }
 
     [Theory]

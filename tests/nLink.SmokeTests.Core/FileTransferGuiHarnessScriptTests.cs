@@ -3082,6 +3082,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($budgetBypass.Phase -ne 'runtime_unlock_retry' -or $budgetBypass.Reason -ne 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget') { throw 'runtime unlock budget bypass lost precedence' }
             $unsettled = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_contract_unsettled; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($unsettled.Phase -ne 'runtime_unlock_retry' -or $unsettled.Reason -ne 'runtime_unlock_retry_dispatch_contract_unsettled') { throw 'runtime unlock unsettled contract lost precedence' }
+            $postGrantHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_held_after_authority_granted; retained_event=runtime_unlock_retry_dispatch_held_by_active_negotiation' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($postGrantHold.Phase -ne 'runtime_unlock_retry' -or $postGrantHold.Reason -ne 'retry_dispatch_held_after_authority_granted') { throw 'runtime unlock post-grant hold lost precedence' }
             $initialResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_initial_responder_boundary_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
             $initialResponderMissingDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_invalidated; first_proof_chain_failure_reason=initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
@@ -3141,6 +3143,83 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(result.ExitCode == 0, $"Failure classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-failure-classification-precedence-ok", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("Resolve-TunaGuiFailureClassification", guiText, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("unresolved")]
+    [InlineData("raw_only")]
+    [InlineData("recovered")]
+    [InlineData("late_hold")]
+    public async Task GuiSmokeFailureClassification_RuntimeUnlockRetryPostGrantHoldUsesIndexedProofBeforeDeadline(
+        string mode)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-post-grant-hold-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $tuple = 'authority_id=retry-a; session_id=sess; transfer_id=transfer; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=2; missing_dispatch_successor_generation=1; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0; release_kind=FallbackPairedTailYield; release_authority_id=pair-a; release_generation=1; release_outcome=paired'
+                $lines = @("event=runtime_unlock_retry_dispatch_authority_granted; $tuple; gui_evidence_sequence=10; log_writer_id=writer")
+                if ('{{mode}}' -eq 'late_hold') {
+                    $lines += "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; gui_evidence_sequence=11; settlement_outcome=MissingDispatch; decision_reason=runtime_unlock_retry_dispatch_missing_before_completion; dispatch_observed=0; log_writer_id=writer"
+                }
+                $lines += "event=runtime_unlock_retry_dispatch_held_by_active_negotiation; $tuple; gui_evidence_sequence=12; decision_reason=runtime_unlock_retry_dispatch_queued_behind_active_negotiation; log_writer_id=writer"
+                if ('{{mode}}' -in @('raw_only', 'recovered')) {
+                    $lines += "event=runtime_unlock_retry_dispatch_observed; $tuple; gui_evidence_sequence=12; offer_generation=3; offer_nonce=nonce; log_writer_id=writer"
+                }
+                if ('{{mode}}' -eq 'recovered') {
+                    $lines += "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; gui_evidence_sequence=13; offer_generation=3; offer_nonce=nonce; settlement_outcome=DispatchObserved; dispatch_observed=1; decision_reason=peer_visible_offer_send_observed; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_dispatch_settlement_reported; $tuple; gui_evidence_sequence=14; offer_generation=3; offer_nonce=nonce; settlement_outcome=DispatchObserved; settlement_reason=peer_visible_offer_send_observed; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; gui_evidence_sequence=15; offer_generation=3; offer_nonce=nonce; settlement_outcome=DispatchObserved; settlement_reason=peer_visible_offer_send_observed; decision_status=Accepted; log_writer_id=writer"
+                }
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded: scenario deadline elapsed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ('{{mode}}' -in @('unresolved', 'raw_only')) {
+                    if ($result.Phase -ne 'runtime_unlock_retry' -or
+                        $result.Reason -ne 'retry_dispatch_held_after_authority_granted' -or
+                        $result.ClassificationSource -ne 'immutable_evidence_runtime_unlock_retry_post_grant_hold_index') {
+                        throw "post-grant hold did not outrank deadline: $($result | ConvertTo-Json -Compress)"
+                    }
+                }
+                elseif ($result.Phase -ne 'progress_failure' -or
+                    $result.Reason -ne 'gui_smoke_scenario_deadline_exceeded') {
+                    throw "exact dispatch did not recover post-grant hold: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-runtime-unlock-post-grant-hold-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Runtime-unlock post-grant hold GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-runtime-unlock-post-grant-hold-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
