@@ -30847,6 +30847,167 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 .Where(line => line.Contains(sessionId, StringComparison.Ordinal)));
     }
 
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryLifecycle")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RuntimeUnlockOffer_NewerPayerWhileDialPending_ReplaysOnceAfterExactPredecessorCompletion(
+        bool predecessorPhysicallyConnected)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-dial-successor.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-dial-successor.address");
+            var predecessorOutcome =
+                new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            var successorOutcome =
+                new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperLane = new RetryableTunaAccelerationSession(
+                canListen: false,
+                failedDialAttemptsBeforeSuccess: 0,
+                dialAttemptOutcomes:
+                [
+                    predecessorOutcome,
+                    successorOutcome,
+                ]);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-dial-successor-id",
+                    hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-dial-successor-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat |
+                InviteCapabilities.FileTransfer |
+                InviteCapabilities.ScreenShare);
+            var predecessor = CreateOfferPayload(
+                sessionId,
+                "runtime-unlock-dial-predecessor-nonce",
+                payerDecisionId: 76);
+            predecessor.Trigger = "runtime_unlock";
+            var successor = CreateOfferPayload(
+                sessionId,
+                "runtime-unlock-dial-successor-nonce",
+                payerDecisionId: 77);
+            successor.Trigger = "runtime_unlock";
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOffer",
+                hostClient.Address,
+                BuildSecureAccelerationEnvelope(
+                    host,
+                    MsgType.TransportAccelerationOffer,
+                    predecessor,
+                    "transport_acceleration_offer",
+                    predecessor.Nonce,
+                    sequence: 710));
+            await WaitUntilAsync(
+                () => helperLane.StartDialerCalls == 1,
+                TimeSpan.FromSeconds(2));
+
+            InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOffer",
+                hostClient.Address,
+                BuildSecureAccelerationEnvelope(
+                    host,
+                    MsgType.TransportAccelerationOffer,
+                    successor,
+                    "transport_acceleration_offer",
+                    successor.Nonce,
+                    sequence: 711));
+            InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOffer",
+                hostClient.Address,
+                BuildSecureAccelerationEnvelope(
+                    host,
+                    MsgType.TransportAccelerationOffer,
+                    successor,
+                    "transport_acceleration_offer",
+                    successor.Nonce,
+                    sequence: 712));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_tuna_dial_successor_offer_held;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+
+            predecessorOutcome.TrySetResult(predecessorPhysicallyConnected);
+            await WaitUntilAsync(
+                () => helperLane.StartDialerCalls == 2,
+                TimeSpan.FromSeconds(4));
+            if (predecessorPhysicallyConnected)
+            {
+                Assert.Equal(1, helperLane.StopCalls);
+                Assert.Equal(
+                    "superseded_by_newer_payer_decision",
+                    helperLane.LastStopReason);
+            }
+
+            successorOutcome.TrySetResult(true);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_tuna_dial_attempt_connected;" +
+                    " session_id=",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(4));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(2, helperLane.StartDialerCalls);
+            Assert.Contains(
+                "decision_status=Accepted; " +
+                "decision_reason=successor_offer_replay_started",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=tuna_acceleration_answer_sent; accepted=1;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "reason=other_dial_pending",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Single(
+                logTail
+                    .Split(
+                        Environment.NewLine,
+                        StringSplitOptions.RemoveEmptyEntries)
+                    .Where(line => line.Contains(
+                        "event=runtime_unlock_tuna_dial_attempt_started;",
+                        StringComparison.Ordinal) &&
+                        line.Contains(
+                            "payer_decision_id=77;",
+                            StringComparison.Ordinal)));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     private static string ReadTransferOperationalLogSnapshot(int logStart, string transferId)
         => ReadOperationalLogSnapshotForToken(logStart, $"transfer_id={transferId};");
 
@@ -33757,6 +33918,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         private readonly bool allowListenerStartWhenCanListenFalse;
         private readonly TimeSpan? dialDelay;
         private readonly TimeSpan? listenerDelay;
+        private readonly IReadOnlyList<TaskCompletionSource<bool>>?
+            dialAttemptOutcomes;
         private int available;
         private int ensureListenerCalls;
         private int startDialerCalls;
@@ -33773,7 +33936,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             int failedListenerAttemptsBeforeSuccess = 0,
             bool allowListenerStartWhenCanListenFalse = false,
             TimeSpan? dialDelay = null,
-            TimeSpan? listenerDelay = null)
+            TimeSpan? listenerDelay = null,
+            IReadOnlyList<TaskCompletionSource<bool>>?
+                dialAttemptOutcomes = null)
         {
             this.canListen = canListen ? 1 : 0;
             this.failedDialAttemptsBeforeSuccess = failedDialAttemptsBeforeSuccess;
@@ -33783,6 +33948,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             this.allowListenerStartWhenCanListenFalse = allowListenerStartWhenCanListenFalse;
             this.dialDelay = dialDelay;
             this.listenerDelay = listenerDelay;
+            this.dialAttemptOutcomes = dialAttemptOutcomes;
         }
 
         public bool IsAvailable => Volatile.Read(ref available) != 0;
@@ -33932,12 +34098,30 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
         {
             var calls = Interlocked.Increment(ref startDialerCalls);
-            if (ct.IsCancellationRequested || calls <= failedDialAttemptsBeforeSuccess)
+            if (ct.IsCancellationRequested)
             {
                 return false;
             }
 
-            if (dialDelay is { } delay && delay > TimeSpan.Zero)
+            if (dialAttemptOutcomes is not null)
+            {
+                if (calls > dialAttemptOutcomes.Count ||
+                    !await dialAttemptOutcomes[calls - 1]
+                        .Task
+                        .WaitAsync(ct)
+                        .ConfigureAwait(false))
+                {
+                    return false;
+                }
+            }
+            else if (calls <= failedDialAttemptsBeforeSuccess)
+            {
+                return false;
+            }
+
+            if (dialAttemptOutcomes is null &&
+                dialDelay is { } delay &&
+                delay > TimeSpan.Zero)
             {
                 await Task.Delay(delay, ct).ConfigureAwait(false);
             }

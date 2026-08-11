@@ -1414,6 +1414,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_attempt_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_attempt_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_offer_duplicate_ignored') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_successor_offer_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_tuna_dial_successor_offer_replay_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_failed_dial_answer_shadow_bound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_failed_dial_answer_replay_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_failed_dial_answer_replay_sent') +
@@ -1425,6 +1427,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_retry_scheduled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_lifecycle_ack_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_offer_authority_boundary_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_confirmed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_execution_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_execution_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_outbound_offer_retired') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_pending_runtime_unlock_answer_preserved') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_retired_offer_answer_accepted') +
@@ -3031,6 +3038,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_initial_activation_answer_peer_delivery_missing'
             Event = $candidateEvent
             Reason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryPendingSuccessorUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+                'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure'
+            }
+            elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence

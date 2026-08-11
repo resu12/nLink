@@ -944,6 +944,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         disposed = true;
+        InvalidateInboundRuntimeUnlockDialLifecycleForSessionChange("dispose");
         TryCancelHostReady();
 
         // Avoid treating normal cleanup as a disconnection.

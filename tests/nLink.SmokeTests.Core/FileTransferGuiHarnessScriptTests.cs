@@ -3094,6 +3094,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialRecoveryHoldDirectReleaseReason.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldDirectReleaseReason.Reason -ne 'released_hold_directive_delivery_rejected') { throw 'direct initial activation hold release reason lost precedence' }
             $initialAnswerPeerDelivery = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; retained_event=tuna_acceleration_answer_ack_timeout' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialAnswerPeerDelivery.Phase -ne 'runtime_unlock_initial_activation' -or $initialAnswerPeerDelivery.Reason -ne 'validated_offer_answer_not_delivered_to_initiator') { throw 'initial activation answer peer delivery lost precedence' }
+            $installedRetryPendingDial = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($installedRetryPendingDial.Phase -ne 'runtime_unlock_initial_activation' -or $installedRetryPendingDial.Reason -ne 'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure') { throw 'installed retry pending dial failure lost precedence' }
             $initialRecoveryHoldRefreshRelease = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialRecoveryHoldRefreshRelease.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldRefreshRelease.Reason -ne 'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation') { throw 'committed refresh release prevalidation lost precedence' }
             $initialRecoveryHoldExpired = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired; retained_event=tuna_acceleration_message_rejected' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
@@ -3219,6 +3221,83 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Scenario-deadline classification chronology arbitration failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-scenario-deadline-one-pass-fallback-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_InstalledRetryOfferPendingBehindOlderDialUsesAnswerPeerDeliveryClass()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-installed-retry-pending-dial-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $base = @(
+                    'event=runtime_unlock_tuna_dial_attempt_started; session_id=sess-1; payer_decision_id=6; dial_attempt_generation=2; log_writer_id=writer-responder',
+                    'event=runtime_unlock_retry_dispatch_install_committed; session_id=sess-1; direction=outbound; authority_id=authority-1; install_generation=1; install_status=Installed; log_writer_id=writer-sender',
+                    'event=runtime_unlock_retry_dispatch_install_confirmed; session_id=sess-1; direction=outbound; authority_id=authority-1; install_generation=1; log_writer_id=writer-sender',
+                    'event=runtime_unlock_offer_authority_boundary_decided; session_id=sess-1; payer_decision_id=7; authority_mode=InstalledRetry; decision_status=accepted; retry_authority_id=authority-1; install_generation=1; log_writer_id=writer-sender',
+                    'event=runtime_unlock_tuna_dial_offer_duplicate_ignored; session_id=sess-1; payer_decision_id=7; reason=other_dial_pending; disposition=PendingDuplicate; log_writer_id=writer-responder',
+                    'event=runtime_unlock_retry_dispatch_observed; session_id=sess-1; authority_id=authority-1; install_generation=1; log_writer_id=writer-sender',
+                    'event=runtime_unlock_tuna_dial_attempt_failed; session_id=sess-1; payer_decision_id=6; dial_attempt_generation=2; reason=runtime_unlock_tuna_dial_failed; log_writer_id=writer-responder'
+                )
+                [IO.File]::WriteAllLines($path, $base)
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'runtime_unlock_initial_activation' -or
+                    $result.Reason -ne 'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure') {
+                    throw "installed retry pending-dial classification mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                [IO.File]::WriteAllLines($path, @($base) + @(
+                    'event=runtime_unlock_tuna_dial_attempt_started; session_id=sess-1; payer_decision_id=7; dial_attempt_generation=3; log_writer_id=writer-responder',
+                    'event=filetransfer_route_transition_prepared; session_id=sess-1; direction=inbound; log_writer_id=writer-responder'
+                ))
+                $recovered = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($recovered.Reason -eq 'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure') {
+                    throw 'exact successor replay did not recover the pending-dial candidate'
+                }
+                Write-Output 'gui-installed-retry-pending-dial-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) {
+                    Remove-Item -LiteralPath $tempRoot -Recurse -Force
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"InstalledRetry pending-dial classification failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-installed-retry-pending-dial-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

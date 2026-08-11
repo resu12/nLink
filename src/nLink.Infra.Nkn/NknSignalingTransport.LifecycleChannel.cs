@@ -2966,7 +2966,16 @@ public sealed partial class NknSignalingTransport
             ResetControlSecureState();
         }
 
+        var previousSessionId = currentSessionSecurityState.SessionId?.Value;
         currentSessionSecurityState = nextState;
+        if (!string.Equals(
+                previousSessionId,
+                nextState.SessionId?.Value,
+                StringComparison.Ordinal))
+        {
+            InvalidateInboundRuntimeUnlockDialLifecycleForSessionChange(
+                "session_security_replaced");
+        }
         UpdateActiveApprovedSessionTracking(nextState);
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
         if (accelerationLane is null)

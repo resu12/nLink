@@ -511,7 +511,12 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "retry_commit" or
             "retry_publication";
         var detected = initialStage || adoptionStage || bindingStage || afterBoundStage;
-        var recovered = mode is "recovered" or "recovered_exact_duplicates";
+        var recovered = mode is
+            "recovered" or
+            "recovered_exact_duplicates" or
+            "recovered_then_replaced" or
+            "retry_commit" or
+            "retry_publication";
 
         Assert.Equal(detected ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
         Assert.Equal(detected ? "1" : "0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
@@ -15368,6 +15373,98 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
         Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
         Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_RuntimeUnlockInitialActivationAnswerPeerDelivery_InstalledRetryOfferPendingBehindOlderDial(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_installed_retry_pending_dial";
+        const string authorityId = "fta2-runtime-unlock-retry-pending-dial";
+        var messages = new List<string>
+        {
+            LogLine($"event=runtime_unlock_tuna_dial_attempt_started; session_id={sessionId}; " +
+                "payer_decision_id=6; dial_attempt_generation=2; log_writer_id=writer_responder"),
+            LogLine($"event=runtime_unlock_retry_dispatch_install_committed; session_id={sessionId}; " +
+                $"direction=outbound; authority_id={authorityId}; install_generation=1; " +
+                "install_status=Installed; log_writer_id=writer_sender"),
+            LogLine($"event=runtime_unlock_retry_dispatch_install_confirmed; session_id={sessionId}; " +
+                $"direction=outbound; authority_id={authorityId}; install_generation=1; " +
+                "log_writer_id=writer_sender"),
+            LogLine($"event=runtime_unlock_offer_authority_boundary_decided; session_id={sessionId}; " +
+                "payer_decision_id=7; offer_generation=3; transaction_generation=1; " +
+                "tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=listener-start-3; " +
+                $"retry_authority_id={authorityId}; install_generation=1; authority_mode=InstalledRetry; " +
+                "decision_status=accepted; log_writer_id=writer_sender"),
+            LogLine($"event=runtime_unlock_tuna_dial_offer_duplicate_ignored; session_id={sessionId}; " +
+                "payer_decision_id=7; reason=other_dial_pending; disposition=PendingDuplicate; " +
+                "log_writer_id=writer_responder"),
+            LogLine($"event=runtime_unlock_retry_dispatch_observed; session_id={sessionId}; " +
+                $"direction=outbound; authority_id={authorityId}; install_generation=1; " +
+                "offer_generation=3; log_writer_id=writer_sender"),
+            LogLine($"event=runtime_unlock_tuna_dial_attempt_failed; session_id={sessionId}; " +
+                "payer_decision_id=6; dial_attempt_generation=2; reason=runtime_unlock_tuna_dial_failed; " +
+                "log_writer_id=writer_responder")
+        };
+        if (recovered)
+        {
+            messages.Add(LogLine($"event=runtime_unlock_tuna_dial_attempt_started; session_id={sessionId}; " +
+                "payer_decision_id=7; dial_attempt_generation=3; replay_queue_generation=1; " +
+                "log_writer_id=writer_responder"));
+            messages.Add(LogLine($"event=tuna_acceleration_answer_sent; session_id={sessionId}; " +
+                "payer_decision_id=7; generation=1; accepted=1; msg_id=answer-7; " +
+                "log_writer_id=writer_responder"));
+            messages.Add(LogLine($"event=tuna_acceleration_answer_received_raw; session_id={sessionId}; " +
+                "payer_decision_id=7; msg_id=answer-7; log_writer_id=writer_sender"));
+            messages.Add(LogLine($"event=tuna_acceleration_answer_ack_received_raw; session_id={sessionId}; " +
+                "payer_decision_id=7; msg_id=answer-ack-7; log_writer_id=writer_responder"));
+            messages.Add(LogLine($"event=filetransfer_route_transition_prepared; session_id={sessionId}; " +
+                "transfer_id=transfer-1; direction=inbound; authority_id=fta2-inbound-successor; " +
+                "transition_generation=3; log_writer_id=writer_responder"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "runtime_unlock_initial_activation_answer_peer_delivery_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "runtime_unlock_tuna_dial_offer_duplicate_ignored",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+        }
     }
 
     [Theory]

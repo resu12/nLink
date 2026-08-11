@@ -23472,6 +23472,46 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     [object[]]$retryScheduled = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_retry_scheduled'
     })
+    [object[]]$installedRetryPendingSuccessors = @($orderedEvents | Where-Object {
+        ($_.EventName -eq 'runtime_unlock_tuna_dial_offer_duplicate_ignored' -and
+         (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'other_dial_pending' -and
+         (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq
+            'PendingDuplicate') -or
+        ($_.EventName -eq 'runtime_unlock_tuna_dial_successor_offer_held' -and
+         (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @(
+            'Held', 'Idempotent'))
+    })
+    [object[]]$retryInstallCommitted = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_install_committed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'install_status' -Default '') -eq
+            'Installed'
+    })
+    [object[]]$retryInstallConfirmed = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_install_confirmed'
+    })
+    [object[]]$installedOfferBoundaries = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_offer_authority_boundary_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'authority_mode' -Default '') -eq
+            'InstalledRetry' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq
+            'accepted'
+    })
+    [object[]]$retryDispatchObserved = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_observed'
+    })
+    [object[]]$successorReplayDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_dial_successor_offer_replay_decided'
+    })
+    [object[]]$scopeInvalidators = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'filetransfer_route_selected',
+            'filetransfer_live_route_epoch_terminal',
+            'filetransfer_v6_epoch_terminal',
+            'filetransfer_terminalized_by_peer_down')
+    })
 
     function Get-AnswerDeliveryIdentityValue {
         param($Event, [string[]]$Names)
@@ -23508,6 +23548,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     $failedDialRejectedAnswerDistinct =
         New-Object System.Collections.Generic.List[object]
     $failedDialRejectedAnswerRecovered =
+        New-Object System.Collections.Generic.List[object]
+    $installedRetryPendingSuccessorUnresolved =
         New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($timeout in $timeouts) {
@@ -23781,6 +23823,197 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         }
     }
 
+    foreach ($candidate in $installedRetryPendingSuccessors) {
+        $sessionId = Get-AnswerDeliveryIdentityValue $candidate @('session_id')
+        $payerDecisionId = Get-AnswerDeliveryIdentityValue $candidate @(
+            'successor_payer_decision_id', 'payer_decision_id')
+        $writer = Get-AnswerDeliveryIdentityValue $candidate @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+            [string]::IsNullOrWhiteSpace($writer)) {
+            continue
+        }
+
+        $predecessorPayerDecisionId = Get-AnswerDeliveryIdentityValue $candidate @(
+            'predecessor_payer_decision_id')
+        $predecessorAttemptGeneration = Get-AnswerDeliveryIdentityValue $candidate @(
+            'predecessor_dial_attempt_generation')
+        $blockerStart = @($dialAttemptStarts | Where-Object {
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+            [int64](Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -lt
+                [int64]$payerDecisionId -and
+            ([string]::IsNullOrWhiteSpace($predecessorPayerDecisionId) -or
+             (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq
+                $predecessorPayerDecisionId) -and
+            ([string]::IsNullOrWhiteSpace($predecessorAttemptGeneration) -or
+             (Get-AnswerDeliveryIdentityValue $_ @('dial_attempt_generation')) -eq
+                $predecessorAttemptGeneration)
+        } | Select-Object -Last 1)
+        if ($blockerStart.Count -ne 1) {
+            continue
+        }
+
+        $blockerPayerDecisionId = Get-AnswerDeliveryIdentityValue $blockerStart[0] @(
+            'payer_decision_id')
+        $blockerAttemptGeneration = Get-AnswerDeliveryIdentityValue $blockerStart[0] @(
+            'dial_attempt_generation')
+        $blockerFailure = @($dialAttemptFailures | Where-Object {
+            [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq
+                $blockerPayerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('dial_attempt_generation')) -in @(
+                '', $blockerAttemptGeneration) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        if ($blockerFailure.Count -ne 1) {
+            continue
+        }
+
+        $senderBoundary = @($installedOfferBoundaries | Where-Object {
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq
+                $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -Last 1)
+        if ($senderBoundary.Count -ne 1) {
+            continue
+        }
+
+        $senderWriter = Get-AnswerDeliveryIdentityValue $senderBoundary[0] @(
+            'log_writer_id')
+        $authorityId = Get-AnswerDeliveryIdentityValue $senderBoundary[0] @(
+            'retry_authority_id', 'authority_id')
+        $installGeneration = Get-AnswerDeliveryIdentityValue $senderBoundary[0] @(
+            'install_generation')
+        $install = @($retryInstallCommitted | Where-Object {
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('authority_id', 'current_authority_id')) -eq
+                $authorityId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('install_generation')) -eq
+                $installGeneration -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $senderWriter
+        } | Select-Object -Last 1)
+        $confirmation = @($retryInstallConfirmed | Where-Object {
+            $install.Count -eq 1 -and
+            [int64]$_.Sequence -ge [int64]$install[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('authority_id')) -eq $authorityId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('install_generation')) -eq
+                $installGeneration -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $senderWriter
+        } | Select-Object -First 1)
+        $dispatchObserved = @($retryDispatchObserved | Where-Object {
+            [int64]$_.Sequence -ge [int64]$senderBoundary[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$blockerFailure[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('authority_id')) -eq $authorityId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('install_generation')) -eq
+                $installGeneration -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $senderWriter
+        } | Select-Object -First 1)
+        if ($install.Count -ne 1 -or
+            $confirmation.Count -ne 1 -or
+            $dispatchObserved.Count -ne 1) {
+            continue
+        }
+
+        $invalidator = @($scopeInvalidators | Where-Object {
+            [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+            [int64]$_.Sequence -lt [int64]$blockerFailure[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -in @(
+                $writer, $senderWriter)
+        } | Select-Object -First 1)
+        if ($invalidator.Count -gt 0) {
+            continue
+        }
+
+        $raw.Add($candidate) | Out-Null
+        $key = [string]::Join('|', @(
+            'installed_retry_pending_successor',
+            $senderWriter,
+            $authorityId,
+            $installGeneration,
+            $writer,
+            $sessionId,
+            $payerDecisionId,
+            $blockerPayerDecisionId,
+            $blockerAttemptGeneration)).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($candidate) | Out-Null
+
+        $successorStart = @($dialAttemptStarts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$blockerFailure[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq
+                $payerDecisionId -and
+            [int64](Get-AnswerDeliveryIdentityValue $_ @('dial_attempt_generation')) -gt
+                [int64]$blockerAttemptGeneration -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $replayAccepted = @($successorReplayDecisions | Where-Object {
+            $successorStart.Count -eq 1 -and
+            [int64]$_.Sequence -ge [int64]$blockerFailure[0].Sequence -and
+            [int64]$_.Sequence -le [int64]$successorStart[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('successor_payer_decision_id')) -eq
+                $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('decision_status')) -in @(
+                'Accepted', 'Idempotent') -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $positiveAnswer = @($answerSends | Where-Object {
+            $successorStart.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorStart[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq
+                $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $peerRaw = @($rawAnswerReceipts | Where-Object {
+            $positiveAnswer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$positiveAnswer[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $senderWriter
+        } | Select-Object -First 1)
+        $ackReceipt = @($answerAckReceipts | Where-Object {
+            $peerRaw.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$peerRaw[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId)
+        } | Select-Object -First 1)
+        $prepared = @($preCommitEvents | Where-Object {
+            $ackReceipt.Count -eq 1 -and
+            $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+            [int64]$_.Sequence -gt [int64]$ackReceipt[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('direction')) -eq 'inbound' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+
+        $legacyCandidate = $candidate.EventName -eq
+            'runtime_unlock_tuna_dial_offer_duplicate_ignored'
+        if ($successorStart.Count -eq 1 -and
+            ($legacyCandidate -or $replayAccepted.Count -eq 1) -and
+            $positiveAnswer.Count -eq 1 -and
+            $peerRaw.Count -eq 1 -and
+            $ackReceipt.Count -eq 1 -and
+            $prepared.Count -eq 1) {
+            $recovered.Add($candidate) | Out-Null
+        }
+        else {
+            $installedRetryPendingSuccessorUnresolved.Add($candidate) | Out-Null
+            $unresolved.Add($candidate) | Out-Null
+        }
+    }
+
     foreach ($duplicate in $dialFailureDuplicateOffers) {
         $sessionId = Get-AnswerDeliveryIdentityValue $duplicate @('session_id')
         $payerDecisionId = Get-AnswerDeliveryIdentityValue $duplicate @('payer_decision_id')
@@ -23946,6 +24179,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         FailedDialRejectedAnswerUnresolvedCount = $failedDialRejectedAnswerUnresolved.Count
         FailedDialRejectedAnswerUnresolvedCandidateEvents =
             @($failedDialRejectedAnswerUnresolved.ToArray())
+        InstalledRetryPendingSuccessorUnresolvedCandidateEvents =
+            @($installedRetryPendingSuccessorUnresolved.ToArray())
     }
 }
 
@@ -57774,6 +58009,13 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     foreach ($candidateEvent in @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents)) {
         $candidateReason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryPendingSuccessorUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+            'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure'
+        }
+        elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.FailedDialRejectedAnswerUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
