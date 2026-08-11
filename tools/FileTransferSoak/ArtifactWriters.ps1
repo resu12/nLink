@@ -23576,6 +23576,23 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
     [object[]]$retryDispatchObserved = @($orderedEvents | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_observed'
     })
+    [object[]]$retiredAnswerPreservations = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'tuna_acceleration_pending_runtime_unlock_answer_preserved',
+            'runtime_unlock_offer_peer_response_timeout_pending_answer_preserved')
+    })
+    [object[]]$retrySlotDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @(
+            'Reserved', 'Converted')
+    })
+    [object[]]$answerAuthorityBoundaryDecisions = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_offer_authority_boundary_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'boundary' -Default '') -eq
+            'answer_received' -and
+        (Get-FileTransferEventField -Event $_ -Name 'authority_mode' -Default '') -eq
+            'InitialActivation'
+    })
     [object[]]$successorReplayDecisions = @($orderedEvents | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_dial_successor_offer_replay_decided'
     })
@@ -23627,7 +23644,149 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         New-Object System.Collections.Generic.List[object]
     $installedRetryPendingSuccessorUnresolved =
         New-Object System.Collections.Generic.List[object]
+    $receivedAnswerAuthorityRejectedUnresolved =
+        New-Object System.Collections.Generic.List[object]
     $seen = @{}
+
+    foreach ($rejection in @($answerAuthorityBoundaryDecisions | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq
+            'rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'runtime_unlock_offer_authority_tuple_mismatch'
+    })) {
+        $sessionId = Get-AnswerDeliveryIdentityValue $rejection @('session_id')
+        $payerDecisionId = Get-AnswerDeliveryIdentityValue $rejection @('payer_decision_id')
+        $offerGeneration = Get-AnswerDeliveryIdentityValue $rejection @(
+            'offer_generation', 'generation')
+        $transactionGeneration = Get-AnswerDeliveryIdentityValue $rejection @(
+            'transaction_generation')
+        $leaseGeneration = Get-AnswerDeliveryIdentityValue $rejection @(
+            'tuna_path_lease_generation', 'lease_generation')
+        $writer = Get-AnswerDeliveryIdentityValue $rejection @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($payerDecisionId) -or
+            [string]::IsNullOrWhiteSpace($offerGeneration) -or
+            [string]::IsNullOrWhiteSpace($writer)) {
+            continue
+        }
+
+        $preserved = @($retiredAnswerPreservations | Where-Object {
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('generation', 'offer_generation')) -eq
+                $offerGeneration -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        $newerRetrySlot = @($retrySlotDecisions | Where-Object {
+            $preserved.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$preserved[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $newerRetryInstall = @($retryInstallCommitted | Where-Object {
+            $newerRetrySlot.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$newerRetrySlot[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $newerRetryConfirmation = @($retryInstallConfirmed | Where-Object {
+            $newerRetryInstall.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$newerRetryInstall[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $rawAnswer = @($rawAnswerReceipts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$preserved[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -Last 1)
+        if ($preserved.Count -ne 1 -or
+            $newerRetrySlot.Count -ne 1 -or
+            $newerRetryInstall.Count -ne 1 -or
+            $newerRetryConfirmation.Count -ne 1 -or
+            $rawAnswer.Count -ne 1) {
+            continue
+        }
+
+        $raw.Add($rejection) | Out-Null
+        $key = [string]::Join('|', @(
+            'received_answer_authority_rejected',
+            $writer,
+            $sessionId,
+            $payerDecisionId,
+            $offerGeneration,
+            $transactionGeneration,
+            $leaseGeneration)).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($rejection) | Out-Null
+
+        $acceptedBoundary = @($answerAuthorityBoundaryDecisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$rejection.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('offer_generation', 'generation')) -eq
+                $offerGeneration -and
+            (Get-AnswerDeliveryIdentityValue $_ @('transaction_generation')) -in @('', $transactionGeneration) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('tuna_path_lease_generation', 'lease_generation')) -in @('', $leaseGeneration) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+            (Get-AnswerDeliveryIdentityValue $_ @('decision_status')) -in @(
+                'accepted', 'idempotent')
+        } | Select-Object -First 1)
+        $transactionAnswer = @($transactionAnswers | Where-Object {
+            $acceptedBoundary.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$acceptedBoundary[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $ackSubmission = @($answerAckSubmissions | Where-Object {
+            $transactionAnswer.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$transactionAnswer[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @('', $payerDecisionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+        } | Select-Object -First 1)
+        $peerAck = @($answerAckReceipts | Where-Object {
+            $ackSubmission.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$ackSubmission[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $boundHandoff = @($responderPeerProbeHandoffs | Where-Object {
+            $peerAck.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$peerAck[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        $prepared = @($preCommitEvents | Where-Object {
+            $boundHandoff.Count -eq 1 -and
+            $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+            [int64]$_.Sequence -gt [int64]$boundHandoff[0].Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -in @('', $sessionId) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('direction')) -eq 'inbound' -and
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer
+        } | Select-Object -First 1)
+        if ($acceptedBoundary.Count -eq 1 -and
+            $transactionAnswer.Count -eq 1 -and
+            $ackSubmission.Count -eq 1 -and
+            $peerAck.Count -eq 1 -and
+            $boundHandoff.Count -eq 1 -and
+            $prepared.Count -eq 1) {
+            $recovered.Add($rejection) | Out-Null
+        }
+        else {
+            $receivedAnswerAuthorityRejectedUnresolved.Add($rejection) | Out-Null
+            $unresolved.Add($rejection) | Out-Null
+        }
+    }
+
     foreach ($timeout in $timeouts) {
         $sessionId = Get-AnswerDeliveryIdentityValue $timeout @('session_id')
         $payerDecisionId = Get-AnswerDeliveryIdentityValue $timeout @('payer_decision_id')
@@ -23907,6 +24066,15 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         if ([string]::IsNullOrWhiteSpace($sessionId) -or
             [string]::IsNullOrWhiteSpace($payerDecisionId) -or
             [string]::IsNullOrWhiteSpace($writer)) {
+            continue
+        }
+        $directRejection = @($distinct | Where-Object {
+            $_.EventName -eq 'runtime_unlock_offer_authority_boundary_decided' -and
+            [int64]$_.Sequence -lt [int64]$timeout.Sequence -and
+            (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+            (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId
+        } | Select-Object -First 1)
+        if ($directRejection.Count -eq 1) {
             continue
         }
 
@@ -24257,6 +24425,8 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             @($failedDialRejectedAnswerUnresolved.ToArray())
         InstalledRetryPendingSuccessorUnresolvedCandidateEvents =
             @($installedRetryPendingSuccessorUnresolved.ToArray())
+        ReceivedAnswerAuthorityRejectedUnresolvedCandidateEvents =
+            @($receivedAnswerAuthorityRejectedUnresolved.ToArray())
     }
 }
 
@@ -58544,6 +58714,13 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     foreach ($candidateEvent in @($runtimeUnlockInitialActivationAnswerPeerDeliveryProof.UnresolvedCandidateEvents)) {
         $candidateReason = if (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.ReceivedAnswerAuthorityRejectedUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+            'validated_offer_answer_received_but_authority_tuple_rejected'
+        }
+        elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryPendingSuccessorUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
@@ -61322,7 +61499,7 @@ function Write-FileTransferDiagnosticsArtifacts {
                 break
             }
             'runtime_unlock_initial_activation_answer_peer_delivery_missing' {
-                'recovery: validated runtime-unlock answer was not delivered to the initiating peer'
+                'recovery: validated runtime-unlock answer did not complete initiating-peer acceptance'
                 break
             }
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' {

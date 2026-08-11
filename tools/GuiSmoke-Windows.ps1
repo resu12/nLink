@@ -5141,6 +5141,11 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
                     Reason = if ($ErrorMessage.IndexOf(
+                            'validated_offer_answer_received_but_authority_tuple_rejected',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'validated_offer_answer_received_but_authority_tuple_rejected'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
                             'exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                         'exact_source_answer_ack_not_delivered_to_responder_before_wire_deadline'
@@ -14200,6 +14205,106 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $true
     }
 
+    function Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $indexed = for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        }
+        foreach ($rejection in @($indexed | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'runtime_unlock_offer_authority_boundary_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'boundary') -eq
+                        'answer_received' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                        'InitialActivation' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                        'rejected' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                        'runtime_unlock_offer_authority_tuple_mismatch'
+                })) {
+            $writer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'session_id'
+            $payer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'payer_decision_id'
+            $offer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'offer_generation'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($payer) -or
+                [string]::IsNullOrWhiteSpace($offer)) {
+                continue
+            }
+
+            $preserved = @($indexed | Where-Object {
+                $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_pending_runtime_unlock_answer_preserved',
+                        'runtime_unlock_offer_peer_response_timeout_pending_answer_preserved')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $offer
+            } | Select-Object -Last 1)
+            $slot = @($indexed | Where-Object {
+                $preserved.Count -eq 1 -and
+                $_.Index -gt $preserved[0].Index -and $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_retry_negotiation_slot_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                    'Reserved', 'Converted') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -First 1)
+            $install = @($indexed | Where-Object {
+                $slot.Count -eq 1 -and
+                $_.Index -gt $slot[0].Index -and $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_retry_dispatch_install_committed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_status') -eq
+                    'Installed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -First 1)
+            $confirmation = @($indexed | Where-Object {
+                $install.Count -eq 1 -and
+                $_.Index -gt $install[0].Index -and $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_retry_dispatch_install_confirmed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -First 1)
+            $rawAnswer = @($indexed | Where-Object {
+                $preserved.Count -eq 1 -and
+                $_.Index -gt $preserved[0].Index -and $_.Index -lt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_received_raw')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            if ($preserved.Count -ne 1 -or $slot.Count -ne 1 -or
+                $install.Count -ne 1 -or $confirmation.Count -ne 1 -or
+                $rawAnswer.Count -ne 1) {
+                continue
+            }
+
+            $accepted = @($indexed | Where-Object {
+                $_.Index -gt $rejection.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_offer_authority_boundary_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'boundary') -eq
+                    'answer_received' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                    'accepted', 'idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq $offer
+            } | Select-Object -First 1)
+            if ($accepted.Count -eq 0) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
     function Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -20600,6 +20705,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $regularV4ReceiveRecoveryClosedNoDeferral -and
         (-not $runtimeUnlockTransactionStarted)
     $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
+    $retiredInitialActivationAnswerAuthorityTupleRejected =
+        Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected `
+            -Lines $regularV4EvidenceLineText
     $initialActivationAnswerPeerDeliveryMissing =
         Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing `
             -Lines $regularV4EvidenceLineText
@@ -20608,7 +20716,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Lines $regularV4EvidenceLineText
     $initialActivationAnswerPeerDeliveryMissing =
         $initialActivationAnswerPeerDeliveryMissing -or
-        $installedRetryOfferPendingDuplicateNotReplayed
+        $installedRetryOfferPendingDuplicateNotReplayed -or
+        $retiredInitialActivationAnswerAuthorityTupleRejected
     $acceptedAnswerAckReturnNotDelivered =
         $initialActivationAnswerPeerDeliveryMissing -and
         (Test-TunaGuiLogLinesContain -Lines $regularV4EvidenceLineText -Needles @(
@@ -20847,7 +20956,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     elseif ($initialActivationAnswerPeerDeliveryMissing) {
         $phase = 'runtime_unlock_initial_activation'
-        $reason = if ($installedRetryOfferPendingDuplicateNotReplayed) {
+        $reason = if ($retiredInitialActivationAnswerAuthorityTupleRejected) {
+            'validated_offer_answer_received_but_authority_tuple_rejected'
+        }
+        elseif ($installedRetryOfferPendingDuplicateNotReplayed) {
             'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure'
         }
         elseif ($dialFailedRejectedAnswerNotRetained) {

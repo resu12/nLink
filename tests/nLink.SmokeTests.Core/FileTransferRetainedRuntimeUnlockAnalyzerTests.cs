@@ -1285,6 +1285,100 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_RetiredInitialActivationAnswerReceivedButAuthorityRejected_OwnsBeforeAckTimeout(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess_retired_answer; payer_decision_id=6; offer_generation=2; " +
+            "transaction_generation=1; tuna_path_lease_generation=2; " +
+            "tuna_path_lease_listener_run_id=listener-start-2; log_writer_id=writer_initiator";
+        var lines = new List<string>
+        {
+            LogLine($"event=tuna_acceleration_pending_runtime_unlock_answer_preserved; {scope}; generation=2"),
+            LogLine("event=runtime_unlock_retry_negotiation_slot_decided; " +
+                "session_id=sess_retired_answer; decision_status=Reserved; " +
+                "intent_generation=2; slot_generation=3; log_writer_id=writer_initiator"),
+            LogLine("event=runtime_unlock_retry_negotiation_slot_decided; " +
+                "session_id=sess_retired_answer; decision_status=Converted; " +
+                "intent_generation=2; slot_generation=3; log_writer_id=writer_initiator"),
+            LogLine("event=runtime_unlock_retry_dispatch_install_committed; " +
+                "session_id=sess_retired_answer; retry_authority_id=retry-authority-3; " +
+                "install_generation=3; install_status=Installed; log_writer_id=writer_initiator"),
+            LogLine("event=runtime_unlock_retry_dispatch_install_confirmed; " +
+                "session_id=sess_retired_answer; retry_authority_id=retry-authority-3; " +
+                "install_generation=3; log_writer_id=writer_initiator"),
+            LogLine("event=tuna_acceleration_answer_received_raw; session_id=sess_retired_answer; " +
+                "payer_decision_id=6; msg_id=answer-2; log_writer_id=writer_initiator"),
+            LogLine($"event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; " +
+                $"authority_mode=InitialActivation; decision_status=rejected; {scope}; " +
+                "decision_reason=runtime_unlock_offer_authority_tuple_mismatch"),
+            LogLine("event=tuna_acceleration_answer_ack_timeout; session_id=sess_retired_answer; " +
+                "payer_decision_id=6; generation=10; trigger=runtime_unlock; " +
+                "retry_reason=runtime_unlock_answer_ack_timeout; log_writer_id=writer_responder")
+        };
+        if (recovered)
+        {
+            lines.Add(LogLine($"event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; " +
+                $"authority_mode=InitialActivation; decision_status=accepted; {scope}; " +
+                "decision_reason=runtime_unlock_offer_authority_current"));
+            lines.Add(LogLine("event=runtime_unlock_transaction_answer_received; " +
+                "session_id=sess_retired_answer; transaction_generation=1; " +
+                "offer_generation=2; log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_sent; session_id=sess_retired_answer; " +
+                "payer_decision_id=6; generation=2; msg_id=answer-ack-2; " +
+                "log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_received_raw; session_id=sess_retired_answer; " +
+                "payer_decision_id=6; msg_id=answer-ack-2; log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; " +
+                "session_id=sess_retired_answer; transfer_id=transfer-1; launch_generation=1; " +
+                "log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_prepared; " +
+                "session_id=sess_retired_answer; transfer_id=transfer-1; direction=inbound; " +
+                "authority_id=fta2-retired-answer; transition_generation=1; " +
+                "log_writer_id=writer_responder"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "runtime_unlock_offer_authority_boundary_decided",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "validated_offer_answer_received_but_authority_tuple_rejected",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, false, false, false, false, "none")]
     [InlineData(true, false, false, false, false, "none")]
     [InlineData(false, true, false, false, false, "none")]

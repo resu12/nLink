@@ -3100,6 +3100,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialRecoveryHoldDirectReleaseReason.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldDirectReleaseReason.Reason -ne 'released_hold_directive_delivery_rejected') { throw 'direct initial activation hold release reason lost precedence' }
             $initialAnswerPeerDelivery = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; retained_event=tuna_acceleration_answer_ack_timeout' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialAnswerPeerDelivery.Phase -ne 'runtime_unlock_initial_activation' -or $initialAnswerPeerDelivery.Reason -ne 'validated_offer_answer_not_delivered_to_initiator') { throw 'initial activation answer peer delivery lost precedence' }
+            $receivedAnswerAuthorityRejected = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=validated_offer_answer_received_but_authority_tuple_rejected' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($receivedAnswerAuthorityRejected.Phase -ne 'runtime_unlock_initial_activation' -or $receivedAnswerAuthorityRejected.Reason -ne 'validated_offer_answer_received_but_authority_tuple_rejected') { throw 'received initial activation answer authority rejection lost precedence' }
             $installedRetryPendingDial = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($installedRetryPendingDial.Phase -ne 'runtime_unlock_initial_activation' -or $installedRetryPendingDial.Reason -ne 'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure') { throw 'installed retry pending dial failure lost precedence' }
             $initialRecoveryHoldRefreshRelease = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -6667,6 +6669,61 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $"GUI answer replay-window test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains(
             "gui-answer-peer-recovery-replay-window-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitialActivationAnswerPeerDeliveryDetectsReceivedAuthorityTupleRejectionBeforeTimeout()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected",
+            "Test-TunaGuiInitialActivationAnswerPeerDeliveryMissing");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected {
+                {{classifierBody}}
+            }
+            $scope = 'session_id=session-answer; payer_decision_id=6; offer_generation=2; log_writer_id=writer-initiator'
+            $lines = @(
+                "event=tuna_acceleration_pending_runtime_unlock_answer_preserved; $scope; generation=2",
+                'event=runtime_unlock_retry_negotiation_slot_decided; session_id=session-answer; decision_status=Reserved; slot_generation=3; log_writer_id=writer-initiator',
+                'event=runtime_unlock_retry_dispatch_install_committed; session_id=session-answer; retry_authority_id=retry-3; install_generation=3; install_status=Installed; log_writer_id=writer-initiator',
+                'event=runtime_unlock_retry_dispatch_install_confirmed; session_id=session-answer; retry_authority_id=retry-3; install_generation=3; log_writer_id=writer-initiator',
+                'event=tuna_acceleration_answer_received_raw; session_id=session-answer; payer_decision_id=6; log_writer_id=writer-initiator',
+                "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=rejected; decision_reason=runtime_unlock_offer_authority_tuple_mismatch; $scope",
+                'event=tuna_acceleration_answer_ack_timeout; session_id=session-answer; payer_decision_id=6; generation=10; trigger=runtime_unlock; log_writer_id=writer-responder'
+            )
+            if (-not (Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected -Lines $lines)) {
+                throw 'received answer authority rejection was not detected'
+            }
+            $lines += "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=accepted; decision_reason=runtime_unlock_offer_authority_current; $scope"
+            if (Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected -Lines $lines) {
+                throw 'exact accepted answer boundary did not recover the rejection'
+            }
+            Write-Output 'gui-received-answer-authority-rejection-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI received-answer rejection test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-received-answer-authority-rejection-ok",
             result.Stdout,
             StringComparison.Ordinal);
     }
