@@ -3084,6 +3084,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($unsettled.Phase -ne 'runtime_unlock_retry' -or $unsettled.Reason -ne 'runtime_unlock_retry_dispatch_contract_unsettled') { throw 'runtime unlock unsettled contract lost precedence' }
             $initialResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_initial_responder_boundary_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
+            $initialResponderMissingDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_invalidated; first_proof_chain_failure_reason=initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($initialResponderMissingDrain.Phase -ne 'route_transition' -or $initialResponderMissingDrain.Reason -ne 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt') { throw 'initial responder missing drain lost precedence' }
             $initialRecoveryHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_offer_receive_recovery_hold_not_preserved; retained_event=tuna_acceleration_activation_offer_not_observed' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialRecoveryHold.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHold.Reason -ne 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof') { throw 'initial activation recovery hold lost precedence' }
             $initialRecoveryHoldRelease = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -3359,6 +3361,44 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($recovered.Phase -ne 'progress_failure' -or
                     $recovered.Reason -ne 'gui_smoke_scenario_deadline_exceeded') {
                     throw "recovered responder drain retained route failure: $($recovered | ConvertTo-Json -Compress)"
+                }
+
+                @(
+                    "event=filetransfer_route_transition_prepared; decision_status=Prepared; $tuple",
+                    "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $tuple",
+                    "event=filetransfer_route_transition_draining; decision_status=Draining; $tuple",
+                    "event=filetransfer_route_transition_invalidated; decision_status=Invalidated; decision_reason=inbound_transfer_terminal; $tuple",
+                    "event=filetransfer_route_transition_disposition_applied; decision_status=Applied; apply_status=Applied; disposition=terminalinvalidated; $tuple",
+                    'event=file_transfer_inbound_terminal; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; state=Canceled; error=canceled_local'
+                ) | Set-Content -LiteralPath $path
+                $terminalInvalidation = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded: scenario deadline elapsed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($terminalInvalidation.Phase -ne 'route_transition' -or
+                    $terminalInvalidation.Reason -ne 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt') {
+                    throw "terminal-invalidated responder drain mismatch: $($terminalInvalidation | ConvertTo-Json -Compress)"
+                }
+
+                @(
+                    "event=filetransfer_route_transition_prepared; decision_status=Prepared; $tuple",
+                    "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $tuple",
+                    "event=filetransfer_route_transition_draining; decision_status=Draining; $tuple",
+                    "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Accepted; drain_outcome=Completed; $tuple",
+                    "event=filetransfer_route_transition_committed; decision_status=Committed; $tuple",
+                    "event=filetransfer_route_transition_disposition_applied; decision_status=Applied; apply_status=Applied; disposition=committed; $tuple",
+                    "event=filetransfer_route_transition_invalidated; decision_status=Invalidated; decision_reason=inbound_transfer_terminal; $tuple",
+                    "event=filetransfer_route_transition_disposition_applied; decision_status=Applied; apply_status=Applied; disposition=terminalinvalidated; $tuple"
+                ) | Set-Content -LiteralPath $path
+                $completedBeforeTerminal = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded: scenario deadline elapsed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($completedBeforeTerminal.Phase -ne 'progress_failure' -or
+                    $completedBeforeTerminal.Reason -ne 'gui_smoke_scenario_deadline_exceeded') {
+                    throw "completed responder drain was misclassified: $($completedBeforeTerminal | ConvertTo-Json -Compress)"
                 }
                 Write-Output 'gui-initial-responder-drain-fast-path-ok'
             }

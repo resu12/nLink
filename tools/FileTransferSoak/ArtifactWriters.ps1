@@ -10568,6 +10568,82 @@ function Get-FileTransferRouteTransitionCorrelation {
             continue
         }
 
+        if ($invalidations.Count -gt 0 -and
+            $pause.Count -gt 0 -and
+            $draining.Count -gt 0 -and
+            [int64]$pause[0].Sequence -lt [int64]$draining[0].Sequence -and
+            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                -Prepared $prepared `
+                -Candidate $pause[0]) -and
+            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                -Prepared $prepared `
+                -Candidate $draining[0])) {
+            [object[]]$terminalInvalidations = @($invalidationEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+                    (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                        -Prepared $prepared `
+                        -Candidate $_) -and
+                    (Test-RouteTransitionStatus `
+                        -Event $_ `
+                        -Allowed @('Invalidated', 'Idempotent')) -and
+                    (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -eq
+                        'inbound_transfer_terminal'
+                } | Sort-Object Sequence, LineNumber)
+            if ($terminalInvalidations.Count -gt 0) {
+                $firstTerminalInvalidation = $terminalInvalidations[0]
+                $firstTerminalInvalidationSequence =
+                    [int64]$firstTerminalInvalidation.Sequence
+                [object[]]$anyExactDrainReceipts = @($receiptEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+                        [int64]$_.Sequence -lt $firstTerminalInvalidationSequence -and
+                        (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                            -Prepared $prepared `
+                            -Candidate $_)
+                    })
+                [object[]]$terminalInvalidationDispositions = @($dispositionEvents | Where-Object {
+                        [int64]$_.Sequence -gt $firstTerminalInvalidationSequence -and
+                        (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                            -Prepared $prepared `
+                            -Candidate $_) -and
+                        ((Get-RouteTransitionField -Event $_ -Name 'disposition') -eq
+                                'terminalinvalidated') -and
+                        (Test-RouteTransitionStatus `
+                            -Event $_ `
+                            -Allowed @('Invalidated', 'Applied', 'Idempotent'))
+                    } | Sort-Object Sequence, LineNumber)
+                [object[]]$newerPrepared = @($preparedEvents | Where-Object {
+                        [int64]$_.Sequence -gt $preparedSequence -and
+                        [int64]$_.Sequence -lt $firstTerminalInvalidationSequence -and
+                        (Test-RouteTransitionTransferScopeMatch `
+                            -Authority $prepared `
+                            -Candidate $_) -and
+                        (Get-RouteTransitionIdentityKey -Event $_) -ne $key
+                    })
+                [object[]]$interveningReplacement = @(
+                    @($supersessionEvents) + @($ownerBoundaryEvents) | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+                        [int64]$_.Sequence -lt $firstTerminalInvalidationSequence -and
+                        (Test-RouteTransitionTransferScopeMatch `
+                            -Authority $prepared `
+                            -Candidate $_)
+                    })
+                if ($anyExactDrainReceipts.Count -eq 0 -and
+                    $terminalInvalidationDispositions.Count -gt 0 -and
+                    $newerPrepared.Count -eq 0 -and
+                    $interveningReplacement.Count -eq 0) {
+                    $terminalCandidateKey =
+                        "$candidateKey|initial-responder-terminal-without-drain|$((Get-RouteTransitionField -Event $prepared -Name 'log_writer_id').ToLowerInvariant())"
+                    foreach ($terminalInvalidation in $terminalInvalidations) {
+                        Add-RouteTransitionCandidate `
+                            -Event $terminalInvalidation `
+                            -Key $terminalCandidateKey `
+                            -Reason 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt'
+                    }
+                    continue
+                }
+            }
+        }
+
         if ($invalidations.Count -gt 0) {
             $routeTransitionBoundedLookupVisitCount += [int64]$dispositionEvents.Count
             [object[]]$matchingDispositions = @($dispositionEvents | Where-Object {
@@ -58462,6 +58538,23 @@ function Get-FileTransferRecoveryFailureClassification {
 
     [object[]]$firstProofChainFailureCandidates =
         @($proofChainFailureCandidates.ToArray())
+    $initialResponderTerminalWithoutDrainReceiptUnresolved = @(
+        $fileTransferRouteTransitionProof.UnresolvedCandidateRecords |
+            Where-Object {
+                [string]$_.Class -eq 'filetransfer_route_transition_incomplete' -and
+                [string]$_.Reason -eq
+                    'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt'
+            }).Count -gt 0
+    if ($initialResponderTerminalWithoutDrainReceiptUnresolved) {
+        # The route-law summary anchors its derived mismatch at the original
+        # route selection.  Once the exact current transition reaches Draining
+        # and is terminally invalidated without any drain receipt, that later
+        # authority edge is causal and must not be masked by the earlier
+        # projection symptom.
+        $firstProofChainFailureCandidates = @(
+            $firstProofChainFailureCandidates |
+                Where-Object { $_.Class -ne 'route_runtime' })
+    }
     if ($fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount -gt 0) {
         # A transition-grace terminalization is the exact authority edge.  Raw
         # repair deferral/stall candidates can begin earlier while the same

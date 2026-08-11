@@ -22780,6 +22780,9 @@ public sealed partial class SessionFileTransferService
                 context,
                 repairFrontierBefore,
                 nextChunkIndexAfterCommit);
+            TryRecheckHeldInboundRuntimeUnlockResponderPeerProbeRouteTransitionAfterOwnerWorkClearedLocked(
+                context,
+                "receiver_sparse_pending_write_cleared");
             snapshot = CreateSnapshotLocked();
         }
 

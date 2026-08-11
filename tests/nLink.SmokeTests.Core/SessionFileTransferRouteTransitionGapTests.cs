@@ -425,6 +425,99 @@ public sealed partial class SessionFileTransferV4SenderTests
                 context,
                 "FileTransferRouteTransitionTransportPauseEvidenceKey"),
             StringComparison.Ordinal);
+
+        using var sparseWrite = new BlockingSparseWriteStream();
+        SetPrivateProperty(context, "WriteStream", sparseWrite);
+        SetPrivateProperty(context, "PullManifestReceived", true);
+        SetPrivateProperty(context, "ReceiverSparseWriteActive", true);
+        var writtenChunks = new BitArray(64);
+        for (var index = 0; index < 4; index++)
+        {
+            writtenChunks[index] = true;
+        }
+        SetPrivateProperty(
+            context,
+            "ReceiverSparseChunksWritten",
+            writtenChunks);
+        var chunkSizeBytes = GetPrivateProperty<int>(context, "ChunkSizeBytes");
+        var sparseBatch = new FileTransferChunkBatchFrameV4
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            StartChunkIndex = 4,
+            ChunkCount = 1,
+            DataSegments = [new byte[chunkSizeBytes]],
+            BatchProfile = "v4_default_21k",
+        };
+        var sparseWriteTask = Assert.IsAssignableFrom<Task>(
+            typeof(SessionFileTransferService)
+                .GetMethod(
+                    "HandleInboundV4ChunkBatchAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(
+                    service,
+                    [
+                        context,
+                        sparseBatch,
+                        FileTransferTransportKind.RegularNkn,
+                    ])!);
+        await sparseWrite.WaitForWriteStartedAsync();
+        var pendingSparseWrites = GetPrivateProperty<HashSet<int>>(
+            context,
+            "ReceiverSparseChunksPendingWrite");
+        Assert.Contains(4, pendingSparseWrites);
+
+        var logStart = GetOperationalLogLength();
+        var serviceGate = typeof(SessionFileTransferService)
+            .GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(service)!;
+        lock (serviceGate)
+        {
+            Assert.False(Assert.IsType<bool>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "TryQueueInboundFileTransferRouteTransitionDrainAfterOwnerWorkClearedLocked",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            "receiver_sparse_pending_write_cleared",
+                        ])));
+        }
+
+        sparseWrite.ReleaseWrites();
+        await sparseWriteTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(pendingSparseWrites);
+
+        await WaitUntilAsync(
+            () => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                      context,
+                      "CoordinatorPersistentState")
+                  .FileTransferRouteTransition.CurrentOperation is null,
+            timeoutMs: 5000);
+        Assert.Equal(
+            FileTransferRoute.FileTunaV4,
+            GetPrivateProperty<FileTransferRouteSelection>(
+                context,
+                "RouteSelection").Route);
+        var committed = Assert.IsType<FileTransferRouteTransitionOperation>(
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.LastTerminalOperation);
+        Assert.Equal(FileTransferRouteTransitionState.Committed, committed.State);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_route_transition_drain_receipt_decided;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_route_transition_committed;"));
     }
 
     [Fact]

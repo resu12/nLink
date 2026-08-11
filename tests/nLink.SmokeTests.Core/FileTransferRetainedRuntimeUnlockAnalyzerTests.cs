@@ -632,6 +632,147 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_InitialResponderTerminalInvalidationWithoutDrainReceiptUsesRouteTransitionOwnership(
+        bool compact,
+        bool completedBeforeTerminal)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildInitialResponderTerminalInvalidationWithoutDrainFixture(
+                completedBeforeTerminal),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            completedBeforeTerminal ? "0" : "1",
+            verdict["filetransfer_route_transition_incomplete_raw_count"]);
+        Assert.Equal(
+            completedBeforeTerminal ? "0" : "1",
+            verdict["filetransfer_route_transition_incomplete_distinct_count"]);
+        Assert.Equal(
+            completedBeforeTerminal ? "0" : "1",
+            verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
+        Assert.Equal(
+            "0",
+            verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+        if (!completedBeforeTerminal)
+        {
+            Assert.Equal(
+                "filetransfer_route_transition_incomplete",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "filetransfer_route_transition_invalidated",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("14094", verdict["first_proof_chain_failure_writer_sequence"]);
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("(none)", verdict["failure_variant"]);
+        }
+    }
+
+    private static IReadOnlyList<string>
+        BuildInitialResponderTerminalInvalidationWithoutDrainFixture(
+            bool completedBeforeTerminal)
+    {
+        const string sessionId = "sess_initial_responder_scope";
+        const string transferId = "transfer_initial_responder_scope";
+        const string writerId = "writer_initial_responder_scope";
+        const string sourceScope =
+            "source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; " +
+            "source_runtime_generation=1; source_route_publication_generation=1; source_route_commit_generation=0; " +
+            "source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; " +
+            "source_bridge_recovery_generation=0; source_checkpoint_request_id=(none); source_checkpoint_generation=0; " +
+            "source_data_session_identity=data-session-initial; source_data_session_generation=1";
+        const string transitionTuple =
+            "transaction_generation=2; offer_generation=6; launch_generation=1; " +
+            "tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; " +
+            "proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; " +
+            "activation_authority_mode=initial_responder; admission_generation=1; " +
+            "pending_precommit_generation=1; retry_install_generation=0; " +
+            "authority_id=fta2-initial-responder; transition_generation=1; " +
+            "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna";
+        var lines = BuildResponderInitialActivationPeerAcceptanceScopeFixture(
+                "retry_drain_rejected")
+            .Where(line => !line.Contains(
+                "event=filetransfer_route_transition_drain_receipt_decided;",
+                StringComparison.Ordinal))
+            .ToList();
+        var drainingIndex = lines.FindIndex(line => line.Contains(
+            "event=filetransfer_route_transition_draining;",
+            StringComparison.Ordinal));
+        Assert.True(drainingIndex >= 0);
+        lines.Insert(
+            drainingIndex,
+            LogLine(
+                $"event=filetransfer_route_transition_pause_bound; direction=inbound; " +
+                $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
+                $"decision_status=Installed; decision_reason=filetransfer_route_transition_pause_bound; log_writer_id={writerId}",
+                secondsOffset: 29));
+        if (completedBeforeTerminal)
+        {
+            lines.Add(LogLine(
+                $"event=filetransfer_route_transition_drain_receipt_decided; direction=inbound; " +
+                $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
+                "decision_status=Accepted; drain_outcome=Completed; captured_send_count=0; " +
+                "completed_send_count=0; captured_send_fingerprint=empty-set; " +
+                $"completed_send_fingerprint=empty-set; log_writer_id={writerId}",
+                secondsOffset: 31));
+            lines.Add(LogLine(
+                $"event=filetransfer_route_transition_committed; direction=inbound; " +
+                $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
+                $"decision_status=Committed; log_writer_id={writerId}",
+                secondsOffset: 32));
+            lines.Add(LogLine(
+                $"event=filetransfer_route_transition_disposition_applied; direction=inbound; " +
+                $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
+                $"decision_status=Applied; apply_status=Applied; disposition=committed; log_writer_id={writerId}",
+                secondsOffset: 33));
+        }
+
+        lines.Add(LogLine(
+            $"event=filetransfer_route_transition_invalidated; direction=inbound; " +
+            $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
+            "decision_status=Invalidated; decision_reason=inbound_transfer_terminal; " +
+            $"log_writer_id={writerId}; log_writer_sequence=14094",
+            secondsOffset: 34));
+        lines.Add(LogLine(
+            $"event=filetransfer_route_transition_disposition_applied; direction=inbound; " +
+            $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
+            "decision_status=Applied; apply_status=Applied; disposition=terminalinvalidated; " +
+            $"decision_reason=filetransfer_route_transition_terminal_invalidated; log_writer_id={writerId}",
+            secondsOffset: 35));
+        lines.Add(LogLine(
+            $"event=file_transfer_inbound_terminal; direction=inbound; transfer_id={transferId}; " +
+            $"session_id={sessionId}; state=Canceled; error=canceled_local; log_writer_id={writerId}",
+            secondsOffset: 36));
+        return lines;
+    }
+
     private static IReadOnlyList<string> BuildResponderInitialActivationPeerAcceptanceScopeFixture(
         string mode)
     {

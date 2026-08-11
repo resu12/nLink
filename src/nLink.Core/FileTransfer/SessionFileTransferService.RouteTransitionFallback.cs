@@ -1967,6 +1967,39 @@ public sealed partial class SessionFileTransferService
             queued);
     }
 
+    private bool
+        TryQueueInboundFileTransferRouteTransitionDrainAfterOwnerWorkClearedLocked(
+            InboundTransferContext context,
+            string reason)
+    {
+        if (!ReferenceEquals(inboundTransfer, context) ||
+            context.IsTerminal ||
+            context.ReceiverSparseChunksPendingWrite.Count != 0 ||
+            context.PendingChunks.Count != 0 ||
+            context.FileTransferRouteTransitionExecution is not
+                {
+                    Authority: not null,
+                    DrainCommand: not null,
+                } execution ||
+            !IsInboundFileTransferRouteTransitionExecutionCurrentLocked(
+                context,
+                execution,
+                out _))
+        {
+            return false;
+        }
+
+        if (!execution.DrainRecheckQueued)
+        {
+            QueueInboundFileTransferRouteTransitionDrainRecheckLocked(
+                context,
+                execution,
+                reason);
+        }
+
+        return true;
+    }
+
     private void RecheckOutboundFileTransferRouteTransitionAfterPhysicalSendLocked(
         OutboundTransferContext context,
         OutboundPhysicalSendLease retiredLease)

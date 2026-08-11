@@ -3020,6 +3020,13 @@ public sealed partial class SessionFileTransferService
             InboundTransferContext context,
             string reason)
     {
+        if (TryQueueInboundFileTransferRouteTransitionDrainAfterOwnerWorkClearedLocked(
+                context,
+                reason))
+        {
+            return true;
+        }
+
         if (ReferenceEquals(inboundTransfer, context) &&
             !context.IsTerminal &&
             context.ReceiverSparseChunksPendingWrite.Count == 0 &&
