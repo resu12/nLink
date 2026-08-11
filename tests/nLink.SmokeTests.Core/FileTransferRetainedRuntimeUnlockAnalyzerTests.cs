@@ -8637,6 +8637,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(true, "binding")]
     [InlineData(false, "after_bound")]
     [InlineData(true, "after_bound")]
+    [InlineData(false, "after_bound_data_session_unavailable")]
+    [InlineData(true, "after_bound_data_session_unavailable")]
     [InlineData(false, "recovered")]
     [InlineData(true, "recovered")]
     [InlineData(false, "recovered_delayed_raw")]
@@ -8755,7 +8757,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         var newVariant = mode is "missing" or "modern_missing" or "delayed_raw" or "raw_duplicate" or "answer_sent_duplicate" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered";
         var recovered = mode is "recovered" or "recovered_delayed_raw" or "initial_activation_recovered";
         var bindingMissing = string.Equals(mode, "binding", StringComparison.Ordinal);
-        var afterBound = mode is "after_bound" or "authority_mode_mismatch";
+        var afterBound = mode is
+            "after_bound" or
+            "after_bound_data_session_unavailable" or
+            "authority_mode_mismatch";
 
         Assert.Equal(mutationRejected ? "0" : "1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
         Assert.Equal(mutationRejected ? "0" : "1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
@@ -8774,10 +8779,30 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         {
             "missing" or "modern_missing" or "delayed_raw" or "raw_duplicate" or "answer_sent_duplicate" => "runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe",
             "binding" => "runtime_unlock_responder_acked_probe_binding_missing",
-            "after_bound" or "authority_mode_mismatch" => "runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe",
+            "after_bound" or "after_bound_data_session_unavailable" or "authority_mode_mismatch" => "runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe",
             _ => "(none)"
         };
         Assert.Equal(expectedVariant, verdict["failure_variant"]);
+
+        if (string.Equals(
+                mode,
+                "after_bound_data_session_unavailable",
+                StringComparison.Ordinal))
+        {
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "bound_responder_acked_peer_probe_route_transition_handoff_invalidated",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe",
+                verdict["failure_variant"]);
+            Assert.Equal("37482", verdict["first_proof_chain_failure_writer_sequence"]);
+        }
 
         if (mode is "missing" or "modern_missing" or "delayed_raw" or "raw_duplicate" or "answer_sent_duplicate")
         {
@@ -9040,16 +9065,16 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             lines.Add(LogLine($"{convergenceLine}; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1786273391607; decision_reason=runtime_scope_replaced", secondsOffset: 11));
         }
 
-        if (mode is "binding" or "after_bound" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
+        if (mode is "binding" or "after_bound" or "after_bound_data_session_unavailable" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
         {
-            if (mode is "after_bound" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
+            if (mode is "after_bound" or "after_bound_data_session_unavailable" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
             {
                 lines.Add(LogLine($"event=runtime_unlock_responder_answer_probe_convergence_decided; status=Accepted; decision_status=Accepted; substate=Complete; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=11; pending_answer_ack_generation=17; authority_mode={convergenceAuthorityMode}; payer_decision_id=7; lanes=file; nonce=ack-correlation-late; answer_message_id=answer-message-late; answer_deadline_utc_ms=1786273392000; ack_message_id=answer-ack-late; ack_source_fingerprint=ack-source-late; ack_frame_fingerprint=ack-frame-late; peer_transaction_generation=1; peer_offer_generation=3; peer_tuna_path_lease_generation=3; probe_id={probeId}; peer_probe_frame_fingerprint=probe-fingerprint-late; received_transport=tuna; received_utc_ms=1786273391340; probe_ack_sent_utc_ms=1786273391347; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1786273391607; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; {propagatedPeerScope}; log_writer_id={writerId}", secondsOffset: 11));
             }
             lines.Add(LogLine($"event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id={sessionId}; transaction_generation=1; offer_generation=11; state=routecommitpending; path_probe_state=acked; route_commit_pending=1; route_committed=0; log_writer_id={writerId}", secondsOffset: 11));
             lines.Add(LogLine($"event=runtime_unlock_precommit_probe_launch_requested; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=11; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; path_probe_id={probeId}; path_probe_state=acked; launch_role=ResponderAdoptingAckedPeerProbe; peer_probe_adoption=1; responder_waiting_for_peer_probe=0; duplicate=0; tuple_mutation=0; log_writer_id={writerId}", secondsOffset: 11));
         }
-        if (mode is "after_bound" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
+        if (mode is "after_bound" or "after_bound_data_session_unavailable" or "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
         {
             lines.Add(LogLine($"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=11; peer_transaction_generation=1; peer_offer_generation=3; peer_tuna_path_lease_generation=3; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; probe_id={probeId}; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1786273391607; launch_role=ResponderAdoptingAckedPeerProbe; answer_acceptance_source=SemanticAnswerAck; ack_message_id=answer-ack-late; ack_source_fingerprint=ack-source-late; peer_probe_frame_fingerprint=probe-fingerprint-late; {propagatedPeerScope}; normalized_reason=exact_responder_peer_probe_adopted; log_writer_id={writerId}", secondsOffset: 11));
         }
@@ -9086,6 +9111,14 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         if (string.Equals(mode, "after_bound", StringComparison.Ordinal))
         {
             lines.Add(LogLine($"event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=outbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=11; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; launch_generation=6; status=Invalidated; route=(none); protocol_version=0; decision_reason=transfer_context_replaced; log_writer_id={writerId}; log_writer_sequence=37482", secondsOffset: 13));
+        }
+        if (string.Equals(
+                mode,
+                "after_bound_data_session_unavailable",
+                StringComparison.Ordinal))
+        {
+            lines.Add(LogLine($"event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=11; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; launch_generation=6; status=Invalidated; route=post_tuna_fallback_v6; protocol_version=6; decision_reason=data_session_unavailable; log_writer_id={writerId}; log_writer_sequence=37482", secondsOffset: 13));
+            lines.Add(LogLine($"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Invalidated; decision_status=Invalidated; decision_reason=data_session_unavailable; direction=inbound; session_id={sessionId}; transfer_id={transferId}; lanes=file; payer_decision_id=7; pending_answer_ack_generation=17; ack_message_id=answer-ack-late; ack_source_fingerprint=ack-source-late; peer_probe_frame_fingerprint=probe-fingerprint-late; transaction_generation=1; offer_generation=11; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; probe_id={probeId}; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1786273391607; answer_acceptance_source=SemanticAnswerAck; pair_state=Paired; {pairTuple}; {directScope}; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; {responderProof}; transition_authority_id=(none); transition_generation=0; log_writer_id={writerId}; log_writer_sequence=37483", secondsOffset: 13));
         }
         if (mode is "recovered" or "recovered_delayed_raw" or "initial_activation_recovered" or "authority_mode_mismatch")
         {

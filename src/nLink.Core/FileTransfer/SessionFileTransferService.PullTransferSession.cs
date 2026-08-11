@@ -3024,7 +3024,7 @@ public sealed partial class SessionFileTransferService
             !context.IsTerminal &&
             context.ReceiverSparseChunksPendingWrite.Count == 0 &&
             context.PendingChunks.Count == 0 &&
-            context.DataSession is { IsAvailable: true } initialDataSession &&
+            context.DataSession is { } initialDataSession &&
             transport is IRuntimeUnlockRouteCommitProofProvider
                 initialProofProvider &&
             initialProofProvider.TryGetRuntimeUnlockRouteCommitProof(
@@ -3056,7 +3056,7 @@ public sealed partial class SessionFileTransferService
                 RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held ||
             handoff.CurrentAuthority is not
                 { IsDefault: false } authority ||
-            context.DataSession is not { IsAvailable: true } ||
+            context.DataSession is null ||
             transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||
             !proofProvider.TryGetRuntimeUnlockRouteCommitProof(
                 context.SessionId,

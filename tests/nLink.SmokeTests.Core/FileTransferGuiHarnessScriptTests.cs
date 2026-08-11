@@ -3642,7 +3642,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         Name = 'accepted binding without current handoff transition'
                         LastRecoveryIndex = 7
                         Stage = 'after_bound'
-                        Reason = 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+                        Reason = 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated'
                         Variant = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe'
                     }
                 )
@@ -4310,11 +4310,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     Set-Content -LiteralPath $path
                 $explicit = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing; failure_variant=runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($explicit.Phase -ne 'route_runtime' -or
-                    $explicit.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced' -or
+                    $explicit.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
                     -not $explicit.RuntimeUnlockResponderPeerProbeHandoffMissing -or
                     $explicit.RuntimeUnlockResponderPeerProbeBindingMissing -or
                     -not $explicit.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe) {
                     throw "explicit responder variant mismatch: $($explicit | ConvertTo-Json -Compress)"
+                }
+                $explicitTransferReplaced = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing; failure_variant=runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe; first_proof_chain_failure_reason=bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($explicitTransferReplaced.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced') {
+                    throw "explicit transfer replacement reason mismatch: $($explicitTransferReplaced | ConvertTo-Json -Compress)"
                 }
                 $prefix = @(
                     'event=runtime_unlock_transaction_answer_received; session_id=sess; transaction_generation=1; offer_generation=6; answer_received=1; tuna_path_lease_generation=1; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; log_writer_id=writer',
@@ -4344,6 +4348,17 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -not $result.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
                     [long]$result.EvidenceLineVisitCount -ne $invalidated.Count) {
                     throw "bound responder peer-probe mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                $dataSessionUnavailable = $prefix + @(
+                    'event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=12; launch_generation=6; tuna_path_lease_generation=3; tuna_path_lease_listener_run_id=peer-offer-dialer-3; status=Invalidated; decision_reason=data_session_unavailable; log_writer_id=writer'
+                )
+                $dataSessionUnavailable | Set-Content -LiteralPath $path
+                $dataSessionUnavailableResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($dataSessionUnavailableResult.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
+                    -not $dataSessionUnavailableResult.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
+                    [long]$dataSessionUnavailableResult.EvidenceLineVisitCount -ne $dataSessionUnavailable.Count) {
+                    throw "data-session-unavailable responder mismatch: $($dataSessionUnavailableResult | ConvertTo-Json -Compress)"
                 }
 
                 $legacyBound = $prefix[-1].Replace(
@@ -4491,6 +4506,19 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 Assert-AfterBoundResponderPeerProbeFailure `
                     -Result (Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)) `
                     -Case 'current inbound compatibility plus typed no-context invalidation'
+
+                $dataSessionUnavailableSiblings = $prefix + @(
+                    $currentCompatibilityInvalidation.Replace('transfer_context_replaced', 'data_session_unavailable'),
+                    $typedNoContextInvalidation.Replace('transfer_context_replaced', 'data_session_unavailable'),
+                    'event=transfer_terminal; direction=inbound; session_id=sess; transfer_id=transfer; terminal_state=failed; log_writer_id=writer'
+                )
+                $dataSessionUnavailableSiblings | Set-Content -LiteralPath $path
+                $dataSessionUnavailableSiblingResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($dataSessionUnavailableSiblingResult.Reason -ne 'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
+                    -not $dataSessionUnavailableSiblingResult.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
+                    [long]$dataSessionUnavailableSiblingResult.EvidenceLineVisitCount -ne $dataSessionUnavailableSiblings.Count) {
+                    throw "generic plus typed data-session-unavailable mismatch: $($dataSessionUnavailableSiblingResult | ConvertTo-Json -Compress)"
+                }
 
                 $mutatedDecision = $prefix + @(
                     $acceptedDecision,

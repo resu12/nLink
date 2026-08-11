@@ -23828,9 +23828,12 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=inbound;", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockResponderPeerProbe")]
-    public async Task RuntimeUnlockResponderPeerProbeAvailability_InitialRegularV4UsesGenericTransitionWithoutFallbackAuthority()
+    public async Task RuntimeUnlockResponderPeerProbeAvailability_InitialRegularV4UsesGenericTransitionWithoutFallbackAuthority(
+        bool isAvailable)
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -23874,7 +23877,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SeedInitialRegularV4RuntimeScopeForTest(
             context,
             "test_initial_responder_peer_probe");
-        var dataSession = new RecordingDataSession(sessionId, transferId);
+        var dataSession = new MutableAvailabilityDataSession(
+            sessionId,
+            transferId,
+            isAvailable);
         SetPrivateProperty(context, "DataSession", dataSession);
         SetPrivateProperty(context, "DataSessionGeneration", 1L);
         serviceType
@@ -23995,29 +24001,76 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         };
         transport.RuntimeUnlockRouteCommitSnapshot = snapshot;
 
+        var malformedLogStart = GetOperationalLogLength();
+        foreach (var malformed in new[]
+                 {
+                     new FileTransferDataSessionAvailabilityChangedEventArgs(
+                         isAvailable,
+                         "initial_responder_peer_probe_acked",
+                         requiresResumeRequest: false,
+                         FileTransferTransportHandoffKind.NormalToTunaActivation,
+                         FileTransferTransportKind.Tuna,
+                         snapshot),
+                     new FileTransferDataSessionAvailabilityChangedEventArgs(
+                         isAvailable,
+                         "initial_responder_peer_probe_acked",
+                         requiresResumeRequest: true,
+                         FileTransferTransportHandoffKind.None,
+                         FileTransferTransportKind.Tuna,
+                         snapshot),
+                     new FileTransferDataSessionAvailabilityChangedEventArgs(
+                         isAvailable,
+                         "initial_responder_peer_probe_acked",
+                         requiresResumeRequest: true,
+                         FileTransferTransportHandoffKind.NormalToTunaActivation,
+                         FileTransferTransportKind.RegularNkn,
+                         snapshot),
+                 })
+        {
+            await Assert.IsAssignableFrom<Task>(serviceType
+                .GetMethod(
+                    "HandleDataSessionAvailabilityChangedAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [dataSession, malformed]));
+        }
+        var malformedLog = ReadOperationalLogTail(malformedLogStart);
+        Assert.Equal(
+            6,
+            CountOccurrences(
+                malformedLog,
+                "decision_reason=runtime_unlock_responder_peer_probe_handoff_command_invalid"));
+        Assert.Null(
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.CurrentOperation);
+        Assert.False(GetPrivateProperty<bool>(
+            context,
+            "RuntimeUnlockActivationWindowGranted"));
+
         var logStart = GetOperationalLogLength();
-        await Assert.IsAssignableFrom<Task>(serviceType
-            .GetMethod(
-                "HandleDataSessionAvailabilityChangedAsync",
-                BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(
-                service,
-                [
-                    dataSession,
-                    new FileTransferDataSessionAvailabilityChangedEventArgs(
-                        isAvailable: true,
-                        reason: "initial_responder_peer_probe_acked",
-                        requiresResumeRequest: false,
-                        FileTransferTransportHandoffKind
-                            .NormalToTunaActivation,
-                        FileTransferTransportKind.Tuna,
-                        snapshot),
-                ]));
+        var exactAvailability =
+            new FileTransferDataSessionAvailabilityChangedEventArgs(
+                isAvailable,
+                reason: "initial_responder_peer_probe_acked",
+                requiresResumeRequest: true,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                snapshot);
+        var availabilityHandler = serviceType.GetMethod(
+            "HandleDataSessionAvailabilityChangedAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        await Assert.IsAssignableFrom<Task>(availabilityHandler.Invoke(
+            service,
+            [dataSession, exactAvailability]));
+        await Assert.IsAssignableFrom<Task>(availabilityHandler.Invoke(
+            service,
+            [dataSession, exactAvailability]));
 
         var log = ReadOperationalLogTail(logStart);
         var handoff = log
             .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-            .Single(line => line.Contains(
+            .First(line => line.Contains(
                 "event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted;",
                 StringComparison.Ordinal));
         Assert.Contains(
@@ -24042,6 +24095,15 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             StringComparison.Ordinal);
         Assert.Contains(
             "transition_kind=RegularV4ToTunaV4",
+            log,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_route_transition_prepared;"));
+        Assert.DoesNotContain(
+            "decision_reason=data_session_unavailable",
             log,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
@@ -24204,7 +24266,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     new FileTransferDataSessionAvailabilityChangedEventArgs(
                         isAvailable: true,
                         reason: "responder_peer_probe_scope_replaced",
-                        requiresResumeRequest: false,
+                        requiresResumeRequest: true,
                         FileTransferTransportHandoffKind
                             .NormalToTunaActivation,
                         FileTransferTransportKind.Tuna,
@@ -24318,7 +24380,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     new FileTransferDataSessionAvailabilityChangedEventArgs(
                         isAvailable: true,
                         reason: "responder_peer_probe_snapshot_replaced",
-                        requiresResumeRequest: false,
+                        requiresResumeRequest: true,
                         FileTransferTransportHandoffKind
                             .NormalToTunaActivation,
                         FileTransferTransportKind.Tuna,
@@ -24385,7 +24447,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 new FileTransferDataSessionAvailabilityChangedEventArgs(
                     isAvailable: true,
                     reason: "responder_peer_probe_pair_missing",
-                    requiresResumeRequest: false,
+                    requiresResumeRequest: true,
                     FileTransferTransportHandoffKind.NormalToTunaActivation,
                     FileTransferTransportKind.Tuna,
                     snapshot),
@@ -24450,8 +24512,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var leg = Assert.IsType<FileTransferLeg>(
             GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         SeedPairedFallbackTailYieldForTest(context, leg);
-        var dataSession = Assert.IsAssignableFrom<IFileTransferDataSession>(
-            GetPrivatePropertyValue(context, "DataSession"));
+        var dataSession = new MutableAvailabilityDataSession(
+            sessionId,
+            transferId,
+            isAvailable: true);
+        SetPrivateProperty(context, "DataSession", dataSession);
 
         const long transactionGeneration = 12;
         const long offerGeneration = 19;
@@ -24607,6 +24672,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
                 .CurrentAuthority);
 
+        dataSession.IsAvailable = false;
+
         SetPrivateProperty(
             context,
             "ReceiverSparseChunksWritten",
@@ -24650,9 +24717,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             [
                 dataSession,
                 new FileTransferDataSessionAvailabilityChangedEventArgs(
-                    isAvailable: true,
+                    isAvailable: false,
                     reason: "responder_peer_probe_inbound_handoff",
-                    requiresResumeRequest: false,
+                    requiresResumeRequest: true,
                     FileTransferTransportHandoffKind.NormalToTunaActivation,
                     FileTransferTransportKind.Tuna,
                     snapshot),
@@ -24697,7 +24764,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
                 .CurrentAuthority);
 
-        Assert.True(dataSession.IsAvailable);
+        Assert.False(dataSession.IsAvailable);
         var heldPendingBeforeStaleUnavailable = GetPrivatePropertyValue(
             context,
             "RuntimeUnlockPendingPreCommitProbe");
@@ -24710,7 +24777,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             [
                 dataSession,
                 new FileTransferDataSessionAvailabilityChangedEventArgs(
-                    isAvailable: false,
+                    isAvailable: true,
                     reason: "responder_peer_probe_stale_unavailable_replay",
                     requiresResumeRequest: false,
                     FileTransferTransportHandoffKind.NormalToTunaActivation,

@@ -5092,7 +5092,17 @@ function Get-TunaGuiExplicitFailureClassification {
                         $ErrorMessage.IndexOf(
                             'bound_responder_acked_peer_probe_route_transition_handoff_invalidated',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                        'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+                        if ($ErrorMessage.IndexOf(
+                                'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced',
+                                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                            $ErrorMessage.IndexOf(
+                                'decision_reason=transfer_context_replaced',
+                                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+                        }
+                        else {
+                            'bound_responder_acked_peer_probe_route_transition_handoff_invalidated'
+                        }
                     }
                     else {
                         'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition'
@@ -5321,6 +5331,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'failure_variant=bound_responder_acked_probe_route_transition_handoff_missing_after_bound_probe',
                     [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                 $explicitResult.Reason -eq
+                    'bound_responder_acked_peer_probe_route_transition_handoff_invalidated' -or
+                $explicitResult.Reason -eq
                     'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced') {
                 $explicitResult.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe = $true
                 $explicitResult.FailureVariant =
@@ -5513,6 +5525,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $pendingAckStatesByAnswerSentTuple = @{}
         $statesByProbe = @{}
         $statesByLaunch = @{}
+        $handoffFailureDecisionsByLaunch = @{}
         $statesByWaitingTransfer = @{}
         $statesByTransfer = @{}
         $admissionsByTransfer = @{}
@@ -6093,6 +6106,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             ConvergenceInvalidationAckFrameFingerprint = ''
                             Candidate = $false; CandidateIndex = 0L; LaunchGeneration = ''; LaunchIndex = 0L
                             Bound = $false; BindingEvidenceMode = ''; BoundIndex = 0L; FailureDecisionIndex = 0L
+                            FailureDecisionReason = ''
                             ProvisionalBound = $false; ProvisionalBoundIndex = 0L
                             ProvisionalBindingMode = ''
                             ProvisionalBoundAckMessageId = ''; ProvisionalBoundAckFingerprint = ''
@@ -7881,13 +7895,35 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         -LaunchGeneration (Get-TunaGuiLogLineFieldValue -Line $line -Name 'launch_generation') `
                         -LeaseGeneration (Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_generation') `
                         -ListenerRunId (Get-TunaGuiLogLineFieldValue -Line $line -Name 'tuna_path_lease_listener_run_id')
+                    if (-not [string]::IsNullOrWhiteSpace($launchKey)) {
+                        if (-not $handoffFailureDecisionsByLaunch.ContainsKey($launchKey)) {
+                            $handoffFailureDecisionsByLaunch[$launchKey] =
+                                [System.Collections.Generic.List[object]]::new()
+                        }
+                        $handoffFailureDecisionsByLaunch[$launchKey].Add([pscustomobject]@{
+                                Index = $sourceIndex
+                                TransferId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+                                Direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+                                Status = Get-TunaGuiLogLineFieldValue -Line $line -Name 'status'
+                                Reason = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
+                            })
+                    }
                     $state = Get-TunaGuiUniqueResponderProbeIndexEntry -Index $statesByLaunch -Key $launchKey
+                    $failureDecisionReason = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
                     if ($null -ne $state -and $state.Bound -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -iin @('inbound', 'outbound') -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id') -eq $state.TransferId -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'status') -ieq 'Invalidated' -and
-                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason') -ieq 'transfer_context_replaced') {
-                        $state.FailureDecisionIndex = $sourceIndex
+                        $failureDecisionReason -iin @('transfer_context_replaced', 'data_session_unavailable')) {
+                        if ($state.FailureDecisionIndex -gt 0 -and
+                            -not [string]::IsNullOrWhiteSpace($state.FailureDecisionReason) -and
+                            $state.FailureDecisionReason -ine $failureDecisionReason) {
+                            $state.Ambiguous = $true
+                        }
+                        elseif ($state.FailureDecisionIndex -le 0) {
+                            $state.FailureDecisionIndex = $sourceIndex
+                            $state.FailureDecisionReason = $failureDecisionReason
+                        }
                     }
                     break
                 }
@@ -8015,7 +8051,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $state.CoordinatorDecisionReason = $decisionReason
                         $state.CoordinatorDecisionIndex = $sourceIndex
                         if ($decisionStatus -in @('Rejected', 'Invalidated')) {
-                            $state.FailureDecisionIndex = $sourceIndex
+                            if ($state.FailureDecisionIndex -gt 0 -and
+                                -not [string]::IsNullOrWhiteSpace($state.FailureDecisionReason) -and
+                                $state.FailureDecisionReason -ine $decisionReason) {
+                                $state.Ambiguous = $true
+                            }
+                            elseif ($state.FailureDecisionIndex -le 0) {
+                                $state.FailureDecisionIndex = $sourceIndex
+                                $state.FailureDecisionReason = $decisionReason
+                            }
                             break
                         }
                         if ($decisionStatus -ieq 'Held') {
@@ -8083,7 +8127,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     if ($decisionStatus -iin @('Rejected', 'Invalidated')) {
                         $state.CoordinatorDecisionIndex = $sourceIndex
                         $state.CoordinatorHeld = $false
-                        $state.FailureDecisionIndex = $sourceIndex
+                        if ($state.FailureDecisionIndex -gt 0 -and
+                            -not [string]::IsNullOrWhiteSpace($state.FailureDecisionReason) -and
+                            $state.FailureDecisionReason -ine $decisionReason) {
+                            $state.Ambiguous = $true
+                        }
+                        elseif ($state.FailureDecisionIndex -le 0) {
+                            $state.FailureDecisionIndex = $sourceIndex
+                            $state.FailureDecisionReason = $decisionReason
+                        }
                         break
                     }
 
@@ -8857,6 +8909,37 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $state.Bound = $true
             }
 
+            if ($state.Bound -and $state.BoundIndex -gt 0) {
+                $launchKey = Get-TunaGuiResponderProbeLaunchKey -Writer $state.Writer `
+                    -SessionId $state.SessionId -TransactionGeneration $state.TransactionGeneration `
+                    -OfferGeneration $state.OfferGeneration -LaunchGeneration $state.LaunchGeneration `
+                    -LeaseGeneration $state.LeaseGeneration -ListenerRunId $state.ListenerRunId
+                $failureDecisions = @(if ($handoffFailureDecisionsByLaunch.ContainsKey($launchKey)) {
+                        $handoffFailureDecisionsByLaunch[$launchKey] | Where-Object {
+                            $_.Index -gt $state.BoundIndex -and $_.TransferId -eq $state.TransferId -and
+                            $_.Direction -iin @('inbound', 'outbound')
+                        }
+                    }
+                    else { @() })
+                $failureFingerprints = @($failureDecisions | ForEach-Object {
+                        "$($_.TransferId)|$($_.Direction)|$($_.Status)|$($_.Reason)".ToLowerInvariant()
+                    } | Sort-Object -Unique)
+                if ($failureFingerprints.Count -gt 1) {
+                    $state.Ambiguous = $true
+                }
+                elseif ($failureFingerprints.Count -eq 1) {
+                    $failureDecision = @($failureDecisions | Sort-Object Index | Select-Object -First 1)[0]
+                    if ($failureDecision.Status -ieq 'Invalidated' -and
+                        $failureDecision.Reason -iin @('transfer_context_replaced', 'data_session_unavailable')) {
+                        $state.FailureDecisionIndex = [long]$failureDecision.Index
+                        $state.FailureDecisionReason = [string]$failureDecision.Reason
+                    }
+                    else {
+                        $state.Ambiguous = $true
+                    }
+                }
+            }
+
             $state.AdoptionRecheckObserved =
                 $state.AdoptionRecheckCandidate -and $state.RawAnswerAck -and
                 $state.AdoptingLaunchObserved -and
@@ -8959,6 +9042,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $first[0].Variant -eq 'adoption_recheck_missing_after_answer_ack_before_probe'
             AfterBoundHandoffMissing =
                 $first.Count -eq 1 -and $first[0].Variant -eq 'after_bound_handoff_missing'
+            FailureDecisionReason = if ($first.Count -eq 1) {
+                [string]$first[0].State.FailureDecisionReason
+            } else { '' }
             LineVisits = [long]$Lines.Count
             ParsedRecords = [long]$metrics.Parsed
             LookupCount = [long]$metrics.Lookups
@@ -12542,7 +12628,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             } elseif ($responderPeerProbeFastPath.Variant -eq 'adoption_recheck_missing_after_answer_ack_before_probe') {
                 'answer_ack_before_probe_acked_peer_probe_not_rechecked_into_responder_adopting_launch'
             } elseif ($responderPeerProbeFastPath.Variant -eq 'after_bound_handoff_missing') {
-                'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+                if ($responderPeerProbeFastPath.FailureDecisionReason -ieq 'transfer_context_replaced') {
+                    'bound_responder_acked_peer_probe_route_transition_handoff_invalidated_as_transfer_context_replaced'
+                }
+                else {
+                    'bound_responder_acked_peer_probe_route_transition_handoff_invalidated'
+                }
             } else {
                 'late_answer_ack_did_not_bind_acked_peer_probe_to_responder_route_transition'
             }) `

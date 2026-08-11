@@ -3485,17 +3485,7 @@ public sealed partial class SessionFileTransferService :
                         responderObservation.TransferId,
                         StringComparison.Ordinal))
                 {
-                    if (availability.IsAvailable && dataSession.IsAvailable)
-                    {
-                        TryHandleInboundRuntimeUnlockResponderPeerProbeRouteTransitionHandoffLocked(
-                            inbound,
-                            dataSession,
-                            responderSnapshot,
-                            responderObservation,
-                            availability.Reason);
-                    }
-                    else if (availability.IsAvailable !=
-                             dataSession.IsAvailable)
+                    if (availability.IsAvailable != dataSession.IsAvailable)
                     {
                         var currentAuthority = inbound.CoordinatorPersistentState
                             .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
@@ -3508,37 +3498,30 @@ public sealed partial class SessionFileTransferService :
                             "Rejected",
                             "data_session_availability_stale");
                     }
+                    else if (IsExactRuntimeUnlockResponderPeerProbeHandoffCommand(
+                                 availability,
+                                 responderSnapshot,
+                                 responderObservation))
+                    {
+                        TryHandleInboundRuntimeUnlockResponderPeerProbeRouteTransitionHandoffLocked(
+                            inbound,
+                            dataSession,
+                            responderSnapshot,
+                            responderObservation,
+                            availability.Reason);
+                    }
                     else
                     {
-                        if (responderObservation.ResponderTransitionMode ==
-                            RuntimeUnlockResponderPeerProbeTransitionMode
-                                .InitialRegularV4)
-                        {
-                            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
-                                inbound,
-                                responderObservation,
-                                null,
-                                null,
-                                "Invalidated",
-                                "data_session_unavailable");
-                        }
-                        else
-                        {
-                            var invalidated = FileTransferCoordinator
-                                .InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff(
-                                    CreateCoordinatorStateLocked(inbound),
-                                    responderObservation,
-                                    "data_session_unavailable");
-                            inbound.CoordinatorPersistentState =
-                                invalidated.State.PersistentState;
-                            LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
-                                inbound,
-                                responderObservation,
-                                invalidated.Authority,
-                                null,
-                                invalidated.Status.ToString(),
-                                invalidated.Reason);
-                        }
+                        var currentAuthority = inbound.CoordinatorPersistentState
+                            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                            .CurrentAuthority;
+                        LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                            inbound,
+                            responderObservation,
+                            currentAuthority,
+                            null,
+                            "Rejected",
+                            "runtime_unlock_responder_peer_probe_handoff_command_invalid");
                     }
                 }
                 else
@@ -6258,6 +6241,18 @@ public sealed partial class SessionFileTransferService :
             }
         }
     }
+
+    private static bool IsExactRuntimeUnlockResponderPeerProbeHandoffCommand(
+        FileTransferDataSessionAvailabilityChangedEventArgs availability,
+        RuntimeUnlockRouteCommitSnapshot snapshot,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation)
+        => availability.RequiresResumeRequest &&
+           availability.HandoffKind ==
+               FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           availability.HandoffKind == observation.HandoffKind &&
+           availability.TargetTransport == FileTransferTransportKind.Tuna &&
+           availability.TargetTransport == observation.TargetTransport &&
+           snapshot.ResponderPeerProbeRouteTransitionObservation == observation;
 
     private RuntimeUnlockRetryLifecycleTransitionDecision
         ObserveRuntimeUnlockRetryDispatchStageLocked(
