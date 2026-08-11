@@ -105,14 +105,18 @@ public sealed class
             invalidated.ReceiveRecoveryOperation?.Authority);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task
-        RuntimeUnlockInitialActivationReceiveRecoveryHold_QueuedReleaseIsDroppedAfterTerminalAndExactInvalidationSurvives()
+        RuntimeUnlockInitialActivationReceiveRecoveryHold_RejectedOrDroppedReleaseAllowsOneExactTerminalInvalidation(
+            bool rejectReleaseBeforeTerminal)
     {
-        const string sessionId =
-            "session_initial_activation_hold_stale_release";
-        const string transferId =
-            "transfer_initial_activation_hold_stale_release";
+        var suffix = rejectReleaseBeforeTerminal ? "rejected" : "dropped";
+        var sessionId =
+            $"session_initial_activation_hold_{suffix}_release";
+        var transferId =
+            $"transfer_initial_activation_hold_{suffix}_release";
         using var bridge =
             new InitialActivationHoldLoopbackTransport(sessionId);
         using var peer = new LoopbackFileTransferTransport(sessionId);
@@ -123,6 +127,149 @@ public sealed class
         var started = await service.TryStartSendAsync(
             new FileTransferSendDescriptor(
                 "initial-activation-hold-stale-release.bin",
+                FileSizeBytes: 1,
+                transferId,
+                ChunkSizeBytes: 4096),
+            _ => Task.FromResult<Stream>(
+                new MemoryStream([0x2a], writable: false)),
+            CancellationToken.None);
+        Assert.NotNull(started);
+
+        var context = GetOutboundContext(service);
+        var operation = await SeedCurrentReceiveRecoveryOperationAsync(
+            service,
+            bridge,
+            context);
+        var request = CreateInitialActivationHoldRequest(operation);
+        var held = bridge.RaiseHoldRequest(request);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Status);
+
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, held);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Single(bridge.ObservedHoldDecisions);
+
+        const string mutatedHeldReason =
+            "test_initial_activation_hold_held_mutated";
+        var mutatedHeld = held with { Reason = mutatedHeldReason };
+        bridge.HoldDecisionAcceptance = decision =>
+            !string.Equals(
+                decision.Reason,
+                mutatedHeldReason,
+                StringComparison.Ordinal);
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, held);
+        QueueInitialActivationHoldDirective(service, held);
+        QueueInitialActivationHoldDirective(service, mutatedHeld);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        var heldDeliveries = bridge.ObservedHoldDecisions.ToArray();
+        Assert.Equal(2, heldDeliveries.Length);
+        Assert.Equal(mutatedHeld, heldDeliveries[^1]);
+        bridge.ObservedHoldDecisions.Clear();
+        bridge.HoldDecisionAcceptance = null;
+
+        PauseInitialActivationHoldDirectiveWorker(service);
+        _ = bridge.CompleteBridgeRecoveryExecution(
+            operation.Authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "test_initial_activation_hold_completed");
+        await WaitUntilAsync(
+            () =>
+                GetReceiveRecoverySubstate(context).CurrentOperation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Completed,
+                    ClosureState:
+                        FileTransferReceiveRecoveryClosureState.Retained,
+                });
+
+        bridge.RaiseReceiveRecoveryProof(
+            operation.Authority.ExecutionCommand,
+            "test_initial_activation_hold_receive_proof",
+            "test_initial_activation_hold_receive_proof");
+        await WaitUntilAsync(
+            () =>
+                GetReceiveRecoverySubstate(context)
+                    .LastInitialActivationHold is
+                {
+                    Status:
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                            .Released,
+                });
+
+        if (rejectReleaseBeforeTerminal)
+        {
+            bridge.HoldDecisionAcceptance = decision =>
+                decision.Status !=
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released;
+            FlushInitialActivationHoldDirectiveWorker(service);
+            Assert.Contains(
+                bridge.ObservedHoldDecisions,
+                decision =>
+                    decision.Status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released);
+            bridge.ObservedHoldDecisions.Clear();
+            bridge.HoldDecisionAcceptance = null;
+            PauseInitialActivationHoldDirectiveWorker(service);
+        }
+
+        var terminal = await service.CancelTransferAsync(
+            transferId,
+            "test_initial_activation_hold_terminal",
+            CancellationToken.None);
+        Assert.NotNull(terminal);
+        Assert.True(terminal.IsTerminal);
+        Assert.Empty(bridge.ObservedHoldDecisions);
+
+        FlushInitialActivationHoldDirectiveWorker(service);
+
+        var invalidated = Assert.Single(bridge.ObservedHoldDecisions);
+        Assert.Equal(request, invalidated.Request);
+        Assert.Equal(held.HoldGeneration, invalidated.HoldGeneration);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
+            invalidated.Status);
+        Assert.Equal("terminal_state", invalidated.Reason);
+        Assert.Equal(
+            FileTransferReceiveRecoveryExecutionState.Invalidated,
+            invalidated.ReceiveRecoveryOperation?.ExecutionState);
+
+        var terminalRecovery = GetReceiveRecoverySubstate(context);
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldTransition(
+            service,
+            terminalRecovery,
+            terminalRecovery);
+        QueueInitialActivationHoldTransition(
+            service,
+            terminalRecovery,
+            terminalRecovery);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Single(bridge.ObservedHoldDecisions);
+    }
+
+    [Fact]
+    public async Task
+        RuntimeUnlockInitialActivationReceiveRecoveryHold_AcceptedReleaseReceiptMakesExactDuplicateIdempotentAndSuppressesTerminalInvalidation()
+    {
+        const string sessionId =
+            "session_initial_activation_hold_accepted_release_receipt";
+        const string transferId =
+            "transfer_initial_activation_hold_accepted_release_receipt";
+        using var bridge =
+            new InitialActivationHoldLoopbackTransport(sessionId);
+        using var peer = new LoopbackFileTransferTransport(sessionId);
+        bridge.Connect(peer);
+
+        using var service = new SessionFileTransferService();
+        service.AttachTransport(bridge);
+        var started = await service.TryStartSendAsync(
+            new FileTransferSendDescriptor(
+                "initial-activation-hold-accepted-release-receipt.bin",
                 FileSizeBytes: 1,
                 transferId,
                 ChunkSizeBytes: 4096),
@@ -156,28 +303,239 @@ public sealed class
                     ClosureState:
                         FileTransferReceiveRecoveryClosureState.Retained,
                 });
-
         bridge.RaiseReceiveRecoveryProof(
             operation.Authority.ExecutionCommand,
             "test_initial_activation_hold_receive_proof",
             "test_initial_activation_hold_receive_proof");
         await WaitUntilAsync(
             () =>
-                GetReceiveRecoverySubstate(context)
-                    .LastInitialActivationHold is
+                GetReceiveRecoverySubstate(context).LastInitialActivationHold is
                 {
                     Status:
                         RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                             .Released,
                 });
 
+        var pendingRefresh = Assert.IsType<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand>(
+            GetReceiveRecoverySubstate(context)
+                .PendingInitialActivationEnvelopeRefresh);
+        bridge.AfterEnvelopeRefreshPrepared = () =>
+        {
+            Assert.Equal(
+                pendingRefresh,
+                GetReceiveRecoverySubstate(context)
+                    .PendingInitialActivationEnvelopeRefresh);
+            Assert.Null(
+                GetReceiveRecoverySubstate(context)
+                    .LastInitialActivationEnvelopeRefreshReceipt);
+        };
+        bridge.RejectAfterEnvelopeRefreshPrepared = true;
+        FlushInitialActivationHoldDirectiveWorker(service);
+        var rejectedRelease = Assert.Single(
+            bridge.ObservedHoldDecisions.Where(
+                decision =>
+                    decision.Status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released));
+        Assert.Equal(
+            pendingRefresh,
+            GetReceiveRecoverySubstate(context)
+                .PendingInitialActivationEnvelopeRefresh);
+        Assert.Null(
+            GetReceiveRecoverySubstate(context)
+                .LastInitialActivationEnvelopeRefreshReceipt);
+        Assert.Single(bridge.PreparedEnvelopeRefreshReceipts);
+
+        bridge.ObservedHoldDecisions.Clear();
+        bridge.RejectAfterEnvelopeRefreshPrepared = false;
+        var exactPersistentState =
+            GetRequiredProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, rejectedRelease);
+        SetProperty(
+            context,
+            "CoordinatorPersistentState",
+            exactPersistentState with
+            {
+                FileTransferReceiveRecovery =
+                    exactPersistentState.FileTransferReceiveRecovery with
+                    {
+                        PendingInitialActivationEnvelopeRefresh =
+                            pendingRefresh with
+                            {
+                                RefreshGeneration =
+                                    pendingRefresh.RefreshGeneration + 1,
+                            },
+                    },
+            });
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Empty(bridge.ObservedHoldDecisions);
+        Assert.Single(bridge.PreparedEnvelopeRefreshReceipts);
+        Assert.Null(
+            GetReceiveRecoverySubstate(context)
+                .LastInitialActivationEnvelopeRefreshReceipt);
+
+        SetProperty(
+            context,
+            "CoordinatorPersistentState",
+            exactPersistentState);
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, rejectedRelease);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        var initiallyDelivered = bridge.ObservedHoldDecisions.ToArray();
+        var released = Assert.Single(
+            initiallyDelivered.Where(
+                decision =>
+                    decision.Status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released));
+        var initialDeliveryCount = initiallyDelivered.Length;
+        Assert.Equal(2, bridge.PreparedEnvelopeRefreshReceipts.Count);
+        Assert.Null(
+            GetReceiveRecoverySubstate(context)
+                .PendingInitialActivationEnvelopeRefresh);
+        Assert.NotNull(
+            GetReceiveRecoverySubstate(context)
+                .LastInitialActivationEnvelopeRefreshReceipt);
+        bridge.AfterEnvelopeRefreshPrepared = null;
+
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, released);
+        QueueInitialActivationHoldDirective(service, released);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Equal(
+            initialDeliveryCount,
+            bridge.ObservedHoldDecisions.Count);
+
+        var releasedOperation = Assert.IsType<
+            FileTransferReceiveRecoveryOperation>(
+            released.ReceiveRecoveryOperation);
+        var receiveProof = Assert.IsType<FileTransferReceiveRecoveryProof>(
+            releasedOperation.ReceiveProof);
+        var refreshCommand = Assert.IsType<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand>(
+            released.EnvelopeRefreshCommand);
+        var observation = releasedOperation.Authority.Observation;
+        var mutatedBindingTransportEpoch =
+            Math.Max(1, observation.TransportEpoch);
+        var mutatedBinding =
+            new RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding(
+                releasedOperation.Authority.AuthorityId,
+                releasedOperation.Authority.OperationGeneration,
+                observation.CheckpointRequestId,
+                "mutated-fallback-child",
+                1,
+                mutatedBindingTransportEpoch,
+                FileTransferReceiveRecoveryFallbackCheckpointBindingState
+                    .Pending)
+            {
+                BindingGeneration = 1,
+                FrameIdentity = new PostTunaFallbackPeerProofFrameIdentity(
+                    "receiver_state",
+                    mutatedBindingTransportEpoch,
+                    new string('a', 64)),
+            };
+        Assert.False(mutatedBinding.IsDefault);
+        var bindingMutation = released with
+        {
+            EnvelopeRefreshCommand = refreshCommand with
+            {
+                ClosureGeneration = 0,
+                ReleaseProfile =
+                    RuntimeUnlockInitialActivationOfferEnvelopeRefreshReleaseProfile
+                        .PostTunaFallbackCheckpointProof,
+                ReceiveRecoveryProof = receiveProof,
+                FallbackCheckpointBinding = mutatedBinding,
+            },
+        };
+        Assert.False(
+            Assert.IsType<
+                    RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand>(
+                    bindingMutation.EnvelopeRefreshCommand)
+                .IsDefault);
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, bindingMutation);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Equal(
+            initialDeliveryCount,
+            bridge.ObservedHoldDecisions.Count);
+
+        PauseInitialActivationHoldDirectiveWorker(service);
         var terminal = await service.CancelTransferAsync(
             transferId,
             "test_initial_activation_hold_terminal",
             CancellationToken.None);
         Assert.NotNull(terminal);
         Assert.True(terminal.IsTerminal);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Equal(
+            initialDeliveryCount,
+            bridge.ObservedHoldDecisions.Count);
+
+        var terminalRecovery = GetReceiveRecoverySubstate(context);
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldTransition(
+            service,
+            terminalRecovery,
+            terminalRecovery);
+        QueueInitialActivationHoldTransition(
+            service,
+            terminalRecovery,
+            terminalRecovery);
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Equal(
+            initialDeliveryCount,
+            bridge.ObservedHoldDecisions.Count);
+    }
+
+    [Fact]
+    public async Task
+        RuntimeUnlockInitialActivationReceiveRecoveryHold_TransportReplacementDropsQueuedDirectiveAndDeliversOneCapturedInvalidation()
+    {
+        const string sessionId =
+            "session_initial_activation_hold_transport_replacement";
+        const string transferId =
+            "transfer_initial_activation_hold_transport_replacement";
+        using var bridge =
+            new InitialActivationHoldLoopbackTransport(sessionId);
+        using var replacement =
+            new InitialActivationHoldLoopbackTransport(sessionId);
+        using var peer = new LoopbackFileTransferTransport(sessionId);
+        bridge.Connect(peer);
+
+        using var service = new SessionFileTransferService();
+        service.AttachTransport(bridge);
+        var started = await service.TryStartSendAsync(
+            new FileTransferSendDescriptor(
+                "initial-activation-hold-transport-replacement.bin",
+                FileSizeBytes: 1,
+                transferId,
+                ChunkSizeBytes: 4096),
+            _ => Task.FromResult<Stream>(
+                new MemoryStream([0x2a], writable: false)),
+            CancellationToken.None);
+        Assert.NotNull(started);
+
+        var context = GetOutboundContext(service);
+        var operation = await SeedCurrentReceiveRecoveryOperationAsync(
+            service,
+            bridge,
+            context);
+        var request = CreateInitialActivationHoldRequest(operation);
+        var held = bridge.RaiseHoldRequest(request);
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
+            held.Status);
+
+        PauseInitialActivationHoldDirectiveWorker(service);
+        QueueInitialActivationHoldDirective(service, held);
+        service.AttachTransport(replacement);
+        Assert.Same(replacement, GetAttachedTransport(service));
         Assert.Empty(bridge.ObservedHoldDecisions);
+        Assert.Empty(replacement.ObservedHoldDecisions);
 
         FlushInitialActivationHoldDirectiveWorker(service);
 
@@ -187,10 +545,14 @@ public sealed class
         Assert.Equal(
             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Invalidated,
             invalidated.Status);
-        Assert.Equal("terminal_state", invalidated.Reason);
         Assert.Equal(
-            FileTransferReceiveRecoveryExecutionState.Invalidated,
-            invalidated.ReceiveRecoveryOperation?.ExecutionState);
+            operation.Authority,
+            invalidated.ReceiveRecoveryOperation?.Authority);
+        Assert.Empty(replacement.ObservedHoldDecisions);
+
+        FlushInitialActivationHoldDirectiveWorker(service);
+        Assert.Single(bridge.ObservedHoldDecisions);
+        Assert.Empty(replacement.ObservedHoldDecisions);
     }
 
     [Fact]
@@ -392,6 +754,8 @@ public sealed class
                 observation.RoutePublication,
                 "test_initial_activation_hold_teardown");
         Assert.NotNull(publicationAuthority);
+        var envelopeSentAtUnixMs =
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         return new RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest(
             observation.SessionId,
             observation.TransferId,
@@ -409,6 +773,11 @@ public sealed class
             RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
                 .OfferPreSend)
         {
+            SemanticOfferFingerprint =
+                "initial-activation-hold-semantic-offer-fingerprint",
+            EnvelopeGeneration = 1,
+            EnvelopeSentAtUnixMs = envelopeSentAtUnixMs,
+            EnvelopeExpiresAtUnixMs = envelopeSentAtUnixMs + 30_000,
             ExpectedScope =
                 new RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope(
                     publicationAuthority,
@@ -434,6 +803,43 @@ public sealed class
         {
             workerScheduled.SetValue(ordering, true);
         }
+    }
+
+    private static void QueueInitialActivationHoldDirective(
+        SessionFileTransferService service,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+    {
+        var queue = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(SessionFileTransferService).GetMethod(
+                "QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                types:
+                [
+                    typeof(
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision),
+                ],
+                modifiers: null));
+        queue.Invoke(service, [decision]);
+    }
+
+    private static void QueueInitialActivationHoldTransition(
+        SessionFileTransferService service,
+        FileTransferReceiveRecoverySubstate previous,
+        FileTransferReceiveRecoverySubstate current)
+    {
+        var queue = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(SessionFileTransferService).GetMethod(
+                "QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                types:
+                [
+                    typeof(FileTransferReceiveRecoverySubstate),
+                    typeof(FileTransferReceiveRecoverySubstate),
+                ],
+                modifiers: null));
+        queue.Invoke(service, [previous, current]);
     }
 
     private static void FlushInitialActivationHoldDirectiveWorker(
@@ -518,10 +924,30 @@ public sealed class
         private event EventHandler<
             RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs>?
             envelopeRefreshPrepared;
+        private int nextEnvelopeRefreshSecureSequence;
 
         internal ConcurrentQueue<
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>
             ObservedHoldDecisions
+        {
+            get;
+        } = [];
+
+        internal Func<
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision,
+            bool>? HoldDecisionAcceptance
+        {
+            get;
+            set;
+        }
+
+        internal bool RejectAfterEnvelopeRefreshPrepared { get; set; }
+
+        internal Action? AfterEnvelopeRefreshPrepared { get; set; }
+
+        internal ConcurrentQueue<
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt>
+            PreparedEnvelopeRefreshReceipts
         {
             get;
         } = [];
@@ -573,7 +999,35 @@ public sealed class
                     decision)
         {
             ObservedHoldDecisions.Enqueue(decision);
-            return true;
+            if (!(HoldDecisionAcceptance?.Invoke(decision) ?? true))
+            {
+                return false;
+            }
+
+            if (decision.Status !=
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Released ||
+                decision.EnvelopeRefreshCommand is not { } refreshCommand)
+            {
+                return true;
+            }
+
+            var secureSequence =
+                Interlocked.Increment(ref nextEnvelopeRefreshSecureSequence);
+            var receipt =
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt(
+                    refreshCommand,
+                    $"prepared-envelope-fingerprint-{secureSequence}",
+                    secureSequence,
+                    $"prepared-envelope-message-{secureSequence}");
+            PreparedEnvelopeRefreshReceipts.Enqueue(receipt);
+            var args =
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshPreparedEventArgs(
+                    receipt);
+            envelopeRefreshPrepared?.Invoke(this, args);
+            AfterEnvelopeRefreshPrepared?.Invoke();
+            return args.Decision is { Accepted: true } &&
+                   !RejectAfterEnvelopeRefreshPrepared;
         }
     }
 }

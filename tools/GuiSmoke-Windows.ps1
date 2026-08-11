@@ -3057,7 +3057,6 @@ function Write-FileTransferGuiLogLedgerEvidence {
     # writers have stopped and their redirected output has reached EOF.
     try {
         Sync-GuiSmokeAppLogLedger -IgnoreScenarioDeadline
-        Update-GuiSmokeLogLedgerWriterEvidenceFromFrozenSource -State $script:GuiSmokeAppLogLedger
         $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
             -State $script:GuiSmokeAppLogLedger `
             -Bookmark $Bookmark
@@ -3066,55 +3065,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $finalizationErrors.Add("final_sync_failed:$($_.Exception.Message)") | Out-Null
     }
 
-    try {
-        if ($null -eq $finalSnapshot) {
-            throw 'final_snapshot_missing'
-        }
-        $retainedSlice = Write-GuiSmokeLogLedgerRangeCapture `
-            -State $script:GuiSmokeAppLogLedger `
-            -StartIndex $Bookmark `
-            -EndIndex ([int]$finalSnapshot.lineCount) `
-            -DestinationPath (Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log')
-    }
-    catch {
-        $finalizationErrors.Add("ledger_slice_failed:$($_.Exception.Message)") | Out-Null
-    }
-
-    try {
-        if ($null -eq $retainedSlice) {
-            throw 'retained_slice_missing'
-        }
-        $analyzerInput = Copy-GuiSmokeFileAtomicCreateNew `
-            -SourcePath ([string]$retainedSlice.Path) `
-            -DestinationPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log')
-        if (-not [string]::Equals(
-                [string]$retainedSlice.Sha256,
-                [string]$analyzerInput.Sha256,
-                [System.StringComparison]::OrdinalIgnoreCase) -or
-            [long]$retainedSlice.ByteCount -ne [long]$analyzerInput.ByteCount -or
-            [long]$retainedSlice.LineCount -ne [long]$analyzerInput.LineCount) {
-            throw 'analyzer_input_capture_mismatch'
-        }
-        if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH)) {
-            Update-FileTransferGuiEvidenceFinalizationStage `
-                -Stage 'capture_persisted' `
-                -CapturePath ([string]$retainedSlice.Path) `
-                -CaptureSha256 ([string]$retainedSlice.Sha256) `
-                -CaptureLineCount ([long]$retainedSlice.LineCount)
-        }
-        $capturePersisted = $true
-    }
-    catch {
-        $finalizationErrors.Add("analyzer_input_failed:$($_.Exception.Message)") | Out-Null
-    }
-    if (-not $capturePersisted) {
-        throw 'filetransfer_gui_evidence_capture_not_persisted'
-    }
-
     if ($null -eq $finalSnapshot) {
         $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark
     }
-    $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $script:GuiSmokeAppLogLedger
     $integrityReasons = New-Object System.Collections.Generic.List[string]
     $writerIntegrityReasons = New-Object System.Collections.Generic.List[string]
     foreach ($errorText in @($finalizationErrors.ToArray())) {
@@ -3124,47 +3077,13 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $writerIntegrityReasons.Add($processOutputDrainFailure) | Out-Null
     }
 
-    foreach ($snapshotReason in @(Get-GuiSmokeLogLedgerSnapshotIntegrityReasons `
-            -InitialSnapshot $InitialSnapshot `
-            -FinalSnapshot $finalSnapshot)) {
-        $integrityReasons.Add([string]$snapshotReason) | Out-Null
-    }
-
     $expectedAcceptanceRunId = if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID }
     $expectedScenarioRunId = if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID }
-    $writerIdentityMismatchCount = [long]$diagnostics.WriterIdentityMismatchCount
     $initialWriters = @()
     if ($null -ne $InitialSnapshot.PSObject.Properties['writers']) {
         $initialWriters = @($InitialSnapshot.writers)
     }
-    $finalWriters = @()
-    if ($null -ne $finalSnapshot.PSObject.Properties['writers']) {
-        $finalWriters = @($finalSnapshot.writers)
-    }
     $writerEvidenceSlice = $null
-    $currentWriterIds = @($finalWriters | ForEach-Object { [string]$_.writerId } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $currentWriterIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($currentWriterId in $currentWriterIds) {
-        [void]$currentWriterIdSet.Add($currentWriterId)
-    }
-    foreach ($writer in $finalWriters) {
-        if (-not [string]::Equals([string]$writer.acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
-            -not [string]::Equals([string]$writer.scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)) {
-            $writerIdentityMismatchCount++
-        }
-    }
-    if ($finalWriters.Count -eq 0) {
-        $writerIntegrityReasons.Add('final_writer_snapshot_missing') | Out-Null
-    }
-    if ([long]$diagnostics.WriterGapCount -ne 0) {
-        $writerIntegrityReasons.Add('writer_sequence_gap_observed') | Out-Null
-    }
-    if ([long]$diagnostics.WriterDuplicateCount -ne 0) {
-        $writerIntegrityReasons.Add('writer_sequence_duplicate_observed') | Out-Null
-    }
-    if ($writerIdentityMismatchCount -ne 0) {
-        $writerIntegrityReasons.Add('writer_identity_mismatch_observed') | Out-Null
-    }
 
     $writerFailureMarkerFiles = New-Object System.Collections.Generic.List[object]
     $deferredMarkers = New-Object System.Collections.Generic.List[object]
@@ -3316,20 +3235,64 @@ function Write-FileTransferGuiLogLedgerEvidence {
         }
     }
 
+    # Keep complete batch payloads only for batches named by deferred markers.
+    # Ordinary writer batches are validated and folded into chronology as the
+    # frozen ledger is streamed, avoiding one object and two hash keys per log
+    # line for the common single-line-batch case.
     $writerBatchAccumulators = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $writerBatchSequenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerCurrentBatchByWriter = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerReusableBatchByWriter = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerPreviousBatchTicks = [System.Collections.Generic.Dictionary[string,long]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerHasPreviousBatch = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $writerChronologyInversionCount = 0L
+    $writerChronologyCollisionCount = 0L
+    $writerChronologyReasons = New-Object System.Collections.Generic.List[string]
     $writerDrainSequences = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[long]]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $writerBatchOrdinal = 0L
+    $retainedSlicePath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log'
+    $retainedSliceTempPath = '{0}.{1}.tmp' -f $retainedSlicePath, ([guid]::NewGuid().ToString('N'))
+    $retainedSliceStream = $null
+    $retainedSliceSha256 = $null
     $writerEvidencePath = Join-Path $ArtifactDir 'filetransfer-gui-log-writer-evidence-slice.log'
     $writerEvidenceTempPath = '{0}.{1}.tmp' -f $writerEvidencePath, ([guid]::NewGuid().ToString('N'))
     $writerEvidenceStream = $null
     $writerEvidenceSha256 = $null
     $writerLedgerReader = $null
     $writerLedgerVisitCount = 0L
+    $rebuildWriterEvidenceFromFrozenSource =
+        $null -ne $script:GuiSmokeAppLogLedger.PSObject.Properties['StorageMode'] -and
+        [string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile'
+    $currentWriterIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    if ($null -ne $finalSnapshot.PSObject.Properties['writers']) {
+        foreach ($writerSnapshot in @($finalSnapshot.writers)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$writerSnapshot.writerId)) {
+                [void]$currentWriterIdSet.Add([string]$writerSnapshot.writerId)
+            }
+        }
+    }
+    if ($rebuildWriterEvidenceFromFrozenSource) {
+        $script:GuiSmokeAppLogLedger.Writers.Clear()
+        $script:GuiSmokeAppLogLedger.UnknownWritersAfterBookmark.Clear()
+        $script:GuiSmokeAppLogLedger.WriterGapCount = 0L
+        $script:GuiSmokeAppLogLedger.WriterDuplicateCount = 0L
+        $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount = 0L
+        $script:GuiSmokeAppLogLedger.WriterEvidenceBookmark = -1
+    }
     try {
+        if (Test-Path -LiteralPath $retainedSlicePath -PathType Leaf) {
+            throw "retained_slice_already_exists:$retainedSlicePath"
+        }
         if (Test-Path -LiteralPath $writerEvidencePath -PathType Leaf) {
             throw "writer_evidence_slice_already_exists:$writerEvidencePath"
         }
+        $retainedSliceStream = [System.IO.FileStream]::new(
+            $retainedSliceTempPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None,
+            65536,
+            [System.IO.FileOptions]::SequentialScan)
+        $retainedSliceSha256 = [System.Security.Cryptography.SHA256]::Create()
         $writerEvidenceStream = [System.IO.FileStream]::new(
             $writerEvidenceTempPath,
             [System.IO.FileMode]::CreateNew,
@@ -3340,6 +3303,8 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $writerEvidenceSha256 = [System.Security.Cryptography.SHA256]::Create()
         $writerEvidenceEncoding = [System.Text.UTF8Encoding]::new($false)
         $writerEvidenceSeparator = $writerEvidenceEncoding.GetBytes([Environment]::NewLine)
+        $retainedSliceLineCount = 0L
+        $retainedSliceByteCount = 0L
         $writerEvidenceLineCount = 0L
         $writerEvidenceByteCount = 0L
         $frozenWriterEvidenceEnd = [int]$finalSnapshot.lineCount
@@ -3364,6 +3329,36 @@ function Write-FileTransferGuiLogLedgerEvidence {
             if ($null -eq $writerLine) {
                 throw "writer_evidence_source_short_read:index=$($ledgerIndex - 1);expected=$frozenWriterEvidenceEnd"
             }
+            if (($ledgerIndex - 1) -ge $Bookmark) {
+                if ($retainedSliceLineCount -gt 0) {
+                    $retainedSliceStream.Write(
+                        $writerEvidenceSeparator,
+                        0,
+                        $writerEvidenceSeparator.Length)
+                    [void]$retainedSliceSha256.TransformBlock(
+                        $writerEvidenceSeparator,
+                        0,
+                        $writerEvidenceSeparator.Length,
+                        $writerEvidenceSeparator,
+                        0)
+                    $retainedSliceByteCount += [long]$writerEvidenceSeparator.Length
+                }
+                $retainedLineBytes = $writerEvidenceEncoding.GetBytes($writerLine)
+                if ($retainedLineBytes.Length -gt 0) {
+                    $retainedSliceStream.Write(
+                        $retainedLineBytes,
+                        0,
+                        $retainedLineBytes.Length)
+                    [void]$retainedSliceSha256.TransformBlock(
+                        $retainedLineBytes,
+                        0,
+                        $retainedLineBytes.Length,
+                        $retainedLineBytes,
+                        0)
+                    $retainedSliceByteCount += [long]$retainedLineBytes.Length
+                }
+                $retainedSliceLineCount++
+            }
             $fields = ConvertFrom-GuiSmokeLogLedgerStructuredFields -Line $writerLine
             $writerId = [string]$fields['log_writer_id']
             $writerEvidenceFieldDuplicate = $fields.ContainsKey('__nlink_duplicate_writer_evidence_field')
@@ -3373,14 +3368,110 @@ function Write-FileTransferGuiLogLedgerEvidence {
                         '(?:^|[;\s])log_writer_id=(?<value>[^;\r\n]*)',
                         [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
                     $candidateWriterId = [string]$writerIdMatch.Groups['value'].Value.Trim()
-                    if ($currentWriterIdSet.Contains($candidateWriterId)) {
+                    if (($rebuildWriterEvidenceFromFrozenSource -and
+                         $script:GuiSmokeAppLogLedger.Writers.ContainsKey($candidateWriterId)) -or
+                        (-not $rebuildWriterEvidenceFromFrozenSource -and
+                         $currentWriterIdSet.Contains($candidateWriterId))) {
                         $writerId = $candidateWriterId
                         break
                     }
                 }
             }
-            if ([string]::IsNullOrWhiteSpace($writerId) -or -not $currentWriterIdSet.Contains($writerId)) {
+            $writerSequenceText = [string]$fields['log_writer_sequence']
+            $lineIndex = $ledgerIndex - 1
+            if (-not $rebuildWriterEvidenceFromFrozenSource) {
+                if ([string]::IsNullOrWhiteSpace($writerId) -or
+                    -not $currentWriterIdSet.Contains($writerId)) {
+                    continue
+                }
+                $sequence = [long]$writerSequenceText
+            }
+            else {
+            if ([string]::IsNullOrWhiteSpace($writerId) -and
+                [string]::IsNullOrWhiteSpace($writerSequenceText)) {
+                if ($lineIndex -ge $Bookmark) {
+                    $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount++
+                }
                 continue
+            }
+            $sequence = 0L
+            if ([string]::IsNullOrWhiteSpace($writerId) -or
+                -not [long]::TryParse(
+                    $writerSequenceText,
+                    [System.Globalization.NumberStyles]::Integer,
+                    [System.Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$sequence) -or
+                $sequence -le 0) {
+                $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount++
+                continue
+            }
+
+            $eventName = [string]$fields['event']
+            $isWriterStart = [string]::Equals(
+                $eventName,
+                'operational_log_writer_started',
+                [System.StringComparison]::OrdinalIgnoreCase)
+            $writer = $script:GuiSmokeAppLogLedger.Writers[$writerId]
+            if ($null -eq $writer) {
+                if (-not $isWriterStart) {
+                    if ($lineIndex -ge $Bookmark -and
+                        $script:GuiSmokeAppLogLedger.UnknownWritersAfterBookmark.Add($writerId)) {
+                        $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount++
+                    }
+                    continue
+                }
+
+                $acceptanceRunId = [string]$fields['acceptance_run_id']
+                $scenarioRunId = [string]$fields['scenario_run_id']
+                if (-not [string]::Equals($acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
+                    -not [string]::Equals($scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)) {
+                    if ($lineIndex -ge $Bookmark) {
+                        $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount++
+                    }
+                    continue
+                }
+
+                $writer = [pscustomobject]@{
+                    WriterId = $writerId
+                    AcceptanceRunId = $acceptanceRunId
+                    ScenarioRunId = $scenarioRunId
+                    FirstSequence = $sequence
+                    LastSequence = $sequence
+                    ObservedCount = 1L
+                    StartObserved = $true
+                }
+                $script:GuiSmokeAppLogLedger.Writers[$writerId] = $writer
+                if ($sequence -gt 1) {
+                    $script:GuiSmokeAppLogLedger.WriterGapCount += $sequence - 1L
+                }
+                if ($sequence -ne 1L) {
+                    $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount++
+                }
+            }
+            else {
+                if ($sequence -eq ([long]$writer.LastSequence + 1L)) {
+                    $writer.LastSequence = $sequence
+                    $writer.ObservedCount++
+                }
+                elseif ($sequence -gt ([long]$writer.LastSequence + 1L)) {
+                    $script:GuiSmokeAppLogLedger.WriterGapCount += $sequence - [long]$writer.LastSequence - 1L
+                    $writer.LastSequence = $sequence
+                    $writer.ObservedCount++
+                }
+                else {
+                    $script:GuiSmokeAppLogLedger.WriterDuplicateCount++
+                }
+
+                if ($isWriterStart -and
+                    ($sequence -ne 1L -or
+                     -not [string]::Equals([string]$writer.AcceptanceRunId, [string]$fields['acceptance_run_id'], [System.StringComparison]::Ordinal) -or
+                     -not [string]::Equals([string]$writer.ScenarioRunId, [string]$fields['scenario_run_id'], [System.StringComparison]::Ordinal))) {
+                    $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount++
+                }
+            }
+            if (-not $script:GuiSmokeAppLogLedger.Writers.ContainsKey($writerId)) {
+                continue
+            }
             }
 
             if ($writerEvidenceLineCount -gt 0) {
@@ -3401,40 +3492,113 @@ function Write-FileTransferGuiLogLedgerEvidence {
             }
             $writerEvidenceLineCount++
 
-            $sequence = [long]$fields['log_writer_sequence']
             $batchGeneration = [long]$fields['log_writer_batch_generation']
             $batchFirstSequence = [long]$fields['log_writer_batch_first_sequence']
             $batchLastSequence = [long]$fields['log_writer_batch_last_sequence']
             $attemptUtcTicks = [long]$fields['log_writer_attempt_utc_ticks']
             $batchKey = '{0}:{1}:{2}' -f $writerId.Length, $writerId, $batchGeneration
             $batch = $null
-            if (-not $writerBatchAccumulators.TryGetValue($batchKey, [ref]$batch)) {
-                $writerBatchOrdinal++
-                $batch = [pscustomobject]@{
-                    writerId = $writerId
-                    batchGeneration = $batchGeneration
-                    batchFirstSequence = $batchFirstSequence
-                    batchLastSequence = $batchLastSequence
-                    attemptUtcTicks = $attemptUtcTicks
-                    minSequence = $sequence
-                    maxSequence = $sequence
-                    lineCount = 0L
-                    firstObservedOrdinal = $writerBatchOrdinal
-                    tupleValid = -not $writerEvidenceFieldDuplicate -and
-                        $sequence -gt 0 -and
-                        $batchGeneration -gt 0 -and
-                        $batchFirstSequence -gt 0 -and
-                        $batchLastSequence -ge $batchFirstSequence -and
-                        $attemptUtcTicks -gt 0
-                    payloadSha256 = ''
-                    payloadLines = $(if ($deferredMarkersByBatch.ContainsKey($batchKey)) {
-                            New-Object System.Collections.Generic.List[object]
+            [void]$writerCurrentBatchByWriter.TryGetValue($writerId, [ref]$batch)
+            if ($null -eq $batch -or [long]$batch.batchGeneration -ne $batchGeneration) {
+                if ($null -ne $batch) {
+                    $batchIsValid = [bool]$batch.tupleValid -and
+                        [long]$batch.batchGeneration -gt 0 -and
+                        [long]$batch.attemptUtcTicks -gt 0 -and
+                        [long]$batch.minSequence -gt 0 -and
+                        [long]$batch.batchFirstSequence -eq [long]$batch.minSequence -and
+                        [long]$batch.batchLastSequence -eq [long]$batch.maxSequence -and
+                        [long]$batch.lineCount -eq ([long]$batch.maxSequence - [long]$batch.minSequence + 1L)
+                    if (-not $batchIsValid) {
+                        $writerChronologyReasons.Add('writer_recovery_chronology_batch_invalid') | Out-Null
+                    }
+                    else {
+                        $previousTicks = 0L
+                        if ($writerHasPreviousBatch.Contains([string]$batch.writerId)) {
+                            [void]$writerPreviousBatchTicks.TryGetValue([string]$batch.writerId, [ref]$previousTicks)
+                            if ([long]$batch.attemptUtcTicks -lt $previousTicks) {
+                                $writerChronologyInversionCount++
+                            }
+                            elseif ([long]$batch.attemptUtcTicks -eq $previousTicks) {
+                                $writerChronologyCollisionCount++
+                            }
                         }
                         else {
-                            $null
-                        })
+                            [void]$writerHasPreviousBatch.Add([string]$batch.writerId)
+                        }
+                        $writerPreviousBatchTicks[[string]$batch.writerId] = [long]$batch.attemptUtcTicks
+                    }
                 }
-                $writerBatchAccumulators.Add($batchKey, $batch)
+
+                $batch = $null
+                $batchWasAlreadyObserved = $false
+                if ($deferredMarkersByBatch.ContainsKey($batchKey)) {
+                    if (-not $writerBatchAccumulators.TryGetValue($batchKey, [ref]$batch)) {
+                        $batch = [pscustomobject]@{
+                            writerId = ''
+                            batchGeneration = 0L
+                            batchFirstSequence = 0L
+                            batchLastSequence = 0L
+                            attemptUtcTicks = 0L
+                            minSequence = 0L
+                            maxSequence = 0L
+                            lastLineSequence = 0L
+                            lineCount = 0L
+                            firstObservedOrdinal = 0L
+                            tupleValid = $false
+                            payloadSha256 = ''
+                            payloadLines = New-Object System.Collections.Generic.List[object]
+                        }
+                        $writerBatchAccumulators.Add($batchKey, $batch)
+                    }
+                    elseif ([long]$batch.lineCount -gt 0) {
+                        $batchWasAlreadyObserved = $true
+                    }
+                }
+                else {
+                    [void]$writerReusableBatchByWriter.TryGetValue($writerId, [ref]$batch)
+                    if ($null -eq $batch) {
+                        $batch = [pscustomobject]@{
+                            writerId = ''
+                            batchGeneration = 0L
+                            batchFirstSequence = 0L
+                            batchLastSequence = 0L
+                            attemptUtcTicks = 0L
+                            minSequence = 0L
+                            maxSequence = 0L
+                            lastLineSequence = 0L
+                            lineCount = 0L
+                            firstObservedOrdinal = 0L
+                            tupleValid = $false
+                            payloadSha256 = ''
+                            payloadLines = $null
+                        }
+                        $writerReusableBatchByWriter.Add($writerId, $batch)
+                    }
+                }
+
+                $writerBatchOrdinal++
+                $batch.writerId = $writerId
+                $batch.batchGeneration = $batchGeneration
+                $batch.batchFirstSequence = $batchFirstSequence
+                $batch.batchLastSequence = $batchLastSequence
+                $batch.attemptUtcTicks = $attemptUtcTicks
+                $batch.minSequence = $sequence
+                $batch.maxSequence = $sequence
+                $batch.lastLineSequence = 0L
+                $batch.lineCount = 0L
+                $batch.firstObservedOrdinal = $writerBatchOrdinal
+                $batch.tupleValid = -not $batchWasAlreadyObserved -and
+                    -not $writerEvidenceFieldDuplicate -and
+                    $sequence -gt 0 -and
+                    $batchGeneration -gt 0 -and
+                    $batchFirstSequence -gt 0 -and
+                    $batchLastSequence -ge $batchFirstSequence -and
+                    $attemptUtcTicks -gt 0
+                $batch.payloadSha256 = ''
+                if ($null -ne $batch.payloadLines) {
+                    $batch.payloadLines.Clear()
+                }
+                $writerCurrentBatchByWriter[$writerId] = $batch
             }
             elseif (-not [string]::Equals([string]$batch.writerId, $writerId, [System.StringComparison]::Ordinal) -or
                 [long]$batch.batchGeneration -ne $batchGeneration -or
@@ -3447,12 +3611,13 @@ function Write-FileTransferGuiLogLedgerEvidence {
             if ($writerEvidenceFieldDuplicate) {
                 $batch.tupleValid = $false
             }
-            $batchSequenceKey = '{0}{1}{2}' -f $batchKey, [char]31, $sequence
-            if (-not $writerBatchSequenceKeys.Add($batchSequenceKey)) {
+            if ([long]$batch.lineCount -gt 0 -and
+                $sequence -ne ([long]$batch.lastLineSequence + 1L)) {
                 $batch.tupleValid = $false
             }
             $batch.minSequence = [Math]::Min([long]$batch.minSequence, $sequence)
             $batch.maxSequence = [Math]::Max([long]$batch.maxSequence, $sequence)
+            $batch.lastLineSequence = $sequence
             $batch.lineCount = [long]$batch.lineCount + 1L
             if ($null -ne $batch.payloadLines) {
                 $batch.payloadLines.Add([pscustomobject]@{
@@ -3471,6 +3636,49 @@ function Write-FileTransferGuiLogLedgerEvidence {
             }
         }
 
+        foreach ($batch in $writerCurrentBatchByWriter.Values) {
+            $batchIsValid = [bool]$batch.tupleValid -and
+                [long]$batch.batchGeneration -gt 0 -and
+                [long]$batch.attemptUtcTicks -gt 0 -and
+                [long]$batch.minSequence -gt 0 -and
+                [long]$batch.batchFirstSequence -eq [long]$batch.minSequence -and
+                [long]$batch.batchLastSequence -eq [long]$batch.maxSequence -and
+                [long]$batch.lineCount -eq ([long]$batch.maxSequence - [long]$batch.minSequence + 1L)
+            if (-not $batchIsValid) {
+                $writerChronologyReasons.Add('writer_recovery_chronology_batch_invalid') | Out-Null
+            }
+            else {
+                $previousTicks = 0L
+                if ($writerHasPreviousBatch.Contains([string]$batch.writerId)) {
+                    [void]$writerPreviousBatchTicks.TryGetValue([string]$batch.writerId, [ref]$previousTicks)
+                    if ([long]$batch.attemptUtcTicks -lt $previousTicks) {
+                        $writerChronologyInversionCount++
+                    }
+                    elseif ([long]$batch.attemptUtcTicks -eq $previousTicks) {
+                        $writerChronologyCollisionCount++
+                    }
+                }
+                else {
+                    [void]$writerHasPreviousBatch.Add([string]$batch.writerId)
+                }
+                $writerPreviousBatchTicks[[string]$batch.writerId] = [long]$batch.attemptUtcTicks
+            }
+        }
+
+        [void]$retainedSliceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $retainedSliceHash = (([BitConverter]::ToString($retainedSliceSha256.Hash)) -replace '-', '').ToLowerInvariant()
+        $retainedSliceStream.Flush($true)
+        $retainedSliceStream.Dispose()
+        $retainedSliceStream = $null
+        [System.IO.File]::Move($retainedSliceTempPath, $retainedSlicePath)
+        $retainedSliceTempPath = ''
+        $retainedSlice = [pscustomobject]@{
+            Path = [System.IO.Path]::GetFullPath($retainedSlicePath)
+            Sha256 = $retainedSliceHash
+            LineCount = $retainedSliceLineCount
+            ByteCount = $retainedSliceByteCount
+        }
+
         [void]$writerEvidenceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
         $writerEvidenceHash = (([BitConverter]::ToString($writerEvidenceSha256.Hash)) -replace '-', '').ToLowerInvariant()
         $writerEvidenceStream.Flush($true)
@@ -3484,9 +3692,29 @@ function Write-FileTransferGuiLogLedgerEvidence {
             LineCount = $writerEvidenceLineCount
             ByteCount = $writerEvidenceByteCount
         }
+
+        $analyzerInput = Copy-GuiSmokeFileAtomicCreateNew `
+            -SourcePath ([string]$retainedSlice.Path) `
+            -DestinationPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log')
+        if (-not [string]::Equals(
+                [string]$retainedSlice.Sha256,
+                [string]$analyzerInput.Sha256,
+                [System.StringComparison]::OrdinalIgnoreCase) -or
+            [long]$retainedSlice.ByteCount -ne [long]$analyzerInput.ByteCount -or
+            [long]$retainedSlice.LineCount -ne [long]$analyzerInput.LineCount) {
+            throw 'analyzer_input_capture_mismatch'
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH)) {
+            Update-FileTransferGuiEvidenceFinalizationStage `
+                -Stage 'capture_persisted' `
+                -CapturePath ([string]$retainedSlice.Path) `
+                -CaptureSha256 ([string]$retainedSlice.Sha256) `
+                -CaptureLineCount ([long]$retainedSlice.LineCount)
+        }
+        $capturePersisted = $true
     }
     catch {
-        $writerEvidenceFailure = "writer_evidence_slice_failed:$($_.Exception.Message)"
+        $writerEvidenceFailure = "atomic_ledger_evidence_failed:$($_.Exception.Message)"
         $integrityReasons.Add($writerEvidenceFailure) | Out-Null
         $writerIntegrityReasons.Add($writerEvidenceFailure) | Out-Null
     }
@@ -3494,16 +3722,64 @@ function Write-FileTransferGuiLogLedgerEvidence {
         if ($writerLedgerReader) {
             $writerLedgerReader.Dispose()
         }
+        if ($retainedSliceStream) {
+            $retainedSliceStream.Dispose()
+        }
         if ($writerEvidenceStream) {
             $writerEvidenceStream.Dispose()
         }
         if ($writerEvidenceSha256) {
             $writerEvidenceSha256.Dispose()
         }
+        if ($retainedSliceSha256) {
+            $retainedSliceSha256.Dispose()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($retainedSliceTempPath) -and
+            (Test-Path -LiteralPath $retainedSliceTempPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $retainedSliceTempPath -Force -ErrorAction SilentlyContinue
+        }
         if (-not [string]::IsNullOrWhiteSpace($writerEvidenceTempPath) -and
             (Test-Path -LiteralPath $writerEvidenceTempPath -PathType Leaf)) {
             Remove-Item -LiteralPath $writerEvidenceTempPath -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    if (-not $capturePersisted) {
+        throw 'filetransfer_gui_evidence_capture_not_persisted'
+    }
+
+    $script:GuiSmokeAppLogLedger.WriterEvidenceBookmark = $Bookmark
+    $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
+        -State $script:GuiSmokeAppLogLedger `
+        -Bookmark $Bookmark
+    $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $script:GuiSmokeAppLogLedger
+    foreach ($snapshotReason in @(Get-GuiSmokeLogLedgerSnapshotIntegrityReasons `
+            -InitialSnapshot $InitialSnapshot `
+            -FinalSnapshot $finalSnapshot)) {
+        $integrityReasons.Add([string]$snapshotReason) | Out-Null
+    }
+    $finalWriters = @()
+    if ($null -ne $finalSnapshot.PSObject.Properties['writers']) {
+        $finalWriters = @($finalSnapshot.writers)
+    }
+    $writerIdentityMismatchCount = [long]$diagnostics.WriterIdentityMismatchCount
+    foreach ($writer in $finalWriters) {
+        if (-not [string]::Equals([string]$writer.acceptanceRunId, $expectedAcceptanceRunId, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$writer.scenarioRunId, $expectedScenarioRunId, [System.StringComparison]::Ordinal)) {
+            $writerIdentityMismatchCount++
+        }
+    }
+    if ($finalWriters.Count -eq 0) {
+        $writerIntegrityReasons.Add('final_writer_snapshot_missing') | Out-Null
+    }
+    if ([long]$diagnostics.WriterGapCount -ne 0) {
+        $writerIntegrityReasons.Add('writer_sequence_gap_observed') | Out-Null
+    }
+    if ([long]$diagnostics.WriterDuplicateCount -ne 0) {
+        $writerIntegrityReasons.Add('writer_sequence_duplicate_observed') | Out-Null
+    }
+    if ($writerIdentityMismatchCount -ne 0) {
+        $writerIntegrityReasons.Add('writer_identity_mismatch_observed') | Out-Null
     }
 
     $writerDeferredLineCount = if ($deferredMarkers.Count -gt 0) {
@@ -3521,8 +3797,6 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $writerUnresolvedDeferredBatchCount = 0L
     $writerUnresolvedDeferredLineCount = 0L
     $writerRecoveryMismatchCount = 0L
-    $writerChronologyInversionCount = 0L
-    $writerChronologyCollisionCount = 0L
     $writerDeferredBatchEvidence = New-Object System.Collections.Generic.List[object]
     foreach ($deferred in $deferredMarkers) {
         $writerDeferredLookupCount++
@@ -3625,47 +3899,6 @@ function Write-FileTransferGuiLogLedgerEvidence {
     if ($writerMarkerStructuredFieldDuplicateCount -ne 0) { $writerRecoveryReasons.Add('writer_marker_structured_field_duplicate') | Out-Null }
     if ($terminalMarkers.Count -ne 0) { $writerRecoveryReasons.Add('operational_log_write_failure_observed') | Out-Null }
     if ($writerDrainMissingCount -ne 0) { $writerRecoveryReasons.Add('writer_drain_missing') | Out-Null }
-    $writerChronologyReasons = New-Object System.Collections.Generic.List[string]
-    $validBatchesByWriter = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($batch in $writerBatchAccumulators.Values) {
-        $batchIsValid = [bool]$batch.tupleValid -and
-            [long]$batch.batchGeneration -gt 0 -and
-            [long]$batch.attemptUtcTicks -gt 0 -and
-            [long]$batch.minSequence -gt 0 -and
-            [long]$batch.batchFirstSequence -gt 0 -and
-            [long]$batch.batchLastSequence -ge [long]$batch.batchFirstSequence -and
-            [long]$batch.batchFirstSequence -eq [long]$batch.minSequence -and
-            [long]$batch.batchLastSequence -eq [long]$batch.maxSequence -and
-            [long]$batch.lineCount -eq ([long]$batch.maxSequence - [long]$batch.minSequence + 1L)
-        if (-not $batchIsValid) {
-            $writerChronologyReasons.Add('writer_recovery_chronology_batch_invalid') | Out-Null
-            continue
-        }
-
-        $validBatches = $null
-        if (-not $validBatchesByWriter.TryGetValue([string]$batch.writerId, [ref]$validBatches)) {
-            $validBatches = New-Object System.Collections.Generic.List[object]
-            $validBatchesByWriter.Add([string]$batch.writerId, $validBatches)
-        }
-        $validBatches.Add([pscustomobject]@{
-            firstSequence = [long]$batch.minSequence
-            attemptUtcTicks = [long]$batch.attemptUtcTicks
-            firstObservedOrdinal = [long]$batch.firstObservedOrdinal
-        }) | Out-Null
-    }
-    foreach ($validBatches in $validBatchesByWriter.Values) {
-        $orderedBatches = @($validBatches.ToArray() | Sort-Object firstSequence, firstObservedOrdinal)
-        for ($batchIndex = 1; $batchIndex -lt $orderedBatches.Count; $batchIndex++) {
-            $previousTicks = [long]$orderedBatches[$batchIndex - 1].attemptUtcTicks
-            $currentTicks = [long]$orderedBatches[$batchIndex].attemptUtcTicks
-            if ($currentTicks -lt $previousTicks) {
-                $writerChronologyInversionCount++
-            }
-            elseif ($currentTicks -eq $previousTicks) {
-                $writerChronologyCollisionCount++
-            }
-        }
-    }
     if ($writerChronologyInversionCount -ne 0) { $writerChronologyReasons.Add('writer_recovery_chronology_inversion') | Out-Null }
     if ($writerChronologyCollisionCount -ne 0) { $writerChronologyReasons.Add('writer_recovery_chronology_collision') | Out-Null }
     foreach ($reason in @($writerRecoveryReasons.ToArray()) + @($writerChronologyReasons.ToArray())) {
@@ -4894,6 +5127,14 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
                     Reason = if ($ErrorMessage.IndexOf(
+                            'released_hold_directive_delivery_rejected',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $ErrorMessage.IndexOf(
+                            'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'released_hold_directive_delivery_rejected'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
                             'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                         'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
@@ -4924,6 +5165,15 @@ function Get-TunaGuiExplicitFailureClassification {
         }
     }
 
+    if ([regex]::IsMatch(
+            $ErrorMessage,
+            '(?i)(?:^|[;\s])gui_smoke_scenario_deadline_exceeded(?=$|[;:\s])')) {
+        return [pscustomobject]@{
+            Phase = 'progress_failure'
+            Reason = 'gui_smoke_scenario_deadline_exceeded'
+            RequiresEvidenceEnrichment = $true
+        }
+    }
     $cursorFailureMatch = [regex]::Match($ErrorMessage, '(?i)(?<value>gui_smoke_log_cursor_[a-z0-9_-]+)')
     if ($cursorFailureMatch.Success) {
         if ([string]::Equals($cursorFailureMatch.Groups['value'].Value, 'gui_smoke_log_cursor_gap', [System.StringComparison]::OrdinalIgnoreCase) -and
@@ -19774,6 +20024,48 @@ function ConvertTo-GuiSmokeProcessArgument {
     return '"{0}"' -f $Value.Replace('"', '\"')
 }
 
+function New-TunaGuiFailureClassificationEnrichmentReceipt {
+    param(
+        [Parameter(Mandatory = $true)]$Classification,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('not_requested', 'pending', 'completed', 'timed_out', 'failed')]
+        [string]$Status,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [long]$ElapsedMilliseconds = 0L
+    )
+
+    return [pscustomobject]@{
+        Classification = $Classification
+        ClassificationEnrichmentStatus = $Status
+        ClassificationEnrichmentReason = $Reason
+        ClassificationEnrichmentElapsedMilliseconds = $ElapsedMilliseconds
+    }
+}
+
+function Test-TunaGuiCompletedFailureClassificationResult {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$Classification,
+        [Parameter(Mandatory = $true)]$RequiredClassification
+    )
+
+    if ($null -eq $Classification -or $null -eq $RequiredClassification) {
+        return $false
+    }
+
+    $propertyNames = @($Classification.PSObject.Properties.Name)
+    foreach ($requiredProperty in @($RequiredClassification.PSObject.Properties.Name)) {
+        if ($propertyNames -notcontains $requiredProperty) {
+            return $false
+        }
+    }
+
+    return $Classification.ClassificationComplete -is [bool] -and
+        $Classification.ClassificationComplete -and
+        -not [string]::IsNullOrWhiteSpace([string]$Classification.Phase) -and
+        -not [string]::IsNullOrWhiteSpace([string]$Classification.Reason) -and
+        -not [string]::IsNullOrWhiteSpace([string]$Classification.ClassificationSource)
+}
+
 function Invoke-TunaGuiFailureClassificationRequest {
     param([Parameter(Mandatory = $true)][string]$RequestPath)
 
@@ -19797,66 +20089,71 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][string]$ErrorMessage,
-        [Parameter(Mandatory = $true)][string]$RouteMode
+        [Parameter(Mandatory = $true)][string]$RouteMode,
+        [Parameter(Mandatory = $true)]$BaseClassification
     )
 
-    $budgetMilliseconds =
-        Get-TunaGuiFailureClassificationBudgetMilliseconds -ArtifactDir $ArtifactDir
-    if ($budgetMilliseconds -le 0) {
-        return New-TunaGuiFileTransferFailureClassificationResult `
-            -Phase 'harness_failure_classification' `
-            -Reason 'evidence_enrichment_timeout' `
-            -RouteMode $RouteMode `
-            -ClassificationSource 'immutable_evidence_timeout' `
-            -ClassificationComplete $false `
-            -EvidenceLineVisitCount '(unavailable)' `
-            -EvidenceParsedRecordCount '(unavailable)' `
-            -EvidenceLookupCount '(unavailable)'
-    }
-
-    $evidencePaths = New-Object System.Collections.Generic.List[string]
-    $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
-    if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
-        $evidencePaths.Add([System.IO.Path]::GetFullPath($retainedPath)) | Out-Null
-    }
-    $snapshotRoot =
-        Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
-    if (Test-Path -LiteralPath $snapshotRoot -PathType Container) {
-        foreach ($snapshot in @(
-                Get-ChildItem -LiteralPath $snapshotRoot -File |
-                    Sort-Object FullName)) {
-            $evidencePaths.Add($snapshot.FullName) | Out-Null
-        }
-    }
-
-    $requestPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification-request.json'
-    $responsePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification-response.json'
-    $stdoutPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification.stdout.log'
-    $stderrPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification.stderr.log'
-    Write-GuiSmokeAtomicJson `
-        -Path $requestPath `
-        -Value ([ordered]@{
-            schemaVersion = 1
-            event = 'filetransfer_tuna_gui_failure_classification_request'
-            errorMessage = $ErrorMessage
-            routeMode = $RouteMode
-            evidencePaths = @($evidencePaths.ToArray())
-            responsePath = $responsePath
-            budgetMilliseconds = $budgetMilliseconds
-            requestedUtc = [DateTimeOffset]::UtcNow.ToString('O')
-        })
-
-    $argumentValues = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', $PSCommandPath,
-        '-FailureClassificationRequestPath', $requestPath)
-    $argumentLine = ($argumentValues | ForEach-Object {
-            ConvertTo-GuiSmokeProcessArgument -Value ([string]$_)
-        }) -join ' '
     $process = $null
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
+        $budgetMilliseconds =
+            Get-TunaGuiFailureClassificationBudgetMilliseconds -ArtifactDir $ArtifactDir
+        if ($budgetMilliseconds -le 0) {
+            return New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $BaseClassification `
+                -Status 'timed_out' `
+                -Reason 'evidence_enrichment_timeout' `
+                -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+        }
+
+        $evidencePaths = New-Object System.Collections.Generic.List[string]
+        $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+        if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
+            $evidencePaths.Add([System.IO.Path]::GetFullPath($retainedPath)) | Out-Null
+        }
+        $snapshotRoot =
+            Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
+        if (Test-Path -LiteralPath $snapshotRoot -PathType Container) {
+            foreach ($snapshot in @(
+                    Get-ChildItem -LiteralPath $snapshotRoot -File |
+                        Sort-Object FullName)) {
+                $evidencePaths.Add($snapshot.FullName) | Out-Null
+            }
+        }
+
+        $requestPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification-request.json'
+        $responsePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification-response.json'
+        $stdoutPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification.stdout.log'
+        $stderrPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-failure-classification.stderr.log'
+        Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+            return New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $BaseClassification `
+                -Status 'failed' `
+                -Reason 'evidence_enrichment_failed' `
+                -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+        }
+        Write-GuiSmokeAtomicJson `
+            -Path $requestPath `
+            -Value ([ordered]@{
+                schemaVersion = 1
+                event = 'filetransfer_tuna_gui_failure_classification_request'
+                errorMessage = $ErrorMessage
+                routeMode = $RouteMode
+                evidencePaths = @($evidencePaths.ToArray())
+                responsePath = $responsePath
+                budgetMilliseconds = $budgetMilliseconds
+                requestedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+            })
+
+        $argumentValues = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', $PSCommandPath,
+            '-FailureClassificationRequestPath', $requestPath)
+        $argumentLine = ($argumentValues | ForEach-Object {
+                ConvertTo-GuiSmokeProcessArgument -Value ([string]$_)
+            }) -join ' '
         $process = Start-Process `
             -FilePath 'powershell' `
             -ArgumentList $argumentLine `
@@ -19874,30 +20171,59 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
             }
             catch {
             }
-            return New-TunaGuiFileTransferFailureClassificationResult `
-                -Phase 'harness_failure_classification' `
+            return New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $BaseClassification `
+                -Status 'timed_out' `
                 -Reason 'evidence_enrichment_timeout' `
-                -RouteMode $RouteMode `
-                -ClassificationSource 'immutable_evidence_timeout' `
-                -ClassificationComplete $false `
-                -EvidenceLineVisitCount '(unavailable)' `
-                -EvidenceParsedRecordCount '(unavailable)' `
-                -EvidenceLookupCount '(unavailable)' `
-                -ClassificationElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+                -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
         }
-        if ($process.ExitCode -ne 0 -or
-            -not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
-            return New-TunaGuiFileTransferFailureClassificationResult `
-                -Phase 'harness_failure_classification' `
+        if ($process.ExitCode -ne 0) {
+            return New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $BaseClassification `
+                -Status 'failed' `
                 -Reason 'evidence_enrichment_failed' `
-                -RouteMode $RouteMode `
-                -ClassificationSource 'immutable_evidence_failed' `
-                -ClassificationComplete $false `
-                -ClassificationElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+                -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+        }
+        if (-not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
+            return New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $BaseClassification `
+                -Status 'failed' `
+                -Reason 'evidence_enrichment_failed' `
+                -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
         }
 
         $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json
-        return $response.classification
+        $responsePropertyNames = @($response.PSObject.Properties.Name)
+        if ($responsePropertyNames -notcontains 'schemaVersion' -or
+            [int]$response.schemaVersion -ne 1 -or
+            $responsePropertyNames -notcontains 'event' -or
+            -not [string]::Equals(
+                [string]$response.event,
+                'filetransfer_tuna_gui_failure_classification_response',
+                [System.StringComparison]::Ordinal) -or
+            $responsePropertyNames -notcontains 'classification' -or
+            -not (Test-TunaGuiCompletedFailureClassificationResult `
+                -Classification $response.classification `
+                -RequiredClassification $BaseClassification)) {
+            return New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $BaseClassification `
+                -Status 'failed' `
+                -Reason 'evidence_enrichment_failed' `
+                -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+        }
+
+        return New-TunaGuiFailureClassificationEnrichmentReceipt `
+            -Classification $response.classification `
+            -Status 'completed' `
+            -Reason '(none)' `
+            -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
+    }
+    catch {
+        return New-TunaGuiFailureClassificationEnrichmentReceipt `
+            -Classification $BaseClassification `
+            -Status 'failed' `
+            -Reason 'evidence_enrichment_failed' `
+            -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
     }
     finally {
         if ($process -is [System.IDisposable]) {
@@ -25348,10 +25674,13 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     $mixedShareButton = $null
     $scenarioFailure = $null
     $failureClassification = $null
+    $requiresFailureClassificationEnrichment = $false
+    $classificationEnrichmentReceipt = $null
     $newFailureSummary = {
         param(
             [Parameter(Mandatory = $true)]$Classification,
-            [Parameter(Mandatory = $true)][string]$ClassificationStatus
+            [Parameter(Mandatory = $true)][string]$ClassificationStatus,
+            [Parameter(Mandatory = $true)]$EnrichmentReceipt
         )
 
         return [ordered]@{
@@ -25369,6 +25698,12 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             classificationSource = [string]$Classification.ClassificationSource
             classificationComplete = [bool]$Classification.ClassificationComplete
             classificationStatus = $ClassificationStatus
+            classificationEnrichmentStatus =
+                [string]$EnrichmentReceipt.ClassificationEnrichmentStatus
+            classificationEnrichmentReason =
+                [string]$EnrichmentReceipt.ClassificationEnrichmentReason
+            classificationEnrichmentElapsedMilliseconds =
+                [long]$EnrichmentReceipt.ClassificationEnrichmentElapsedMilliseconds
             classificationEvidenceLineVisitCount =
                 $Classification.EvidenceLineVisitCount
             classificationEvidenceParsedRecordCount =
@@ -25443,6 +25778,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         $explicitClassification =
             Get-TunaGuiExplicitFailureClassification `
                 -ErrorMessage ([string]$scenarioFailure.Exception.Message)
+        $requiresFailureClassificationEnrichment = $null -eq $explicitClassification
         if ($null -ne $explicitClassification) {
             $failureClassification =
                 New-TunaGuiFileTransferFailureClassificationResult `
@@ -25450,6 +25786,11 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
                     -Reason ([string]$explicitClassification.Reason) `
                     -RouteMode $routeMode `
                     -ClassificationSource 'explicit_error'
+            if ($explicitClassification.PSObject.Properties.Name -contains
+                    'RequiresEvidenceEnrichment') {
+                $requiresFailureClassificationEnrichment =
+                    [bool]$explicitClassification.RequiresEvidenceEnrichment
+            }
         }
         else {
             $failureClassification =
@@ -25461,10 +25802,23 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
                     -ClassificationComplete $false
         }
 
+        $classificationEnrichmentReceipt =
+            New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $failureClassification `
+                -Status $(if ($requiresFailureClassificationEnrichment) {
+                    'pending'
+                } else {
+                    'not_requested'
+                }) `
+                -Reason '(none)'
+
         try {
             Write-GuiSmokeAtomicJson `
                 -Path (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') `
-                -Value (& $newFailureSummary $failureClassification 'provisional')
+                -Value (& $newFailureSummary `
+                    $failureClassification `
+                    'provisional' `
+                    $classificationEnrichmentReceipt)
             Update-FileTransferGuiEvidenceFinalizationStage `
                 -Stage 'failure_record_persisted'
         }
@@ -25499,22 +25853,24 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     }
 
     if ($null -ne $scenarioFailure) {
-        if (-not [string]::Equals(
-                [string]$failureClassification.ClassificationSource,
-                'explicit_error',
-                [System.StringComparison]::Ordinal)) {
+        if ($requiresFailureClassificationEnrichment) {
             Update-FileTransferGuiEvidenceFinalizationStage `
                 -Stage 'failure_classification_started'
-            $failureClassification =
+            $classificationEnrichmentReceipt =
                 Invoke-TunaGuiFailureClassificationEnrichment `
                     -ArtifactDir $artifactDir `
                     -ErrorMessage ([string]$scenarioFailure.Exception.Message) `
-                    -RouteMode $routeMode
+                    -RouteMode $routeMode `
+                    -BaseClassification $failureClassification
+            $failureClassification = $classificationEnrichmentReceipt.Classification
         }
 
         Write-GuiSmokeAtomicJson `
             -Path (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') `
-            -Value (& $newFailureSummary $failureClassification 'completed')
+            -Value (& $newFailureSummary `
+                $failureClassification `
+                'completed' `
+                $classificationEnrichmentReceipt)
         Update-FileTransferGuiEvidenceFinalizationStage `
             -Stage 'failure_classification_completed'
         throw $scenarioFailure

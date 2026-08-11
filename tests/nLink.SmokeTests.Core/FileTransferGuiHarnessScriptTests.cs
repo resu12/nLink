@@ -829,7 +829,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        Assert.Contains("Write-GuiSmokeLogLedgerRangeCapture", writerBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Write-GuiSmokeLogLedgerRangeCapture", writerBody, StringComparison.Ordinal);
+        Assert.Contains("$writerLedgerVisitCount++", writerBody, StringComparison.Ordinal);
+        Assert.Contains("while ($ledgerIndex -lt $frozenWriterEvidenceEnd)", writerBody, StringComparison.Ordinal);
+        Assert.Contains("$retainedSliceStream.Write", writerBody, StringComparison.Ordinal);
         Assert.Contains("Copy-GuiSmokeFileAtomicCreateNew", writerBody, StringComparison.Ordinal);
         Assert.Contains("-Stage 'process_cleanup_started'", writerBody, StringComparison.Ordinal);
         Assert.Contains("-Stage 'process_output_drained'", writerBody, StringComparison.Ordinal);
@@ -1547,6 +1550,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(
             captureIndex >= 0 && enrichmentIndex > captureIndex,
             "Failure enrichment must run only after immutable capture and writer validation.");
+        Assert.Contains("classificationEnrichmentStatus", scenarioBody, StringComparison.Ordinal);
+        Assert.Contains("classificationEnrichmentReason", scenarioBody, StringComparison.Ordinal);
+        Assert.Contains("classificationEnrichmentElapsedMilliseconds", scenarioBody, StringComparison.Ordinal);
+        Assert.Contains("-BaseClassification $failureClassification", scenarioBody, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "Get-TunaGuiFileTransferSetupFailureClassification",
             scenarioBody,
@@ -2260,10 +2267,20 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $outputRoot = Join-Path $artifactDir 'process-output'
             [void][IO.Directory]::CreateDirectory($outputRoot)
             $markerWriter = $null
+            $ledgerWriter = $null
             $payloadHasher = $null
             try {
                 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
-                $script:GuiSmokeAppLogLedger.Lines = [Collections.Generic.List[string]]::new(200000)
+                $ledgerPath = Join-Path $tempRoot 'nlink.log'
+                Enable-GuiSmokeAppendOnlyLogLedgerState `
+                    -State $script:GuiSmokeAppLogLedger `
+                    -Path $ledgerPath `
+                    -MaximumBytes (512L * 1024L * 1024L)
+                $ledgerWriter = [IO.StreamWriter]::new(
+                    $ledgerPath,
+                    $true,
+                    [Text.UTF8Encoding]::new($false),
+                    65536)
                 $markerPath = Join-Path $outputRoot 'scale.stderr.log'
                 $markerWriter = [IO.StreamWriter]::new(
                     $markerPath,
@@ -2273,7 +2290,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $payloadHasher = [Security.Cryptography.SHA256]::Create()
                 $utf8 = [Text.UTF8Encoding]::new($false)
                 for ($sequence = 1; $sequence -le 100000; $sequence++) {
-                    $event = if ($sequence -eq 100000) { 'operational_log_writer_drained' } else { 'payload' }
+                    $event = if ($sequence -eq 1) {
+                        'operational_log_writer_started'
+                    }
+                    elseif ($sequence -eq 100000) {
+                        'operational_log_writer_drained'
+                    }
+                    else {
+                        'payload'
+                    }
                     $lineA = '[a] event=' + $event +
                         '; acceptance_run_id=run-scale; scenario_run_id=run-scale:scenario:1' +
                         '; log_writer_id=writer-a; log_writer_sequence=' + $sequence +
@@ -2288,8 +2313,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         '; log_writer_batch_first_sequence=' + $sequence +
                         '; log_writer_batch_last_sequence=' + $sequence +
                         '; log_writer_attempt_utc_ticks=' + (2000000 + $sequence)
-                    $script:GuiSmokeAppLogLedger.Lines.Add($lineA)
-                    $script:GuiSmokeAppLogLedger.Lines.Add($lineB)
+                    $ledgerWriter.WriteLine($lineA)
+                    $ledgerWriter.WriteLine($lineB)
                     if ($sequence -le 50000) {
                         $payloadHash = (([BitConverter]::ToString($payloadHasher.ComputeHash($utf8.GetBytes($lineA)))) -replace '-', '').ToLowerInvariant()
                         $common = 'acceptance_run_id=run-scale; scenario_run_id=run-scale:scenario:1' +
@@ -2304,6 +2329,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $markerWriter.Flush()
                 $markerWriter.Dispose()
                 $markerWriter = $null
+                $ledgerWriter.Flush()
+                $ledgerWriter.Dispose()
+                $ledgerWriter = $null
+                Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($ledgerPath)
+                if ($script:GuiSmokeAppLogLedger.Lines.Count -ne 0 -or
+                    (Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger) -ne 200000) {
+                    throw 'artifact-scale source was not retained as one disk-backed append-only ledger'
+                }
                 $payloadHasher.Dispose()
                 $payloadHasher = $null
 
@@ -2333,11 +2366,17 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     recoveredLookupCount = 0L
                 }
 
-                Write-FileTransferGuiLogLedgerEvidence `
-                    -ArtifactDir $artifactDir `
-                    -Bookmark 0 `
-                    -InitialSnapshot $initialSnapshot `
-                    -TestMetrics $metrics
+                $finalizationStopwatch = [Diagnostics.Stopwatch]::StartNew()
+                try {
+                    Write-FileTransferGuiLogLedgerEvidence `
+                        -ArtifactDir $artifactDir `
+                        -Bookmark 0 `
+                        -InitialSnapshot $initialSnapshot `
+                        -TestMetrics $metrics
+                }
+                finally {
+                    $finalizationStopwatch.Stop()
+                }
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
                 if ([long]$metrics.ledgerLineVisitCount -ne 200000 -or
                     [long]$metrics.markerLineVisitCount -ne 100000 -or
@@ -2361,10 +2400,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $ledger.analyzerInput.captureLineCount -ne 200000) {
                     throw 'artifact-scale immutable capture evidence diverged'
                 }
-                Write-Output 'gui-log-ledger-scale-linear-ok'
+                if ($ledger.writerEvidenceSlice.sha256 -ne $ledger.retainedSlice.sha256 -or
+                    $ledger.writerEvidenceSlice.lineCount -ne 200000) {
+                    throw 'artifact-scale writer evidence diverged from the frozen ledger'
+                }
+                Write-Output "gui-log-ledger-scale-linear-ok elapsed_ms=$($finalizationStopwatch.ElapsedMilliseconds)"
             }
             finally {
                 if ($markerWriter) { $markerWriter.Dispose() }
+                if ($ledgerWriter) { $ledgerWriter.Dispose() }
                 if ($payloadHasher) { $payloadHasher.Dispose() }
                 Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID -ErrorAction SilentlyContinue
                 Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
@@ -2376,6 +2420,141 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.True(result.ExitCode == 0, $"Artifact-scale writer validation failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-log-ledger-scale-linear-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_FrozenArtifactWriterValidationBenchmarkCompletesInsideGrace()
+    {
+        var sourcePath = Environment.GetEnvironmentVariable("NLINK_GUI_LEDGER_BENCHMARK_SOURCE");
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var escapedSourcePath = Path.GetFullPath(sourcePath)
+            .Replace("'", "''", StringComparison.Ordinal);
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var chronologyBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-GuiSmokeLogWriterChronology",
+            "Write-FileTransferGuiLogLedgerEvidence");
+        var writerBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Write-FileTransferGuiLogLedgerEvidence",
+            "Write-TunaGuiMilestoneEvidence");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+            function Get-GuiSmokeLogWriterChronology { {{chronologyBody}} }
+            function Write-FileTransferGuiLogLedgerEvidence { {{writerBody}} }
+            function Sync-GuiSmokeAppLogLedger {}
+            function Wait-GuiSmokeProcessOutputCaptureDrain { param([object[]]$Processes) }
+
+            $sourcePath = '{{escapedSourcePath}}'
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-benchmark-' + [guid]::NewGuid().ToString('N'))
+            $artifactDir = Join-Path $tempRoot 'artifact'
+            $outputRoot = Join-Path $artifactDir 'process-output'
+            [void][IO.Directory]::CreateDirectory($outputRoot)
+            $source = $null
+            $destination = $null
+            try {
+                $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
+                $ledgerPath = Join-Path $tempRoot 'nlink.log'
+                Enable-GuiSmokeAppendOnlyLogLedgerState `
+                    -State $script:GuiSmokeAppLogLedger `
+                    -Path $ledgerPath `
+                    -MaximumBytes (1024L * 1024L * 1024L)
+                $source = [IO.FileStream]::new($sourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                $destination = [IO.FileStream]::new($ledgerPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+                $source.CopyTo($destination, 1048576)
+                if ($destination.Position -gt 0) {
+                    $destination.Position--
+                    $lastByte = $destination.ReadByte()
+                    $destination.Position = $destination.Length
+                    if ($lastByte -ne 10) {
+                        $destination.WriteByte(10)
+                    }
+                }
+                $destination.Flush($true)
+                $source.Dispose()
+                $source = $null
+                $destination.Dispose()
+                $destination = $null
+
+                Sync-GuiSmokeLogLedger -State $script:GuiSmokeAppLogLedger -Paths @($ledgerPath)
+                Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark 0
+                $reader = [IO.StreamReader]::new($ledgerPath, [Text.UTF8Encoding]::new($false, $true))
+                try {
+                    $firstFields = ConvertFrom-GuiSmokeLogLedgerStructuredFields -Line ([string]$reader.ReadLine())
+                }
+                finally {
+                    $reader.Dispose()
+                }
+                $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = [string]$firstFields['acceptance_run_id']
+                $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = [string]$firstFields['scenario_run_id']
+                Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
+
+                $markerPath = Join-Path $outputRoot 'benchmark.stdout.log'
+                [IO.File]::WriteAllText($markerPath, '', [Text.UTF8Encoding]::new($false))
+                $script:GuiSmokeProcessOutputFiles = [Collections.Generic.List[string]]::new()
+                $script:GuiSmokeProcessOutputFiles.Add($markerPath)
+                $baselineSnapshot = Get-GuiSmokeLogLedgerSnapshot `
+                    -State $script:GuiSmokeAppLogLedger `
+                    -Bookmark 0
+                $initialSnapshot = [pscustomobject]@{
+                    ledgerId = [string]$baselineSnapshot.ledgerId
+                    bookmark = 0
+                    lineCount = 0
+                    activeGenerationKey = [string]$baselineSnapshot.activeGenerationKey
+                    generations = @($baselineSnapshot.generations)
+                    writers = @()
+                }
+                $metrics = [pscustomobject]@{
+                    ledgerLineVisitCount = 0L
+                    markerLineVisitCount = 0L
+                    deferredLookupCount = 0L
+                    recoveredLookupCount = 0L
+                }
+
+                $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+                try {
+                    Write-FileTransferGuiLogLedgerEvidence `
+                        -ArtifactDir $artifactDir `
+                        -Bookmark 0 `
+                        -InitialSnapshot $initialSnapshot `
+                        -TestMetrics $metrics
+                }
+                finally {
+                    $stopwatch.Stop()
+                }
+                $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
+                $expectedLines = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+                if ($stopwatch.ElapsedMilliseconds -ge 120000 -or
+                    [long]$metrics.ledgerLineVisitCount -ne [long]$expectedLines -or
+                    [long]$ledger.retainedSlice.lineCount -ne [long]$expectedLines -or
+                    [long]$ledger.writerEvidenceSlice.lineCount -ne [long]$expectedLines -or
+                    $ledger.writerIntegrityVerdict -ne 'pass' -or
+                    $ledger.cursorIntegrityVerdict -ne 'pass') {
+                    throw "frozen artifact writer benchmark failed: elapsed_ms=$($stopwatch.ElapsedMilliseconds); expected_lines=$expectedLines; metrics=$($metrics | ConvertTo-Json -Compress); ledger=$($ledger | ConvertTo-Json -Compress -Depth 3)"
+                }
+                Write-Output "gui-log-ledger-frozen-benchmark-ok elapsed_ms=$($stopwatch.ElapsedMilliseconds) lines=$expectedLines"
+            }
+            finally {
+                if ($source) { $source.Dispose() }
+                if ($destination) { $destination.Dispose() }
+                Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Frozen artifact writer benchmark failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-frozen-benchmark-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2907,6 +3086,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialRecoveryHold.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHold.Reason -ne 'initial_activation_retry_exhausted_while_receive_recovery_awaiting_proof') { throw 'initial activation recovery hold lost precedence' }
             $initialRecoveryHoldRelease = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialRecoveryHoldRelease.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldRelease.Reason -ne 'released_hold_routed_through_exact_invalidation_boundary') { throw 'initial activation recovery hold release delivery lost precedence' }
+            $initialRecoveryHoldDirectReleaseEvent = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
+            if ($initialRecoveryHoldDirectReleaseEvent.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldDirectReleaseEvent.Reason -ne 'released_hold_directive_delivery_rejected') { throw 'direct initial activation hold release event lost precedence' }
+            $initialRecoveryHoldDirectReleaseReason = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; first_reason=released_hold_directive_delivery_rejected' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
+            if ($initialRecoveryHoldDirectReleaseReason.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldDirectReleaseReason.Reason -ne 'released_hold_directive_delivery_rejected') { throw 'direct initial activation hold release reason lost precedence' }
             $initialAnswerPeerDelivery = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; retained_event=tuna_acceleration_answer_ack_timeout' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialAnswerPeerDelivery.Phase -ne 'runtime_unlock_initial_activation' -or $initialAnswerPeerDelivery.Reason -ne 'validated_offer_answer_not_delivered_to_initiator') { throw 'initial activation answer peer delivery lost precedence' }
             $initialRecoveryHoldRefreshRelease = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -2955,7 +3138,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public async Task GuiSmokeFailureClassification_ExplicitClassUsesOnePassEvidenceScanBeforeFallback()
+    public async Task GuiSmokeFailureClassification_ScenarioDeadlineUsesOnePassEvidenceScanBeforeFallback()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var resultBody = ExtractPowerShellFunctionBody(
@@ -2981,6 +3164,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-explicit-one-pass-' + [guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($tempRoot)
             try {
+                $nearMatch = Get-TunaGuiExplicitFailureClassification `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded_suffix: not the exact marker'
+                if ($null -ne $nearMatch) {
+                    throw 'scenario deadline near-match was treated as the exact marker'
+                }
                 $largeEvidence = Join-Path $tempRoot 'large-evidence.log'
                 $writer = [IO.StreamWriter]::new($largeEvidence, $false)
                 try {
@@ -2998,21 +3186,23 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 $result = Get-TunaGuiFileTransferSetupFailureClassification `
                     -Bookmark 0 `
-                    -ErrorMessage 'failure_class=regular_v4_terminal_before_tuna_activation_commit' `
+                    -ErrorMessage 'GUI_SMOKE_SCENARIO_DEADLINE_EXCEEDED: scenario deadline elapsed' `
                     -RouteMode 'live-regular-activation-cycle' `
                     -ImmutableEvidencePaths @($largeEvidence) `
                     -TestMetrics $metrics
-                if ($result.Phase -ne 'live_route_proof' -or
+                if ($result.Phase -ne 'progress_failure' -or
+                    $result.Reason -ne 'gui_smoke_scenario_deadline_exceeded' -or
                     $result.ClassificationSource -ne 'explicit_error' -or
+                    -not $result.ClassificationComplete -or
                     [long]$result.EvidenceLineVisitCount -ne 100000 -or
                     [long]$result.EvidenceParsedRecordCount -ne 0 -or
                     [long]$result.EvidenceLookupCount -ne 0 -or
                     [long]$metrics.evidenceLineVisitCount -ne 100000 -or
                     [long]$metrics.evidenceLookupCount -ne 0 -or
                     $metrics.classificationSource -ne 'explicit_error') {
-                    throw "explicit classification chronology arbitration mismatch: result=$($result | ConvertTo-Json -Compress); metrics=$($metrics | ConvertTo-Json -Compress)"
+                    throw "scenario-deadline classification chronology arbitration mismatch: result=$($result | ConvertTo-Json -Compress); metrics=$($metrics | ConvertTo-Json -Compress)"
                 }
-                Write-Output 'gui-explicit-classification-one-pass-fallback-ok'
+                Write-Output 'gui-scenario-deadline-one-pass-fallback-ok'
             }
             finally {
                 if (Test-Path -LiteralPath $tempRoot) {
@@ -3025,8 +3215,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.True(
             result.ExitCode == 0,
-            $"Explicit classification chronology arbitration failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
-        Assert.Contains("gui-explicit-classification-one-pass-fallback-ok", result.Stdout, StringComparison.Ordinal);
+            $"Scenario-deadline classification chronology arbitration failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-scenario-deadline-one-pass-fallback-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3151,6 +3341,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     [long]$result.EvidenceParsedRecordCount -ne 10 -or
                     [long]$result.EvidenceLookupCount -le 0) {
                     throw "responder peer-probe fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                $deadlineResult = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'Gui_Smoke_Scenario_Deadline_Exceeded: scenario deadline elapsed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($deadlineResult.Phase -ne $result.Phase -or
+                    $deadlineResult.Reason -ne $result.Reason -or
+                    $deadlineResult.ClassificationSource -ne $result.ClassificationSource -or
+                    [long]$deadlineResult.EvidenceLineVisitCount -ne 10) {
+                    throw "exact proof did not override scenario-deadline fallback: $($deadlineResult | ConvertTo-Json -Compress)"
                 }
                 Write-Output 'gui-responder-peer-probe-fast-path-ok'
             }
@@ -5303,6 +5500,297 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Failure-classification budget test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-enrichment-budget-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_EnrichmentOutcomesPreserveBaseUntilCompletedResponse()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var budgetBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds",
+            "ConvertTo-GuiSmokeProcessArgument");
+        var argumentBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "ConvertTo-GuiSmokeProcessArgument",
+            "New-TunaGuiFailureClassificationEnrichmentReceipt");
+        var receiptBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFailureClassificationEnrichmentReceipt",
+            "Test-TunaGuiCompletedFailureClassificationResult");
+        var completedBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Test-TunaGuiCompletedFailureClassificationResult",
+            "Invoke-TunaGuiFailureClassificationRequest");
+        var enrichmentBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Invoke-TunaGuiFailureClassificationEnrichment",
+            "Wait-TunaGuiFileTransferAcceptOrThrow");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiFailureClassificationBudgetMilliseconds { {{budgetBody}} }
+            function ConvertTo-GuiSmokeProcessArgument { {{argumentBody}} }
+            function New-TunaGuiFailureClassificationEnrichmentReceipt { {{receiptBody}} }
+            function Test-TunaGuiCompletedFailureClassificationResult { {{completedBody}} }
+            function Invoke-TunaGuiFailureClassificationEnrichment { {{enrichmentBody}} }
+            function Write-GuiSmokeAtomicJson {
+                param($Path, $Value)
+                $Value | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $Path -Encoding UTF8
+            }
+            function New-FakeClassificationProcess {
+                param([bool]$WaitResult, [int]$ExitCode)
+                $process = [pscustomobject]@{
+                    Id = 4242
+                    ExitCode = $ExitCode
+                    WaitResult = $WaitResult
+                }
+                $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+                    param($Milliseconds)
+                    return [bool]$this.WaitResult
+                }
+                return $process
+            }
+            function Start-Process {
+                param(
+                    $FilePath,
+                    $ArgumentList,
+                    $WorkingDirectory,
+                    $RedirectStandardOutput,
+                    $RedirectStandardError,
+                    $WindowStyle,
+                    [switch]$PassThru)
+                switch ($script:fakeProcessMode) {
+                    'unexpected' { throw 'enrichment process was started with zero budget' }
+                    'timeout' { return New-FakeClassificationProcess -WaitResult $false -ExitCode 0 }
+                    'process-failed' { return New-FakeClassificationProcess -WaitResult $true -ExitCode 9 }
+                    'missing-response' { return New-FakeClassificationProcess -WaitResult $true -ExitCode 0 }
+                    'completed' {
+                        $candidate = New-TunaGuiFileTransferFailureClassificationResult `
+                            -Phase 'route_runtime' `
+                            -Reason 'exact_proof_chain_failure' `
+                            -RouteMode 'live-regular-activation-cycle' `
+                            -ClassificationSource 'immutable_evidence_exact_proof'
+                        [ordered]@{
+                            schemaVersion = 1
+                            event = 'filetransfer_tuna_gui_failure_classification_response'
+                            classification = $candidate
+                        } | ConvertTo-Json -Depth 32 | Set-Content `
+                            -LiteralPath (Join-Path $script:artifactRoot 'filetransfer-tuna-gui-failure-classification-response.json') `
+                            -Encoding UTF8
+                        return New-FakeClassificationProcess -WaitResult $true -ExitCode 0
+                    }
+                    'invalid-response' {
+                        [ordered]@{
+                            schemaVersion = 1
+                            event = 'filetransfer_tuna_gui_failure_classification_response'
+                            classification = [ordered]@{
+                                Phase = 'route_runtime'
+                                Reason = 'partial'
+                                ClassificationSource = 'immutable_evidence_partial'
+                                ClassificationComplete = $true
+                            }
+                        } | ConvertTo-Json -Depth 32 | Set-Content `
+                            -LiteralPath (Join-Path $script:artifactRoot 'filetransfer-tuna-gui-failure-classification-response.json') `
+                            -Encoding UTF8
+                        return New-FakeClassificationProcess -WaitResult $true -ExitCode 0
+                    }
+                    default { throw "unexpected fake process mode '$script:fakeProcessMode'" }
+                }
+            }
+            function Stop-Process {
+                param($Id, [switch]$Force, $ErrorAction)
+                $script:stopCount++
+            }
+            function Assert-BaseClassificationPreserved {
+                param($Receipt, [string]$Status, [string]$Reason)
+                if ($Receipt.ClassificationEnrichmentStatus -ne $Status -or
+                    $Receipt.ClassificationEnrichmentReason -ne $Reason -or
+                    $Receipt.Classification.Phase -ne 'progress_failure' -or
+                    $Receipt.Classification.Reason -ne 'gui_smoke_scenario_deadline_exceeded' -or
+                    $Receipt.Classification.ClassificationSource -ne 'explicit_error' -or
+                    -not $Receipt.Classification.ClassificationComplete) {
+                    throw "primary classification was overwritten by diagnostic enrichment outcome: $($Receipt | ConvertTo-Json -Depth 8 -Compress)"
+                }
+            }
+
+            $script:artifactRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-enrichment-receipt-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($script:artifactRoot)
+            try {
+                $base = New-TunaGuiFileTransferFailureClassificationResult `
+                    -Phase 'progress_failure' `
+                    -Reason 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ClassificationSource 'explicit_error'
+                $statePath = Join-Path $script:artifactRoot 'state.json'
+                $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $statePath
+                $env:NLINK_TUNA_GUI_FAILURE_CLASSIFICATION_TIMEOUT_SECONDS_TEST_ONLY = '30'
+                [ordered]@{ deadlineUtc = [DateTimeOffset]::UtcNow.AddSeconds(5).ToString('O') } |
+                    ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+                $script:fakeProcessMode = 'unexpected'
+                $zeroBudget = Invoke-TunaGuiFailureClassificationEnrichment `
+                    -ArtifactDir $script:artifactRoot `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -BaseClassification $base
+                Assert-BaseClassificationPreserved $zeroBudget 'timed_out' 'evidence_enrichment_timeout'
+
+                Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH
+                $script:fakeProcessMode = 'timeout'
+                $script:stopCount = 0
+                $forcedTimeout = Invoke-TunaGuiFailureClassificationEnrichment `
+                    -ArtifactDir $script:artifactRoot `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -BaseClassification $base
+                Assert-BaseClassificationPreserved $forcedTimeout 'timed_out' 'evidence_enrichment_timeout'
+                if ($script:stopCount -ne 1) { throw 'timed-out enrichment child was not stopped exactly once' }
+
+                $script:fakeProcessMode = 'process-failed'
+                $processFailure = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
+                Assert-BaseClassificationPreserved $processFailure 'failed' 'evidence_enrichment_failed'
+
+                $script:fakeProcessMode = 'missing-response'
+                $missingResponse = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
+                Assert-BaseClassificationPreserved $missingResponse 'failed' 'evidence_enrichment_failed'
+
+                $script:fakeProcessMode = 'invalid-response'
+                $invalidResponse = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
+                Assert-BaseClassificationPreserved $invalidResponse 'failed' 'evidence_enrichment_failed'
+
+                $script:fakeProcessMode = 'completed'
+                $completed = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
+                if ($completed.ClassificationEnrichmentStatus -ne 'completed' -or
+                    $completed.ClassificationEnrichmentReason -ne '(none)' -or
+                    $completed.Classification.Phase -ne 'route_runtime' -or
+                    $completed.Classification.Reason -ne 'exact_proof_chain_failure' -or
+                    $completed.Classification.ClassificationSource -ne 'immutable_evidence_exact_proof' -or
+                    -not $completed.Classification.ClassificationComplete) {
+                    throw "valid completed enrichment response was not applied: $($completed | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                Write-Output 'gui-enrichment-receipt-outcomes-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_TUNA_GUI_FAILURE_CLASSIFICATION_TIMEOUT_SECONDS_TEST_ONLY -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $script:artifactRoot) {
+                    Remove-Item -LiteralPath $script:artifactRoot -Recurse -Force
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Failure-classification enrichment receipt test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-enrichment-receipt-outcomes-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_ProvisionalAndFinalDtosPreservePrimaryDeadlineFailure()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var scenarioBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Run-ScenarioFileTransferTunaHandoffFallback",
+            "Suspend-ProcessForRecoveryWindow");
+        var summaryMatch = Regex.Match(
+            scenarioBody,
+            @"(?s)\$newFailureSummary\s*=\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\s*try\s*\{");
+        Assert.True(summaryMatch.Success, "Could not extract the Tuna GUI failure-summary projection.");
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var receiptBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFailureClassificationEnrichmentReceipt",
+            "Test-TunaGuiCompletedFailureClassificationResult");
+        var summaryBody = summaryMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function New-TunaGuiFailureClassificationEnrichmentReceipt { {{receiptBody}} }
+
+            $direction = 'outbound'
+            $payerMode = 'payer'
+            $faultMode = 'off-on-off'
+            $routeMode = 'live-regular-activation-cycle'
+            $payloadSize = 268435456
+            try {
+                throw 'GUI_SMOKE_SCENARIO_DEADLINE_EXCEEDED: raw scenario error retained'
+            }
+            catch {
+                $scenarioFailure = $_
+            }
+            $newFailureSummary = { {{summaryBody}} }
+            $base = New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'progress_failure' `
+                -Reason 'gui_smoke_scenario_deadline_exceeded' `
+                -RouteMode $routeMode `
+                -ClassificationSource 'explicit_error'
+            $pending = New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $base `
+                -Status 'pending' `
+                -Reason '(none)'
+            $timedOut = New-TunaGuiFailureClassificationEnrichmentReceipt `
+                -Classification $base `
+                -Status 'timed_out' `
+                -Reason 'evidence_enrichment_timeout' `
+                -ElapsedMilliseconds 123
+            $provisional = & $newFailureSummary $base 'provisional' $pending
+            $final = & $newFailureSummary $timedOut.Classification 'completed' $timedOut
+
+            foreach ($field in @(
+                    'completed',
+                    'integrityOk',
+                    'failurePhase',
+                    'failureReason',
+                    'failureVariant',
+                    'classificationSource',
+                    'classificationComplete',
+                    'classificationEvidenceLineVisitCount',
+                    'classificationEvidenceParsedRecordCount',
+                    'classificationEvidenceLookupCount',
+                    'classificationElapsedMilliseconds',
+                    'error')) {
+                if ([string]$provisional[$field] -cne [string]$final[$field]) {
+                    throw "enrichment metadata overwrote primary field '$field': provisional=$($provisional[$field]); final=$($final[$field])"
+                }
+            }
+            if ($provisional.failurePhase -ne 'progress_failure' -or
+                $provisional.failureReason -ne 'gui_smoke_scenario_deadline_exceeded' -or
+                $provisional.classificationSource -ne 'explicit_error' -or
+                -not $provisional.classificationComplete -or
+                $provisional.completed -or
+                $provisional.integrityOk -or
+                $provisional.error -ne 'GUI_SMOKE_SCENARIO_DEADLINE_EXCEEDED: raw scenario error retained') {
+                throw "provisional primary deadline DTO was not retained: $($provisional | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            if ($provisional.classificationStatus -ne 'provisional' -or
+                $provisional.classificationEnrichmentStatus -ne 'pending' -or
+                $provisional.classificationEnrichmentReason -ne '(none)' -or
+                [long]$provisional.classificationEnrichmentElapsedMilliseconds -ne 0L -or
+                $final.classificationStatus -ne 'completed' -or
+                $final.classificationEnrichmentStatus -ne 'timed_out' -or
+                $final.classificationEnrichmentReason -ne 'evidence_enrichment_timeout' -or
+                [long]$final.classificationEnrichmentElapsedMilliseconds -ne 123L) {
+                throw "classification enrichment metadata projection mismatch: provisional=$($provisional | ConvertTo-Json -Depth 8 -Compress); final=$($final | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            Write-Output 'gui-enrichment-dto-preservation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Failure-classification DTO preservation test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-enrichment-dto-preservation-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

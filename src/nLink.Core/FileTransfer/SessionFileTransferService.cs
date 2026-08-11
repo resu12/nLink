@@ -27,6 +27,13 @@ public sealed partial class SessionFileTransferService :
         public Queue<BridgeRecoveryExecutionInvalidation> PendingInvalidations { get; } = [];
     }
 
+    private enum RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+    {
+        None = 0,
+        ActiveHoldInvalidation = 1,
+        UndeliveredReleaseInvalidation = 2,
+    }
+
     private readonly record struct
         RuntimeUnlockInitialActivationHoldDirectiveDispatch(
             IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge Bridge,
@@ -34,7 +41,30 @@ public sealed partial class SessionFileTransferService :
                 Decision,
             RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
                 FallbackCheckpointBinding,
-            bool AllowAfterContextRemoval);
+            RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                TeardownDelivery);
+
+    private readonly record struct
+        RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt(
+            IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge Bridge,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
+                Decision,
+            RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
+                FallbackCheckpointBinding);
+
+    private readonly record struct
+        RuntimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt(
+            IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge Bridge,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand Command);
+
+    private readonly record struct
+        RuntimeUnlockInitialActivationEnvelopeRefreshStage(
+            IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge Bridge,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt Receipt,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+                CoordinatorDecision,
+            OutboundTransferContext? OutboundContext,
+            InboundTransferContext? InboundContext);
 
     private sealed class RuntimeUnlockInitialActivationHoldDirectiveOrdering
     {
@@ -47,6 +77,20 @@ public sealed partial class SessionFileTransferService :
         } = [];
 
         public bool WorkerScheduled { get; set; }
+
+        public RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt?
+            LastAcceptedDeliveryReceipt
+        {
+            get;
+            set;
+        }
+
+        public RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt?
+            RetainedAcceptedReleaseDeliveryReceipt
+        {
+            get;
+            set;
+        }
     }
 
     private readonly record struct FallbackControlPlaneExchangeOwnerSnapshot(
@@ -430,6 +474,12 @@ public sealed partial class SessionFileTransferService :
     private readonly BridgeRecoveryExecutionDispatchOrdering bridgeRecoveryExecutionDispatchOrdering = new();
     private readonly RuntimeUnlockInitialActivationHoldDirectiveOrdering
         runtimeUnlockInitialActivationHoldDirectiveOrdering = new();
+
+    private RuntimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt?
+        runtimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt;
+
+    private RuntimeUnlockInitialActivationEnvelopeRefreshStage?
+        runtimeUnlockInitialActivationEnvelopeRefreshStage;
     private readonly object inboundLifecycleDispatchGate = new();
     private readonly object inboundControlDispatchGate = new();
     private readonly object inboundChunkDispatchGate = new();
@@ -6103,12 +6153,34 @@ public sealed partial class SessionFileTransferService :
         lock (gate)
         {
             var request = receipt.Command.HoldRequest;
+            var attemptIsCurrent =
+                runtimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt is
+                    { } attempt &&
+                ReferenceEquals(attempt.Bridge, bridge) &&
+                attempt.Command == receipt.Command;
             var bridgeIsCurrent =
                 transport is
                     IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
                         currentBridge &&
                 ReferenceEquals(currentBridge, bridge);
-            if (bridgeIsCurrent &&
+            if (attemptIsCurrent &&
+                bridgeIsCurrent &&
+                runtimeUnlockInitialActivationEnvelopeRefreshStage is
+                    { } existingStage)
+            {
+                coordinatorDecision =
+                    ReferenceEquals(existingStage.Bridge, bridge) &&
+                    existingStage.Receipt == receipt
+                        ? existingStage.CoordinatorDecision
+                        : new(
+                            new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                                receipt,
+                                RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                                    .Rejected,
+                                "runtime_unlock_initial_activation_offer_envelope_refresh_stage_conflict"));
+            }
+            else if (attemptIsCurrent &&
+                     bridgeIsCurrent &&
                 request.Direction == FileTransferDirection.Outbound &&
                 outboundTransfer is { IsTerminal: false } outbound &&
                 string.Equals(
@@ -6125,12 +6197,19 @@ public sealed partial class SessionFileTransferService :
                         .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
                             CreateCoordinatorStateLocked(outbound),
                             receipt);
-                ApplyReceiveRecoveryStateLocked(
-                    outbound,
-                    coordinatorDecision.State,
-                    queueInitialActivationHoldDirective: false);
+                if (coordinatorDecision.Decision.Accepted)
+                {
+                    runtimeUnlockInitialActivationEnvelopeRefreshStage =
+                        new(
+                            bridge,
+                            receipt,
+                            coordinatorDecision,
+                            outbound,
+                            InboundContext: null);
+                }
             }
-            else if (bridgeIsCurrent &&
+            else if (attemptIsCurrent &&
+                     bridgeIsCurrent &&
                      request.Direction == FileTransferDirection.Inbound &&
                      inboundTransfer is { IsTerminal: false } inbound &&
                      string.Equals(
@@ -6147,10 +6226,16 @@ public sealed partial class SessionFileTransferService :
                         .CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
                             CreateCoordinatorStateLocked(inbound),
                             receipt);
-                ApplyReceiveRecoveryStateLocked(
-                    inbound,
-                    coordinatorDecision.State,
-                    queueInitialActivationHoldDirective: false);
+                if (coordinatorDecision.Decision.Accepted)
+                {
+                    runtimeUnlockInitialActivationEnvelopeRefreshStage =
+                        new(
+                            bridge,
+                            receipt,
+                            coordinatorDecision,
+                            OutboundContext: null,
+                            InboundContext: inbound);
+                }
             }
             else
             {
@@ -6159,15 +6244,18 @@ public sealed partial class SessionFileTransferService :
                         receipt,
                         RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
                             .Invalidated,
-                        "runtime_unlock_initial_activation_offer_envelope_refresh_transfer_context_missing"));
+                        attemptIsCurrent
+                            ? "runtime_unlock_initial_activation_offer_envelope_refresh_transfer_context_missing"
+                            : "runtime_unlock_initial_activation_offer_envelope_refresh_delivery_attempt_missing"));
             }
 
             args.Decision = coordinatorDecision.Decision;
-            LogRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
-                coordinatorDecision.Decision.Accepted
-                    ? "runtime_unlock_initial_activation_offer_envelope_refresh_committed"
-                    : "runtime_unlock_initial_activation_offer_envelope_refresh_rejected",
-                coordinatorDecision.Decision);
+            if (!coordinatorDecision.Decision.Accepted)
+            {
+                LogRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+                    "runtime_unlock_initial_activation_offer_envelope_refresh_rejected",
+                    coordinatorDecision.Decision);
+            }
         }
     }
 
@@ -7499,6 +7587,8 @@ public sealed partial class SessionFileTransferService :
     {
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? directive =
             null;
+        var teardownDelivery =
+            RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery.None;
         var priorActive = previous.CurrentInitialActivationHold;
         var currentActive = current.CurrentInitialActivationHold;
         if (priorActive is { } priorHold &&
@@ -7543,6 +7633,19 @@ public sealed partial class SessionFileTransferService :
                     terminalHold.Reason,
                     terminalHold.HoldGeneration,
                     operation);
+            if (terminalHold.Status ==
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                        .Invalidated &&
+                operation is
+                {
+                    ExecutionState:
+                        FileTransferReceiveRecoveryExecutionState.Invalidated,
+                })
+            {
+                teardownDelivery =
+                    RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                        .ActiveHoldInvalidation;
+            }
         }
         else if (priorActive is null &&
                  previous.LastInitialActivationHold is
@@ -7551,6 +7654,11 @@ public sealed partial class SessionFileTransferService :
                          RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
                              .Released,
                  } releasedHold &&
+                 previous.CurrentOperation is { } releasedOperation &&
+                 releasedOperation.Authority ==
+                     releasedHold.ReceiveRecoveryAuthority &&
+                 releasedOperation.ExecutionState !=
+                     FileTransferReceiveRecoveryExecutionState.Invalidated &&
                  current.CurrentOperation is null &&
                  current.LastTerminalOperation is
                  {
@@ -7571,12 +7679,16 @@ public sealed partial class SessionFileTransferService :
                         : invalidatedOperation.InvalidationReason,
                     releasedHold.HoldGeneration,
                     invalidatedOperation);
+            teardownDelivery =
+                RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                    .UndeliveredReleaseInvalidation;
         }
 
         if (directive is { IsDefault: false } exactDirective)
         {
             QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
-                exactDirective);
+                exactDirective,
+                teardownDelivery);
         }
     }
 
@@ -7631,45 +7743,145 @@ public sealed partial class SessionFileTransferService :
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
                 exactDirective)
     {
-        RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
-            fallbackCheckpointBinding = null;
-        if (exactDirective.ReceiveRecoveryOperation is { } operation)
+        var teardownDelivery =
+            RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery.None;
+        if (IsExactRuntimeUnlockInitialActivationHoldInvalidationDirective(
+                exactDirective))
         {
             lock (gate)
             {
-                FileTransferReceiveRecoverySubstate? recoveryState =
-                    outboundTransfer is { } outbound &&
-                    (outbound.CoordinatorPersistentState
-                         .FileTransferReceiveRecovery.CurrentOperation
-                         ?.Authority == operation.Authority ||
-                     outbound.CoordinatorPersistentState
-                         .FileTransferReceiveRecovery.LastTerminalOperation
-                         ?.Authority == operation.Authority)
-                        ? outbound.CoordinatorPersistentState
-                            .FileTransferReceiveRecovery
-                        : inboundTransfer is { } inbound &&
-                          (inbound.CoordinatorPersistentState
-                               .FileTransferReceiveRecovery.CurrentOperation
-                               ?.Authority == operation.Authority ||
-                           inbound.CoordinatorPersistentState
-                               .FileTransferReceiveRecovery.LastTerminalOperation
-                               ?.Authority == operation.Authority)
-                            ? inbound.CoordinatorPersistentState
-                                .FileTransferReceiveRecovery
-                            : null;
-                if (recoveryState is { } currentRecovery)
+                if (RuntimeUnlockInitialActivationHoldInvalidationMatchesTerminalTransitionLocked(
+                        exactDirective))
                 {
-                    fallbackCheckpointBinding =
-                        FindReceiveRecoveryFallbackCheckpointBindingForDirective(
-                            currentRecovery,
-                            operation.Authority);
+                    teardownDelivery =
+                        RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                            .ActiveHoldInvalidation;
                 }
             }
         }
 
         QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
             exactDirective,
-            fallbackCheckpointBinding);
+            teardownDelivery);
+    }
+
+    private void
+        QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
+                exactDirective,
+            RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                teardownDelivery)
+    {
+        RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
+            fallbackCheckpointBinding = null;
+        IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge?
+            acceptedReceiptBridge = null;
+        if (exactDirective.Status ==
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released &&
+            exactDirective.EnvelopeRefreshCommand is
+            {
+                FallbackCheckpointBinding: not null,
+            } refreshCommand)
+        {
+            if (exactDirective.ReceiveRecoveryOperation is not { } operation ||
+                refreshCommand.IsDefault ||
+                refreshCommand.FallbackCheckpointBinding is not
+                    { IsDefault: false } commandBinding ||
+                refreshCommand.HoldRequest != exactDirective.Request ||
+                refreshCommand.HoldGeneration !=
+                    exactDirective.HoldGeneration ||
+                refreshCommand.ReceiveRecoveryAuthority !=
+                    operation.Authority)
+            {
+                LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+                    exactDirective.Request,
+                    exactDirective,
+                    "hold_directive_fallback_checkpoint_binding_invalid");
+                return;
+            }
+
+            lock (runtimeUnlockInitialActivationHoldDirectiveOrdering.Gate)
+            {
+                var receipt =
+                    runtimeUnlockInitialActivationHoldDirectiveOrdering
+                        .LastAcceptedDeliveryReceipt;
+                var retainedRelease =
+                    runtimeUnlockInitialActivationHoldDirectiveOrdering
+                        .RetainedAcceptedReleaseDeliveryReceipt;
+                if (receipt is { } exactReceipt &&
+                    exactReceipt.Decision == exactDirective &&
+                    exactReceipt.FallbackCheckpointBinding == commandBinding)
+                {
+                    acceptedReceiptBridge = exactReceipt.Bridge;
+                }
+                else if (retainedRelease is { } exactReleaseReceipt &&
+                         exactReleaseReceipt.Decision == exactDirective &&
+                         exactReleaseReceipt.FallbackCheckpointBinding ==
+                             commandBinding)
+                {
+                    acceptedReceiptBridge = exactReleaseReceipt.Bridge;
+                }
+            }
+
+            if (acceptedReceiptBridge is not null)
+            {
+                fallbackCheckpointBinding = commandBinding;
+            }
+            else
+            {
+                lock (gate)
+                {
+                    FileTransferReceiveRecoverySubstate? recoveryState =
+                        outboundTransfer is { } outbound &&
+                        (outbound.CoordinatorPersistentState
+                             .FileTransferReceiveRecovery.CurrentOperation
+                             ?.Authority == operation.Authority ||
+                         outbound.CoordinatorPersistentState
+                             .FileTransferReceiveRecovery.LastTerminalOperation
+                             ?.Authority == operation.Authority)
+                            ? outbound.CoordinatorPersistentState
+                                .FileTransferReceiveRecovery
+                            : inboundTransfer is { } inbound &&
+                              (inbound.CoordinatorPersistentState
+                                   .FileTransferReceiveRecovery.CurrentOperation
+                                   ?.Authority == operation.Authority ||
+                               inbound.CoordinatorPersistentState
+                                   .FileTransferReceiveRecovery.LastTerminalOperation
+                                   ?.Authority == operation.Authority)
+                                ? inbound.CoordinatorPersistentState
+                                    .FileTransferReceiveRecovery
+                                : null;
+                    if (recoveryState is { } currentRecovery &&
+                        currentRecovery
+                                .PendingInitialActivationEnvelopeRefresh ==
+                            refreshCommand)
+                    {
+                        fallbackCheckpointBinding =
+                            FindReceiveRecoveryFallbackCheckpointBindingForDirective(
+                                currentRecovery,
+                                operation.Authority);
+                    }
+                }
+            }
+
+            if (fallbackCheckpointBinding != commandBinding)
+            {
+                LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+                    exactDirective.Request,
+                    exactDirective,
+                    "hold_directive_fallback_checkpoint_binding_not_current");
+                return;
+            }
+        }
+
+        QueueRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+            exactDirective,
+            fallbackCheckpointBinding,
+            teardownDelivery,
+            acceptedReceiptBridge);
     }
 
     private void
@@ -7677,11 +7889,17 @@ public sealed partial class SessionFileTransferService :
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision
                 exactDirective,
             RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
-                fallbackCheckpointBinding)
+                fallbackCheckpointBinding,
+            RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                teardownDelivery,
+            IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge?
+                requiredBridge)
     {
         if (exactDirective.IsDefault ||
             transport is not
-                IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge bridge)
+                IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge bridge ||
+            requiredBridge is not null &&
+            !ReferenceEquals(bridge, requiredBridge))
         {
             return;
         }
@@ -7696,15 +7914,7 @@ public sealed partial class SessionFileTransferService :
                         bridge,
                         exactDirective,
                         fallbackCheckpointBinding,
-                        exactDirective.Status ==
-                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                                .Invalidated &&
-                        exactDirective.ReceiveRecoveryOperation is
-                        {
-                            ExecutionState:
-                                FileTransferReceiveRecoveryExecutionState
-                                    .Invalidated,
-                        }));
+                        teardownDelivery));
             if (!runtimeUnlockInitialActivationHoldDirectiveOrdering
                     .WorkerScheduled)
             {
@@ -7739,50 +7949,151 @@ public sealed partial class SessionFileTransferService :
                 }
             }
 
-            var shouldDeliver = false;
-            if (dispatch.AllowAfterContextRemoval)
+            RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt?
+                acceptedReceipt;
+            RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt?
+                retainedReleaseReceipt;
+            lock (runtimeUnlockInitialActivationHoldDirectiveOrdering.Gate)
             {
-                shouldDeliver =
-                    dispatch.Decision.Status ==
-                        RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
-                            .Invalidated &&
-                    dispatch.Decision.ReceiveRecoveryOperation is
-                    {
-                        ExecutionState:
-                            FileTransferReceiveRecoveryExecutionState
-                                .Invalidated,
-                    };
+                acceptedReceipt =
+                    runtimeUnlockInitialActivationHoldDirectiveOrdering
+                        .LastAcceptedDeliveryReceipt;
+                retainedReleaseReceipt =
+                    runtimeUnlockInitialActivationHoldDirectiveOrdering
+                        .RetainedAcceptedReleaseDeliveryReceipt;
             }
-            else
+
+            if ((acceptedReceipt is { } exactReceipt &&
+                 RuntimeUnlockInitialActivationHoldDirectiveDispatchMatchesReceipt(
+                     dispatch,
+                     exactReceipt)) ||
+                (retainedReleaseReceipt is { } exactReleaseReceipt &&
+                 RuntimeUnlockInitialActivationHoldDirectiveDispatchMatchesReceipt(
+                     dispatch,
+                     exactReleaseReceipt)))
             {
-                lock (gate)
+                LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+                    dispatch.Decision.Request,
+                    dispatch.Decision,
+                    "hold_directive_delivery_idempotent");
+                continue;
+            }
+
+            if (dispatch.TeardownDelivery is
+                    RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                        .UndeliveredReleaseInvalidation &&
+                retainedReleaseReceipt is { } releaseReceipt &&
+                RuntimeUnlockInitialActivationHoldInvalidationFollowsAcceptedRelease(
+                    dispatch,
+                    releaseReceipt))
+            {
+                LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                    "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+                    dispatch.Decision.Request,
+                    dispatch.Decision,
+                    "hold_directive_delivery_suppressed_after_accepted_release");
+                continue;
+            }
+
+            var shouldDeliver = false;
+            var accepted = false;
+            var deliveryReason = "hold_directive_delivery_not_current";
+            lock (gate)
+            {
+                shouldDeliver = dispatch.TeardownDelivery switch
                 {
-                    shouldDeliver =
+                    RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                        .ActiveHoldInvalidation or
+                    RuntimeUnlockInitialActivationHoldDirectiveTeardownDelivery
+                        .UndeliveredReleaseInvalidation =>
+                        IsExactRuntimeUnlockInitialActivationHoldInvalidationDirective(
+                            dispatch.Decision),
+                    _ =>
                         transport is
                             IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge
                                 currentBridge &&
                         ReferenceEquals(currentBridge, dispatch.Bridge) &&
                         IsRuntimeUnlockInitialActivationReceiveRecoveryHoldDirectiveCurrentLocked(
-                            dispatch.Decision);
+                            dispatch.Decision) &&
+                        RuntimeUnlockInitialActivationHoldDirectiveBindingIsCurrentLocked(
+                            dispatch),
+                };
+                if (shouldDeliver)
+                {
+                    runtimeUnlockInitialActivationEnvelopeRefreshStage = null;
+                    runtimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt =
+                        dispatch.Decision.Status ==
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Released &&
+                            dispatch.Decision.EnvelopeRefreshCommand is
+                                { } refreshCommand
+                            ? new(dispatch.Bridge, refreshCommand)
+                            : null;
+                    try
+                    {
+                        accepted =
+                            TryDeliverRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+                                dispatch.Bridge,
+                                dispatch.Decision,
+                                dispatch.FallbackCheckpointBinding,
+                                out deliveryReason);
+                        if (accepted &&
+                            !TryApplyRuntimeUnlockInitialActivationEnvelopeRefreshStageLocked(
+                                dispatch,
+                                out deliveryReason))
+                        {
+                            accepted = false;
+                        }
+
+                        if (accepted)
+                        {
+                            var receipt =
+                                new RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt(
+                                    dispatch.Bridge,
+                                    dispatch.Decision,
+                                    dispatch.FallbackCheckpointBinding);
+                            lock (runtimeUnlockInitialActivationHoldDirectiveOrdering.Gate)
+                            {
+                                runtimeUnlockInitialActivationHoldDirectiveOrdering
+                                    .LastAcceptedDeliveryReceipt = receipt;
+                                if (dispatch.Decision.Status ==
+                                    RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                        .Released)
+                                {
+                                    runtimeUnlockInitialActivationHoldDirectiveOrdering
+                                        .RetainedAcceptedReleaseDeliveryReceipt =
+                                        receipt;
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        runtimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt =
+                            null;
+                        runtimeUnlockInitialActivationEnvelopeRefreshStage = null;
+                    }
                 }
             }
 
             if (shouldDeliver)
             {
-                DeliverRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
-                    dispatch.Bridge,
+                LogRuntimeUnlockInitialActivationReceiveRecoveryHoldDirectiveDelivery(
                     dispatch.Decision,
-                    dispatch.FallbackCheckpointBinding);
+                    accepted,
+                    deliveryReason);
             }
         }
     }
 
-    private static void
-        DeliverRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
+    private static bool
+        TryDeliverRuntimeUnlockInitialActivationReceiveRecoveryHoldDirective(
             IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge bridge,
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision directive,
             RuntimeUnlockInitialActivationReceiveRecoveryFallbackCheckpointBinding?
-                fallbackCheckpointBinding)
+                fallbackCheckpointBinding,
+            out string deliveryReason)
     {
         var accepted = false;
         try
@@ -7798,33 +8109,33 @@ public sealed partial class SessionFileTransferService :
         }
         catch (Exception ex)
         {
-            var reason =
+            deliveryReason =
                 $"hold_directive_delivery_{NormalizeReason(ex.GetType().Name)}";
-            LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
-                "runtime_unlock_initial_activation_receive_recovery_hold_decided",
-                directive.Request,
-                directive,
-                reason);
-            LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
-                "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
-                directive.Request,
-                directive,
-                reason);
-            return;
+            return false;
         }
 
+        deliveryReason = accepted
+            ? "hold_directive_delivery_accepted"
+            : "hold_directive_delivery_rejected";
+        return accepted;
+    }
+
+    private static void
+        LogRuntimeUnlockInitialActivationReceiveRecoveryHoldDirectiveDelivery(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision directive,
+            bool accepted,
+            string deliveryReason)
+    {
         LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
             "runtime_unlock_initial_activation_receive_recovery_hold_decided",
             directive.Request,
             directive,
-            directive.Reason);
+            accepted ? directive.Reason : deliveryReason);
         LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
             "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
             directive.Request,
             directive,
-            accepted
-                ? "hold_directive_delivery_accepted"
-                : "hold_directive_delivery_rejected");
+            deliveryReason);
         if (directive.PreviousReceiveRecoveryAuthority is not null)
         {
             LogRuntimeUnlockInitialActivationReceiveRecoveryHold(
@@ -7847,6 +8158,228 @@ public sealed partial class SessionFileTransferService :
                 directive,
                 directive.Reason);
         }
+    }
+
+    private bool
+        RuntimeUnlockInitialActivationHoldDirectiveBindingIsCurrentLocked(
+            RuntimeUnlockInitialActivationHoldDirectiveDispatch dispatch)
+    {
+        var decision = dispatch.Decision;
+        if (decision.EnvelopeRefreshCommand is not { } command)
+        {
+            return dispatch.FallbackCheckpointBinding is null;
+        }
+
+        if (decision.Status !=
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released ||
+            command.IsDefault ||
+            decision.ReceiveRecoveryOperation is not { } operation ||
+            command.HoldRequest != decision.Request ||
+            command.HoldGeneration != decision.HoldGeneration ||
+            command.ReceiveRecoveryAuthority != operation.Authority ||
+            FindReceiveRecoveryStateForHoldDirectiveLocked(
+                operation.Authority) is not { } recoveryState ||
+            recoveryState.PendingInitialActivationEnvelopeRefresh != command)
+        {
+            return false;
+        }
+
+        if (command.FallbackCheckpointBinding is not { } capturedBinding)
+        {
+            return dispatch.FallbackCheckpointBinding is null;
+        }
+
+        return dispatch.FallbackCheckpointBinding == capturedBinding &&
+               FindReceiveRecoveryFallbackCheckpointBindingForDirective(
+                   recoveryState,
+                   operation.Authority) == capturedBinding;
+    }
+
+    private FileTransferReceiveRecoverySubstate?
+        FindReceiveRecoveryStateForHoldDirectiveLocked(
+            FileTransferReceiveRecoveryOperationAuthority authority)
+        => outboundTransfer is { } outbound &&
+           (outbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                .CurrentOperation?.Authority == authority ||
+            outbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                .LastTerminalOperation?.Authority == authority)
+            ? outbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+            : inboundTransfer is { } inbound &&
+              (inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                   .CurrentOperation?.Authority == authority ||
+               inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                   .LastTerminalOperation?.Authority == authority)
+                ? inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                : null;
+
+    private bool
+        TryApplyRuntimeUnlockInitialActivationEnvelopeRefreshStageLocked(
+            RuntimeUnlockInitialActivationHoldDirectiveDispatch dispatch,
+            out string deliveryReason)
+    {
+        if (dispatch.Decision.EnvelopeRefreshCommand is not { } command)
+        {
+            deliveryReason = "hold_directive_delivery_accepted";
+            return true;
+        }
+
+        if (dispatch.Decision.Status !=
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                    .Released ||
+            runtimeUnlockInitialActivationEnvelopeRefreshDeliveryAttempt is not
+                { } attempt ||
+            !ReferenceEquals(attempt.Bridge, dispatch.Bridge) ||
+            attempt.Command != command ||
+            runtimeUnlockInitialActivationEnvelopeRefreshStage is not
+                { } stage ||
+            !ReferenceEquals(stage.Bridge, dispatch.Bridge) ||
+            stage.Receipt.Command != command ||
+            stage.CoordinatorDecision.Decision.Receipt != stage.Receipt ||
+            !stage.CoordinatorDecision.Decision.Accepted)
+        {
+            deliveryReason =
+                "hold_directive_refresh_core_stage_missing_or_mutated";
+            return false;
+        }
+
+        if (stage.OutboundContext is { } outbound)
+        {
+            if (!ReferenceEquals(outboundTransfer, outbound) ||
+                outbound.IsTerminal ||
+                outbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                        .PendingInitialActivationEnvelopeRefresh !=
+                    command)
+            {
+                deliveryReason =
+                    "hold_directive_refresh_core_stage_scope_replaced";
+                return false;
+            }
+
+            ApplyReceiveRecoveryStateLocked(
+                outbound,
+                stage.CoordinatorDecision.State,
+                queueInitialActivationHoldDirective: false);
+        }
+        else if (stage.InboundContext is { } inbound)
+        {
+            if (!ReferenceEquals(inboundTransfer, inbound) ||
+                inbound.IsTerminal ||
+                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                        .PendingInitialActivationEnvelopeRefresh !=
+                    command)
+            {
+                deliveryReason =
+                    "hold_directive_refresh_core_stage_scope_replaced";
+                return false;
+            }
+
+            ApplyReceiveRecoveryStateLocked(
+                inbound,
+                stage.CoordinatorDecision.State,
+                queueInitialActivationHoldDirective: false);
+        }
+        else
+        {
+            deliveryReason = "hold_directive_refresh_core_stage_context_missing";
+            return false;
+        }
+
+        LogRuntimeUnlockInitialActivationOfferEnvelopeRefresh(
+            "runtime_unlock_initial_activation_offer_envelope_refresh_committed",
+            stage.CoordinatorDecision.Decision);
+        deliveryReason = "hold_directive_delivery_accepted";
+        return true;
+    }
+
+    private static bool
+        RuntimeUnlockInitialActivationHoldDirectiveDispatchMatchesReceipt(
+            RuntimeUnlockInitialActivationHoldDirectiveDispatch dispatch,
+            RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt receipt)
+        => ReferenceEquals(dispatch.Bridge, receipt.Bridge) &&
+           dispatch.Decision == receipt.Decision &&
+           dispatch.FallbackCheckpointBinding ==
+               receipt.FallbackCheckpointBinding;
+
+    private static bool
+        RuntimeUnlockInitialActivationHoldInvalidationFollowsAcceptedRelease(
+            RuntimeUnlockInitialActivationHoldDirectiveDispatch invalidation,
+            RuntimeUnlockInitialActivationHoldDirectiveDeliveryReceipt receipt)
+        => ReferenceEquals(invalidation.Bridge, receipt.Bridge) &&
+           receipt.Decision.Status ==
+               RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released &&
+           receipt.Decision.Request == invalidation.Decision.Request &&
+           receipt.Decision.HoldGeneration ==
+               invalidation.Decision.HoldGeneration &&
+           receipt.Decision.ReceiveRecoveryOperation is { } releasedOperation &&
+           invalidation.Decision.ReceiveRecoveryOperation is
+               { } invalidatedOperation &&
+           releasedOperation.Authority == invalidatedOperation.Authority;
+
+    private static bool
+        IsExactRuntimeUnlockInitialActivationHoldInvalidationDirective(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+        => decision.Status ==
+               RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                   .Invalidated &&
+           decision.ReceiveRecoveryOperation is
+           {
+               ExecutionState:
+                   FileTransferReceiveRecoveryExecutionState.Invalidated,
+           };
+
+    private bool
+        RuntimeUnlockInitialActivationHoldInvalidationMatchesTerminalTransitionLocked(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision decision)
+    {
+        if (decision.ReceiveRecoveryOperation is not { } operation)
+        {
+            return false;
+        }
+
+        FileTransferReceiveRecoverySubstate? recoveryState =
+            decision.Request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(
+                outbound.SessionId,
+                decision.Request.SessionId,
+                StringComparison.Ordinal) &&
+            string.Equals(
+                outbound.TransferId,
+                decision.Request.TransferId,
+                StringComparison.Ordinal)
+                ? outbound.CoordinatorPersistentState
+                    .FileTransferReceiveRecovery
+                : decision.Request.Direction == FileTransferDirection.Inbound &&
+                  inboundTransfer is { } inbound &&
+                  string.Equals(
+                      inbound.SessionId,
+                      decision.Request.SessionId,
+                      StringComparison.Ordinal) &&
+                  string.Equals(
+                      inbound.TransferId,
+                      decision.Request.TransferId,
+                      StringComparison.Ordinal)
+                    ? inbound.CoordinatorPersistentState
+                        .FileTransferReceiveRecovery
+                    : null;
+        return recoveryState is
+               {
+                   CurrentOperation: null,
+                   LastTerminalOperation: { } terminalOperation,
+                   LastInitialActivationHold: { } terminalHold,
+               } &&
+               terminalOperation == operation &&
+               terminalHold.Status ==
+                   RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                       .Invalidated &&
+               terminalHold.Request == decision.Request &&
+               terminalHold.HoldGeneration == decision.HoldGeneration &&
+               terminalHold.ReceiveRecoveryAuthority == operation.Authority &&
+               string.Equals(
+                   terminalHold.Reason,
+                   decision.Reason,
+                   StringComparison.Ordinal);
     }
 
     private bool
@@ -17334,8 +17867,9 @@ public sealed partial class SessionFileTransferService :
         }
 
         var stateCarriesFallbackRecoveryWork =
-            !string.IsNullOrWhiteSpace(state.RepairRequestId) ||
-            !string.IsNullOrWhiteSpace(state.RecoveryMode);
+            state.MissingRanges.Any(static range => range.ChunkCount > 0) &&
+            (!string.IsNullOrWhiteSpace(state.RepairRequestId) ||
+             !string.IsNullOrWhiteSpace(state.RecoveryMode));
 
         var movingFrontierRepairSatisfied = false;
         if (context.PullTransportFrontierOnlyRepairActive)
@@ -17394,6 +17928,7 @@ public sealed partial class SessionFileTransferService :
         }
 
         var pendingOwnerWork =
+            context.FileTransferRouteTransitionExecution is not null ||
             context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending ||
             context.V6RegularNknStateRefreshSendInFlight != 0 ||
             context.V6RegularNknDeferredStateRefreshRequest is not null ||
@@ -17416,7 +17951,9 @@ public sealed partial class SessionFileTransferService :
                         out var currentScope);
                 var peerPairKey = peerProof.Proof.PairKey;
                 var decisionReason = pendingOwnerWork
-                    ? context.PullTransportFrontierOnlyRepairActive
+                    ? context.FileTransferRouteTransitionExecution is not null
+                        ? "fallback_tail_route_transition_disposition_pending"
+                        : context.PullTransportFrontierOnlyRepairActive
                         ? "fallback_tail_frontier_repair_pending"
                         : IsV6TransportHandoffBlockingTail(context.V6TransportHandoff)
                             ? "fallback_tail_transport_handoff_blocking"
@@ -20836,6 +21373,17 @@ public sealed partial class SessionFileTransferService :
         }
 
         TrackOutboundPostTunaFallbackLiveCheckpointLocked(context, currentLeg, state);
+        if (!IsExactOutboundRetainedFallbackTransitionStatePendingLocked(
+                context,
+                state) &&
+            context.CurrentTransferLeg is { } acceptedLeg)
+        {
+            TryMarkOutboundFallbackTailQuiescentAfterCheckpointAcceptedLocked(
+                context,
+                acceptedLeg,
+                state,
+                acceptedReason);
+        }
         return true;
     }
 
@@ -20846,117 +21394,54 @@ public sealed partial class SessionFileTransferService :
         string reason)
     {
         if (!context.RuntimeUnlockWaitingForFallbackSurvival ||
-            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
-            context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
-            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
             !ReferenceEquals(context.CurrentTransferLeg, leg) ||
-            !IsCurrentPostTunaFallbackLeg(leg) ||
-            leg.State != FileTransferLegState.RecoveryActive ||
-            !leg.CanSendData ||
-            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) ||
-            context.IsTerminal)
-        {
-            return false;
-        }
-
-        var currentLiveRouteEpoch = context.CurrentLiveRouteEpoch?.EpochId ?? 0;
-        if (leg.LiveRouteEpochId > 0 &&
-            currentLiveRouteEpoch > 0 &&
-            leg.LiveRouteEpochId != currentLiveRouteEpoch)
+            !IsCurrentPostTunaFallbackLeg(leg))
         {
             return false;
         }
 
         var committed = Math.Clamp(state.ContiguousCommittedChunkIndex, 0, Math.Max(0, context.ChunkCount));
-        var highestObserved = Math.Max(-1, state.DurableReceivedHighestChunkIndex);
-        if (state.TerminalReady && committed >= context.ChunkCount && context.ChunkCount > 0)
-        {
-            LogOutboundFallbackTailTerminalProofConsumedOnceLocked(context, leg, committed, reason);
-            return false;
-        }
-
         var stateRequestsCurrentFrontier = state.MissingRanges.Any(range =>
             range.ChunkCount > 0 &&
             range.StartChunkIndex <= committed &&
             (long)range.StartChunkIndex + range.ChunkCount > committed);
-        if (IsFallbackFrontierObligationBlockingTailYield(
-                context.CurrentFallbackFrontierRepairContract,
-                leg.StartCommittedChunkIndex,
-                committed,
-                highestObserved,
-                stateRequestsCurrentFrontier))
-        {
-            LogFallbackTailYieldBlockedByFrontierObligation(
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                context.CurrentFallbackFrontierRepairContract,
-                committed,
-                highestObserved,
-                reason);
-            return false;
-        }
-
-        if (state.MissingRanges.Any(range => range.StartChunkIndex > committed) &&
-            (!string.IsNullOrWhiteSpace(state.RepairRequestId) ||
-             !string.IsNullOrWhiteSpace(state.RecoveryMode)))
-        {
-            return false;
-        }
-
-        if (!TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked(
-                context,
-                leg,
-                state.TransportEpoch,
-                committed,
-                highestObserved,
-                reason,
-                out var yieldDecision))
-        {
-            return false;
-        }
-
-        if (!RecordOutboundFallbackTailLocalYieldLocked(
-                context,
-                leg,
-                yieldDecision,
-                committed,
-                highestObserved,
-                "fallback_tail_quiescent"))
-        {
-            return false;
-        }
-
-        ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked(
-            context,
-            leg,
-            "fallback_tail_quiescent");
-        ClearOutboundFallbackTailQuiescenceDiagnosticLocked(context);
-        MaybeClearOutboundV6RegularNknFrontierPressureLocked(
+        return TryMarkOutboundFallbackTailQuiescentOrTerminalLocked(
             context,
             state,
-            "fallback_tail_quiescent",
-            forceClear: true);
-        ClearPostTunaFallbackControlPlanePressure(context.TransferId, "fallback_tail_quiescent");
-        TryPublishRouteHintIfAuthorizedLocked(
-            context,
-            "fallback_tail_quiescent_route_hint",
-            "fallback_tail_quiescent",
-            "fallback_tail_quiescent",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"),
-            routePublicationToken: context.CurrentRoutePublicationToken);
-        LogFileTransferFallbackTailQuiescentYieldGranted(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            leg,
-            yieldDecision,
-            committed,
-            highestObserved,
-            reason);
-        return true;
+            stateRequestsCurrentFrontier,
+            reason,
+            out _);
     }
+
+    private static bool
+        IsExactOutboundRetainedFallbackTransitionStatePendingLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state)
+        => context.FileTransferRouteTransitionExecution is
+            {
+                Authority:
+                {
+                    Direction: FileTransferDirection.Outbound,
+                    TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                    TargetProtocolVersion:
+                        FileTransferProtocol.ProtocolVersionV6,
+                    TargetTransport: FileTransferTransportKind.RegularNkn,
+                } authority,
+                RetainedPeerFrame:
+                    FileTransferReceiverStateFrameV6 retainedState,
+                RetainedFrameIdentity: { } identity,
+                LastFrameReceipt: null,
+            } &&
+           string.Equals(
+               authority.SessionId,
+               context.SessionId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               authority.TransferId,
+               context.TransferId,
+               StringComparison.Ordinal) &&
+           ReferenceEquals(retainedState, state) &&
+           identity.Matches(state);
 
     private bool TryAcceptOutboundFallbackCheckpointSupersededByCurrentPeerStateLocked(
         OutboundTransferContext context,
@@ -21078,6 +21563,17 @@ public sealed partial class SessionFileTransferService :
             acceptedReason);
         MarkLiveRouteEpochRecoveredFromFallbackCheckpointIfCurrent(context, leg);
         TrackOutboundPostTunaFallbackLiveCheckpointLocked(context, leg, state);
+        if (!IsExactOutboundRetainedFallbackTransitionStatePendingLocked(
+                context,
+                state) &&
+            context.CurrentTransferLeg is { } acceptedLeg)
+        {
+            TryMarkOutboundFallbackTailQuiescentAfterCheckpointAcceptedLocked(
+                context,
+                acceptedLeg,
+                state,
+                acceptedReason);
+        }
         return true;
     }
 

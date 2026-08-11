@@ -1138,21 +1138,24 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         }
     }
 
-    $routeEvents = @(
-        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected'
-        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned'
-        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started'
+    [object[]]$routeChronologyEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') |
+            Sort-Object Sequence, LineNumber
     )
+    $routeEvents = @(
+        Get-FileTransferCanonicalRouteSelectionEvents -Events $routeChronologyEvents
+    )
+    $compactLiveRouteProof =
+        Get-FileTransferLiveRouteEpochProof `
+            -TransferEvents $routeChronologyEvents `
+            -Mode $LiveRouteProofMode
     $selectedRouteChanges = @(Get-FileTransferCompactRouteChanges -Events $routeEvents)
-    $liveRouteChanges = @(Get-FileTransferCompactRouteChanges -Events (Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started'))
-    $guiSelectedRouteChanges = Get-FileTransferCompactObjectProperty -Object $gui -Name 'selectedRouteChanges' -Default @()
-    if ($selectedRouteChanges.Count -eq 0 -and $null -ne $guiSelectedRouteChanges) {
-        $selectedRouteChanges = @($guiSelectedRouteChanges)
-    }
-    $guiLiveRouteChanges = Get-FileTransferCompactObjectProperty -Object $gui -Name 'liveRouteEpochRouteChanges' -Default @()
-    if ($liveRouteChanges.Count -eq 0 -and $null -ne $guiLiveRouteChanges) {
-        $liveRouteChanges = @($guiLiveRouteChanges)
-    }
+    $liveRouteChanges = @($compactLiveRouteProof.RouteChanges)
 
     $selectedRouteText = if ($selectedRouteChanges.Count -gt 0) { $selectedRouteChanges -join ',' } else { '(none)' }
     $liveRouteText = if ($liveRouteChanges.Count -gt 0) { $liveRouteChanges -join ',' } else { '(none)' }
@@ -2313,14 +2316,30 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     [object[]]$fallbackTailPairingEvents = @(
         @($routeEvents) +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_workers_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_terminalized') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_transport_epoch_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_transport_epoch_adopted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_superseded_by_route_hint') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_frozen') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_recreated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_removed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_epoch_reopened') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_epoch_reused') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_reused') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_recovered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_recovery_owner_retired_after_yield') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_retired_owner_update_suppressed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_transport_epoch_reauthorization_staged') +
@@ -2333,6 +2352,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_frontier_repair_cleared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_tail_unblocked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_tail_caught_up_to_accepted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_handoff_held_for_retry_authority') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_admission_denied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_peer_proof_pending_decided') +
@@ -2358,6 +2381,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_terminal_proof_consumed') +
         $runtimeUnlockRetryDispatchInstallEvents +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_peer_down') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_session_end') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_end_cancel_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_end_notice_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
@@ -3048,6 +3075,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing'
             Event = $candidateEvent
             Reason = if ($candidateEvent.EventName -eq
+                'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided') {
+                'released_hold_directive_delivery_rejected'
+            }
+            elseif ($candidateEvent.EventName -eq
                 'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated') {
                 'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
             }
@@ -3201,6 +3232,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'paired_fallback_tail_yield_missing'
             Event = $candidateRecord.Event
             Reason = $candidateRecord.Reason
+            Variant = $candidateRecord.Variant
         }) | Out-Null
     }
     $firstCompactProofChainFailure = @(
@@ -3245,7 +3277,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'setup'
     }
-    elseif (-not $guiIntegrityOk -or $hardFailureCount -gt 0 -or $activeFileTunaV6Count -gt 0) {
+    elseif (-not $guiIntegrityOk -or
+        $hardFailureCount -gt 0 -or
+        $activeFileTunaV6Count -gt 0 -or
+        $compactLiveRouteProof.Verdict -eq 'fail') {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'protocol_or_integrity'
@@ -3426,8 +3461,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         '(none)'
     }
     $failureVariant = if ($null -ne $firstCompactProofChainFailure -and
-        [string]$firstCompactProofChainFailure.Class -eq
-            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' -and
+        [string]$firstCompactProofChainFailure.Class -in @(
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
+            'paired_fallback_tail_yield_missing') -and
         $null -ne $firstCompactProofChainFailure.PSObject.Properties['Variant'] -and
         -not [string]::IsNullOrWhiteSpace([string]$firstCompactProofChainFailure.Variant)) {
         [string]$firstCompactProofChainFailure.Variant
@@ -3503,7 +3539,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $runtimeUnlockProbeCommitVerdict = if ($probeAckCount -gt 0 -and $pairedCommitCount -gt 0) { 'pass' } else { 'none' }
     $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
     $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } else { 'none' }
-    $liveRouteProofVerdict = if ($liveRouteChanges.Count -gt 0 -or $LiveRouteProofMode -eq 'None') { 'pass' } else { 'none' }
+    $liveRouteProofVerdict = [string]$compactLiveRouteProof.Verdict
     $selectedRouteDetailLines = New-Object System.Collections.Generic.List[string]
     $selectedRouteDetailLines.Add(("route_selected_count={0}" -f $selectedRouteChanges.Count)) | Out-Null
     for ($i = 0; $i -lt $selectedRouteChanges.Count; $i++) {
@@ -6681,19 +6717,32 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         $transferId = 'unknown'
     }
 
-    $routeEvents = @(Get-FileTransferEfficiencyEventsByName -Index $Index -Events $Events -Names @('filetransfer_route_selected', 'filetransfer_route_transitioned'))
-    $liveEpochEvents = @(Get-FileTransferEfficiencyEventsByName -Index $Index -Events $Events -Names @('filetransfer_live_route_epoch_started'))
+    $routeChronologyEvents = @(
+        Get-FileTransferEfficiencyEventsByName `
+            -Index $Index `
+            -Events $Events `
+            -Names @('filetransfer_route_selected', 'filetransfer_route_transitioned')
+    )
+    $routeEvents = @(
+        Get-FileTransferCanonicalRouteSelectionEvents -Events $routeChronologyEvents
+    )
+    $liveEpochEvents = @(
+        Get-FileTransferEfficiencyEventsByName `
+            -Index $Index `
+            -Events $Events `
+            -Names @('filetransfer_live_route_epoch_started') |
+            Where-Object { Test-FileTransferProductionRouteEvidenceEvent -Event $_ } |
+            Sort-Object `
+                @{ Expression = {
+                        Get-FileTransferEventInt64Field `
+                            -Event $_ `
+                            -Name 'live_route_epoch' `
+                            -Default 0
+                    } }, `
+                Sequence, LineNumber
+    )
     $routeSequence = @(Get-FileTransferEfficiencyRouteChanges -Events $routeEvents)
-    if ($routeSequence.Count -eq 0 -and $null -ne $gui) {
-        $guiRoutes = Get-FileTransferCompactObjectProperty -Object $gui -Name 'selectedRouteChanges' -Default @()
-        $routeSequence = @($guiRoutes)
-    }
-
     $liveEpochSequence = @(Get-FileTransferEfficiencyRouteChanges -Events $liveEpochEvents)
-    if ($liveEpochSequence.Count -eq 0 -and $null -ne $gui) {
-        $guiLiveRoutes = Get-FileTransferCompactObjectProperty -Object $gui -Name 'liveRouteEpochRouteChanges' -Default @()
-        $liveEpochSequence = @($guiLiveRoutes)
-    }
 
     $inboundTerminalState = if ($null -ne $Summary -and $null -ne $Summary.PSObject.Properties['InboundTerminalEvents']) {
         Get-FileTransferInvariantLatestTerminalState -Events @($Summary.InboundTerminalEvents)

@@ -2647,6 +2647,177 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     [InlineData(false, true)]
     [InlineData(true, true)]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackTailRecoveredWithoutPairedYieldInstallReceipt_CorrelatesAndRecovers(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFallbackTailRecoveredWithoutInstallReceiptFixture(recovered),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal("paired_fallback_tail_yield_missing", verdict["recovery_failure_class"]);
+            Assert.Equal(
+                "recovered_tail_paired_yield_install_receipt_missing",
+                verdict["failure_variant"]);
+            Assert.Equal(
+                "filetransfer_runtime_unlock_handoff_held_for_retry_authority",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "fallback_tail_recovered_without_paired_yield_install_receipt",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, "retry_contract")]
+    [InlineData(true, "retry_contract")]
+    [InlineData(false, "outbound_terminal")]
+    [InlineData(true, "outbound_terminal")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackTailRecoveredWithoutPairedYieldInstallReceipt_MutatedRecoveryRemainsUnresolved(
+        bool compact,
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFallbackTailRecoveredWithoutInstallReceiptFixture(
+                recovered: true,
+                mutation: mutation),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(!compact && mutation == "outbound_terminal" ? 1 : 0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal("0", verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+        Assert.Equal("paired_fallback_tail_yield_missing", verdict["recovery_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackTailRecoveredWithoutPairedYieldInstallReceipt_InboundTerminalDoesNotPoisonOutboundRecovery(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFallbackTailRecoveredWithoutInstallReceiptFixture(
+                recovered: true,
+                mutation: "inbound_terminal"),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(compact ? 0 : 1, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal("0", verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, "missing_caught_up", "0", "0", "0", "0")]
+    [InlineData(true, "missing_caught_up", "0", "0", "0", "0")]
+    [InlineData(false, "missing_unblocked", "0", "0", "0", "0")]
+    [InlineData(true, "missing_unblocked", "0", "0", "0", "0")]
+    [InlineData(false, "wrong_writer", "0", "0", "0", "0")]
+    [InlineData(true, "wrong_writer", "0", "0", "0", "0")]
+    [InlineData(false, "wrong_session", "0", "0", "0", "0")]
+    [InlineData(true, "wrong_session", "0", "0", "0", "0")]
+    [InlineData(false, "scope_replacement", "0", "0", "0", "0")]
+    [InlineData(true, "scope_replacement", "0", "0", "0", "0")]
+    [InlineData(false, "unrelated_install", "2", "1", "0", "1")]
+    [InlineData(true, "unrelated_install", "2", "1", "0", "1")]
+    [InlineData(false, "pairing_reason", "2", "1", "0", "1")]
+    [InlineData(true, "pairing_reason", "2", "1", "0", "1")]
+    [InlineData(false, "none", "2", "1", "1", "0")]
+    [InlineData(true, "none", "2", "1", "1", "0")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackTailRecoveredWithoutPairedYieldInstallReceipt_EnforcesCorrelationBoundaries(
+        bool compact,
+        string mutation,
+        string expectedRaw,
+        string expectedDistinct,
+        string expectedRecovered,
+        string expectedUnresolved)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFallbackTailRecoveredWithoutInstallReceiptFixture(
+                recovered: true,
+                mutation: mutation),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(expectedRaw, verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal(expectedDistinct, verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal(expectedRecovered, verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal(expectedUnresolved, verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FallbackTailPeerProofBeforeLocalYieldNotRetained_ClassifiesAdmissionBoundary(
         bool compact,
         bool asymmetricRecoveryScope)
@@ -5007,6 +5178,327 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal(
             "0",
             verdict["fallback_tail_coordinator_invalid_unresolved_count"]);
+    }
+
+    private static string[] BuildFallbackTailRecoveredWithoutInstallReceiptFixture(
+        bool recovered,
+        string mutation = "none")
+    {
+        const string sessionId = "sess_recovered_tail_install_missing";
+        const string transferId = "transfer_recovered_tail_install_missing";
+        const string yieldAuthorityId =
+            "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        const string peerAuthorityId =
+            "fta2-fallback_tail_yield-89abcdef0123456701234567";
+        const string retryAuthorityId =
+            "fta2-runtime-unlock-retry-0123456789abcdef01234567";
+        const string ownerKey =
+            "sess_recovered_tail_install_missing|transfer_recovered_tail_install_missing|post_tuna_fallback_v6|6|2|3|2|3|fallback-child:1";
+        const string pairKey =
+            "sess_recovered_tail_install_missing|transfer_recovered_tail_install_missing|post_tuna_fallback_v6|6|2|3|fallback-child:1";
+        const string scope =
+            "session_id=sess_recovered_tail_install_missing; " +
+            "transfer_id=transfer_recovered_tail_install_missing; direction=outbound; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "route_publication_generation=5; route_commit_generation=0; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "transport_epoch=3; bridge_recovery_generation=2; " +
+            "checkpoint_generation=1; checkpoint_request_id=fallback-child:1; " +
+            "data_session_identity=data-session-1; data_session_generation=1";
+        const string yieldIdentity =
+            "authority_id=fta2-fallback_tail_yield-0123456789abcdef01234567; " +
+            "predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; " +
+            "owner_key=sess_recovered_tail_install_missing|transfer_recovered_tail_install_missing|post_tuna_fallback_v6|6|2|3|2|3|fallback-child:1; " +
+            "pair_key=sess_recovered_tail_install_missing|transfer_recovered_tail_install_missing|post_tuna_fallback_v6|6|2|3|fallback-child:1";
+        const string holdLifecycle =
+            "offer_authority_mode=InitialActivation; hold_boundary=OfferPreSend; " +
+            "payer_decision_id=6; offer_generation=2; offer_nonce=offer-nonce-2; " +
+            "transaction_generation=1; tuna_path_lease_generation=2; " +
+            "tuna_path_lease_listener_run_id=listener-start-2; " +
+            "semantic_offer_fingerprint=semantic-offer-2; envelope_generation=1; " +
+            "envelope_sent_at_unix_ms=1000; envelope_expires_at_unix_ms=121000; " +
+            "control_envelope_fingerprint=envelope-fingerprint-1";
+        const string expectedScope =
+            "expected_route=post_tuna_fallback_v6; expected_protocol_version=6; " +
+            "expected_live_route_epoch=2; expected_runtime_generation=3; " +
+            "expected_terminal_generation=0; expected_leg_generation=3; " +
+            "expected_route_publication_generation=5; expected_route_commit_generation=0; " +
+            "expected_transport_epoch=3; expected_bridge_recovery_generation=2; " +
+            "expected_checkpoint_request_id=(none); " +
+            "expected_data_session_identity=data-session-1; expected_data_session_generation=1";
+
+        var lines = new List<string>
+        {
+            LogLine(
+                $"event=filetransfer_route_selected; {scope}; " +
+                "target_route=post_tuna_fallback_v6; target_protocol_version=6; " +
+                "target_transport=regular_nkn; route_publication_action_kind=RoutePublication; " +
+                "coordinator_decision_reason=accepted; " +
+                "log_writer_id=writer_a; log_writer_sequence=1",
+                secondsOffset: 0),
+            LogLine(
+                $"event=filetransfer_v6_handoff_recovered; session_id={sessionId}; " +
+                $"transfer_id={transferId}; direction=outbound; transport_epoch=3; " +
+                "reason=frontier_caught_up_to_accepted_tail; " +
+                "log_writer_id=writer_a; log_writer_sequence=2",
+                secondsOffset: 1),
+            LogLine(
+                $"event=filetransfer_v6_handoff_tail_unblocked; session_id={sessionId}; " +
+                $"transfer_id={transferId}; direction=outbound; transport_epoch=3; " +
+                "reason=frontier_caught_up_to_accepted_tail; " +
+                "log_writer_id=writer_a; log_writer_sequence=3",
+                secondsOffset: 2),
+            LogLine(
+                $"event=filetransfer_v6_handoff_tail_caught_up_to_accepted; session_id={sessionId}; " +
+                $"transfer_id={transferId}; direction=outbound; transport_epoch=3; " +
+                "log_writer_id=writer_a; log_writer_sequence=4",
+                secondsOffset: 3),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_requested; " +
+                $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+                $"{holdLifecycle}; {expectedScope}; decision_reason=hold_requested; " +
+                "log_writer_id=writer_a; log_writer_sequence=5",
+                secondsOffset: 4),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_requested; " +
+                $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+                $"{holdLifecycle}; {expectedScope}; decision_reason=hold_requested; " +
+                "log_writer_id=writer_a; log_writer_sequence=6",
+                secondsOffset: 5),
+            LogLine(
+                $"event=filetransfer_runtime_unlock_handoff_held_for_retry_authority; " +
+                $"session_id={sessionId}; lanes=file; source=tuna_activation_handoff; " +
+                "decision_status=Held; " +
+                "decision_reason=fallback_paired_tail_yield_install_receipt_missing; " +
+                "log_writer_id=writer_a; log_writer_sequence=7",
+                secondsOffset: 6),
+            LogLine(
+                $"event=filetransfer_runtime_unlock_handoff_held_for_retry_authority; " +
+                $"session_id={sessionId}; lanes=file; source=tuna_activation_handoff; " +
+                "decision_status=Held; " +
+                "decision_reason=fallback_paired_tail_yield_install_receipt_missing; " +
+                "log_writer_id=writer_a; log_writer_sequence=8",
+                secondsOffset: 7)
+        };
+
+        if (mutation == "missing_caught_up")
+        {
+            lines.RemoveAll(line => line.Contains(
+                "event=filetransfer_v6_handoff_tail_caught_up_to_accepted",
+                StringComparison.Ordinal));
+        }
+        else if (mutation == "missing_unblocked")
+        {
+            lines.RemoveAll(line => line.Contains(
+                "event=filetransfer_v6_handoff_tail_unblocked",
+                StringComparison.Ordinal));
+        }
+        else if (mutation == "wrong_writer")
+        {
+            var index = lines.FindIndex(line => line.Contains(
+                "event=filetransfer_v6_handoff_tail_caught_up_to_accepted",
+                StringComparison.Ordinal));
+            lines[index] = lines[index].Replace(
+                "log_writer_id=writer_a",
+                "log_writer_id=writer_b",
+                StringComparison.Ordinal);
+        }
+        else if (mutation == "wrong_session")
+        {
+            var index = lines.FindIndex(line => line.Contains(
+                "event=filetransfer_v6_handoff_tail_caught_up_to_accepted",
+                StringComparison.Ordinal));
+            lines[index] = lines[index].Replace(
+                $"session_id={sessionId}",
+                "session_id=sess_wrong",
+                StringComparison.Ordinal);
+        }
+        else if (mutation == "scope_replacement")
+        {
+            var firstHoldRequestIndex = lines.FindIndex(line => line.Contains(
+                "event=runtime_unlock_initial_activation_receive_recovery_hold_requested",
+                StringComparison.Ordinal));
+            lines.Insert(
+                firstHoldRequestIndex,
+                LogLine(
+                    $"event=filetransfer_route_selected; session_id={sessionId}; " +
+                    $"transfer_id={transferId}; direction=outbound; route=file_tuna_v4; " +
+                    "protocol_version=4; live_route_epoch=3; runtime_generation=4; " +
+                    "terminal_generation=0; leg_generation=4; " +
+                    "route_publication_generation=6; route_commit_generation=0; " +
+                    "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+                    "route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted; " +
+                    "log_writer_id=writer_a; log_writer_sequence=5",
+                    secondsOffset: 4));
+        }
+
+        if (!recovered)
+        {
+            lines.Add(LogLine(
+                $"event=file_transfer_outbound_terminal; role=helpee; session_id={sessionId}; " +
+                $"transfer_id={transferId}; state=Failed; error_code=route_cycle_missing; " +
+                "log_writer_id=writer_a; log_writer_sequence=9",
+                secondsOffset: 8));
+            return lines.ToArray();
+        }
+
+        if (mutation is "outbound_terminal" or "inbound_terminal")
+        {
+            var direction = mutation == "outbound_terminal" ? "outbound" : "inbound";
+            lines.Add(LogLine(
+                $"event=file_transfer_{direction}_terminal; direction={direction}; role=helper; " +
+                $"session_id={sessionId}; transfer_id={transferId}; state=Failed; " +
+                "error_code=diagnostic_terminal; log_writer_id=writer_a; log_writer_sequence=9",
+                secondsOffset: 8));
+        }
+
+        lines.AddRange(
+        [
+            LogLine(
+                $"event=filetransfer_fallback_tail_yield_issued; {scope}; {yieldIdentity}; " +
+                "pairing_state=YieldIssued; decision_status=Accepted; reason=accepted; " +
+                "decision_reason=accepted; log_writer_id=writer_a; log_writer_sequence=10",
+                secondsOffset: 9),
+            LogLine(
+                $"event=filetransfer_fallback_tail_local_proof_receipt_decided; {scope}; {yieldIdentity}; " +
+                "pairing_state=YieldIssued; local_proof_identity=local-proof-1; " +
+                "local_frame_fingerprint=local-frame-1; decision_status=Applied; reason=accepted; " +
+                "decision_reason=accepted; log_writer_id=writer_a; log_writer_sequence=11",
+                secondsOffset: 10),
+            LogLine(
+                $"event=filetransfer_fallback_tail_peer_proof_receipt_decided; {scope}; {yieldIdentity}; " +
+                $"pairing_state=YieldIssued; peer_authority_id={peerAuthorityId}; " +
+                "peer_predecessor_authority_id=(none); peer_yield_generation=1; " +
+                "peer_observation_identity=peer-proof-1; peer_frame_fingerprint=peer-frame-1; " +
+                $"peer_owner_key={ownerKey}; peer_pair_key={pairKey}; decision_status=Applied; " +
+                "reason=accepted; decision_reason=accepted; " +
+                "log_writer_id=writer_a; log_writer_sequence=12",
+                secondsOffset: 11),
+            LogLine(
+                $"event=filetransfer_fallback_tail_pairing_committed; {scope}; {yieldIdentity}; " +
+                "pairing_state=Paired; pairing_generation=1; " +
+                "local_proof_identity=local-proof-1; local_frame_fingerprint=local-frame-1; " +
+                $"peer_authority_id={peerAuthorityId}; " +
+                "peer_predecessor_authority_id=(none); peer_yield_generation=1; " +
+                "peer_observation_identity=peer-proof-1; peer_frame_fingerprint=peer-frame-1; " +
+                $"peer_owner_key={ownerKey}; peer_pair_key={pairKey}; " +
+                "release_kind=FallbackPairedTailYield; release_outcome=Quiescent; " +
+                "decision_status=Accepted; reason=accepted; decision_reason=accepted; " +
+                "log_writer_id=writer_a; log_writer_sequence=13",
+                secondsOffset: 12),
+            LogLine(
+                $"event=filetransfer_fallback_tail_paired_release_reserved; {scope}; {yieldIdentity}; " +
+                "pairing_state=ReleaseReserved; pairing_generation=1; " +
+                "release_kind=FallbackPairedTailYield; release_outcome=Quiescent; " +
+                $"reservation_generation=1; retry_authority_id={retryAuthorityId}; " +
+                "retry_attempt_generation=1; install_generation=0; decision_status=Accepted; " +
+                "reason=accepted; decision_reason=accepted; " +
+                "log_writer_id=writer_a; log_writer_sequence=14",
+                secondsOffset: 13)
+        ]);
+
+        if (mutation == "pairing_reason")
+        {
+            lines.Add(LogLine(
+                $"event=filetransfer_fallback_tail_pairing_committed; {scope}; {yieldIdentity}; " +
+                "pairing_state=Paired; pairing_generation=1; " +
+                "local_proof_identity=local-proof-1; local_frame_fingerprint=local-frame-1; " +
+                $"peer_authority_id={peerAuthorityId}; " +
+                "peer_predecessor_authority_id=(none); peer_yield_generation=1; " +
+                "peer_observation_identity=peer-proof-1; peer_frame_fingerprint=peer-frame-1; " +
+                $"peer_owner_key={ownerKey}; peer_pair_key={pairKey}; " +
+                "release_kind=FallbackPairedTailYield; release_outcome=Quiescent; " +
+                "decision_status=Accepted; reason=mutated; decision_reason=mutated; " +
+                "log_writer_id=writer_a; log_writer_sequence=15",
+                secondsOffset: 14));
+        }
+
+        var requestContract = mutation == "retry_contract" ? 2 : 1;
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; " +
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "source_route=post_tuna_fallback_v6; source_protocol_version=6; " +
+            "source_live_route_epoch=2; source_runtime_generation=3; " +
+            "source_terminal_generation=0; source_leg_generation=3; " +
+            "source_route_publication_generation=5; source_route_commit_generation=0; " +
+            $"authority_id={yieldAuthorityId}; predecessor_authority_id=(none); " +
+            $"yield_generation=1; yield_kind=Quiescent; recovery_contract_generation={requestContract}; " +
+            "retired_offer_generation=0; dispatch_attempt_generation=1; " +
+            "missing_dispatch_successor_generation=0; request_active_predecessor_supersession=0; " +
+            "decision_status=Queued; decision_reason=paired_tail_yield_queued; " +
+            "log_writer_id=writer_a; log_writer_sequence=16",
+            secondsOffset: 15));
+
+        var installSequence = 17;
+        foreach (var installLine in BuildFallbackTailCoordinatorPhase2InstallLines(
+                     sessionId,
+                     transferId,
+                     yieldAuthorityId,
+                     retryAuthorityId,
+                     transportEpoch: 3,
+                     bridgeRecoveryGeneration: 2))
+        {
+            var line = installLine
+                .Replace("retired_generation=1", "retired_generation=0", StringComparison.Ordinal)
+                .Replace(
+                    "source_publication_reason=accepted",
+                    "source_publication_reason=fallback_paired_tail_yield",
+                    StringComparison.Ordinal);
+            if (mutation == "unrelated_install")
+            {
+                line = line.Replace(
+                    retryAuthorityId,
+                    "fta2-runtime-unlock-retry-unrelated",
+                    StringComparison.Ordinal);
+            }
+            if (line.Contains("event=runtime_unlock_retry_dispatch_decision_staged", StringComparison.Ordinal))
+            {
+                line += "; stage_disposition=Retained; stage_cleared=0";
+            }
+            else if (line.Contains("event=runtime_unlock_retry_dispatch_install_receipt_issued", StringComparison.Ordinal))
+            {
+                line += "; stage_status=Staged; stage_disposition=Retained; stage_cleared=0";
+            }
+            else if (line.Contains("event=runtime_unlock_retry_dispatch_install_committed", StringComparison.Ordinal))
+            {
+                line += "; stage_status=Staged; stage_disposition=Consumed; stage_cleared=1";
+            }
+            line += $"; log_writer_id=writer_a; log_writer_sequence={installSequence++}";
+            lines.Add(line);
+        }
+
+        lines.AddRange(
+        [
+            LogLine(
+                $"event=filetransfer_fallback_tail_paired_release_consumed; {scope}; {yieldIdentity}; " +
+                "pairing_state=ReleaseConsumed; pairing_generation=1; " +
+                "release_kind=FallbackPairedTailYield; release_outcome=Quiescent; " +
+                $"reservation_generation=1; retry_authority_id={retryAuthorityId}; " +
+                "retry_attempt_generation=1; install_generation=7; decision_status=Accepted; " +
+                "reason=accepted; decision_reason=accepted; " +
+                "log_writer_id=writer_a; log_writer_sequence=21",
+                secondsOffset: 20),
+            LogLine(
+                $"event=filetransfer_route_transition_prepared; session_id={sessionId}; " +
+                $"transfer_id={transferId}; direction=outbound; " +
+                "source_route=post_tuna_fallback_v6; source_protocol_version=6; " +
+                "source_live_route_epoch=2; source_runtime_generation=3; " +
+                "source_terminal_generation=0; source_leg_generation=3; " +
+                "source_route_publication_generation=5; source_route_commit_generation=0; " +
+                "source_transport_epoch=3; source_bridge_recovery_generation=2; " +
+                "source_data_session_generation=1; transition_kind=PostTunaFallbackV6ToTunaV4; " +
+                "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+                $"fallback_yield_authority_id={yieldAuthorityId}; fallback_yield_generation=1; " +
+                "pairing_generation=1; retry_install_generation=7; decision_status=Prepared; " +
+                "decision_reason=prepared; log_writer_id=writer_a; log_writer_sequence=22",
+                secondsOffset: 21),
+            LogLine(
+                $"event=file_transfer_outbound_terminal; role=helpee; session_id={sessionId}; " +
+                $"transfer_id={transferId}; state=Completed; error_code=(none); " +
+                "log_writer_id=writer_a; log_writer_sequence=23",
+                secondsOffset: 22)
+        ]);
+        return lines.ToArray();
     }
 
     private static string[] BuildFallbackTailCoordinatorAggregateFixture(

@@ -7733,6 +7733,109 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryActiveNegotiationHoldAfterGrant_AcceptedAuthorityRejectedSettlementRemainsUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_active_negotiation_hold_authority_rejected";
+        const string settlementReason = "runtime_unlock_retry_dispatch_missing_before_completion";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    transferId,
+                    "; stage_status=Staged; decision_status=Granted",
+                    "coordinator_install_receipt_issued"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    transferId,
+                    "; stage_status=Staged; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed"),
+                RuntimeUnlockRetryInstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId,
+                    "; attempt_phase=Granted",
+                    "accepted"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_held_by_active_negotiation",
+                    transferId,
+                    decisionReason: "runtime_unlock_retry_dispatch_queued_behind_active_negotiation"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_execution_observed",
+                    transferId,
+                    suffix: "; install_generation=1; attempt_phase=AliasBound; offer_generation=3" +
+                            "; offer_nonce=nonce-live-held-dispatch; dispatch_observed=0; subscriber_present=1",
+                    decisionReason: "reported_to_core"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_lifecycle_execution_decided",
+                    transferId,
+                    suffix: "; install_generation=1; attempt_phase=AliasBound; offer_generation=3" +
+                            "; offer_nonce=nonce-live-held-dispatch; dispatch_observed=0; decision_status=Accepted",
+                    decisionReason: "retry_dispatch_execution_observed"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_execution_observed",
+                    transferId,
+                    suffix: "; install_generation=1; attempt_phase=SendInFlight; offer_generation=3" +
+                            "; offer_nonce=nonce-live-held-dispatch; dispatch_observed=0; subscriber_present=1",
+                    decisionReason: "reported_to_core"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_lifecycle_execution_decided",
+                    transferId,
+                    suffix: "; install_generation=1; attempt_phase=SendInFlight; offer_generation=3" +
+                            "; offer_nonce=nonce-live-held-dispatch; dispatch_observed=0; decision_status=Accepted",
+                    decisionReason: "retry_dispatch_execution_observed"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    suffix: "; settlement_outcome=AuthorityRejected; dispatch_observed=0",
+                    decisionReason: settlementReason),
+                RuntimeUnlockRetrySettlementReportedLine(
+                    transferId,
+                    "AuthorityRejected",
+                    settlementReason: settlementReason),
+                RuntimeUnlockRetrySettlementDecidedLine(
+                    transferId,
+                    "AuthorityRejected",
+                    settlementReason: settlementReason)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_post_grant_hold_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_post_grant_hold_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_post_grant_hold_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_post_grant_hold_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_post_grant_hold_verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_held_after_authority_granted", verdict["recovery_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_retry_dispatch_held_by_active_negotiation",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "retry_dispatch_held_after_authority_granted",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("(none)", verdict["failure_variant"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryActiveNegotiationHoldAfterGrant_ExactActiveSuccessorDispatchRecovers(
         bool compact)
     {
@@ -15131,6 +15234,372 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
         Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
     }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task
+        AnalyzeRetained_InitialActivationReleasedHoldDirectiveRejected_UsesExistingReleaseDeliveryClass(
+            bool compact,
+            bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_hold_directive_delivery_rejected";
+        const string transferId = "transfer_hold_directive_delivery_rejected";
+        const string writerId = "writer_hold_directive_delivery_rejected";
+        var heldTuple = InitialActivationDirectHoldTuple(
+            sessionId,
+            transferId,
+            writerId,
+            offerGeneration: 2,
+            refreshGeneration: 0,
+            successorEnvelopeGeneration: 0);
+        var releasedTuple = InitialActivationDirectHoldTuple(
+            sessionId,
+            transferId,
+            writerId,
+            offerGeneration: 2,
+            refreshGeneration: 2,
+            successorEnvelopeGeneration: 2);
+        var lines = new List<string>
+        {
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {heldTuple}; " +
+                "decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current; " +
+                "log_writer_sequence=34863",
+                secondsOffset: 0),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {releasedTuple}; " +
+                "decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current; " +
+                "log_writer_sequence=37875",
+                secondsOffset: 1),
+            LogLine(
+                $"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {releasedTuple}; " +
+                "decision_status=Released; decision_reason=hold_directive_delivery_rejected; " +
+                "log_writer_sequence=37878",
+                secondsOffset: 2)
+        };
+        if (recovered)
+        {
+            lines.AddRange(
+            [
+                LogLine(
+                    $"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {releasedTuple}; " +
+                    "decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current; " +
+                    "log_writer_sequence=37890",
+                    secondsOffset: 3),
+                LogLine(
+                    $"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {releasedTuple}; " +
+                    "decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current; " +
+                    "log_writer_sequence=37891",
+                    secondsOffset: 4),
+                LogLine(
+                    $"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {releasedTuple}; " +
+                    "decision_status=Released; decision_reason=hold_directive_delivery_accepted; " +
+                    "log_writer_sequence=37892",
+                    secondsOffset: 5)
+            ]);
+        }
+        lines.Add(
+            LogLine(
+                $"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; " +
+                $"direction=outbound; log_writer_id={writerId}; " +
+                $"state={(recovered ? "Completed" : "Failed")}; error_code={(recovered ? "(none)" : "peer_disconnected")}",
+                secondsOffset: recovered ? 6 : 3));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
+        Assert.Equal(
+            "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
+        Assert.Equal(
+            recovered ? "1" : "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
+        Assert.Equal(
+            recovered ? "0" : "1",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
+        Assert.Equal(
+            recovered ? "pass" : "fail",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_verdict"]);
+        if (recovered)
+        {
+            Assert.NotEqual(
+                "runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing",
+                verdict["first_proof_chain_failure_class"]);
+            return;
+        }
+
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "released_hold_directive_delivery_rejected",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("37878", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task
+        AnalyzeRetained_InitialActivationReleasedHoldDirectiveRejected_ExactTupleAndPoisonBoundaries(
+            bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_hold_directive_delivery_adversarial";
+        const string transferId = "transfer_hold_directive_delivery_adversarial";
+        const string writerId = "writer_hold_directive_delivery_adversarial";
+        const string otherWriterId = "writer_hold_directive_delivery_other";
+        var lines = new List<string>();
+        var secondsOffset = 0;
+
+        void Add(string message)
+            => lines.Add(LogLine(message, secondsOffset++));
+
+        string Tuple(
+            long offerGeneration,
+            long refreshGeneration,
+            long successorEnvelopeGeneration,
+            string? writer = null)
+            => InitialActivationDirectHoldTuple(
+                sessionId,
+                transferId,
+                writer ?? writerId,
+                offerGeneration,
+                refreshGeneration,
+                successorEnvelopeGeneration);
+
+        var missingHeldRelease = Tuple(10, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {missingHeldRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {missingHeldRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var missingReleaseHeld = Tuple(15, 0, 0);
+        var missingReleaseDelivery = Tuple(15, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {missingReleaseHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {missingReleaseDelivery}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var wrongWriterHeld = Tuple(20, 0, 0);
+        var wrongWriterRelease = Tuple(20, 2, 2, otherWriterId);
+        var wrongWriterDelivery = Tuple(20, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {wrongWriterHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {wrongWriterRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {wrongWriterDelivery}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var exactHeldAfterMutation = Tuple(30, 0, 0);
+        var mutatedHeld = exactHeldAfterMutation.Replace(
+            "semantic_offer_fingerprint=semantic-30",
+            "semantic_offer_fingerprint=semantic-30-mutated");
+        var heldMutationRelease = Tuple(30, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {mutatedHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {exactHeldAfterMutation}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {heldMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {heldMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var releaseMutationHeld = Tuple(31, 0, 0);
+        var exactReleaseAfterMutation = Tuple(31, 2, 2);
+        var mutatedRelease = exactReleaseAfterMutation.Replace(
+            "semantic_offer_fingerprint=semantic-31",
+            "semantic_offer_fingerprint=semantic-31-mutated");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {releaseMutationHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {mutatedRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {exactReleaseAfterMutation}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {exactReleaseAfterMutation}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var rejectionMutationHeld = Tuple(32, 0, 0);
+        var rejectionMutationRelease = Tuple(32, 2, 2);
+        var mutatedRejection = rejectionMutationRelease.Replace(
+            "semantic_offer_fingerprint=semantic-32",
+            "semantic_offer_fingerprint=semantic-32-mutated");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {rejectionMutationHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {rejectionMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {mutatedRejection}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {rejectionMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var lateHeldMutation = Tuple(33, 0, 0).Replace(
+            "semantic_offer_fingerprint=semantic-33",
+            "semantic_offer_fingerprint=semantic-33-mutated");
+        var lateHeldMutationRelease = Tuple(33, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {Tuple(33, 0, 0)}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {lateHeldMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {lateHeldMutation}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {lateHeldMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var preCandidateTerminalHeld = Tuple(34, 0, 0);
+        var preCandidateTerminalRelease = Tuple(34, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {preCandidateTerminalHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {preCandidateTerminalRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; direction=outbound; log_writer_id={writerId}; state=Completed; error_code=(none)");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {preCandidateTerminalRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var preCandidateScopeHeld = Tuple(35, 0, 0);
+        var preCandidateScopeRelease = Tuple(35, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {preCandidateScopeHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {preCandidateScopeRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_invalidated; {preCandidateScopeRelease}; decision_status=Invalidated; decision_reason=runtime_scope_replaced");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {preCandidateScopeRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+
+        var scopeHeld = Tuple(40, 0, 0);
+        var scopeRelease = Tuple(40, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {scopeHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {scopeRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {scopeRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=4040");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {scopeRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=4041");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_invalidated; {scopeRelease}; decision_status=Invalidated; decision_reason=runtime_scope_replaced");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {scopeRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {scopeRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {scopeRelease}; decision_status=Released; decision_reason=hold_directive_delivery_accepted");
+
+        var rejectedMutationHeld = Tuple(44, 0, 0);
+        var rejectedMutationRelease = Tuple(44, 2, 2);
+        var mutatedRejectedCopy = rejectedMutationRelease.Replace(
+            "semantic_offer_fingerprint=semantic-44",
+            "semantic_offer_fingerprint=semantic-44-mutated");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {rejectedMutationHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {rejectedMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {rejectedMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=4444");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {mutatedRejectedCopy}; decision_status=Released; decision_reason=hold_directive_delivery_rejected");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {rejectedMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {rejectedMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {rejectedMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_accepted");
+
+        var acceptedMutationHeld = Tuple(45, 0, 0);
+        var acceptedMutationRelease = Tuple(45, 2, 2);
+        var mutatedAcceptance = acceptedMutationRelease.Replace(
+            "semantic_offer_fingerprint=semantic-45",
+            "semantic_offer_fingerprint=semantic-45-mutated");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {acceptedMutationHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {acceptedMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {acceptedMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=4545");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {mutatedAcceptance}; decision_status=Released; decision_reason=hold_directive_delivery_accepted");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {acceptedMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {acceptedMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {acceptedMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_accepted");
+
+        var resumeMutationHeld = Tuple(46, 0, 0);
+        var resumeMutationRelease = Tuple(46, 2, 2);
+        var mutatedResume = resumeMutationRelease.Replace(
+            "semantic_offer_fingerprint=semantic-46",
+            "semantic_offer_fingerprint=semantic-46-mutated");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {resumeMutationHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {resumeMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {resumeMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=4646");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {mutatedResume}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {resumeMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {resumeMutationRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {resumeMutationRelease}; decision_status=Released; decision_reason=hold_directive_delivery_accepted");
+
+        var terminalHeld = Tuple(50, 0, 0);
+        var terminalRelease = Tuple(50, 2, 2);
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {terminalHeld}; decision_status=Held; decision_reason=runtime_unlock_initial_activation_receive_recovery_operation_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {terminalRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {terminalRelease}; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=5050");
+        Add($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; direction=outbound; log_writer_id={writerId}; state=Completed; error_code=(none)");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {terminalRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_resumed; {terminalRelease}; decision_status=Released; decision_reason=runtime_unlock_initial_activation_receive_recovery_proof_current");
+        Add($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {terminalRelease}; decision_status=Released; decision_reason=hold_directive_delivery_accepted");
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "6",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
+        Assert.Equal(
+            "5",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
+        Assert.Equal(
+            "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_recovered_count"]);
+        Assert.Equal(
+            "5",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "released_hold_directive_delivery_rejected",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("4040", verdict["first_proof_chain_failure_writer_sequence"]);
+    }
+
+    private static string InitialActivationDirectHoldTuple(
+        string sessionId,
+        string transferId,
+        string writerId,
+        long offerGeneration,
+        long refreshGeneration,
+        long successorEnvelopeGeneration)
+        =>
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            $"offer_nonce=offer-{offerGeneration}; payer_decision_id=6; " +
+            $"offer_generation={offerGeneration}; transaction_generation=1; " +
+            "tuna_path_lease_generation=2; tuna_path_lease_listener_run_id=listener-start-2; " +
+            $"semantic_offer_fingerprint=semantic-{offerGeneration}; " +
+            "envelope_generation=1; envelope_sent_at_unix_ms=1000; " +
+            "envelope_expires_at_unix_ms=121000; " +
+            $"control_envelope_fingerprint=envelope-{offerGeneration}; " +
+            "peer_visible_dispatch_observed=0; expected_route=post_tuna_fallback_v6; " +
+            "expected_protocol_version=6; expected_live_route_epoch=2; " +
+            "expected_runtime_generation=3; expected_terminal_generation=0; " +
+            "expected_leg_generation=3; expected_route_publication_generation=3; " +
+            "expected_transport_epoch=1; expected_bridge_recovery_generation=1; " +
+            "expected_data_session_identity=data-1; expected_data_session_generation=1; " +
+            "hold_generation=2; " +
+            $"refresh_generation={refreshGeneration}; " +
+            $"successor_envelope_generation={successorEnvelopeGeneration}; " +
+            $"receive_recovery_operation_authority_id=operation-{offerGeneration}; " +
+            "receive_recovery_operation_generation=2; bridge_decision_generation=2; " +
+            "recovery_liveness_lease_authority_id=(none); " +
+            "recovery_liveness_lease_generation=0; closure_generation=0; " +
+            $"log_writer_id={writerId}";
 
     [Theory]
     [InlineData(false, false)]

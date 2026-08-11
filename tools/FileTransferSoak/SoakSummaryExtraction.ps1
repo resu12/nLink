@@ -899,6 +899,120 @@ function Convert-FileTransferRouteTransitionToSelection {
     }
 }
 
+function Test-FileTransferProductionRouteEvidenceEvent {
+    param([AllowNull()]$Event)
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    return (Get-FileTransferEventField `
+            -Event $Event `
+            -Name 'gui_authoritative_projection' `
+            -Default '0') -ne '1'
+}
+
+function Get-FileTransferCanonicalRouteSelectionEvents {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    [object[]]$selectedEvents = @(
+        Get-FileTransferEventsByName `
+            -Events $Events `
+            -Names @('filetransfer_route_selected') |
+            Where-Object { Test-FileTransferProductionRouteEvidenceEvent -Event $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+    if ($selectedEvents.Count -gt 0) {
+        $canonicalEvents = New-Object System.Collections.Generic.List[object]
+        $latestFileTunaByScope = @{}
+        foreach ($selectedEvent in $selectedEvents) {
+            $route = Get-FileTransferEventField `
+                -Event $selectedEvent `
+                -Name 'route' `
+                -Default ''
+            if ($route -ne 'file_tuna_v4') {
+                $canonicalEvents.Add($selectedEvent) | Out-Null
+                continue
+            }
+
+            $scopeKey = Get-FileTransferRouteEventKey `
+                -Event $selectedEvent `
+                -IncludeDirection
+            if (-not $latestFileTunaByScope.ContainsKey($scopeKey)) {
+                $latestFileTunaByScope[$scopeKey] = $selectedEvent
+                $canonicalEvents.Add($selectedEvent) | Out-Null
+                continue
+            }
+
+            $previous = $latestFileTunaByScope[$scopeKey]
+            $strictlyNewer = $false
+            $regressed = $false
+            foreach ($fieldName in @(
+                    'live_route_epoch',
+                    'route_publication_generation',
+                    'leg_generation')) {
+                $previousText = Get-FileTransferEventField `
+                    -Event $previous `
+                    -Name $fieldName `
+                    -Default ''
+                $currentText = Get-FileTransferEventField `
+                    -Event $selectedEvent `
+                    -Name $fieldName `
+                    -Default ''
+                if ([string]::IsNullOrWhiteSpace($previousText) -and
+                    [string]::IsNullOrWhiteSpace($currentText)) {
+                    continue
+                }
+                if ([string]::IsNullOrWhiteSpace($previousText)) {
+                    # A newly populated component cannot prove advancement
+                    # over an unknown coordinator generation.
+                    continue
+                }
+                if ([string]::IsNullOrWhiteSpace($currentText)) {
+                    $regressed = $true
+                    break
+                }
+
+                $previousGeneration = Get-FileTransferEventInt64Field `
+                    -Event $previous `
+                    -Name $fieldName `
+                    -Default -1
+                $currentGeneration = Get-FileTransferEventInt64Field `
+                    -Event $selectedEvent `
+                    -Name $fieldName `
+                    -Default -1
+                if ($currentGeneration -lt $previousGeneration) {
+                    $regressed = $true
+                    break
+                }
+                if ($currentGeneration -gt $previousGeneration) {
+                    $strictlyNewer = $true
+                }
+            }
+
+            if ($regressed -or -not $strictlyNewer) {
+                continue
+            }
+
+            $latestFileTunaByScope[$scopeKey] = $selectedEvent
+            $canonicalEvents.Add($selectedEvent) | Out-Null
+        }
+
+        return @($canonicalEvents.ToArray())
+    }
+
+    return @(
+        $Events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_route_transitioned' -and
+                (Test-FileTransferProductionRouteEvidenceEvent -Event $_)
+            } |
+            ForEach-Object { Convert-FileTransferRouteTransitionToSelection -Event $_ } |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber
+    )
+}
+
 function Test-FileTransferRouteTerminalBetween {
     param(
         [Parameter(Mandatory = $true)]
@@ -1030,16 +1144,18 @@ function Add-FileTransferRouteSelfConsistencyFindings {
 function Get-FileTransferRouteConsistency {
     param([object[]]$TransferEvents)
 
-    $routeSelectedEvents = @(Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_route_selected') | Sort-Object Sequence)
-    $routeTransitionSelections = @(
-        $TransferEvents |
-            Where-Object { $_.EventName -eq 'filetransfer_route_transitioned' } |
-            ForEach-Object { Convert-FileTransferRouteTransitionToSelection -Event $_ } |
-            Where-Object { $null -ne $_ } |
-            Sort-Object Sequence
+    $routeSelectedEvents = @(
+        Get-FileTransferCanonicalRouteSelectionEvents -Events $TransferEvents
     )
-    $routeStateEvents = @($routeSelectedEvents + $routeTransitionSelections | Sort-Object Sequence)
-    $routeAwareEvents = @($TransferEvents | Where-Object { Test-FileTransferRouteAwareEvent -Event $_ } | Sort-Object Sequence)
+    $routeStateEvents = @($routeSelectedEvents)
+    $routeAwareEvents = @(
+        $TransferEvents |
+            Where-Object {
+                (Test-FileTransferProductionRouteEvidenceEvent -Event $_) -and
+                (Test-FileTransferRouteAwareEvent -Event $_)
+            } |
+            Sort-Object Sequence, LineNumber
+    )
     $terminalEvents = @(Get-FileTransferTerminalEvents -Events $TransferEvents | Sort-Object Sequence)
     $findings = New-Object System.Collections.ArrayList
     $evidenceEvents = New-Object System.Collections.ArrayList
@@ -1312,8 +1428,11 @@ function Get-FileTransferLiveRouteEpochProof {
 
     [object[]]$explicitEvents = @(
         $TransferEvents |
-            Where-Object { Test-FileTransferLiveRouteEpochEventName -Event $_ } |
-            Sort-Object Sequence
+            Where-Object {
+                (Test-FileTransferProductionRouteEvidenceEvent -Event $_) -and
+                (Test-FileTransferLiveRouteEpochEventName -Event $_)
+            } |
+            Sort-Object Sequence, LineNumber
     )
     [object[]]$completeEvents = @(
         $explicitEvents |
@@ -1335,8 +1454,7 @@ function Get-FileTransferLiveRouteEpochProof {
     )
 
     [object[]]$routeSelectedEvents = @(
-        Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_route_selected') |
-            Sort-Object Sequence
+        Get-FileTransferCanonicalRouteSelectionEvents -Events $TransferEvents
     )
     $selectedRouteSequence = @(
         $routeSelectedEvents |
@@ -1446,6 +1564,21 @@ function Get-FileTransferLiveRouteEpochProof {
             )
         }
     }
+
+    # Parser sequence reflects file append order, but the coordinator epoch is
+    # the canonical live-route chronology.  Sort complete production epochs
+    # numerically so a late duplicate cannot reorder the route cycle.
+    $scopedCompleteEvents = @(
+        $scopedCompleteEvents |
+            Sort-Object `
+                @{ Expression = {
+                        Get-FileTransferEventInt64Field `
+                            -Event $_ `
+                            -Name 'live_route_epoch' `
+                            -Default 0
+                    } }, `
+                Sequence, LineNumber
+    )
 
     $completedEpochRows = New-Object System.Collections.Generic.List[object]
     [object[]]$scopedLiveEpochGroups = @(

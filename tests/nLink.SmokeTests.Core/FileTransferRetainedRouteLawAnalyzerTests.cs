@@ -672,6 +672,120 @@ public sealed class FileTransferRetainedRouteLawAnalyzerTests : FileTransferOpsS
         Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["live_route_epoch_route_changes"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveRegularActivationCycleGenuineNewerCoordinatorTunaPublication_IsRetained(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRouteAwareLiveRegularActivationCycleFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-route-consistency-summary.txt");
+        Assert.Equal(
+            "regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6",
+            route["selected_route_changes"]);
+        Assert.Equal(
+            "file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6",
+            route["live_route_epoch_route_changes"]);
+        if (!compact)
+        {
+            Assert.Equal("8", route["live_route_epoch_explicit_event_count"]);
+        }
+        Assert.Equal("pass", route["live_route_epoch_proof_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveRegularActivationCycleSyntheticOrStaleEpochOneTuna_CannotFabricateSecondPublication(
+        bool compact,
+        bool guiProjection)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareLiveRegularActivationCycleFixture()
+            .Where(line =>
+                !(line.Contains("route=file_tuna_v4", StringComparison.Ordinal) &&
+                  line.Contains("live_route_epoch=3", StringComparison.Ordinal)))
+            .ToList();
+        var projection = guiProjection ? "; gui_authoritative_projection=1" : string.Empty;
+        lines.Add(LogLine(
+            "event=filetransfer_route_selected; direction=outbound; transfer_id=[redacted]; " +
+            "session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; " +
+            "runtime_profile=file_tuna_v4_fast; frame_family=v4; " +
+            "handoff_kind=normal_to_tuna_activation; target_transport=tuna; " +
+            "live_route_epoch=1; route_publication_generation=1; leg_generation=1; " +
+            "file_tuna_active=1; post_tuna_fallback_active=0" + projection,
+            secondsOffset: 60));
+        if (guiProjection)
+        {
+            lines.Add(LogLine(
+                "event=filetransfer_live_route_epoch_started; direction=outbound; " +
+                "transfer_id=[redacted]; session_id=sess_redacted; route=file_tuna_v4; " +
+                "protocol_version=4; live_route_epoch=1; runtime_profile=file_tuna_v4_fast; " +
+                "frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; " +
+                "state=started; reason=gui_projection; gui_authoritative_projection=1",
+                secondsOffset: 61));
+            lines.Add(LogLine(
+                "event=filetransfer_live_route_epoch_recovered; direction=outbound; " +
+                "transfer_id=[redacted]; session_id=sess_redacted; route=file_tuna_v4; " +
+                "protocol_version=4; live_route_epoch=1; runtime_profile=file_tuna_v4_fast; " +
+                "frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; " +
+                "reason=gui_projection; gui_authoritative_projection=1",
+                secondsOffset: 62));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-route-consistency-summary.txt");
+        Assert.Equal(
+            "regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6",
+            route["selected_route_changes"]);
+        Assert.Equal(
+            "file_tuna_v4,post_tuna_fallback_v6",
+            route["live_route_epoch_route_changes"]);
+        if (!compact)
+        {
+            Assert.Equal("6", route["live_route_epoch_explicit_event_count"]);
+            Assert.Equal("0", route["live_route_epoch_metadata_missing_count"]);
+        }
+        Assert.Equal("fail", route["live_route_epoch_proof_verdict"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_LiveSwitchOffProofModeWithStrictLiveRouteEvents_ReturnsPass()

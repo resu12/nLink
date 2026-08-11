@@ -7095,12 +7095,57 @@ internal static class FileTransferCoordinator
                 },
             },
         };
+
+        FallbackCheckpointLease? routeTransitionFallbackCheckpointLease = null;
+        if (!toTuna && committedState.Direction == FileTransferDirection.Outbound)
+        {
+            const string checkpointReason =
+                "filetransfer_route_transition_fallback_checkpoint_registered";
+            var checkpointRequestId =
+                $"v6-regular-nkn-state-refresh:route-transition:{authority.TransitionGeneration}:{fallbackProof!.TargetTransportEpoch}";
+            var checkpointDecision = MarkFallbackCheckpointRequested(
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                    committedState.RouteSelection,
+                    authority.HandoffKind,
+                    authority.TargetTransport,
+                    checkpointReason,
+                    FileTransferLegState.CheckpointPending,
+                    CanSendData: false,
+                    authority.DurableCheckpoint.ContiguousCommittedChunkIndex,
+                    authority.DurableCheckpoint.DurableHighestChunkIndex,
+                    fallbackProof.TargetTransportEpoch,
+                    fallbackProof.TargetBridgeRecoveryGeneration,
+                    CheckpointRequestId: checkpointRequestId,
+                    CheckpointPriority: "state_refresh"),
+                committedState,
+                checkpointReason);
+            if (checkpointDecision.MutationRejectedReason is not null ||
+                checkpointDecision.FallbackCheckpointLease is not
+                    { State: FallbackCheckpointLeaseState.Pending } checkpointLease ||
+                !string.Equals(
+                    checkpointLease.CheckpointRequestId,
+                    checkpointRequestId,
+                    StringComparison.Ordinal))
+            {
+                return FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Rejected,
+                    checkpointDecision.MutationRejectedReason ??
+                        "filetransfer_route_transition_fallback_checkpoint_registration_failed");
+            }
+
+            committedState = checkpointDecision.State;
+            routeTransitionFallbackCheckpointLease = checkpointLease;
+        }
+
         routeDecision = routeDecision with
         {
             State = committedState,
             RuntimeUnlockCommitAccepted = toTuna,
             RuntimeUnlockCommitRejectedReason = null,
             RouteCommitToken = routeCommitToken,
+            FallbackCheckpointLease = routeTransitionFallbackCheckpointLease,
         };
         return FileTransferRouteTransitionDecisionFor(
             committedState,

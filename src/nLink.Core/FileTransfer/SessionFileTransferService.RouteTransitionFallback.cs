@@ -4,6 +4,16 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService
 {
+    private readonly record struct
+        OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding(
+            FileTransferRouteTransitionAuthority Authority,
+            RuntimeOwnerToken RuntimeOwner,
+            RoutePublicationToken RoutePublication,
+            FileTransferLeg TargetLeg,
+            FallbackCheckpointLease CheckpointLease,
+            IFileTransferDataSession DataSession,
+            long DataSessionGeneration);
+
     private sealed record FileTransferRouteTransitionExecutionShadow(
         FileTransferRouteTransitionAuthority? Authority,
         IFileTransferDataSession SourceDataSession,
@@ -21,6 +31,25 @@ public sealed partial class SessionFileTransferService
         public LiveRouteEpoch? StartedLiveRouteEpoch { get; init; }
 
         public LiveRouteEpoch? RecoveredLiveRouteEpoch { get; init; }
+
+        public OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding?
+            FallbackCheckpointDispatchBinding
+        {
+            get;
+            init;
+        }
+
+        public OutboundSparsePumpInstall? PendingRetainedReplayInstall
+        {
+            get;
+            init;
+        }
+
+        public bool PendingRetainedReplayImmediateRetryIssued
+        {
+            get;
+            init;
+        }
 
         public bool HasExactPeerBoundary =>
             PeerProof is { IsComplete: true, IsExactFrameBound: true } proof &&
@@ -1969,6 +1998,8 @@ public sealed partial class SessionFileTransferService
     {
         await Task.Yield();
         SessionFileTransferSnapshot? snapshot = null;
+        OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding?
+            fallbackCheckpointDispatch = null;
         var committed = false;
         lock (gate)
         {
@@ -2004,11 +2035,12 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            committed = TryCommitOutboundFileTransferRouteTransitionLocked(
+            committed = TryCommitOutboundFileTransferRouteTransitionAndCaptureFallbackCheckpointLocked(
                 context,
                 execution,
                 out snapshot,
-                out rejectionReason);
+                out rejectionReason,
+                out fallbackCheckpointDispatch);
             if (!committed)
             {
                 LogFileTransferRouteTransitionDecision(
@@ -2027,6 +2059,13 @@ public sealed partial class SessionFileTransferService
         if (committed && snapshot is not null)
         {
             RaiseTransferChanged(snapshot);
+        }
+
+        if (committed && fallbackCheckpointDispatch is { } dispatch)
+        {
+            TryDispatchOutboundFileTransferRouteTransitionFallbackCheckpoint(
+                context,
+                dispatch);
         }
     }
 
@@ -2104,8 +2143,24 @@ public sealed partial class SessionFileTransferService
         FileTransferRouteTransitionExecutionShadow execution,
         out SessionFileTransferSnapshot? snapshot,
         out string rejectionReason)
+        => TryCommitOutboundFileTransferRouteTransitionAndCaptureFallbackCheckpointLocked(
+            context,
+            execution,
+            out snapshot,
+            out rejectionReason,
+            out _);
+
+    private bool
+        TryCommitOutboundFileTransferRouteTransitionAndCaptureFallbackCheckpointLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionExecutionShadow execution,
+        out SessionFileTransferSnapshot? snapshot,
+        out string rejectionReason,
+        out OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding?
+            fallbackCheckpointDispatch)
     {
         snapshot = null;
+        fallbackCheckpointDispatch = null;
         rejectionReason = "filetransfer_route_transition_not_current";
         if (execution.Authority is not { } authority ||
             execution.DrainCommand is not { } drainCommand ||
@@ -2214,6 +2269,13 @@ public sealed partial class SessionFileTransferService
             previousRoute,
             disposition,
             execution.Reason);
+        TryCaptureOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
+            context,
+            authority,
+            disposition,
+            execution,
+            out var capturedFallbackCheckpointDispatch,
+            out var fallbackCheckpointCaptureReason);
         context.FileTransferRouteTransitionExecution = execution with
         {
             Authority = authority,
@@ -2221,6 +2283,8 @@ public sealed partial class SessionFileTransferService
             DrainRecheckQueued = false,
             StartedLiveRouteEpoch = routeDecision.StartedLiveRouteEpoch,
             RecoveredLiveRouteEpoch = routeDecision.RecoveredLiveRouteEpoch,
+            FallbackCheckpointDispatchBinding =
+                capturedFallbackCheckpointDispatch,
         };
         EmitOutboundFileTransferRouteTransitionCompatibilityProjectionsLocked(
             context,
@@ -2251,9 +2315,179 @@ public sealed partial class SessionFileTransferService
         }
 
         context.FileTransferRouteTransitionExecution = null;
+        fallbackCheckpointDispatch = capturedFallbackCheckpointDispatch;
+        if (authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
+            fallbackCheckpointDispatch is null)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_route_transition_fallback_checkpoint_dispatch_deferred; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; transition_generation={authority.TransitionGeneration}; decision_reason={FormatProtocolLogValue(fallbackCheckpointCaptureReason)}");
+        }
         rejectionReason = "none";
         return true;
     }
+
+    private bool
+        TryCaptureOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionDispositionCommand disposition,
+        FileTransferRouteTransitionExecutionShadow execution,
+        out OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding?
+            dispatch,
+        out string rejectionReason)
+    {
+        dispatch = null;
+        rejectionReason = "filetransfer_route_transition_not_fallback";
+        if (authority.TargetRoute != FileTransferRoute.PostTunaFallbackV6)
+        {
+            return false;
+        }
+
+        if (authority.ProofBoundary is not
+                FileTransferFallbackTransitionProofBoundary ||
+            context.CurrentRuntimeOwner is not { } runtimeOwner ||
+            context.CurrentRoutePublicationToken is not { } routePublication ||
+            context.CurrentTransferLeg is not { } targetLeg ||
+            context.CurrentFallbackCheckpointLease is not { } checkpointLease ||
+            !ReferenceEquals(context.DataSession, execution.SourceDataSession) ||
+            context.DataSessionGeneration != execution.SourceDataSessionGeneration ||
+            disposition.RoutePublicationToken != routePublication)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_fallback_checkpoint_scope_missing";
+            return false;
+        }
+
+        var candidate =
+            new OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding(
+                authority,
+                runtimeOwner,
+                routePublication,
+                targetLeg,
+                checkpointLease,
+                execution.SourceDataSession,
+                execution.SourceDataSessionGeneration);
+        if (!TryValidateOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
+                context,
+                candidate,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        dispatch = candidate;
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private bool
+        TryValidateOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
+        OutboundTransferContext context,
+        OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding
+            dispatch,
+        out string rejectionReason)
+    {
+        rejectionReason =
+            "filetransfer_route_transition_fallback_checkpoint_dispatch_stale";
+        var authority = dispatch.Authority;
+        var lease = dispatch.CheckpointLease;
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            authority.Direction != FileTransferDirection.Outbound ||
+            !string.Equals(authority.SessionId, context.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(authority.TransferId, context.TransferId, StringComparison.Ordinal) ||
+            authority.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            authority.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            authority.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            authority.ProofBoundary is not
+                FileTransferFallbackTransitionProofBoundary fallback ||
+            context.RouteSelection.Route != authority.TargetRoute ||
+            context.NegotiatedDataProtocolVersion != authority.TargetProtocolVersion ||
+            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            context.CurrentRuntimeOwner != dispatch.RuntimeOwner ||
+            context.CurrentRoutePublicationToken != dispatch.RoutePublication ||
+            context.TerminalGeneration != lease.TerminalGeneration ||
+            context.CurrentTransferLeg is not { } currentTargetLeg ||
+            !FileTransferRouteTransitionFallbackCheckpointTargetLegMatches(
+                currentTargetLeg,
+                dispatch.TargetLeg) ||
+            !ReferenceEquals(context.DataSession, dispatch.DataSession) ||
+            context.DataSessionGeneration != dispatch.DataSessionGeneration ||
+            context.DataSessionGeneration != authority.DataSessionGeneration ||
+            dispatch.RoutePublication.RuntimeOwner != dispatch.RuntimeOwner ||
+            dispatch.TargetLeg.State != FileTransferLegState.CheckpointPending ||
+            dispatch.TargetLeg.CanSendData ||
+            dispatch.TargetLeg.Generation != lease.LegGeneration ||
+            dispatch.TargetLeg.TransportEpochId != fallback.TargetTransportEpoch ||
+            dispatch.TargetLeg.TransportEpochId != lease.TransportEpoch ||
+            dispatch.TargetLeg.BridgeRecoveryGeneration !=
+                fallback.TargetBridgeRecoveryGeneration ||
+            dispatch.TargetLeg.BridgeRecoveryGeneration !=
+                lease.BridgeRecoveryGeneration ||
+            dispatch.TargetLeg.CheckpointGeneration !=
+                lease.CheckpointGeneration ||
+            !string.Equals(
+                dispatch.TargetLeg.CheckpointRequestId,
+                lease.CheckpointRequestId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                dispatch.TargetLeg.CheckpointPriority,
+                "state_refresh",
+                StringComparison.Ordinal) ||
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
+                    CreateCoordinatorStateLocked(context))
+                .LastTerminalOperation is not
+                {
+                    State: FileTransferRouteTransitionState.Committed,
+                    Authority: var terminalAuthority,
+                    DispositionCommand: { } terminalDisposition,
+                } ||
+            terminalAuthority != authority ||
+            terminalDisposition.Authority != authority ||
+            terminalDisposition.RoutePublicationToken != dispatch.RoutePublication ||
+            !FileTransferCoordinator.IsFallbackCheckpointLeaseCurrent(
+                CreateCoordinatorStateLocked(context),
+                lease,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        rejectionReason = "current";
+        return true;
+    }
+
+    private static bool
+        FileTransferRouteTransitionFallbackCheckpointTargetLegMatches(
+        FileTransferLeg current,
+        FileTransferLeg retained)
+        => string.Equals(current.LegId, retained.LegId, StringComparison.Ordinal) &&
+           current.Generation == retained.Generation &&
+           current.RouteSelection == retained.RouteSelection &&
+           current.ProtocolVersion == retained.ProtocolVersion &&
+           current.LiveRouteEpochId == retained.LiveRouteEpochId &&
+           current.TransportEpochId == retained.TransportEpochId &&
+           current.StartedUtc == retained.StartedUtc &&
+           current.FrozenUtc == retained.FrozenUtc &&
+           current.State == retained.State &&
+           current.StartCommittedChunkIndex == retained.StartCommittedChunkIndex &&
+           current.ProvenCommittedChunkIndex == retained.ProvenCommittedChunkIndex &&
+           current.ProvenHighestObservedChunkIndex == retained.ProvenHighestObservedChunkIndex &&
+           string.Equals(
+               current.CheckpointRequestId,
+               retained.CheckpointRequestId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               current.CheckpointPriority,
+               retained.CheckpointPriority,
+               StringComparison.Ordinal) &&
+           current.CheckpointRequestedUtc == retained.CheckpointRequestedUtc &&
+           current.CheckpointGeneration == retained.CheckpointGeneration &&
+           current.BridgeRecoveryGeneration == retained.BridgeRecoveryGeneration &&
+           current.CanSendData == retained.CanSendData &&
+           current.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption ==
+               retained.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption;
 
     private bool TryCommitInboundFileTransferRouteTransitionLocked(
         InboundTransferContext context,
@@ -2411,13 +2645,27 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private async Task TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameAsync(
+    private Task TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameAsync(
         OutboundTransferContext context,
         OutboundSparsePumpInstall install,
         IFileTransferDataSession dataSession)
+        => TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameCoreAsync(
+            context,
+            install,
+            dataSession,
+            queuedCheckpointRequestId: null);
+
+    private async Task TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameCoreAsync(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall install,
+        IFileTransferDataSession dataSession,
+        string? queuedCheckpointRequestId)
     {
         FileTransferRouteTransitionExecutionShadow execution;
         FileTransferRouteTransitionRetainedFrameApplyCommand command;
+        OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding
+            fallbackCheckpointDispatch;
+        var exactCheckpointAlreadyQueued = false;
         long receiveSupervisorGeneration;
         lock (gate)
         {
@@ -2428,6 +2676,8 @@ public sealed partial class SessionFileTransferService
                         Authority: { } authority,
                         RetainedPeerFrame: { } frame,
                         RetainedFrameIdentity: { } identity,
+                        FallbackCheckpointDispatchBinding:
+                            { } pendingFallbackCheckpointDispatch,
                     } current ||
                 current.FrameApplyInFlight ||
                 current.LastFrameReceipt is not null ||
@@ -2446,7 +2696,11 @@ public sealed partial class SessionFileTransferService
                         RetainedFrameApplyReceipt: null,
                     } ||
                 terminalAuthority != authority ||
-                pendingCommand.FrameIdentity != identity)
+                pendingCommand.FrameIdentity != identity ||
+                !TryValidateOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
+                    context,
+                    pendingFallbackCheckpointDispatch,
+                    out _))
             {
                 return;
             }
@@ -2454,8 +2708,76 @@ public sealed partial class SessionFileTransferService
             execution = current with { FrameApplyInFlight = true };
             context.FileTransferRouteTransitionExecution = execution;
             command = pendingCommand;
+            fallbackCheckpointDispatch = pendingFallbackCheckpointDispatch;
+            exactCheckpointAlreadyQueued =
+                !string.IsNullOrWhiteSpace(queuedCheckpointRequestId) &&
+                string.Equals(
+                    queuedCheckpointRequestId,
+                    pendingFallbackCheckpointDispatch.CheckpointLease
+                        .CheckpointRequestId,
+                    StringComparison.Ordinal);
             receiveSupervisorGeneration =
                 context.ActiveOutboundSparseReceiveSupervisorGeneration;
+        }
+
+        if (!exactCheckpointAlreadyQueued &&
+            !TryDispatchOutboundFileTransferRouteTransitionFallbackCheckpoint(
+                context,
+                fallbackCheckpointDispatch))
+        {
+            OutboundSparsePumpInstall? immediateRetryInstall = null;
+            IFileTransferDataSession? immediateRetryDataSession = null;
+            lock (gate)
+            {
+                if (ReferenceEquals(outboundTransfer, context) &&
+                    context.FileTransferRouteTransitionExecution == execution)
+                {
+                    var pendingExecution = execution with
+                    {
+                        FrameApplyInFlight = false,
+                        PendingRetainedReplayInstall = install,
+                    };
+                    context.FileTransferRouteTransitionExecution = pendingExecution;
+                    var exactDeferredRequestRetained =
+                        context.V6RegularNknDeferredStateRefreshRequest is
+                            { } deferredRequest &&
+                        string.Equals(
+                            deferredRequest.RepairRequestId,
+                            fallbackCheckpointDispatch.CheckpointLease
+                                .CheckpointRequestId,
+                            StringComparison.Ordinal);
+                    if (!pendingExecution
+                            .PendingRetainedReplayImmediateRetryIssued &&
+                        context.V6RegularNknStateRefreshSendInFlight <= 0 &&
+                        !exactDeferredRequestRetained &&
+                        TryCapturePendingOutboundFileTransferRouteTransitionRetainedReplayLocked(
+                            context,
+                            out var capturedInstall,
+                            out var capturedDataSession,
+                            out _))
+                    {
+                        immediateRetryInstall = capturedInstall;
+                        immediateRetryDataSession = capturedDataSession;
+                        context.FileTransferRouteTransitionExecution =
+                            pendingExecution with
+                            {
+                                PendingRetainedReplayImmediateRetryIssued = true,
+                            };
+                    }
+                }
+            }
+
+            if (immediateRetryInstall is { } retryInstall &&
+                immediateRetryDataSession is { } retryDataSession)
+            {
+                _ = TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameCoreAsync(
+                    context,
+                    retryInstall,
+                    retryDataSession,
+                    queuedCheckpointRequestId: null);
+            }
+
+            return;
         }
 
         var applied = false;
@@ -2575,6 +2897,16 @@ public sealed partial class SessionFileTransferService
             }
 
             context.FileTransferRouteTransitionExecution = null;
+            if (execution.RetainedPeerFrame is
+                    FileTransferReceiverStateFrameV6 retainedReceiverState &&
+                context.CurrentTransferLeg is { } currentLeg)
+            {
+                TryMarkOutboundFallbackTailQuiescentAfterCheckpointAcceptedLocked(
+                    context,
+                    currentLeg,
+                    retainedReceiverState,
+                    "filetransfer_route_transition_retained_frame_applied");
+            }
             snapshot = CreateSnapshotLocked();
         }
 
@@ -2582,6 +2914,47 @@ public sealed partial class SessionFileTransferService
         {
             RaiseTransferChanged(snapshot);
         }
+    }
+
+    private bool
+        TryCapturePendingOutboundFileTransferRouteTransitionRetainedReplayLocked(
+        OutboundTransferContext context,
+        out OutboundSparsePumpInstall install,
+        out IFileTransferDataSession dataSession,
+        out OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding
+            fallbackCheckpointDispatch)
+    {
+        install = null!;
+        dataSession = null!;
+        fallbackCheckpointDispatch = default;
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            context.FileTransferRouteTransitionExecution is not
+                {
+                    FrameApplyInFlight: false,
+                    LastFrameReceipt: null,
+                    PendingRetainedReplayInstall: { } pendingInstall,
+                    FallbackCheckpointDispatchBinding:
+                        { } pendingFallbackCheckpointDispatch,
+                } execution ||
+            !ReferenceEquals(execution.SourceDataSession, context.DataSession) ||
+            !IsOutboundSparsePumpInstallCurrentLocked(
+                context,
+                pendingInstall,
+                execution.SourceDataSession,
+                out _) ||
+            !TryValidateOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
+                context,
+                pendingFallbackCheckpointDispatch,
+                out _))
+        {
+            return false;
+        }
+
+        install = pendingInstall;
+        dataSession = execution.SourceDataSession;
+        fallbackCheckpointDispatch = pendingFallbackCheckpointDispatch;
+        return true;
     }
 
     private bool TryCompleteInboundFileTransferRouteTransitionRetainedFrameLocked(

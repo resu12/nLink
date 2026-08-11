@@ -17665,6 +17665,38 @@ public sealed class FileTransferCoordinatorTests
             "started",
             fallbackCommitted.State.CurrentLiveRouteEpoch!.State);
         Assert.Null(fallbackCommitted.State.CurrentRouteCommit);
+        var fallbackLeg = Assert.IsType<FileTransferLeg>(
+            fallbackCommitted.State.CurrentLeg);
+        Assert.Equal(
+            FileTransferLegState.CheckpointPending,
+            fallbackLeg.State);
+        Assert.False(fallbackLeg.CanSendData);
+        Assert.Equal(
+            $"v6-regular-nkn-state-refresh:route-transition:{fallbackAuthority.TransitionGeneration}:{targetEpoch}",
+            fallbackLeg.CheckpointRequestId);
+        Assert.Equal("state_refresh", fallbackLeg.CheckpointPriority);
+        var fallbackCheckpointLease = Assert.IsType<FallbackCheckpointLease>(
+            fallbackCommitted.State.CurrentFallbackCheckpointLease);
+        Assert.Equal(
+            fallbackCommitted.RouteDecision!.FallbackCheckpointLease,
+            fallbackCheckpointLease);
+        Assert.Equal(fallbackLeg.Generation, fallbackCheckpointLease.LegGeneration);
+        Assert.Equal(targetEpoch, fallbackCheckpointLease.TransportEpoch);
+        Assert.Equal(
+            fallbackBoundary.TargetBridgeRecoveryGeneration,
+            fallbackCheckpointLease.BridgeRecoveryGeneration);
+        Assert.Equal(
+            fallbackLeg.CheckpointGeneration,
+            fallbackCheckpointLease.CheckpointGeneration);
+        Assert.Equal(
+            fallbackLeg.CheckpointRequestId,
+            fallbackCheckpointLease.CheckpointRequestId);
+        Assert.True(
+            FileTransferCoordinator.IsFallbackCheckpointLeaseCurrent(
+                fallbackCommitted.State,
+                fallbackCheckpointLease,
+                out var checkpointLeaseReason),
+            checkpointLeaseReason);
         Assert.True(
             FileTransferCoordinator.IsFileTransferRouteTransitionDispositionCommandValid(
                 fallbackCommitted.DispositionCommand!.Value));
@@ -17691,6 +17723,9 @@ public sealed class FileTransferCoordinatorTests
             FileTransferRouteTransitionDecisionStatus.Idempotent,
             duplicateCommit.Status);
         Assert.Same(applied.State, duplicateCommit.State);
+        Assert.Equal(
+            fallbackCheckpointLease,
+            duplicateCommit.State.CurrentFallbackCheckpointLease);
 
         var duplicateFrame =
             FileTransferCoordinator.ApplyFileTransferRouteTransitionRetainedFrameReceipt(
