@@ -15977,6 +15977,157 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task RuntimeUnlockRetryDispatch_FallbackPairedYieldDiagnosticReasonQueuesExactlyOnce()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-retry-source-reason.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-retry-source-reason.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-retry-source-reason-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-retry-source-reason-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_runtime_unlock_retry_source_reason";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var logStart = GetOperationalLogLength();
+
+            var request = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                host,
+                sessionId,
+                transferId,
+                "runtime_unlock_offer_send_not_observed",
+                "fallback_tail_pairing_committed");
+            var current = CaptureCurrentRuntimeUnlockFileTransferOwnerAuthorityForTests(
+                host,
+                sessionId);
+            Assert.Equal("accepted", current.CoordinatorDecisionReason);
+            Assert.Equal(
+                "fallback_paired_tail_yield",
+                request.SourcePublicationAuthority.CoordinatorDecisionReason);
+            Assert.Equal(
+                current with
+                {
+                    CoordinatorDecisionReason =
+                        request.SourcePublicationAuthority.CoordinatorDecisionReason,
+                },
+                request.SourcePublicationAuthority);
+
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(host);
+            for (var i = 0; i < 8; i++)
+            {
+                Assert.True(bridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request));
+            }
+
+            await host.DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await WaitUntilAsync(
+                () => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host) is not null,
+                TimeSpan.FromSeconds(3));
+
+            var lines = ReadOperationalLogTail(logStart)
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains($"transfer_id={transferId}", StringComparison.Ordinal))
+                .ToArray();
+            Assert.Single(lines.Where(line => line.Contains(
+                "event=runtime_unlock_retry_dispatch_authority_request_queued;",
+                StringComparison.Ordinal)));
+            Assert.Single(lines.Where(line => line.Contains(
+                "event=runtime_unlock_retry_dispatch_install_committed;",
+                StringComparison.Ordinal)));
+            Assert.DoesNotContain(lines, line => line.Contains(
+                "decision_reason=coordinator_request_source_scope_not_current",
+                StringComparison.Ordinal));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [InlineData("reason", true)]
+    [InlineData("session", false)]
+    [InlineData("transfer", false)]
+    [InlineData("direction", false)]
+    [InlineData("route", false)]
+    [InlineData("protocol", false)]
+    [InlineData("epoch", false)]
+    [InlineData("runtime", false)]
+    [InlineData("terminal", false)]
+    [InlineData("leg", false)]
+    [InlineData("publication", false)]
+    [InlineData("commit", false)]
+    [InlineData("target_route", false)]
+    [InlineData("target_protocol", false)]
+    [InlineData("target_transport", false)]
+    [InlineData("action", false)]
+    [Trait("Category", "Smoke")]
+    public void RuntimeUnlockRetryDispatch_SourcePublicationCurrentnessIgnoresOnlyDiagnosticReason(
+        string mutation,
+        bool expected)
+    {
+        var current = new FileTransferRoutePublicationAuthority(
+            "session",
+            "transfer",
+            FileTransferDirection.Outbound,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch: 2,
+            RuntimeGeneration: 3,
+            TerminalGeneration: 0,
+            LegGeneration: 3,
+            RoutePublicationGeneration: 3,
+            RouteCommitGeneration: null,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            FileTransferTransportKind.RegularNkn,
+            FileTransferCoordinatorActionKind.RoutePublication.ToString(),
+            "accepted");
+        var requested = current with { CoordinatorDecisionReason = "fallback_paired_tail_yield" };
+        requested = mutation switch
+        {
+            "reason" => requested,
+            "session" => requested with { SessionId = "other-session" },
+            "transfer" => requested with { TransferId = "other-transfer" },
+            "direction" => requested with { Direction = FileTransferDirection.Inbound },
+            "route" => requested with { RouteToken = FileTransferRouteResolver.RegularNknV4FastToken },
+            "protocol" => requested with { ProtocolVersion = FileTransferProtocol.ProtocolVersionV4 },
+            "epoch" => requested with { LiveRouteEpoch = 3 },
+            "runtime" => requested with { RuntimeGeneration = 4 },
+            "terminal" => requested with { TerminalGeneration = 1 },
+            "leg" => requested with { LegGeneration = 4 },
+            "publication" => requested with { RoutePublicationGeneration = 4 },
+            "commit" => requested with { RouteCommitGeneration = 0 },
+            "target_route" => requested with { TargetRouteToken = FileTransferRouteResolver.FileTunaV4Token },
+            "target_protocol" => requested with { TargetProtocolVersion = 5 },
+            "target_transport" => requested with { TargetTransport = FileTransferTransportKind.Tuna },
+            "action" => requested with { RoutePublicationActionKind = "OtherAction" },
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null),
+        };
+        var method = typeof(NknSignalingTransport).GetMethod(
+            "RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        Assert.Equal(expected, Assert.IsType<bool>(method!.Invoke(null, [current, requested])));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockRetryDispatch_PreCoreHeldDecisionReleasesExactSlotWithoutInstall()
     {
         FakeNknClient.ResetNetwork();
@@ -31764,7 +31915,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             transferId,
             FileTransferRouteResolver.PostTunaFallbackV6Token,
             FileTransferProtocol.ProtocolVersionV6,
-            "fallback_paired_tail_yield",
+            "accepted",
             false,
             "fallback_tail_quiescent",
             "active",

@@ -3084,6 +3084,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($unsettled.Phase -ne 'runtime_unlock_retry' -or $unsettled.Reason -ne 'runtime_unlock_retry_dispatch_contract_unsettled') { throw 'runtime unlock unsettled contract lost precedence' }
             $postGrantHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_held_after_authority_granted; retained_event=runtime_unlock_retry_dispatch_held_by_active_negotiation' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($postGrantHold.Phase -ne 'runtime_unlock_retry' -or $postGrantHold.Reason -ne 'retry_dispatch_held_after_authority_granted') { throw 'runtime unlock post-grant hold lost precedence' }
+            $pairedYieldSourceScope = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=paired_fallback_tail_yield_missing; failure_variant=paired_yield_retry_request_source_scope_not_current; retained_event=runtime_unlock_retry_dispatch_authority_request_queue_rejected' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($pairedYieldSourceScope.Phase -ne 'route_runtime' -or $pairedYieldSourceScope.Reason -ne 'fallback_paired_tail_yield_retry_request_source_scope_not_current') { throw 'paired-yield retry source-scope rejection lost precedence' }
             $initialResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_initial_responder_boundary_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
             $initialResponderMissingDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_invalidated; first_proof_chain_failure_reason=initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
@@ -3220,6 +3222,84 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Runtime-unlock post-grant hold GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-runtime-unlock-post-grant-hold-index-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GuiSmokeFailureClassification_PairedYieldRetrySourceScopeFailureUsesIndexedProofBeforeDeadline(
+        bool recovered)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-paired-yield-source-scope-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'session_id=sess; transfer_id=transfer; direction=outbound; authority_id=yield-a; yield_generation=1; log_writer_id=writer'
+                $lines = @(
+                    "event=filetransfer_fallback_tail_local_proof_receipt_decided; $scope; decision_status=Accepted",
+                    "event=filetransfer_fallback_tail_peer_proof_receipt_decided; $scope; decision_status=Accepted",
+                    "event=filetransfer_fallback_tail_pairing_committed; $scope; decision_status=Accepted",
+                    "event=filetransfer_fallback_tail_paired_yield_granted; $scope",
+                    'event=runtime_unlock_retry_dispatch_authority_request_queue_rejected; session_id=sess; transfer_id=transfer; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; retry_reason=fallback_paired_tail_yield; decision_reason=coordinator_request_source_scope_not_current; log_writer_id=writer',
+                    "event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; $scope; decision_status=Rejected; decision_reason=fallback_paired_tail_yield_request_queue_rejected"
+                )
+                if (${{recovered.ToString().ToLowerInvariant()}}) {
+                    $lines += "event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; $scope; decision_status=Queued"
+                    $lines += 'event=runtime_unlock_retry_dispatch_authority_granted; session_id=sess; transfer_id=transfer; release_authority_id=yield-a; log_writer_id=writer'
+                    $lines += "event=filetransfer_fallback_tail_paired_release_reserved; $scope"
+                    $lines += "event=filetransfer_fallback_tail_paired_release_consumed; $scope"
+                    $lines += 'event=filetransfer_route_transition_prepared; session_id=sess; transfer_id=transfer; direction=outbound; transition_kind=PostTunaFallbackV6ToTunaV4; fallback_yield_authority_id=yield-a; log_writer_id=writer'
+                }
+                [IO.File]::WriteAllLines($path, $lines)
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded: scenario deadline elapsed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if (-not ${{recovered.ToString().ToLowerInvariant()}}) {
+                    if ($result.Phase -ne 'route_runtime' -or
+                        $result.Reason -ne 'fallback_paired_tail_yield_retry_request_source_scope_not_current' -or
+                        $result.ClassificationSource -ne 'immutable_evidence_paired_yield_retry_source_scope_index') {
+                        throw "paired-yield source-scope failure did not outrank deadline: $($result | ConvertTo-Json -Compress)"
+                    }
+                }
+                elseif ($result.Phase -ne 'progress_failure' -or
+                    $result.Reason -ne 'gui_smoke_scenario_deadline_exceeded') {
+                    throw "exact recovery did not close paired-yield source-scope failure: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-paired-yield-source-scope-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Paired-yield source-scope GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-paired-yield-source-scope-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -7339,6 +7419,25 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             )
             if (-not (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $crossScope)) {
                 throw 'cross-scope atomic recovery masked an unrelated stall'
+            }
+
+            $tunaScope = 'session_id=session-tuna; transfer_id=transfer-tuna; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; route_commit_generation=0; log_writer_id=writer-tuna'
+            $tunaLines = @(
+                "event=filetransfer_regular_v4_frontier_repair_stalled; $tunaScope; repair_request_key=96:12:96:12; frontier_chunk_index=96; requested_chunk_count=12",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; $tunaScope; authority_id=repair-tuna; successor_install_generation=4; repair_request_key=96:12:96:12; outcome=StaleRejected; settlement_reason=tuna_activation_pause_tuna_activation_negotiating",
+                'event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-tuna; transfer_id=transfer-tuna; direction=inbound; install_generation=4; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; log_writer_id=writer-tuna',
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_retired; $tunaScope; authority_id=repair-tuna; install_generation=4; repair_request_key=96:12:96:12; install_boundary=settlement",
+                'event=filetransfer_route_transition_committed; session_id=session-tuna; transfer_id=transfer-tuna; direction=inbound; transition_kind=RegularV4ToTunaV4; source_route=regular_nkn_v4_fast; source_live_route_epoch=0; source_runtime_generation=1; source_leg_generation=1; source_route_publication_generation=1; target_route=file_tuna_v4; target_live_route_epoch=1; decision_status=Committed; log_writer_id=writer-tuna',
+                'event=filetransfer_file_tuna_v4_frontier_repair_progress_observed; session_id=session-tuna; transfer_id=transfer-tuna; direction=inbound; repair_request_key=96:12:96:12; live_route_epoch=1; committed_frontier_before=96; committed_frontier_after=99; log_writer_id=writer-tuna',
+                'event=filetransfer_v4_repair_cleared; session_id=session-tuna; transfer_id=transfer-tuna; repair_request_key=96:12:96:12; reason=frontier_advanced; log_writer_id=writer-tuna'
+            )
+            if (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $tunaLines) {
+                throw 'exact Tuna progress did not recover the Regular-V4 stall'
+            }
+            $wrongTunaKey = @($tunaLines)
+            $wrongTunaKey[5] = $wrongTunaKey[5].Replace('repair_request_key=96:12:96:12', 'repair_request_key=96:11:96:11')
+            if (-not (Test-TunaGuiRegularV4FrontierRepairStallUnresolved -Lines $wrongTunaKey)) {
+                throw 'wrong-key Tuna progress recovered the Regular-V4 stall'
             }
 
             Write-Output 'gui-completed-proven-and-atomic-stall-correlation-ok'

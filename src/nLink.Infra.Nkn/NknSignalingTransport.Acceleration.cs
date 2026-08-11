@@ -8001,6 +8001,14 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private static bool RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent(
+        FileTransferRoutePublicationAuthority current,
+        FileTransferRoutePublicationAuthority requested)
+        => current with
+           {
+               CoordinatorDecisionReason = requested.CoordinatorDecisionReason,
+           } == requested;
+
     private bool TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
         FileTransferRoutePublicationAuthority sourcePublicationAuthority,
         out RuntimeUnlockRetryNegotiationSourceScope sourceScope)
@@ -8015,7 +8023,9 @@ public sealed partial class NknSignalingTransport
             if (!fileTransferRoutePublicationAuthorities.TryGetValue(
                     key,
                     out var currentPublicationAuthority) ||
-                currentPublicationAuthority != sourcePublicationAuthority ||
+                !RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent(
+                    currentPublicationAuthority,
+                    sourcePublicationAuthority) ||
                 !fileTransferRouteHints.TryGetValue(key, out var routeHint) ||
                 routeHint.RoutePublicationGeneration !=
                     sourcePublicationAuthority.RoutePublicationGeneration ||
