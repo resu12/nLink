@@ -9557,7 +9557,7 @@ function Get-FileTransferRouteTransitionCorrelation {
         return $true
     }
 
-    function Test-InitialResponderRouteTransitionDrainTupleMatch {
+    function Test-ResponderRouteTransitionDrainTupleMatch {
         param(
             [Parameter(Mandatory = $true)]$Prepared,
             [Parameter(Mandatory = $true)]$Candidate
@@ -9566,13 +9566,22 @@ function Get-FileTransferRouteTransitionCorrelation {
         if (-not (Test-RouteTransitionAuthorityMatch `
                 -Authority $Prepared `
                 -Candidate $Candidate) -or
-            (Get-RouteTransitionField -Event $Prepared -Name 'direction') -ine 'inbound' -or
-            (Get-RouteTransitionField -Event $Prepared -Name 'transition_kind') -ne
-                'RegularV4ToTunaV4' -or
-            (Get-RouteTransitionField -Event $Prepared -Name 'responder_transition_mode') -ne
-                'initial_regular_v4' -or
-            (Get-RouteTransitionField -Event $Prepared -Name 'activation_authority_mode') -ne
-                'initial_responder') {
+            (Get-RouteTransitionField -Event $Prepared -Name 'direction') -ine 'inbound') {
+            return $false
+        }
+
+        $transitionKind = Get-RouteTransitionField -Event $Prepared -Name 'transition_kind'
+        $responderMode = Get-RouteTransitionField -Event $Prepared -Name 'responder_transition_mode'
+        $activationMode = Get-RouteTransitionField -Event $Prepared -Name 'activation_authority_mode'
+        $initialResponder =
+            $transitionKind -eq 'RegularV4ToTunaV4' -and
+            $responderMode -eq 'initial_regular_v4' -and
+            $activationMode -eq 'initial_responder'
+        $postFallbackResponder =
+            $transitionKind -eq 'PostTunaFallbackV6ToTunaV4' -and
+            $responderMode -eq 'post_fallback_v6_paired' -and
+            $activationMode -eq 'responder'
+        if (-not $initialResponder -and -not $postFallbackResponder) {
             return $false
         }
 
@@ -9586,7 +9595,7 @@ function Get-FileTransferRouteTransitionCorrelation {
             return $false
         }
 
-        foreach ($fieldName in @(
+        $tupleFields = @(
                 'proof_boundary_kind',
                 'responder_transition_mode',
                 'activation_authority_mode',
@@ -9596,11 +9605,40 @@ function Get-FileTransferRouteTransitionCorrelation {
                 'offer_generation',
                 'launch_generation',
                 'tuna_path_lease_generation',
-                'retry_install_generation')) {
-            $expected = Get-RouteTransitionField -Event $Prepared -Name $fieldName
-            $actual = Get-RouteTransitionField -Event $Candidate -Name $fieldName
+                'retry_install_generation')
+        if ($postFallbackResponder) {
+            $tupleFields += @(
+                'fallback_yield_authority_id',
+                'fallback_yield_generation',
+                'pairing_generation',
+                'pair_key',
+                'responder_handoff_authority_id',
+                'responder_handoff_generation',
+                'checkpoint_request_id',
+                'data_session_identity',
+                'checkpoint_generation',
+                'checkpoint_state_epoch',
+                'checkpoint_contiguous_frontier',
+                'checkpoint_durable_highest',
+                'checkpoint_chunk_count')
+        }
+        foreach ($fieldName in $tupleFields) {
+            $expected = if ($fieldName -eq 'checkpoint_request_id') {
+                Get-FileTransferEventField -Event $Prepared -Name $fieldName -Default '__missing__'
+            }
+            else {
+                Get-RouteTransitionField -Event $Prepared -Name $fieldName
+            }
+            $actual = if ($fieldName -eq 'checkpoint_request_id') {
+                Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default '__missing__'
+            }
+            else {
+                Get-RouteTransitionField -Event $Candidate -Name $fieldName
+            }
             if ([string]::IsNullOrWhiteSpace($expected) -or
                 [string]::IsNullOrWhiteSpace($actual) -or
+                $expected -eq '__missing__' -or
+                $actual -eq '__missing__' -or
                 -not [string]::Equals(
                     $expected,
                     $actual,
@@ -10313,13 +10351,36 @@ function Get-FileTransferRouteTransitionCorrelation {
         $terminalSequence = if ($terminals.Count -gt 0) { [int64]$terminals[0].Sequence } else { [int64]::MaxValue }
         $operationEnd = [Math]::Min($terminalSequence, [Math]::Min($commitSequence, $invalidationSequence))
 
-        if ($draining.Count -gt 0 -and
-            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+        [object[]]$responderPauses = @($pauseEvents | Where-Object {
+                [int64]$_.Sequence -gt $preparedSequence -and
+                (Test-ResponderRouteTransitionDrainTupleMatch `
+                    -Prepared $prepared `
+                    -Candidate $_) -and
+                (Test-RouteTransitionStatus `
+                    -Event $_ `
+                    -Allowed @('Accepted', 'Installed', 'Idempotent'))
+            } | Sort-Object Sequence, LineNumber)
+        if ($responderPauses.Count -gt 0 -and
+            $draining.Count -gt 0 -and
+            (Test-ResponderRouteTransitionDrainTupleMatch `
                 -Prepared $prepared `
                 -Candidate $draining[0])) {
+            $postFallbackResponder =
+                (Get-RouteTransitionField -Event $prepared -Name 'transition_kind') -eq
+                    'PostTunaFallbackV6ToTunaV4' -and
+                (Get-RouteTransitionField -Event $prepared -Name 'responder_transition_mode') -eq
+                    'post_fallback_v6_paired' -and
+                (Get-RouteTransitionField -Event $prepared -Name 'activation_authority_mode') -eq
+                    'responder'
+            $drainRejectionReason = if ($postFallbackResponder) {
+                'filetransfer_route_transition_fallback_release_not_current'
+            }
+            else {
+                'filetransfer_route_transition_initial_responder_boundary_not_current'
+            }
             [object[]]$rejectedDrainReceipts = @($receiptEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
-                    (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                    (Test-ResponderRouteTransitionDrainTupleMatch `
                         -Prepared $prepared `
                         -Candidate $_) -and
                     (Get-RouteTransitionField -Event $_ -Name 'status') -eq 'Rejected'
@@ -10327,18 +10388,18 @@ function Get-FileTransferRouteTransitionCorrelation {
             if ($rejectedDrainReceipts.Count -gt 0) {
                 [object[]]$reasonMutations = @($rejectedDrainReceipts | Where-Object {
                         (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -ne
-                            'filetransfer_route_transition_initial_responder_boundary_not_current'
+                            $drainRejectionReason
                     })
                 [object[]]$exactRejectedDrainReceipts = @($rejectedDrainReceipts | Where-Object {
                         (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -eq
-                            'filetransfer_route_transition_initial_responder_boundary_not_current'
+                            $drainRejectionReason
                     })
                 if ($reasonMutations.Count -eq 0 -and
                     $exactRejectedDrainReceipts.Count -gt 0) {
                     $lastRejectedSequence = [int64]$exactRejectedDrainReceipts[-1].Sequence
                     [object[]]$completedRecoveryReceipts = @($receiptEvents | Where-Object {
                             [int64]$_.Sequence -gt $lastRejectedSequence -and
-                            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                            (Test-ResponderRouteTransitionDrainTupleMatch `
                                 -Prepared $prepared `
                                 -Candidate $_) -and
                             (Test-RouteTransitionReceiptComplete `
@@ -10350,7 +10411,7 @@ function Get-FileTransferRouteTransitionCorrelation {
                         $recoveryReceipt = $completedRecoveryReceipts[0]
                         [object[]]$recoveryCommits = @($commitEvents | Where-Object {
                                 [int64]$_.Sequence -gt [int64]$recoveryReceipt.Sequence -and
-                                (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                                (Test-ResponderRouteTransitionDrainTupleMatch `
                                     -Prepared $prepared `
                                     -Candidate $_) -and
                                 (Test-RouteTransitionStatus `
@@ -10361,7 +10422,7 @@ function Get-FileTransferRouteTransitionCorrelation {
                             $recoveryCommit = $recoveryCommits[0]
                             [object[]]$recoveryDispositions = @($dispositionEvents | Where-Object {
                                     [int64]$_.Sequence -gt [int64]$recoveryCommit.Sequence -and
-                                    (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                                    (Test-ResponderRouteTransitionDrainTupleMatch `
                                         -Prepared $prepared `
                                         -Candidate $_) -and
                                     ((Test-RouteTransitionStatus `
@@ -10387,12 +10448,18 @@ function Get-FileTransferRouteTransitionCorrelation {
                         }
                     }
 
-                    $directCandidateKey = "$candidateKey|initial-responder-drain-rejected|$((Get-RouteTransitionField -Event $prepared -Name 'log_writer_id').ToLowerInvariant())"
+                    $drainMode = if ($postFallbackResponder) {
+                        'post-fallback-responder'
+                    }
+                    else {
+                        'initial-responder'
+                    }
+                    $directCandidateKey = "$candidateKey|$drainMode-drain-rejected|$((Get-RouteTransitionField -Event $prepared -Name 'log_writer_id').ToLowerInvariant())"
                     foreach ($rejectedDrainReceipt in $exactRejectedDrainReceipts) {
                         Add-RouteTransitionCandidate `
                             -Event $rejectedDrainReceipt `
                             -Key $directCandidateKey `
-                            -Reason 'filetransfer_route_transition_initial_responder_boundary_not_current' `
+                            -Reason $drainRejectionReason `
                             -Recovered:$recovered
                     }
                     continue
@@ -24023,12 +24090,22 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
         $distinct.Add($rejection) | Out-Null
 
         $laterSubmission = @($answerAckSubmissions | Where-Object {
-            $_.EventName -eq 'tuna_acceleration_answer_ack_sent' -and
+            $_.EventName -in @(
+                'tuna_acceleration_answer_ack_sent',
+                'tuna_acceleration_answer_ack_replay_sent') -and
             [int64]$_.Sequence -gt [int64]$rejection.Sequence -and
             (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
             (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -eq $payerDecisionId -and
             (Get-AnswerDeliveryIdentityValue $_ @('generation')) -eq $generation -and
-            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer
+            (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -eq $writer -and
+            (Get-AnswerDeliveryIdentityValue $_ @('msg_id')) -eq
+                (Get-AnswerDeliveryIdentityValue $rejection @('msg_id')) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('target_mode')) -eq
+                (Get-AnswerDeliveryIdentityValue $rejection @('target_mode')) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('inbound_msg_id')) -eq
+                (Get-AnswerDeliveryIdentityValue $rejection @('inbound_msg_id')) -and
+            (Get-AnswerDeliveryIdentityValue $_ @('reply_deadline_utc_ms')) -eq
+                (Get-AnswerDeliveryIdentityValue $rejection @('reply_deadline_utc_ms'))
         } | Select-Object -First 1)
         $peerAck = @($answerAckReceipts | Where-Object {
             $laterSubmission.Count -eq 1 -and

@@ -3088,6 +3088,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($pairedYieldSourceScope.Phase -ne 'route_runtime' -or $pairedYieldSourceScope.Reason -ne 'fallback_paired_tail_yield_retry_request_source_scope_not_current') { throw 'paired-yield retry source-scope rejection lost precedence' }
             $initialResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_initial_responder_boundary_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
+            $postFallbackResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_fallback_release_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($postFallbackResponderDrain.Phase -ne 'route_transition' -or $postFallbackResponderDrain.Reason -ne 'filetransfer_route_transition_fallback_release_not_current') { throw 'post-fallback responder drain rejection lost precedence' }
             $initialResponderMissingDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_invalidated; first_proof_chain_failure_reason=initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderMissingDrain.Phase -ne 'route_transition' -or $initialResponderMissingDrain.Reason -ne 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt') { throw 'initial responder missing drain lost precedence' }
             $initialRecoveryHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_offer_receive_recovery_hold_not_preserved; retained_event=tuna_acceleration_activation_offer_not_observed' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -3494,6 +3496,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $tuple = 'direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; authority_id=authority; transition_generation=1; transition_kind=RegularV4ToTunaV4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; source_runtime_generation=1; source_route_publication_generation=1; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; retry_install_generation=0'
                 @(
                     "event=filetransfer_route_transition_prepared; decision_status=Prepared; $tuple",
+                    "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $tuple",
                     "event=filetransfer_route_transition_draining; decision_status=Draining; $tuple",
                     "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Rejected; decision_reason=filetransfer_route_transition_initial_responder_boundary_not_current; $tuple",
                     "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Rejected; decision_reason=filetransfer_route_transition_initial_responder_boundary_not_current; $tuple"
@@ -3522,6 +3525,24 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($recovered.Phase -ne 'progress_failure' -or
                     $recovered.Reason -ne 'gui_smoke_scenario_deadline_exceeded') {
                     throw "recovered responder drain retained route failure: $($recovered | ConvertTo-Json -Compress)"
+                }
+
+                $postFallbackTuple = 'direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; authority_id=authority-post-fallback; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_route_publication_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; proof_boundary_kind=tuna_activation; responder_transition_mode=post_fallback_v6_paired; activation_authority_mode=responder; admission_generation=3; pending_precommit_generation=2; transaction_generation=1; offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; retry_install_generation=0; fallback_yield_authority_id=yield-1; fallback_yield_generation=1; pairing_generation=1; pair_key=pair-1; responder_handoff_authority_id=handoff-1; responder_handoff_generation=1; checkpoint_request_id=(none); data_session_identity=data-session:1; checkpoint_generation=1; checkpoint_state_epoch=1039; checkpoint_contiguous_frontier=2586; checkpoint_durable_highest=3094; checkpoint_chunk_count=12484'
+                @(
+                    "event=filetransfer_route_transition_prepared; decision_status=Prepared; $postFallbackTuple",
+                    "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $postFallbackTuple",
+                    "event=filetransfer_route_transition_draining; decision_status=Draining; $postFallbackTuple",
+                    "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Rejected; decision_reason=filetransfer_route_transition_fallback_release_not_current; $postFallbackTuple",
+                    "event=filetransfer_route_transition_invalidated; decision_status=Invalidated; decision_reason=inbound_transfer_terminal; $postFallbackTuple"
+                ) | Set-Content -LiteralPath $path
+                $postFallback = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded: scenario deadline elapsed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($postFallback.Phase -ne 'route_transition' -or
+                    $postFallback.Reason -ne 'filetransfer_route_transition_fallback_release_not_current') {
+                    throw "post-fallback responder drain mismatch: $($postFallback | ConvertTo-Json -Compress)"
                 }
 
                 @(

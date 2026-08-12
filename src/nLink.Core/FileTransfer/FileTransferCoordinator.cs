@@ -28430,7 +28430,12 @@ internal static class FileTransferCoordinator
                     { IsDefault: false } &&
                 activation.ResponderPeerProbeHandoffAuthority is
                     { IsDefault: false };
-            var validBoundary = proof == activation.AcceptedLaunchBoundary &&
+            var validBoundary =
+                (responderMode
+                    ? RuntimeUnlockPostFallbackResponderCommitProofMatchesAcceptedBoundary(
+                        proof,
+                        activation.AcceptedLaunchBoundary)
+                    : proof == activation.AcceptedLaunchBoundary) &&
                 activation.InitialResponderPeerProbeObservation is null &&
                 initiatorMode != responderMode;
             if (validBoundary && initiatorMode)
@@ -28524,6 +28529,12 @@ internal static class FileTransferCoordinator
 
     private static bool
         RuntimeUnlockInitialResponderCommitProofMatchesAcceptedBoundary(
+            RuntimeUnlockRouteCommitProof current,
+            RuntimeUnlockRouteCommitProof accepted)
+        => current with { Reason = accepted.Reason } == accepted;
+
+    private static bool
+        RuntimeUnlockPostFallbackResponderCommitProofMatchesAcceptedBoundary(
             RuntimeUnlockRouteCommitProof current,
             RuntimeUnlockRouteCommitProof accepted)
         => current with { Reason = accepted.Reason } == accepted;

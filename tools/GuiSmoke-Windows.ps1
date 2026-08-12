@@ -5128,6 +5128,11 @@ function Get-TunaGuiExplicitFailureClassification {
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                         'filetransfer_route_transition_initial_responder_boundary_not_current'
                     }
+                    elseif ($ErrorMessage.IndexOf(
+                            'filetransfer_route_transition_fallback_release_not_current',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'filetransfer_route_transition_fallback_release_not_current'
+                    }
                     else { $failureClass }
                 }
             }
@@ -12792,7 +12797,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [Parameter(Mandatory = $true)][string]$Candidate
             )
 
-            foreach ($field in $tupleFields) {
+            $fields = @($tupleFields)
+            if ((Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'transition_kind') -ieq
+                    'PostTunaFallbackV6ToTunaV4') {
+                $fields += @(
+                    'fallback_yield_authority_id', 'fallback_yield_generation',
+                    'pairing_generation', 'pair_key',
+                    'responder_handoff_authority_id', 'responder_handoff_generation',
+                    'checkpoint_request_id', 'data_session_identity',
+                    'checkpoint_generation', 'checkpoint_state_epoch',
+                    'checkpoint_contiguous_frontier', 'checkpoint_durable_highest',
+                    'checkpoint_chunk_count')
+            }
+            foreach ($field in $fields) {
                 $expected = Get-TunaGuiLogLineFieldValue -Line $Prepared -Name $field
                 $actual = Get-TunaGuiLogLineFieldValue -Line $Candidate -Name $field
                 if ([string]::IsNullOrWhiteSpace($expected) -or
@@ -12820,14 +12837,20 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $key = Get-TunaGuiInitialResponderDrainKey -Line $line
 
             if ($eventName -eq 'filetransfer_route_transition_prepared') {
+                $transitionKind = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transition_kind'
+                $responderMode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'responder_transition_mode'
+                $activationMode = Get-TunaGuiLogLineFieldValue -Line $line -Name 'activation_authority_mode'
+                $initialResponder =
+                    $transitionKind -ieq 'RegularV4ToTunaV4' -and
+                    $responderMode -ieq 'initial_regular_v4' -and
+                    $activationMode -ieq 'initial_responder'
+                $postFallbackResponder =
+                    $transitionKind -ieq 'PostTunaFallbackV6ToTunaV4' -and
+                    $responderMode -ieq 'post_fallback_v6_paired' -and
+                    $activationMode -ieq 'responder'
                 if ([string]::IsNullOrWhiteSpace($key) -or
                     (Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction') -ine 'inbound' -or
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transition_kind') -ine
-                        'RegularV4ToTunaV4' -or
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'responder_transition_mode') -ine
-                        'initial_regular_v4' -or
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'activation_authority_mode') -ine
-                        'initial_responder') {
+                    (-not $initialResponder -and -not $postFallbackResponder)) {
                     continue
                 }
                 $preparedWriter = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
@@ -12855,12 +12878,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         Incident = $false
                         IncidentSequence = 0L
                         IncidentReason = ''
+                        ExpectedRejectionReason = if ($postFallbackResponder) {
+                            'filetransfer_route_transition_fallback_release_not_current'
+                        }
+                        else {
+                            'filetransfer_route_transition_initial_responder_boundary_not_current'
+                        }
                         TerminalIncident = $false
                         PendingTerminalInvalidation = $false
                         PendingTerminalInvalidationSequence = 0L
                         RecoveryReceipt = $false
                         Commit = $false
                         Recovered = $false
+                        RecoveryBlocked = $false
                         Invalid = $false
                     }
                 }
@@ -12897,15 +12927,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $status = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status'
                         $reason = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
                         if ($status -ieq 'Rejected') {
-                            if (-not $state.Draining -or
-                                $reason -ine 'filetransfer_route_transition_initial_responder_boundary_not_current') {
+                            if (-not $state.Pause -or -not $state.Draining -or
+                                $reason -ine $state.ExpectedRejectionReason) {
                                 $state.Invalid = $true
                             }
                             elseif (-not $state.Incident) {
                                 $state.Incident = $true
                                 $state.IncidentSequence = $sequence
-                                $state.IncidentReason =
-                                    'filetransfer_route_transition_initial_responder_boundary_not_current'
+                                $state.IncidentReason = $state.ExpectedRejectionReason
                             }
                         }
                         elseif ($status -iin @('Accepted', 'Applied', 'Idempotent') -and
@@ -12936,7 +12965,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             $state.IncidentReason =
                                 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt'
                         }
-                        elseif ($state.Commit -and
+                        elseif ($state.Commit -and -not $state.RecoveryBlocked -and
                             ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'apply_status') -iin
                                     @('Applied', 'Idempotent') -or
                                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -iin
@@ -12946,7 +12975,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     }
                     'filetransfer_route_transition_invalidated' {
                         if ($state.Incident -and -not $state.Recovered) {
-                            $state.Invalid = $true
+                            $state.RecoveryBlocked = $true
                         }
                         elseif ($state.Pause -and
                             $state.Draining -and
@@ -12989,6 +13018,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                                 'filetransfer_v6_epoch_terminal',
                                 'file_transfer_inbound_terminal',
                                 'transfer_terminal')) {
+                            continue
+                        }
+                        if ($state.Incident) {
+                            $state.RecoveryBlocked = $true
                             continue
                         }
                         $state.Invalid = $true

@@ -638,6 +638,88 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(false, true)]
     [InlineData(true, true)]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostFallbackResponderDrainBoundaryRejectionUsesRouteTransitionOwnership(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "direction=inbound; session_id=sess_post_fallback_responder; transfer_id=transfer_post_fallback_responder; " +
+            "authority_id=fta2-post-fallback-responder; transition_generation=3; " +
+            "transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; " +
+            "source_protocol_version=6; source_transport=regular_nkn; source_live_route_epoch=2; " +
+            "source_runtime_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; " +
+            "source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; " +
+            "source_bridge_recovery_generation=1; source_data_session_generation=1; " +
+            "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+            "proof_boundary_kind=tuna_activation; responder_transition_mode=post_fallback_v6_paired; " +
+            "activation_authority_mode=responder; admission_generation=3; pending_precommit_generation=2; " +
+            "transaction_generation=1; offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; " +
+            "retry_install_generation=0; fallback_yield_authority_id=yield-post-fallback; " +
+            "fallback_yield_generation=1; pairing_generation=1; pair_key=pair-post-fallback; " +
+            "responder_handoff_authority_id=handoff-post-fallback; responder_handoff_generation=1; " +
+            "checkpoint_request_id=(none); data_session_identity=data-session-post-fallback:1; " +
+            "checkpoint_generation=1; checkpoint_state_epoch=1039; checkpoint_contiguous_frontier=2586; " +
+            "checkpoint_durable_highest=3094; checkpoint_chunk_count=12484; " +
+            "log_writer_id=writer_post_fallback_responder";
+        var messages = new List<string>
+        {
+            LogLine($"event=filetransfer_route_transition_prepared; {scope}; decision_status=Prepared"),
+            LogLine($"event=filetransfer_route_transition_pause_bound; {scope}; decision_status=Installed"),
+            LogLine($"event=filetransfer_route_transition_draining; {scope}; decision_status=Draining"),
+            LogLine($"event=filetransfer_route_transition_drain_receipt_decided; {scope}; " +
+                "decision_status=Rejected; decision_reason=filetransfer_route_transition_fallback_release_not_current")
+        };
+        if (recovered)
+        {
+            messages.Add(LogLine($"event=filetransfer_route_transition_drain_receipt_decided; {scope}; " +
+                "decision_status=Accepted; drain_outcome=Completed; captured_send_count=0; completed_send_count=0; " +
+                "captured_send_fingerprint=empty-set; completed_send_fingerprint=empty-set"));
+            messages.Add(LogLine($"event=filetransfer_route_transition_committed; {scope}; decision_status=Committed"));
+            messages.Add(LogLine($"event=filetransfer_route_transition_disposition_applied; {scope}; " +
+                "decision_status=Applied; apply_status=Applied; disposition=committed"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_route_transition_incomplete_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_route_transition_incomplete_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_route_transition_incomplete_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal("filetransfer_route_transition_incomplete", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("filetransfer_route_transition_drain_receipt_decided", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "filetransfer_route_transition_fallback_release_not_current",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+            Assert.Equal("(none)", verdict["failure_variant"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_InitialResponderTerminalInvalidationWithoutDrainReceiptUsesRouteTransitionOwnership(
         bool compact,
         bool completedBeforeTerminal)
@@ -1876,6 +1958,58 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "runtime_unlock_answer_ack_submission_failed_during_bridge_recovery_before_probe_handoff",
             verdict["first_proof_chain_failure_reason"]);
         Assert.Equal("tuna_acceleration_answer_ack_rejected", verdict["first_proof_chain_failure_event"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_RuntimeUnlockAnswerAckSubmissionBarrierExactReplayRecovers(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string initiatorScope =
+            "session_id=sess_answer_ack_replay; transfer_id=transfer_answer_ack_replay; " +
+            "payer_decision_id=4; generation=1; log_writer_id=writer_initiator";
+        const string deliveryTuple =
+            "target_mode=validated_inbound_source; inbound_msg_id=answer-1; msg_id=answer-ack-1; " +
+            "reply_deadline_utc_ms=90000";
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                LogLine($"event=runtime_unlock_transaction_answer_received; {initiatorScope}; transaction_generation=1; offer_generation=2"),
+                LogLine($"event=runtime_unlock_acceleration_reply_target_decided; {initiatorScope}; purpose=answer_ack; boundary=answer_ack_send; status=accepted; target_mode=validated_inbound_source"),
+                LogLine($"event=tuna_acceleration_answer_ack_rejected; {initiatorScope}; {deliveryTuple}"),
+                LogLine($"event=runtime_unlock_answer_ack_probe_barrier_released; {initiatorScope}; reason=answer_ack_sent_before_tuna_probe"),
+                LogLine($"event=runtime_unlock_precommit_probe_launch_requested; {initiatorScope}; responder_waiting_for_peer_probe=0; launch_generation=1; probe_id=probe-1"),
+                LogLine($"event=runtime_unlock_precommit_probe_sent; {initiatorScope}; launch_generation=1; probe_id=probe-1"),
+                LogLine("event=runtime_unlock_precommit_probe_acked; session_id=sess_answer_ack_replay; " +
+                    "transfer_id=transfer_answer_ack_replay; direction=inbound; launch_generation=0; " +
+                    "probe_id=probe-1; log_writer_id=writer_responder"),
+                LogLine($"event=tuna_acceleration_answer_ack_replay_sent; {initiatorScope}; {deliveryTuple}"),
+                LogLine("event=tuna_acceleration_answer_ack_received_raw; session_id=sess_answer_ack_replay; " +
+                    "payer_decision_id=4; msg_id=answer-ack-1; log_writer_id=writer_responder"),
+                LogLine("event=filetransfer_route_transition_prepared; session_id=sess_answer_ack_replay; " +
+                    "transfer_id=transfer_answer_ack_replay; direction=inbound; log_writer_id=writer_responder")
+            ],
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
     }
 
     [Theory]

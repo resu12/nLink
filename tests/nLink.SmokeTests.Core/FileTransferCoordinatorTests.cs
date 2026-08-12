@@ -18368,6 +18368,18 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             "filetransfer_route_transition_activation_proof_mismatch",
             missingProofReason);
+        Assert.False(
+            FileTransferCoordinator.TryValidateFileTransferRouteTransitionCommitProof(
+                draining.State,
+                authority,
+                setup.FinalProof with
+                {
+                    Reason = "runtime_unlock_transaction_peer_proof",
+                },
+                out var initiatorReasonDriftReason));
+        Assert.Equal(
+            "filetransfer_route_transition_fallback_release_not_current",
+            initiatorReasonDriftReason);
         Assert.True(
             FileTransferCoordinator
                 .TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
@@ -18801,10 +18813,14 @@ public sealed class FileTransferCoordinatorTests
         var finalProof = WithCurrentTunaLease(
             RuntimeUnlockTransaction.CreateRouteCommitProof(
                 transaction,
-                "responder_fallback_v6_to_tuna_commit",
+                "runtime_unlock_transaction_peer_proof",
                 admission),
             pending.TunaPathLeaseGeneration,
             pending.TunaPathLeaseListenerRunId!);
+        var acceptedLaunchBoundary = finalProof with
+        {
+            Reason = "runtime_unlock_responder_peer_probe_acked",
+        };
         var currentOwner = bound.State.CurrentRuntimeOwner!.Value;
         var currentPublication = bound.State.CurrentRoutePublicationToken!.Value;
         var currentLeg = bound.State.CurrentLeg!;
@@ -18832,7 +18848,7 @@ public sealed class FileTransferCoordinatorTests
             new FileTransferTunaActivationTransitionProofBoundary(
                 admission,
                 pending,
-                finalProof,
+                acceptedLaunchBoundary,
                 observation.LaunchGeneration,
                 EffectiveRetryInstallReceipt: null,
                 pairedRelease,
