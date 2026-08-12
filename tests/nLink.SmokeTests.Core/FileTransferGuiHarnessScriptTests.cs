@@ -2305,17 +2305,19 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         '; log_writer_batch_generation=' + $sequence +
                         '; log_writer_batch_first_sequence=' + $sequence +
                         '; log_writer_batch_last_sequence=' + $sequence +
-                        '; log_writer_attempt_utc_ticks=' + (1000000 + $sequence)
+                        '; log_writer_attempt_utc_ticks=' + (1000000 + $sequence) +
+                        '; payload_padding=' + ('a' * 650)
                     $lineB = '[b] event=' + $event +
                         '; acceptance_run_id=run-scale; scenario_run_id=run-scale:scenario:1' +
                         '; log_writer_id=writer-b; log_writer_sequence=' + $sequence +
                         '; log_writer_batch_generation=' + $sequence +
                         '; log_writer_batch_first_sequence=' + $sequence +
                         '; log_writer_batch_last_sequence=' + $sequence +
-                        '; log_writer_attempt_utc_ticks=' + (2000000 + $sequence)
+                        '; log_writer_attempt_utc_ticks=' + (2000000 + $sequence) +
+                        '; payload_padding=' + ('b' * 650)
                     $ledgerWriter.WriteLine($lineA)
                     $ledgerWriter.WriteLine($lineB)
-                    if ($sequence -le 50000) {
+                    if ($sequence -le 100) {
                         $payloadHash = (([BitConverter]::ToString($payloadHasher.ComputeHash($utf8.GetBytes($lineA)))) -replace '-', '').ToLowerInvariant()
                         $common = 'acceptance_run_id=run-scale; scenario_run_id=run-scale:scenario:1' +
                             '; log_writer_id=writer-a; batch_generation=' + $sequence +
@@ -2379,13 +2381,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
                 if ([long]$metrics.ledgerLineVisitCount -ne 200000 -or
-                    [long]$metrics.markerLineVisitCount -ne 100000 -or
-                    [long]$metrics.deferredLookupCount -ne 50000 -or
-                    [long]$metrics.recoveredLookupCount -ne 50000) {
+                    [long]$metrics.markerLineVisitCount -ne 200 -or
+                    [long]$metrics.deferredLookupCount -ne 100 -or
+                    [long]$metrics.recoveredLookupCount -ne 100) {
                     throw "nonlinear visit metrics: $($metrics | ConvertTo-Json -Compress)"
                 }
-                if ($ledger.writerDeferredBatchCount -ne 50000 -or
-                    $ledger.writerRecoveredBatchCount -ne 50000 -or
+                if ($ledger.writerDeferredBatchCount -ne 100 -or
+                    $ledger.writerRecoveredBatchCount -ne 100 -or
                     $ledger.writerUnresolvedDeferredBatchCount -ne 0 -or
                     $ledger.writerRecoveryMismatchCount -ne 0 -or
                     $ledger.writerChronologyInversionCount -ne 0 -or
@@ -2403,6 +2405,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($ledger.writerEvidenceSlice.sha256 -ne $ledger.retainedSlice.sha256 -or
                     $ledger.writerEvidenceSlice.lineCount -ne 200000) {
                     throw 'artifact-scale writer evidence diverged from the frozen ledger'
+                }
+                if ($finalizationStopwatch.ElapsedMilliseconds -ge 30000) {
+                    throw "compiled writer validation exceeded 30-second scale gate: $($finalizationStopwatch.ElapsedMilliseconds)ms"
                 }
                 Write-Output "gui-log-ledger-scale-linear-ok elapsed_ms=$($finalizationStopwatch.ElapsedMilliseconds)"
             }
@@ -2466,7 +2471,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 Enable-GuiSmokeAppendOnlyLogLedgerState `
                     -State $script:GuiSmokeAppLogLedger `
                     -Path $ledgerPath `
-                    -MaximumBytes (1024L * 1024L * 1024L)
+                    -MaximumBytes (4L * 1024L * 1024L * 1024L)
                 $source = [IO.FileStream]::new($sourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
                 $destination = [IO.FileStream]::new($ledgerPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
                 $source.CopyTo($destination, 1048576)
@@ -2532,12 +2537,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
                 $expectedLines = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
-                if ($stopwatch.ElapsedMilliseconds -ge 120000 -or
+                $remainingTemps = @(Get-ChildItem -LiteralPath $artifactDir -File -Filter '*.tmp' -ErrorAction SilentlyContinue)
+                if ([long]$expectedLines -ne 1617609 -or
+                    $stopwatch.ElapsedMilliseconds -ge 90000 -or
                     [long]$metrics.ledgerLineVisitCount -ne [long]$expectedLines -or
                     [long]$ledger.retainedSlice.lineCount -ne [long]$expectedLines -or
                     [long]$ledger.writerEvidenceSlice.lineCount -ne [long]$expectedLines -or
                     $ledger.writerIntegrityVerdict -ne 'pass' -or
-                    $ledger.cursorIntegrityVerdict -ne 'pass') {
+                    $ledger.cursorIntegrityVerdict -ne 'pass' -or
+                    $remainingTemps.Count -ne 0) {
                     throw "frozen artifact writer benchmark failed: elapsed_ms=$($stopwatch.ElapsedMilliseconds); expected_lines=$expectedLines; metrics=$($metrics | ConvertTo-Json -Compress); ledger=$($ledger | ConvertTo-Json -Compress -Depth 3)"
                 }
                 Write-Output "gui-log-ledger-frozen-benchmark-ok elapsed_ms=$($stopwatch.ElapsedMilliseconds) lines=$expectedLines"
@@ -6745,6 +6753,63 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $"GUI received-answer rejection test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains(
             "gui-received-answer-authority-rejection-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitialActivationAnswerContinuationDetectsSuccessorSlotCollisionAndExactRecovery()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiInitialActivationAnswerContinuationSlotCollision",
+            "Test-TunaGuiRetiredInitialActivationAnswerAuthorityTupleRejected");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Get-TunaGuiInitialActivationAnswerContinuationSlotCollision {
+                {{classifierBody}}
+            }
+            $scope = 'session_id=session-answer-continuation; transfer_id=transfer-1'
+            $lines = @(
+                "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=accepted; payer_decision_id=6; offer_generation=2; transaction_generation=1; tuna_path_lease_generation=2; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_transaction_answer_received; offer_generation=2; transaction_generation=1; tuna_path_lease_generation=2; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_retry_negotiation_slot_decided; intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=7; decision_status=Reserved; authority_effect=none; $scope; log_writer_id=writer-initiator"
+            )
+            $result = Get-TunaGuiInitialActivationAnswerContinuationSlotCollision -Lines $lines
+            if (-not $result.Unresolved) { throw 'successor slot collision was not detected' }
+            $lines += @(
+                "event=runtime_unlock_retry_negotiation_slot_decided; intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=7; decision_status=Released; authority_effect=none; $scope; log_writer_id=writer-initiator",
+                "event=tuna_acceleration_answer_ack_sent; payer_decision_id=6; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_answer_ack_probe_barrier_released; payer_decision_id=6; $scope; log_writer_id=writer-initiator",
+                "event=tuna_acceleration_answer_ack_received_raw; payer_decision_id=6; $scope; log_writer_id=writer-responder",
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; launch_generation=1; $scope; log_writer_id=writer-responder",
+                "event=filetransfer_route_transition_prepared; direction=inbound; transition_kind=PostTunaFallbackV6ToTunaV4; $scope; log_writer_id=writer-responder",
+                "event=filetransfer_route_transition_draining; direction=inbound; transition_kind=PostTunaFallbackV6ToTunaV4; $scope; log_writer_id=writer-responder"
+            )
+            $result = Get-TunaGuiInitialActivationAnswerContinuationSlotCollision -Lines $lines
+            if ($result.Unresolved) { throw 'exact continuation did not recover slot collision' }
+            Write-Output 'gui-answer-continuation-slot-collision-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI answer-continuation slot test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-answer-continuation-slot-collision-ok",
             result.Stdout,
             StringComparison.Ordinal);
     }

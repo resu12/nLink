@@ -3259,6 +3259,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $writerEvidenceSha256 = $null
     $writerLedgerReader = $null
     $writerLedgerVisitCount = 0L
+    $nativeStreamingResult = $null
     $rebuildWriterEvidenceFromFrozenSource =
         $null -ne $script:GuiSmokeAppLogLedger.PSObject.Properties['StorageMode'] -and
         [string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile'
@@ -3285,22 +3286,6 @@ function Write-FileTransferGuiLogLedgerEvidence {
         if (Test-Path -LiteralPath $writerEvidencePath -PathType Leaf) {
             throw "writer_evidence_slice_already_exists:$writerEvidencePath"
         }
-        $retainedSliceStream = [System.IO.FileStream]::new(
-            $retainedSliceTempPath,
-            [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::None,
-            65536,
-            [System.IO.FileOptions]::SequentialScan)
-        $retainedSliceSha256 = [System.Security.Cryptography.SHA256]::Create()
-        $writerEvidenceStream = [System.IO.FileStream]::new(
-            $writerEvidenceTempPath,
-            [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::None,
-            65536,
-            [System.IO.FileOptions]::SequentialScan)
-        $writerEvidenceSha256 = [System.Security.Cryptography.SHA256]::Create()
         $writerEvidenceEncoding = [System.Text.UTF8Encoding]::new($false)
         $writerEvidenceSeparator = $writerEvidenceEncoding.GetBytes([Environment]::NewLine)
         $retainedSliceLineCount = 0L
@@ -3308,7 +3293,38 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $writerEvidenceLineCount = 0L
         $writerEvidenceByteCount = 0L
         $frozenWriterEvidenceEnd = [int]$finalSnapshot.lineCount
-        if ($null -ne $script:GuiSmokeAppLogLedger.PSObject.Properties['StorageMode'] -and
+        if ($rebuildWriterEvidenceFromFrozenSource) {
+            $nativeStreamingResult =
+                [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::Process(
+                    [string]$script:GuiSmokeAppLogLedger.AppendOnlyPath,
+                    [long]$frozenWriterEvidenceEnd,
+                    [long]$Bookmark,
+                    $retainedSliceTempPath,
+                    $writerEvidenceTempPath,
+                    $expectedAcceptanceRunId,
+                    $expectedScenarioRunId,
+                    [string[]]@($deferredMarkersByBatch.Keys))
+        }
+        else {
+            $retainedSliceStream = [System.IO.FileStream]::new(
+                $retainedSliceTempPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None,
+                65536,
+                [System.IO.FileOptions]::SequentialScan)
+            $retainedSliceSha256 = [System.Security.Cryptography.SHA256]::Create()
+            $writerEvidenceStream = [System.IO.FileStream]::new(
+                $writerEvidenceTempPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None,
+                65536,
+                [System.IO.FileOptions]::SequentialScan)
+            $writerEvidenceSha256 = [System.Security.Cryptography.SHA256]::Create()
+        }
+        if ($null -eq $nativeStreamingResult -and
+            $null -ne $script:GuiSmokeAppLogLedger.PSObject.Properties['StorageMode'] -and
             [string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile') {
             $writerLedgerReader = [System.IO.StreamReader]::new(
                 [string]$script:GuiSmokeAppLogLedger.AppendOnlyPath,
@@ -3317,6 +3333,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
                 65536)
         }
         $ledgerIndex = 0
+        if ($null -eq $nativeStreamingResult) {
         while ($ledgerIndex -lt $frozenWriterEvidenceEnd) {
             $writerLedgerVisitCount++
             $writerLine = if ($null -ne $writerLedgerReader) {
@@ -3636,7 +3653,67 @@ function Write-FileTransferGuiLogLedgerEvidence {
             }
         }
 
-        foreach ($batch in $writerCurrentBatchByWriter.Values) {
+        }
+        else {
+            $writerLedgerVisitCount = [long]$nativeStreamingResult.SourceLineVisitCount
+            $retainedSliceLineCount = [long]$nativeStreamingResult.RetainedLineCount
+            $retainedSliceByteCount = [long]$nativeStreamingResult.RetainedByteCount
+            $writerEvidenceLineCount = [long]$nativeStreamingResult.WriterLineCount
+            $writerEvidenceByteCount = [long]$nativeStreamingResult.WriterByteCount
+            $script:GuiSmokeAppLogLedger.WriterGapCount = [long]$nativeStreamingResult.WriterGapCount
+            $script:GuiSmokeAppLogLedger.WriterDuplicateCount = [long]$nativeStreamingResult.WriterDuplicateCount
+            $script:GuiSmokeAppLogLedger.WriterIdentityMismatchCount =
+                [long]$nativeStreamingResult.WriterIdentityMismatchCount
+            foreach ($nativeWriter in @($nativeStreamingResult.Writers)) {
+                $script:GuiSmokeAppLogLedger.Writers[[string]$nativeWriter.WriterId] =
+                    [pscustomobject]@{
+                        WriterId = [string]$nativeWriter.WriterId
+                        AcceptanceRunId = [string]$nativeWriter.AcceptanceRunId
+                        ScenarioRunId = [string]$nativeWriter.ScenarioRunId
+                        FirstSequence = [long]$nativeWriter.FirstSequence
+                        LastSequence = [long]$nativeWriter.LastSequence
+                        ObservedCount = [long]$nativeWriter.ObservedCount
+                        StartObserved = $true
+                    }
+            }
+            foreach ($nativeBatch in @($nativeStreamingResult.DeferredBatches)) {
+                $batchKey = '{0}:{1}:{2}' -f `
+                    ([string]$nativeBatch.WriterId).Length, `
+                    [string]$nativeBatch.WriterId, `
+                    [long]$nativeBatch.BatchGeneration
+                $writerBatchAccumulators[$batchKey] = [pscustomobject]@{
+                    writerId = [string]$nativeBatch.WriterId
+                    batchGeneration = [long]$nativeBatch.BatchGeneration
+                    batchFirstSequence = [long]$nativeBatch.BatchFirstSequence
+                    batchLastSequence = [long]$nativeBatch.BatchLastSequence
+                    attemptUtcTicks = [long]$nativeBatch.AttemptUtcTicks
+                    minSequence = [long]$nativeBatch.MinSequence
+                    maxSequence = [long]$nativeBatch.MaxSequence
+                    lastLineSequence = [long]$nativeBatch.MaxSequence
+                    lineCount = [long]$nativeBatch.LineCount
+                    firstObservedOrdinal = 0L
+                    tupleValid = [bool]$nativeBatch.TupleValid
+                    payloadSha256 = [string]$nativeBatch.PayloadSha256
+                    payloadLines = $null
+                }
+            }
+            foreach ($nativeDrain in @($nativeStreamingResult.Drains)) {
+                $drains = New-Object System.Collections.Generic.List[long]
+                foreach ($sequence in @($nativeDrain.Sequences)) {
+                    $drains.Add([long]$sequence) | Out-Null
+                }
+                $writerDrainSequences[[string]$nativeDrain.WriterId] = $drains
+            }
+            $writerChronologyInversionCount = [long]$nativeStreamingResult.ChronologyInversionCount
+            $writerChronologyCollisionCount = [long]$nativeStreamingResult.ChronologyCollisionCount
+            if ([bool]$nativeStreamingResult.ChronologyBatchInvalid) {
+                $writerChronologyReasons.Add('writer_recovery_chronology_batch_invalid') | Out-Null
+            }
+        }
+
+        foreach ($batch in @($(if ($null -eq $nativeStreamingResult) {
+                    $writerCurrentBatchByWriter.Values
+                } else { @() }))) {
             $batchIsValid = [bool]$batch.tupleValid -and
                 [long]$batch.batchGeneration -gt 0 -and
                 [long]$batch.attemptUtcTicks -gt 0 -and
@@ -3665,11 +3742,17 @@ function Write-FileTransferGuiLogLedgerEvidence {
             }
         }
 
-        [void]$retainedSliceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
-        $retainedSliceHash = (([BitConverter]::ToString($retainedSliceSha256.Hash)) -replace '-', '').ToLowerInvariant()
-        $retainedSliceStream.Flush($true)
-        $retainedSliceStream.Dispose()
-        $retainedSliceStream = $null
+        $retainedSliceHash = if ($null -ne $nativeStreamingResult) {
+            [string]$nativeStreamingResult.RetainedSha256
+        }
+        else {
+            [void]$retainedSliceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+            $calculatedHash = (([BitConverter]::ToString($retainedSliceSha256.Hash)) -replace '-', '').ToLowerInvariant()
+            $retainedSliceStream.Flush($true)
+            $retainedSliceStream.Dispose()
+            $retainedSliceStream = $null
+            $calculatedHash
+        }
         [System.IO.File]::Move($retainedSliceTempPath, $retainedSlicePath)
         $retainedSliceTempPath = ''
         $retainedSlice = [pscustomobject]@{
@@ -3679,11 +3762,17 @@ function Write-FileTransferGuiLogLedgerEvidence {
             ByteCount = $retainedSliceByteCount
         }
 
-        [void]$writerEvidenceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
-        $writerEvidenceHash = (([BitConverter]::ToString($writerEvidenceSha256.Hash)) -replace '-', '').ToLowerInvariant()
-        $writerEvidenceStream.Flush($true)
-        $writerEvidenceStream.Dispose()
-        $writerEvidenceStream = $null
+        $writerEvidenceHash = if ($null -ne $nativeStreamingResult) {
+            [string]$nativeStreamingResult.WriterSha256
+        }
+        else {
+            [void]$writerEvidenceSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+            $calculatedHash = (([BitConverter]::ToString($writerEvidenceSha256.Hash)) -replace '-', '').ToLowerInvariant()
+            $writerEvidenceStream.Flush($true)
+            $writerEvidenceStream.Dispose()
+            $writerEvidenceStream = $null
+            $calculatedHash
+        }
         [System.IO.File]::Move($writerEvidenceTempPath, $writerEvidencePath)
         $writerEvidenceTempPath = ''
         $writerEvidenceSlice = [pscustomobject]@{
@@ -3809,7 +3898,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
         [void]$recoveredMarkerTupleCounts.TryGetValue([string]$deferred.tupleKey, [ref]$exactRecoveryCount)
         $persistedBatch = $null
         [void]$writerBatchAccumulators.TryGetValue($batchKey, [ref]$persistedBatch)
-        $persistedPayloadSha256 = ''
+        $persistedPayloadSha256 = if ($null -ne $persistedBatch) {
+            [string]$persistedBatch.payloadSha256
+        } else { '' }
         if ($null -ne $persistedBatch -and $null -ne $persistedBatch.payloadLines) {
             if ([string]::IsNullOrWhiteSpace([string]$persistedBatch.payloadSha256)) {
                 if ($persistedBatch.payloadLines.Count -eq 1) {
@@ -5146,6 +5237,11 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
                     Reason = if ($ErrorMessage.IndexOf(
+                            'retry_successor_slot_reserved_before_initial_activation_answer_continuation_completed',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'retry_successor_slot_reserved_before_initial_activation_answer_continuation_completed'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
                             'validated_offer_answer_received_but_authority_tuple_rejected',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                         'validated_offer_answer_received_but_authority_tuple_rejected'
@@ -13538,6 +13634,20 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'session_recovery_contract_retry_authority_offer_window_refreshed',
             'runtime_unlock_retry_dispatch_chain_closed',
             'runtime_unlock_retry_lifecycle_chain_closed')
+        AnswerContinuation = @(
+            'runtime_unlock_offer_authority_boundary_decided',
+            'runtime_unlock_transaction_answer_received',
+            'runtime_unlock_retry_negotiation_slot_decided',
+            'tuna_acceleration_answer_ack_sent',
+            'tuna_acceleration_answer_ack_replay_sent',
+            'runtime_unlock_answer_ack_probe_barrier_released',
+            'tuna_acceleration_answer_ack_received_raw',
+            'tuna_acceleration_answer_ack_received',
+            'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
+            'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_draining',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal')
     }
     $earlyPredicateEventSets = @{}
     $earlyPredicateLines = @{}
@@ -13548,6 +13658,156 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $earlyPredicateEventSets[$predicateName] = $eventSet
         $earlyPredicateLines[$predicateName] = [System.Collections.Generic.List[string]]::new()
     }
+    function Get-TunaGuiInitialActivationAnswerContinuationSlotCollision {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $records = for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        }
+        $lookupCount = 0L
+        foreach ($slot in @($records | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'runtime_unlock_retry_negotiation_slot_decided')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                        'Reserved' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'intent_kind') -eq
+                        'SuccessorEvaluation'
+                })) {
+            $lookupCount++
+            $writer = Get-TunaGuiLogLineFieldValue -Line $slot.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $slot.Line -Name 'session_id'
+            $slotGeneration = Get-TunaGuiLogLineFieldValue -Line $slot.Line -Name 'slot_generation'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($slotGeneration)) {
+                continue
+            }
+
+            $accepted = @($records | Where-Object {
+                $_.Index -lt $slot.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_offer_authority_boundary_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'boundary') -eq
+                    'answer_received' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                    'InitialActivation' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                    'accepted', 'idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+            } | Select-Object -Last 1)
+            $answer = @($records | Where-Object {
+                $accepted.Count -eq 1 -and
+                $_.Index -gt $accepted[0].Index -and $_.Index -lt $slot.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_transaction_answer_received')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+            } | Select-Object -First 1)
+            $continuationBeforeSlot = @($records | Where-Object {
+                $answer.Count -eq 1 -and
+                $_.Index -gt $answer[0].Index -and $_.Index -lt $slot.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_ack_sent',
+                        'tuna_acceleration_answer_ack_replay_sent',
+                        'runtime_unlock_answer_ack_probe_barrier_released',
+                        'filetransfer_route_transition_prepared'))
+            })
+            if ($accepted.Count -ne 1 -or $answer.Count -ne 1 -or
+                $continuationBeforeSlot.Count -gt 0) {
+                continue
+            }
+
+            $terminal = @($records | Where-Object {
+                $_.Index -gt $slot.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_retry_negotiation_slot_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'slot_generation') -eq
+                    $slotGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                    'Released', 'Rejected', 'Converted')
+            } | Select-Object -First 1)
+            $safeRelease = $terminal.Count -eq 1 -and
+                (Get-TunaGuiLogLineFieldValue -Line $terminal[0].Line -Name 'decision_status') -in @(
+                    'Released', 'Rejected') -and
+                (Get-TunaGuiLogLineFieldValue -Line $terminal[0].Line -Name 'authority_effect') -in @(
+                    '', 'none')
+            $ack = @($records | Where-Object {
+                $safeRelease -and $_.Index -gt $terminal[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_ack_sent',
+                        'tuna_acceleration_answer_ack_replay_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -in @('', $session)
+            } | Select-Object -First 1)
+            $probeBarrier = @($records | Where-Object {
+                $ack.Count -eq 1 -and $_.Index -gt $ack[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_answer_ack_probe_barrier_released')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -in @('', $session)
+            } | Select-Object -First 1)
+            $peerAck = @($records | Where-Object {
+                $probeBarrier.Count -eq 1 -and $_.Index -gt $probeBarrier[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_ack_received_raw',
+                        'tuna_acceleration_answer_ack_received')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -in @('', $session)
+            } | Select-Object -First 1)
+            $handoff = @($records | Where-Object {
+                $peerAck.Count -eq 1 -and $_.Index -gt $peerAck[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_precommit_responder_peer_probe_handoff_bound')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -in @('', $session)
+            } | Select-Object -First 1)
+            $prepared = @($records | Where-Object {
+                $handoff.Count -eq 1 -and $_.Index -gt $handoff[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_route_transition_prepared')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'inbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_kind') -eq
+                    'PostTunaFallbackV6ToTunaV4'
+            } | Select-Object -First 1)
+            $draining = @($records | Where-Object {
+                $prepared.Count -eq 1 -and $_.Index -gt $prepared[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'filetransfer_route_transition_draining')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'inbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_kind') -eq
+                    'PostTunaFallbackV6ToTunaV4'
+            } | Select-Object -First 1)
+            if (-not $safeRelease -or $ack.Count -ne 1 -or
+                $probeBarrier.Count -ne 1 -or $peerAck.Count -ne 1 -or
+                $handoff.Count -ne 1 -or $prepared.Count -ne 1 -or
+                $draining.Count -ne 1) {
+                $sequenceText = Get-TunaGuiLogLineFieldValue `
+                    -Line $slot.Line `
+                    -Name 'gui_evidence_sequence'
+                return [pscustomobject]@{
+                    Unresolved = $true
+                    FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
+                        [long]$sequenceText
+                    } else { [long]($slot.Index + 1) }
+                    ParsedRecords = [long]$records.Count
+                    LookupCount = $lookupCount
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
+    }
+
     $earlyEvidenceLineVisitCount = 0L
     foreach ($line in $evidenceLines) {
         $earlyEvidenceLineVisitCount++
@@ -13582,6 +13842,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $postGrantHoldFastPath =
         Get-TunaGuiRuntimeUnlockRetryPostGrantHoldFailure `
             -Lines ([string[]]$earlyPredicateLines.PostGrantHold.ToArray())
+    $answerContinuationSlotCollisionFastPath =
+        Get-TunaGuiInitialActivationAnswerContinuationSlotCollision `
+            -Lines ([string[]]$earlyPredicateLines.AnswerContinuation.ToArray())
     $installedRetryPendingDialFirstSequence = [long]::MaxValue
     if ($installedRetryPendingDialFastPath) {
         $firstPendingDialCandidate = @($earlyPredicateLines.PendingDial | Where-Object {
@@ -13606,6 +13869,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{ Kind = 'Adoption'; Result = $currentListenerAdoptionFastPath },
             [pscustomobject]@{ Kind = 'Unblock'; Result = $fallbackTailRepairUnblockFastPath },
             [pscustomobject]@{ Kind = 'PostGrantHold'; Result = $postGrantHoldFastPath },
+            [pscustomobject]@{
+                Kind = 'AnswerContinuation'
+                Result = $answerContinuationSlotCollisionFastPath
+            },
             [pscustomobject]@{
                 Kind = 'PendingDial'
                 Result = [pscustomobject]@{
@@ -13660,6 +13927,27 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceParsedRecordCount ([long]$postGrantHoldFastPath.ParsedRecords) `
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'AnswerContinuation') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$answerContinuationSlotCollisionFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_answer_continuation_slot_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'runtime_unlock_initial_activation' `
+            -Reason 'retry_successor_slot_reserved_before_initial_activation_answer_continuation_completed' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_answer_continuation_slot_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$answerContinuationSlotCollisionFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$answerContinuationSlotCollisionFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.InitialActivationAnswerPeerDeliveryMissing = $true
+        return $result
     }
 
     if ($firstEarlyRouteRuntimeKind -eq 'PendingDial') {

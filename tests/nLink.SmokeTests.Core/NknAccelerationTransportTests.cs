@@ -19628,6 +19628,177 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         Assert.False(Assert.IsType<bool>(resolver.Invoke(transport, mutatedArgs)));
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task RuntimeUnlockRetryDispatch_ActiveInitialActivationAnswerDefersSuccessorUntilExactHandoffDisposition()
+    {
+        FakeNknClient.ResetNetwork();
+        var blockedAnswerAck = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-answer-continuation-slot.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-answer-continuation-slot.address");
+            hostClient.BeforeSendAsync = async (_, payload, ct) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationAnswerAck)
+                {
+                    await blockedAnswerAck.Task.WaitAsync(ct);
+                }
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-answer-continuation-slot-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new FakeNknAccelerationLane(isAvailable: true));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-answer-continuation-slot-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_runtime_unlock_answer_continuation_slot";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
+            InvokePrivateMethod(
+                host,
+                "ClearAccelerationUserStoppedForCurrentSession");
+            const string nonce = "ce11223344556677889900aabbccddee";
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce,
+                payerDecisionId: 6L,
+                generation: 2L,
+                observedSend: true,
+                observedLane: "control_priority");
+            InvokePrivateMethod(
+                host,
+                "ApplyRuntimeUnlockTransaction",
+                RuntimeUnlockTransactionEventKind.ObservedSend,
+                sessionId,
+                2L,
+                "offer_observed_send",
+                "control_priority");
+
+            var logStart = GetOperationalLogLength();
+            var answer = CreateAnswerPayload(
+                sessionId,
+                nonce,
+                accepted: true,
+                supportedLanes: new[] { "file" },
+                payerDecisionId: 6L);
+            var envelope = BuildSecureAccelerationEnvelope(
+                helper,
+                MsgType.TransportAccelerationAnswer,
+                answer,
+                "transport_acceleration_answer",
+                answer.Nonce,
+                sequence: 211);
+            InvokePrivateMethod(
+                host,
+                "HandleTransportAccelerationAnswer",
+                helperClient.Address,
+                envelope);
+
+            await WaitUntilAsync(
+                () => GetPrivateField(
+                    host,
+                    "runtimeUnlockRetiredAnswerBarrier") is not null,
+                TimeSpan.FromSeconds(3));
+            var barrier = GetPrivateField(
+                host,
+                "runtimeUnlockRetiredAnswerBarrier");
+            Assert.NotNull(barrier);
+            var barrierGeneration = GetPrivatePropertyValue<long>(
+                barrier!,
+                "BarrierGeneration");
+            Assert.Null(GetPrivateField(host, "outboundAccelerationOfferNonce"));
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                917L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "session_liveness_timeout_pending");
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cts.Token);
+            var blockedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "decision_reason=retry_dispatch_retained_answer_barrier_current",
+                blockedTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Reserved;",
+                blockedTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_install_committed;",
+                blockedTail,
+                StringComparison.Ordinal);
+
+            blockedAnswerAck.TrySetResult(null);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_answer_ack_probe_barrier_released;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+            Assert.NotNull(GetPrivateField(
+                host,
+                "runtimeUnlockRetiredAnswerBarrier"));
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_install_committed;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            var dispositionType = typeof(NknSignalingTransport).GetNestedType(
+                "RuntimeUnlockRetiredAnswerHandoffDisposition",
+                BindingFlags.NonPublic)!;
+            InvokePrivateMethod(
+                host,
+                "CompleteRuntimeUnlockRetiredAnswerHandoffBarrier",
+                barrierGeneration,
+                Enum.Parse(dispositionType, "RetryAuthorityRequired"),
+                "test_handoff_requires_retry_authority");
+            await WaitUntilAsync(
+                () => GetPrivateField(
+                    host,
+                    "runtimeUnlockRetiredAnswerBarrier") is null,
+                TimeSpan.FromSeconds(3));
+            var releasedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "decision_reason=test_handoff_requires_retry_authority",
+                releasedTail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            blockedAnswerAck.TrySetResult(null);
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
 
     [Theory]
     [InlineData("ack_first", false)]

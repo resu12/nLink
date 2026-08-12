@@ -1,5 +1,9 @@
 Set-StrictMode -Version Latest
 
+if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'GuiSmokeLogLedgerStreamingProcessor.cs')
+}
+
 function New-GuiSmokeLogLedgerState {
     param(
         [int]$MaxLines = 500000,
