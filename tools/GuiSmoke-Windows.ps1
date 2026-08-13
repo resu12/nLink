@@ -5295,6 +5295,16 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
                     Reason = if ($ErrorMessage.IndexOf(
+                            'installed_retry_pending_answer_cleared_before_failed_dial_answer_arrived',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'installed_retry_pending_answer_cleared_before_failed_dial_answer_arrived'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
+                            'initial_activation_wake_started_before_installed_retry_answer_continuation_completed',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'initial_activation_wake_started_before_installed_retry_answer_continuation_completed'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
                             'retry_successor_slot_reserved_before_initial_activation_answer_continuation_completed',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                         'retry_successor_slot_reserved_before_initial_activation_answer_continuation_completed'
@@ -14038,6 +14048,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         AnswerContinuation = @(
             'runtime_unlock_offer_authority_boundary_decided',
             'runtime_unlock_transaction_answer_received',
+            'tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled',
+            'tuna_payer_decision_started',
+            'tuna_acceleration_payer_intent_queued',
+            'runtime_unlock_post_fallback_paired_retry_offer_classified',
+            'runtime_unlock_retry_dispatch_observed',
+            'runtime_unlock_tuna_dial_attempt_started',
+            'runtime_unlock_tuna_dial_attempt_failed',
+            'tuna_acceleration_answer_sent',
+            'tuna_acceleration_answer_received_raw',
+            'tuna_listener_sidecar_event',
+            'tuna_acceleration_state_changed',
+            'tuna_acceleration_message_rejected',
+            'tuna_path_lease_started',
             'runtime_unlock_retired_pending_answer_slot_decided',
             'runtime_unlock_answer_handoff_boundary_rejected',
             'runtime_unlock_retry_negotiation_slot_decided',
@@ -14073,6 +14096,198 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
         }
         return $false
+    }
+    function Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $records = for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        }
+        $lookupCount = 0L
+        foreach ($wake in @($records | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                        'InitialActivation' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq
+                        'answer_ack_cleared'
+                })) {
+            $lookupCount++
+            $writer = Get-TunaGuiLogLineFieldValue -Line $wake.Line -Name 'log_writer_id'
+            $accepted = @($records | Where-Object {
+                $_.Index -lt $wake.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_offer_authority_boundary_decided')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'boundary') -eq 'answer_received' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq 'InstalledRetry' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('accepted', 'idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            $session = if ($accepted.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $accepted[0].Line -Name 'session_id'
+            } else { '' }
+            $answer = @($records | Where-Object {
+                $accepted.Count -eq 1 -and $_.Index -gt $accepted[0].Index -and
+                $_.Index -lt $wake.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_transaction_answer_received')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+            } | Select-Object -First 1)
+            if ($accepted.Count -ne 1 -or $answer.Count -ne 1) { continue }
+
+            $originalPayer = Get-TunaGuiLogLineFieldValue -Line $accepted[0].Line -Name 'payer_decision_id'
+            $effect = @($records | Where-Object {
+                $_.Index -gt $wake.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -in @('', $session) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -ne $originalPayer -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_payer_decision_started',
+                        'tuna_acceleration_payer_intent_queued',
+                        'tuna_path_lease_started'))
+            } | Select-Object -First 1)
+            $ack = @($records | Where-Object {
+                $_.Index -gt $wake.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_ack_sent',
+                        'tuna_acceleration_answer_ack_replay_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $originalPayer
+            } | Select-Object -First 1)
+            if ($effect.Count -eq 0 -and $ack.Count -eq 1) { continue }
+
+            $sequenceText = Get-TunaGuiLogLineFieldValue -Line $wake.Line -Name 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
+                    [long]$sequenceText
+                } else { [long]($wake.Index + 1) }
+                ParsedRecords = [long]$records.Count
+                LookupCount = $lookupCount
+            }
+        }
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
+    }
+    function Get-TunaGuiInstalledRetryPendingAnswerClearedFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $records = for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        }
+        $lookupCount = 0L
+        foreach ($wake in @($records | Where-Object {
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                            'tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled')) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -eq
+                        'InitialActivation' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq
+                        'answer_ack_cleared'
+                })) {
+            $lookupCount++
+            $writer = Get-TunaGuiLogLineFieldValue -Line $wake.Line -Name 'log_writer_id'
+            $unavailable = @($records | Where-Object {
+                $_.Index -lt $wake.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_state_changed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'available') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason').StartsWith(
+                    'listener_stream_rejected_',
+                    [System.StringComparison]::Ordinal) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            $streamRejected = @($records | Where-Object {
+                $unavailable.Count -eq 1 -and $_.Index -lt $unavailable[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_listener_sidecar_event')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'sidecar_event') -eq
+                    'tuna_stream_rejected' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            $dispatch = @($records | Where-Object {
+                $streamRejected.Count -eq 1 -and $_.Index -lt $streamRejected[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_retry_dispatch_observed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            if ($unavailable.Count -ne 1 -or $streamRejected.Count -ne 1 -or
+                $dispatch.Count -ne 1) { continue }
+
+            $session = Get-TunaGuiLogLineFieldValue -Line $dispatch[0].Line -Name 'session_id'
+            $pairedOffer = @($records | Where-Object {
+                $_.Index -lt $streamRejected[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_post_fallback_paired_retry_offer_classified')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                    'Accepted', 'Idempotent', 'accepted', 'idempotent') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+            } | Select-Object -Last 1)
+            $payer = if ($pairedOffer.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $pairedOffer[0].Line -Name 'payer_decision_id'
+            } else { '' }
+            $dialStart = @($records | Where-Object {
+                $pairedOffer.Count -eq 1 -and $_.Index -gt $pairedOffer[0].Index -and
+                $_.Index -lt $streamRejected[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_tuna_dial_attempt_started')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer
+            } | Select-Object -First 1)
+            $dialFailure = @($records | Where-Object {
+                $dialStart.Count -eq 1 -and $_.Index -gt $dialStart[0].Index -and
+                $_.Index -lt $streamRejected[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'runtime_unlock_tuna_dial_attempt_failed')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'runtime_unlock_tuna_dial_failed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer
+            } | Select-Object -First 1)
+            $negativeAnswer = @($records | Where-Object {
+                $dialFailure.Count -eq 1 -and $_.Index -gt $dialFailure[0].Index -and
+                $_.Index -lt $streamRejected[0].Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_sent')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'accepted') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'runtime_unlock_tuna_dial_failed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer
+            } | Select-Object -First 1)
+            $rawAnswer = @($records | Where-Object {
+                $_.Index -gt $wake.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                        'tuna_acceleration_answer_received_raw')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -First 1)
+            if ($pairedOffer.Count -ne 1 -or $dialStart.Count -ne 1 -or
+                $dialFailure.Count -ne 1 -or $negativeAnswer.Count -ne 1 -or
+                $rawAnswer.Count -ne 1) { continue }
+
+            $sequenceText = Get-TunaGuiLogLineFieldValue -Line $wake.Line -Name 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
+                    [long]$sequenceText
+                } else { [long]($wake.Index + 1) }
+                ParsedRecords = [long]$records.Count
+                LookupCount = $lookupCount
+            }
+        }
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
     }
     function Get-TunaGuiInitialActivationAnswerContinuationSlotCollision {
         param(
@@ -14438,6 +14653,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $answerContinuationSlotCollisionFastPath =
         Get-TunaGuiInitialActivationAnswerContinuationSlotCollision `
             -Lines ([string[]]$earlyPredicateLines.AnswerContinuation.ToArray())
+    $installedRetryAnswerContinuationWakeFastPath =
+        Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure `
+            -Lines ([string[]]$earlyPredicateLines.AnswerContinuation.ToArray())
+    $installedRetryPendingAnswerClearedFastPath =
+        Get-TunaGuiInstalledRetryPendingAnswerClearedFailure `
+            -Lines ([string[]]$earlyPredicateLines.AnswerContinuation.ToArray())
     $answerHandoffTransferIdentityFastPath =
         Get-TunaGuiInitialActivationAnswerHandoffTransferIdentityFailure `
             -Lines ([string[]]$earlyPredicateLines.AnswerContinuation.ToArray())
@@ -14470,6 +14691,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{
                 Kind = 'AnswerContinuation'
                 Result = $answerContinuationSlotCollisionFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'InstalledRetryPendingAnswerCleared'
+                Result = $installedRetryPendingAnswerClearedFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'InstalledRetryAnswerContinuation'
+                Result = $installedRetryAnswerContinuationWakeFastPath
             },
             [pscustomobject]@{
                 Kind = 'AnswerHandoffTransferIdentity'
@@ -14547,6 +14776,48 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
             -EvidenceParsedRecordCount ([long]$answerContinuationSlotCollisionFastPath.ParsedRecords) `
             -EvidenceLookupCount ([long]$answerContinuationSlotCollisionFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.InitialActivationAnswerPeerDeliveryMissing = $true
+        return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'InstalledRetryAnswerContinuation') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$installedRetryAnswerContinuationWakeFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_installed_retry_answer_continuation_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'runtime_unlock_initial_activation' `
+            -Reason 'initial_activation_wake_started_before_installed_retry_answer_continuation_completed' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_installed_retry_answer_continuation_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$installedRetryAnswerContinuationWakeFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$installedRetryAnswerContinuationWakeFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.InitialActivationAnswerPeerDeliveryMissing = $true
+        return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'InstalledRetryPendingAnswerCleared') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$installedRetryPendingAnswerClearedFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_installed_retry_pending_answer_cleared_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'runtime_unlock_initial_activation' `
+            -Reason 'installed_retry_pending_answer_cleared_before_failed_dial_answer_arrived' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_installed_retry_pending_answer_cleared_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$installedRetryPendingAnswerClearedFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$installedRetryPendingAnswerClearedFastPath.LookupCount) `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.InitialActivationAnswerPeerDeliveryMissing = $true
         return $result

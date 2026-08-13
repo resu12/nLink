@@ -21409,7 +21409,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     [InlineData(true, true)]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
-    public async Task RuntimeUnlockRetryDispatch_InstalledAnswerAndLocalObservedSendOrdersConvergeOnce(
+    public async Task RuntimeUnlockRetryDispatch_ActiveInstalledRetryAnswerDefersGenericAndSuccessorUntilExactHandoffDisposition(
         bool postFallback,
         bool answerBeforeLocalObservedSend)
     {
@@ -21439,6 +21439,19 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseSend = new TaskCompletionSource<object?>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            var answerAckEntered = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseAnswerAck = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            hostClient.BeforeSendAsync = async (_, payload, ct) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                    sent.Type == MsgType.TransportAccelerationAnswerAck)
+                {
+                    answerAckEntered.TrySetResult(null);
+                    await releaseAnswerAck.Task.WaitAsync(ct);
+                }
+            };
             if (!answerBeforeLocalObservedSend)
             {
                 hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
@@ -21597,6 +21610,25 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 host,
                 "outboundRuntimeUnlockOfferAuthorityBoundary");
             Assert.NotNull(offerBoundary);
+            var authorityModeType = typeof(NknSignalingTransport).GetNestedType(
+                "RuntimeUnlockOfferAuthorityMode",
+                BindingFlags.NonPublic)!;
+            SetPrivateField(
+                host,
+                "pendingRuntimeUnlockAccelerationNegotiation",
+                1);
+            SetPrivateField(
+                host,
+                "pendingRuntimeUnlockAccelerationNegotiationReason",
+                "runtime_unlock");
+            SetPrivateField(
+                host,
+                "pendingRuntimeUnlockAccelerationNegotiationAuthorityMode",
+                Enum.Parse(authorityModeType, "InitialActivation"));
+            SetPrivateField(
+                host,
+                "pendingRuntimeUnlockAccelerationNegotiationInstallReceipt",
+                null);
             var answer = CreateAnswerPayload(
                 sessionId,
                 nonce,
@@ -21611,15 +21643,46 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 nonce,
                 sequence: 919);
 
+            var answerLogStart = GetOperationalLogLength();
+
             InvokePrivateMethod(
                 host,
                 "HandleTransportAccelerationAnswer",
                 helperClient.Address,
                 duplicateAnswerEnvelope);
 
+            await answerAckEntered.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                cts.Token);
+            await WaitUntilAsync(
+                () => GetPrivateField(
+                    host,
+                    "runtimeUnlockRetiredAnswerBarrier") is not null,
+                TimeSpan.FromSeconds(3));
+            var heldTail = ReadOperationalLogTail(answerLogStart);
+            Assert.Contains(
+                "decision_reason=active_installed_retry_answer_accepted",
+                heldTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "trigger=answer_ack_cleared",
+                heldTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "reason=transport_acceleration_answer_handoff_transferred",
+                heldTail,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                GetPrivateField(
+                    host,
+                    "pendingRuntimeUnlockAccelerationNegotiation"));
+
+            releaseAnswerAck.TrySetResult(null);
+
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=session_recovery_contract_completed;",
+                    "event=runtime_unlock_answer_ack_probe_barrier_released;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
             var logTail = ReadOperationalLogTail(logStart);
@@ -21627,7 +21690,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "event=runtime_unlock_retry_dispatch_observed;",
                 StringComparison.Ordinal);
             var completedIndex = logTail.IndexOf(
-                "event=session_recovery_contract_completed;",
+                "event=runtime_unlock_answer_ack_probe_barrier_released;",
                 StringComparison.Ordinal);
             Assert.True(dispatchObservedIndex >= 0, logTail);
             Assert.True(completedIndex > dispatchObservedIndex, logTail);

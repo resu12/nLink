@@ -1815,7 +1815,6 @@ function Write-TunaGuiDirectEvidenceManifest {
         $analyzerInputMatches
     $cursorPass = $null -ne $ledger -and [string]$ledger.cursorIntegrityVerdict -eq 'pass'
     $writerPass = $null -ne $ledger -and [int]$ledger.writerEvidenceVersion -eq 3 -and [string]$ledger.writerIntegrityVerdict -eq 'pass'
-    $currentRuntimeProof = $artifactFinalized -and $cursorPass -and $writerPass
     $analysisDirs = if ($RouteMode -eq 'v4-restart-v6-fallback') {
         @((Join-Path $ArtifactDir 'measured-fallback-analysis'))
     }
@@ -1888,6 +1887,11 @@ function Write-TunaGuiDirectEvidenceManifest {
         $sourceDirty = @(& git -C $RepoRoot status --porcelain 2>$null).Count -gt 0
     }
     catch {}
+    $currentRuntimeProof = $artifactFinalized -and
+        $cursorPass -and
+        $writerPass -and
+        $retainedAnalysisCompleted -and
+        -not $sourceDirty
 
     $hashFile = {
         param([string]$Path)

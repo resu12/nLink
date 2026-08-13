@@ -1733,6 +1733,187 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_InstalledRetryAnswerContinuationWake_OwnsBeforeDownstreamNonceRejection(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scope =
+            "session_id=sess-installed-answer; transfer_id=transfer-1; direction=outbound; " +
+            "payer_decision_id=5; offer_generation=2; transaction_generation=1; " +
+            "tuna_path_lease_generation=2; tuna_path_lease_listener_run_id=listener-start-2; " +
+            "retry_authority_id=retry-authority-1; install_generation=1; " +
+            "log_writer_id=writer_initiator";
+        var lines = new List<string>
+        {
+            LogLine("event=runtime_unlock_offer_authority_boundary_decided; " +
+                "boundary=answer_received; authority_mode=InstalledRetry; " +
+                $"decision_status=accepted; {scope}"),
+            LogLine($"event=runtime_unlock_transaction_answer_received; {scope}"),
+            LogLine("event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled; " +
+                "session_id=sess-installed-answer; authority_mode=InitialActivation; " +
+                "trigger=answer_ack_cleared; log_writer_id=writer_initiator")
+        };
+        if (recovered)
+        {
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_sent; " +
+                "session_id=sess-installed-answer; payer_decision_id=5; generation=2; " +
+                "msg_id=answer-ack-2; log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=runtime_unlock_answer_ack_probe_barrier_released; " +
+                "session_id=sess-installed-answer; payer_decision_id=5; generation=2; " +
+                "log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; " +
+                "session_id=sess-installed-answer; transfer_id=transfer-1; launch_generation=1; " +
+                "log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_prepared; " +
+                "session_id=sess-installed-answer; transfer_id=transfer-1; direction=inbound; " +
+                "transition_kind=PostTunaFallbackV6ToTunaV4; authority_id=fta2-installed-answer; " +
+                "transition_generation=1; log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_draining; " +
+                "session_id=sess-installed-answer; transfer_id=transfer-1; direction=inbound; " +
+                "transition_kind=PostTunaFallbackV6ToTunaV4; authority_id=fta2-installed-answer; " +
+                "transition_generation=1; log_writer_id=writer_responder"));
+        }
+        else
+        {
+            lines.Add(LogLine("event=tuna_payer_decision_started; " +
+                "session_id=sess-installed-answer; payer_decision_id=6; " +
+                "log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_payer_intent_queued; " +
+                "session_id=sess-installed-answer; payer_decision_id=6; " +
+                "log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=tuna_path_lease_started; session_id=sess-installed-answer; " +
+                "payer_decision_id=6; tuna_path_lease_generation=3; " +
+                "listener_start_request_id=listener-start-3; log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_sent; " +
+                "session_id=sess-installed-answer; payer_decision_id=5; generation=2; " +
+                "msg_id=answer-ack-2; log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_message_rejected; " +
+                "session_id=sess-installed-answer; message_type=transport_acceleration_answer_ack; " +
+                "reason=nonce_mismatch; log_writer_id=writer_responder"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "initial_activation_wake_started_before_installed_retry_answer_continuation_completed",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_InstalledRetryPendingAnswerCleared_OwnsBeforeNonceRejection(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string session = "session_id=sess-negative-answer; transfer_id=transfer-1";
+        var lines = new[]
+        {
+            LogLine("event=runtime_unlock_retry_dispatch_install_committed; install_status=Installed; " +
+                "authority_id=retry-authority-1; install_generation=1; direction=outbound; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=runtime_unlock_retry_dispatch_install_confirmed; " +
+                "authority_id=retry-authority-1; install_generation=1; direction=outbound; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=runtime_unlock_retry_dispatch_observed; authority_id=retry-authority-1; " +
+                "install_generation=1; payer_decision_id=5; offer_generation=2; direction=outbound; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=runtime_unlock_offer_authority_boundary_decided; boundary=control_send_dispatch; " +
+                "authority_mode=InstalledRetry; decision_status=accepted; retry_authority_id=retry-authority-1; " +
+                "install_generation=1; payer_decision_id=5; transaction_generation=1; offer_generation=2; " +
+                "tuna_path_lease_generation=2; tuna_path_lease_listener_run_id=listener-start-2; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=runtime_unlock_post_fallback_paired_retry_offer_classified; direction=inbound; " +
+                "payer_decision_id=5; decision_status=Accepted; " +
+                $"{session}; log_writer_id=writer-responder"),
+            LogLine("event=runtime_unlock_tuna_dial_attempt_started; payer_decision_id=5; " +
+                "dial_attempt_generation=9; " +
+                $"{session}; log_writer_id=writer-responder"),
+            LogLine("event=runtime_unlock_tuna_dial_attempt_failed; payer_decision_id=5; " +
+                "dial_attempt_generation=9; reason=runtime_unlock_tuna_dial_failed; " +
+                $"{session}; log_writer_id=writer-responder"),
+            LogLine("event=tuna_acceleration_answer_sent; accepted=0; " +
+                "reason=runtime_unlock_tuna_dial_failed; payer_decision_id=5; msg_id=answer-negative-1; " +
+                "log_writer_id=writer-responder"),
+            LogLine("event=tuna_listener_sidecar_event; sidecar_event=tuna_stream_rejected; " +
+                "sidecar_reason=session closed; log_writer_id=writer-initiator"),
+            LogLine("event=tuna_acceleration_state_changed; available=0; " +
+                "reason=listener_stream_rejected_session closed; log_writer_id=writer-initiator"),
+            LogLine("event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled; " +
+                "authority_mode=InitialActivation; trigger=answer_ack_cleared; " +
+                "log_writer_id=writer-initiator"),
+            LogLine("event=tuna_payer_decision_started; payer_decision_id=6; " +
+                "log_writer_id=writer-initiator"),
+            LogLine("event=tuna_acceleration_answer_received_raw; msg_id=answer-negative-1; " +
+                "log_writer_id=writer-initiator"),
+            LogLine("event=tuna_acceleration_message_rejected; message_type=transport_acceleration_answer; " +
+                "reason=nonce_mismatch; msg_id=answer-negative-1; log_writer_id=writer-initiator")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        Assert.Equal(
+            "tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "installed_retry_pending_answer_cleared_before_failed_dial_answer_arrived",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Theory]
     [InlineData(false, false, false, false, false, "none")]
     [InlineData(true, false, false, false, false, "none")]
     [InlineData(false, true, false, false, false, "none")]

@@ -1429,6 +1429,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_retry_scheduled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_lifecycle_ack_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_offer_authority_boundary_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_payer_decision_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_payer_intent_queued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_post_fallback_paired_retry_offer_classified') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_listener_sidecar_event') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_state_changed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_reset') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_failed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_sidecar_unavailable') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_message_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_answer_handoff_boundary_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retired_pending_answer_slot_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_committed') +
@@ -3073,6 +3083,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_initial_activation_answer_peer_delivery_missing'
             Event = $candidateEvent
             Reason = if (@(
+                    $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryPendingAnswerClearedUnresolvedCandidateEvents |
+                        Where-Object {
+                            [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                        }).Count -gt 0) {
+                'installed_retry_pending_answer_cleared_before_failed_dial_answer_arrived'
+            }
+            elseif (@(
+                    $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryAnswerContinuationWakeUnresolvedCandidateEvents |
+                        Where-Object {
+                            [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                        }).Count -gt 0) {
+                'initial_activation_wake_started_before_installed_retry_answer_continuation_completed'
+            }
+            elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AnswerContinuationSlotCollisionUnresolvedCandidateEvents |
                     Where-Object {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence

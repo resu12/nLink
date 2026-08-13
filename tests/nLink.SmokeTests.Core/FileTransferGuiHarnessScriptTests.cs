@@ -3114,6 +3114,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialAnswerPeerDelivery.Phase -ne 'runtime_unlock_initial_activation' -or $initialAnswerPeerDelivery.Reason -ne 'validated_offer_answer_not_delivered_to_initiator') { throw 'initial activation answer peer delivery lost precedence' }
             $receivedAnswerAuthorityRejected = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=validated_offer_answer_received_but_authority_tuple_rejected' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($receivedAnswerAuthorityRejected.Phase -ne 'runtime_unlock_initial_activation' -or $receivedAnswerAuthorityRejected.Reason -ne 'validated_offer_answer_received_but_authority_tuple_rejected') { throw 'received initial activation answer authority rejection lost precedence' }
+            $installedRetryAnswerContinuationWake = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=initial_activation_wake_started_before_installed_retry_answer_continuation_completed' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($installedRetryAnswerContinuationWake.Phase -ne 'runtime_unlock_initial_activation' -or $installedRetryAnswerContinuationWake.Reason -ne 'initial_activation_wake_started_before_installed_retry_answer_continuation_completed') { throw 'installed retry answer continuation wake lost precedence' }
             $answerHandoffTransferIdentity = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=accepted_initial_activation_answer_handoff_rejected_on_unresolved_transfer_identity' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($answerHandoffTransferIdentity.Phase -ne 'runtime_unlock_initial_activation' -or $answerHandoffTransferIdentity.Reason -ne 'accepted_initial_activation_answer_handoff_rejected_on_unresolved_transfer_identity') { throw 'answer handoff transfer identity failure lost precedence' }
             $installedRetryPendingDial = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
@@ -6928,6 +6930,113 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task InstalledRetryAnswerContinuationWakeDetectsPhysicalOwnershipBeforeOriginalAck()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure",
+            "Get-TunaGuiInitialActivationAnswerContinuationSlotCollision");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure {
+                {{classifierBody}}
+            }
+            $scope = 'session_id=session-installed-answer; transfer_id=transfer-1; log_writer_id=writer-initiator'
+            $lines = @(
+                "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InstalledRetry; decision_status=accepted; retry_authority_id=retry-1; install_generation=1; payer_decision_id=5; offer_generation=2; transaction_generation=1; tuna_path_lease_generation=2; $scope",
+                "event=runtime_unlock_transaction_answer_received; payer_decision_id=5; offer_generation=2; transaction_generation=1; tuna_path_lease_generation=2; $scope",
+                "event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled; authority_mode=InitialActivation; trigger=answer_ack_cleared; log_writer_id=writer-initiator",
+                "event=tuna_payer_decision_started; payer_decision_id=6; $scope",
+                "event=tuna_path_lease_started; payer_decision_id=6; tuna_path_lease_generation=3; $scope",
+                "event=tuna_acceleration_answer_ack_sent; payer_decision_id=5; $scope"
+            )
+            $result = Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure -Lines $lines
+            if (-not $result.Unresolved) { throw 'installed retry answer continuation wake was not detected' }
+            $safeLines = @($lines[0], $lines[1], $lines[2], $lines[5])
+            $result = Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure -Lines $safeLines
+            if ($result.Unresolved) { throw 'wake without physical ownership was not recovered' }
+            Write-Output 'gui-installed-retry-answer-continuation-wake-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI installed-retry answer continuation test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-installed-retry-answer-continuation-wake-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InstalledRetryPendingAnswerClearedDetectsFailedDialAnswerReset()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiInstalledRetryPendingAnswerClearedFailure",
+            "Get-TunaGuiInitialActivationAnswerContinuationSlotCollision");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Get-TunaGuiInstalledRetryPendingAnswerClearedFailure {
+                {{classifierBody}}
+            }
+            $session = 'session_id=session-negative-answer; transfer_id=transfer-1'
+            $lines = @(
+                "event=runtime_unlock_retry_dispatch_observed; authority_id=retry-1; install_generation=1; payer_decision_id=5; offer_generation=2; $session; log_writer_id=writer-initiator",
+                "event=runtime_unlock_post_fallback_paired_retry_offer_classified; decision_status=Accepted; payer_decision_id=5; $session; log_writer_id=writer-responder",
+                "event=runtime_unlock_tuna_dial_attempt_started; payer_decision_id=5; dial_attempt_generation=9; $session; log_writer_id=writer-responder",
+                "event=runtime_unlock_tuna_dial_attempt_failed; payer_decision_id=5; dial_attempt_generation=9; reason=runtime_unlock_tuna_dial_failed; $session; log_writer_id=writer-responder",
+                'event=tuna_acceleration_answer_sent; accepted=0; reason=runtime_unlock_tuna_dial_failed; payer_decision_id=5; msg_id=answer-negative-1; log_writer_id=writer-responder',
+                'event=tuna_listener_sidecar_event; sidecar_event=tuna_stream_rejected; sidecar_reason=session closed; log_writer_id=writer-initiator',
+                'event=tuna_acceleration_state_changed; available=0; reason=listener_stream_rejected_session closed; log_writer_id=writer-initiator',
+                'event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled; authority_mode=InitialActivation; trigger=answer_ack_cleared; log_writer_id=writer-initiator',
+                'event=tuna_acceleration_answer_received_raw; msg_id=answer-negative-1; log_writer_id=writer-initiator'
+            )
+            $result = Get-TunaGuiInstalledRetryPendingAnswerClearedFailure -Lines $lines
+            if (-not $result.Unresolved) { throw 'failed-dial answer reset was not detected' }
+            $safe = @($lines | Where-Object { $_ -notmatch 'tuna_acceleration_state_changed' })
+            $result = Get-TunaGuiInstalledRetryPendingAnswerClearedFailure -Lines $safe
+            if ($result.Unresolved) { throw 'stream rejection without listener-down was classified' }
+            Write-Output 'gui-installed-retry-pending-answer-cleared-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI pending-answer reset test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-installed-retry-pending-answer-cleared-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task InitialActivationAnswerHandoffTransferIdentityFailureOutranksDeadline()
     {
         var guiText = File.ReadAllText(
@@ -8502,6 +8611,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("sourceAnalyzerInputSha256", manifestBody, StringComparison.Ordinal);
         Assert.Contains("derivedAnalyzerInputSha256", manifestBody, StringComparison.Ordinal);
         Assert.Contains("milestoneSha256", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("$retainedAnalysisCompleted", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("-not $sourceDirty", manifestBody, StringComparison.Ordinal);
+        var sourceDirtyCapture = manifestBody.IndexOf("$sourceDirty =", StringComparison.Ordinal);
+        var proofComputation = manifestBody.IndexOf("$currentRuntimeProof =", StringComparison.Ordinal);
+        Assert.True(sourceDirtyCapture >= 0 && proofComputation > sourceDirtyCapture);
     }
 
     [Fact]
