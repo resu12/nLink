@@ -1126,6 +1126,64 @@ function Sort-TunaGuiRetainedLogLinesChronologically {
     return @($records | Sort-Object -Property SortTicks, Ordinal | ForEach-Object { [string]$_.Line })
 }
 
+function Get-TunaGuiStrictUtf8LineCount {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $reader = [System.IO.StreamReader]::new(
+        $Path,
+        [System.Text.UTF8Encoding]::new($false, $true),
+        $true,
+        1MB)
+    try {
+        $count = 0L
+        while ($null -ne $reader.ReadLine()) {
+            $count++
+        }
+
+        return $count
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+function Write-TunaGuiDerivedAnalyzerInputReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$AnalyzerInputPath,
+        [Parameter(Mandatory = $true)][string]$MilestonePath
+    )
+
+    $ledgerPath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
+    if (-not (Test-Path -LiteralPath $ledgerPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $AnalyzerInputPath -PathType Leaf)) {
+        return
+    }
+
+    $ledger = Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json
+    if ($null -eq $ledger -or $null -eq $ledger.analyzerInput) {
+        return
+    }
+
+    $milestoneExists = Test-Path -LiteralPath $MilestonePath -PathType Leaf
+    $receipt = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_tuna_gui_derived_analyzer_input_receipt'
+        sourceAnalyzerInputPath = [string]$ledger.analyzerInput.path
+        sourceAnalyzerInputSha256 = [string]$ledger.analyzerInput.captureSha256
+        sourceAnalyzerInputLineCount = [long]$ledger.analyzerInput.captureLineCount
+        milestonePath = [System.IO.Path]::GetFullPath($MilestonePath)
+        milestoneSha256 = $(if ($milestoneExists) { (Get-FileHash -LiteralPath $MilestonePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' })
+        derivedAnalyzerInputPath = [System.IO.Path]::GetFullPath($AnalyzerInputPath)
+        derivedAnalyzerInputSha256 = (Get-FileHash -LiteralPath $AnalyzerInputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        derivedAnalyzerInputLineCount = Get-TunaGuiStrictUtf8LineCount -Path $AnalyzerInputPath
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    }
+    Write-TunaGuiAtomicJson `
+        -Path (Join-Path $ArtifactDir 'filetransfer-retained-log-slice-derived-receipt.json') `
+        -Value $receipt
+}
+
 function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -1134,51 +1192,59 @@ function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
 
     $milestonePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'
     $retainedPath = Join-Path $ArtifactDir $FileName
-    if (-not (Test-Path -LiteralPath $milestonePath -PathType Leaf)) {
-        return
-    }
+    try {
+        if (-not (Test-Path -LiteralPath $milestonePath -PathType Leaf)) {
+            return
+        }
 
-    $milestoneLines = @(
-        Get-Content -LiteralPath $milestonePath -ErrorAction SilentlyContinue |
-            Where-Object {
-                $line = [string]$_
-                $line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                $line.IndexOf('event=filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                $line.IndexOf('event=filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        $milestoneLines = @(
+            Get-Content -LiteralPath $milestonePath -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $line = [string]$_
+                    $line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $line.IndexOf('event=filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $line.IndexOf('event=filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                }
+        )
+        if ($milestoneLines.Count -eq 0) {
+            return
+        }
+
+        $existingText = ''
+        $existingLines = @()
+        if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
+            $existingText = Get-Content -LiteralPath $retainedPath -Raw -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrEmpty($existingText)) {
+                $existingLines = @($existingText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
             }
-    )
-    if ($milestoneLines.Count -eq 0) {
-        return
-    }
-
-    $existingText = ''
-    $existingLines = @()
-    if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
-        $existingText = Get-Content -LiteralPath $retainedPath -Raw -ErrorAction SilentlyContinue
-        if (-not [string]::IsNullOrEmpty($existingText)) {
-            $existingLines = @($existingText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-        }
-    }
-
-    $missingLines = New-Object System.Collections.Generic.List[string]
-    foreach ($line in @($milestoneLines)) {
-        $text = [string]$line
-        if ([string]::IsNullOrWhiteSpace($text)) {
-            continue
         }
 
-        if ($existingText.IndexOf($text, [System.StringComparison]::Ordinal) -lt 0) {
-            $missingLines.Add($text) | Out-Null
+        $missingLines = New-Object System.Collections.Generic.List[string]
+        foreach ($line in @($milestoneLines)) {
+            $text = [string]$line
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                continue
+            }
+
+            if ($existingText.IndexOf($text, [System.StringComparison]::Ordinal) -lt 0) {
+                $missingLines.Add($text) | Out-Null
+            }
         }
+
+        if ($missingLines.Count -eq 0) {
+            return
+        }
+
+        $combined = Sort-TunaGuiRetainedLogLinesChronologically -Lines (@($missingLines.ToArray()) + @($existingLines))
+
+        [System.IO.File]::WriteAllText($retainedPath, ($combined -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
     }
-
-    if ($missingLines.Count -eq 0) {
-        return
+    finally {
+        Write-TunaGuiDerivedAnalyzerInputReceipt `
+            -ArtifactDir $ArtifactDir `
+            -AnalyzerInputPath $retainedPath `
+            -MilestonePath $milestonePath
     }
-
-    $combined = Sort-TunaGuiRetainedLogLinesChronologically -Lines (@($missingLines.ToArray()) + @($existingLines))
-
-    [System.IO.File]::WriteAllText($retainedPath, ($combined -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
 }
 
 function Ensure-TunaGuiSecondTransferRetainedLogSlice {
@@ -1705,10 +1771,13 @@ function Write-TunaGuiDirectEvidenceManifest {
     $ledgerPath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
     $capturePath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log'
     $analyzerInputPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    $derivedAnalyzerInputReceiptPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice-derived-receipt.json'
+    $milestonePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'
     $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) { Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json } else { $null }
     $ledger = if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) { Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json } else { $null }
     $captureSha = if (Test-Path -LiteralPath $capturePath -PathType Leaf) { (Get-FileHash -LiteralPath $capturePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
     $analyzerInputSha = if (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) { (Get-FileHash -LiteralPath $analyzerInputPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+    $derivedAnalyzerInputReceipt = if (Test-Path -LiteralPath $derivedAnalyzerInputReceiptPath -PathType Leaf) { Get-Content -LiteralPath $derivedAnalyzerInputReceiptPath -Raw | ConvertFrom-Json } else { $null }
     $ledgerSha = if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) { (Get-FileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
     $writerEvidenceSlice = if ($null -ne $ledger -and $ledger.PSObject.Properties.Name -contains 'writerEvidenceSlice') {
         $ledger.writerEvidenceSlice
@@ -1724,6 +1793,20 @@ function Write-TunaGuiDirectEvidenceManifest {
         ([string]::IsNullOrWhiteSpace($stateCaptureSha) -or [string]::Equals($captureSha, $stateCaptureSha, [System.StringComparison]::OrdinalIgnoreCase))
     $analyzerInputMatches = -not [string]::IsNullOrWhiteSpace($analyzerInputSha) -and
         [string]::Equals($analyzerInputSha, $ledgerAnalyzerInputSha, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($null -ne $derivedAnalyzerInputReceipt) {
+        $milestoneSha = if (Test-Path -LiteralPath $milestonePath -PathType Leaf) { (Get-FileHash -LiteralPath $milestonePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+        $analyzerInputLineCount = if (Test-Path -LiteralPath $analyzerInputPath -PathType Leaf) { Get-TunaGuiStrictUtf8LineCount -Path $analyzerInputPath } else { -1L }
+        $analyzerInputMatches =
+            [int]$derivedAnalyzerInputReceipt.schemaVersion -eq 1 -and
+            [string]::Equals([string]$derivedAnalyzerInputReceipt.event, 'filetransfer_tuna_gui_derived_analyzer_input_receipt', [System.StringComparison]::Ordinal) -and
+            [string]::Equals([string]$derivedAnalyzerInputReceipt.sourceAnalyzerInputSha256, $ledgerAnalyzerInputSha, [System.StringComparison]::OrdinalIgnoreCase) -and
+            [long]$derivedAnalyzerInputReceipt.sourceAnalyzerInputLineCount -eq [long]$ledger.analyzerInput.captureLineCount -and
+            [string]::Equals([string]$derivedAnalyzerInputReceipt.derivedAnalyzerInputPath, [System.IO.Path]::GetFullPath($analyzerInputPath), [System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$derivedAnalyzerInputReceipt.derivedAnalyzerInputSha256, $analyzerInputSha, [System.StringComparison]::OrdinalIgnoreCase) -and
+            [long]$derivedAnalyzerInputReceipt.derivedAnalyzerInputLineCount -eq $analyzerInputLineCount -and
+            [string]::Equals([string]$derivedAnalyzerInputReceipt.milestonePath, [System.IO.Path]::GetFullPath($milestonePath), [System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$derivedAnalyzerInputReceipt.milestoneSha256, $milestoneSha, [System.StringComparison]::OrdinalIgnoreCase)
+    }
     $artifactFinalized = $null -ne $state -and
         -not ([bool]$state.timedOut) -and
         [string]$state.lastCompletedStage -eq 'gui_child_exited' -and
@@ -1843,6 +1926,8 @@ function Write-TunaGuiDirectEvidenceManifest {
         captureSha256 = $captureSha
         analyzerInputPath = $analyzerInputPath
         analyzerInputSha256 = $analyzerInputSha
+        derivedAnalyzerInputReceiptPath = $derivedAnalyzerInputReceiptPath
+        derivedAnalyzerInputReceiptSha256 = & $hashFile $derivedAnalyzerInputReceiptPath
         artifactFinalized = $artifactFinalized
         cursorIntegrityVerdict = $(if ($cursorPass) { 'pass' } else { 'fail' })
         writerEvidenceVersion = $(if ($null -ne $ledger) { [int]$ledger.writerEvidenceVersion } else { 0 })

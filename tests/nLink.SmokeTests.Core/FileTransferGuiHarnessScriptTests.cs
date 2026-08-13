@@ -8440,6 +8440,80 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "$captureSha, $ledger.analyzerInput.captureSha256",
             manifestBody,
             StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-log-slice-derived-receipt.json", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("sourceAnalyzerInputSha256", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("derivedAnalyzerInputSha256", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("milestoneSha256", manifestBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TunaGuiMilestoneMerge_WritesExactDerivedAnalyzerInputReceipt()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var atomicJsonBody = ExtractPowerShellFunctionBody(wrapperText, "Write-TunaGuiAtomicJson", "Read-TunaGuiReportValue");
+        var sortKeyBody = ExtractPowerShellFunctionBody(wrapperText, "Get-TunaGuiRetainedLogLineSortKey", "Sort-TunaGuiRetainedLogLinesChronologically");
+        var sortBody = ExtractPowerShellFunctionBody(wrapperText, "Sort-TunaGuiRetainedLogLinesChronologically", "Get-TunaGuiStrictUtf8LineCount");
+        var lineCountBody = ExtractPowerShellFunctionBody(wrapperText, "Get-TunaGuiStrictUtf8LineCount", "Write-TunaGuiDerivedAnalyzerInputReceipt");
+        var receiptBody = ExtractPowerShellFunctionBody(wrapperText, "Write-TunaGuiDerivedAnalyzerInputReceipt", "Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice");
+        var mergeBody = ExtractPowerShellFunctionBody(wrapperText, "Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice", "Ensure-TunaGuiSecondTransferRetainedLogSlice");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-FileHash {
+                param([string]$LiteralPath, [string]$Algorithm)
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $hash = ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($LiteralPath))) -replace '-', '')
+                    return [pscustomobject]@{ Hash = $hash }
+                }
+                finally { $sha.Dispose() }
+            }
+            function Write-TunaGuiAtomicJson { {{atomicJsonBody}} }
+            function Get-TunaGuiRetainedLogLineSortKey { {{sortKeyBody}} }
+            function Sort-TunaGuiRetainedLogLinesChronologically { {{sortBody}} }
+            function Get-TunaGuiStrictUtf8LineCount { {{lineCountBody}} }
+            function Write-TunaGuiDerivedAnalyzerInputReceipt { {{receiptBody}} }
+            function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice { {{mergeBody}} }
+
+            $root = Join-Path ([IO.Path]::GetTempPath()) ('derived-input-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $input = Join-Path $root 'filetransfer-retained-log-slice.log'
+                $milestone = Join-Path $root 'filetransfer-tuna-gui-milestone-evidence.log'
+                $sourceLine = '[2026-08-13 10:00:00Z] event=runtime_unlock_retry_dispatch_observed'
+                $milestoneLine = '[2026-08-13 10:00:01Z] event=filetransfer_route_selected; route=file_tuna_v4'
+                [IO.File]::WriteAllText($input, $sourceLine + [Environment]::NewLine, $utf8)
+                [IO.File]::WriteAllText($milestone, $milestoneLine + [Environment]::NewLine, $utf8)
+                $sourceSha = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash.ToLowerInvariant()
+                [IO.File]::WriteAllText(
+                    (Join-Path $root 'filetransfer-gui-log-ledger.json'),
+                    (@{ analyzerInput = @{ path = $input; captureSha256 = $sourceSha; captureLineCount = 1 } } | ConvertTo-Json -Depth 8),
+                    $utf8)
+
+                Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $root
+                $receipt = Get-Content -Raw (Join-Path $root 'filetransfer-retained-log-slice-derived-receipt.json') | ConvertFrom-Json
+                $derivedSha = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($receipt.sourceAnalyzerInputSha256 -ne $sourceSha -or
+                    $receipt.derivedAnalyzerInputSha256 -ne $derivedSha -or
+                    [long]$receipt.derivedAnalyzerInputLineCount -ne 2 -or
+                    $receipt.milestoneSha256 -ne (Get-FileHash -LiteralPath $milestone -Algorithm SHA256).Hash.ToLowerInvariant()) {
+                    throw 'derived analyzer input receipt did not bind exact source, milestones, and result'
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+            }
+            Write-Output 'derived-input-receipt-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Derived-input receipt test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("derived-input-receipt-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
