@@ -1427,6 +1427,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_retry_scheduled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_lifecycle_ack_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_offer_authority_boundary_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_answer_handoff_boundary_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retired_pending_answer_slot_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_install_confirmed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_execution_observed') +
@@ -3048,6 +3050,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                         [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
                     }).Count -gt 0) {
                 'retry_successor_slot_reserved_before_initial_activation_answer_continuation_completed'
+            }
+            elseif (@(
+                $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.AnswerHandoffTransferIdentityUnresolvedCandidateEvents |
+                    Where-Object {
+                        [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                    }).Count -gt 0) {
+                'accepted_initial_activation_answer_handoff_rejected_on_unresolved_transfer_identity'
             }
             elseif (@(
                 $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.ReceivedAnswerAuthorityRejectedUnresolvedCandidateEvents |

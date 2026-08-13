@@ -402,6 +402,105 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_InitialActivationAnswerHandoffTransferIdentityFailure_IsOwned(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string initiatorScope =
+            "session_id=sess_answer_handoff_transfer; transfer_id=transfer-1; payer_decision_id=4; " +
+            "offer_generation=1; transaction_generation=1; tuna_path_lease_generation=1; " +
+            "tuna_path_lease_listener_run_id=listener-start-1; log_writer_id=writer_initiator";
+        var lines = new List<string>
+        {
+            LogLine($"event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; " +
+                $"authority_mode=InitialActivation; decision_status=accepted; {initiatorScope}"),
+            LogLine($"event=runtime_unlock_transaction_answer_received; {initiatorScope}"),
+            LogLine($"event=runtime_unlock_retired_pending_answer_slot_decided; decision_status=Held; " +
+                $"barrier_generation=1; barrier_phase=AwaitingHandoffDisposition; {initiatorScope}"),
+            LogLine("event=tuna_acceleration_answer_ack_sent; session_id=sess_answer_handoff_transfer; " +
+                "payer_decision_id=4; generation=1; log_writer_id=writer_initiator"),
+            LogLine("event=runtime_unlock_answer_ack_probe_barrier_released; " +
+                "session_id=sess_answer_handoff_transfer; payer_decision_id=4; " +
+                "log_writer_id=writer_initiator"),
+            LogLine("event=runtime_unlock_answer_handoff_boundary_rejected; " +
+                "session_id=sess_answer_handoff_transfer; transaction_generation=1; " +
+                "offer_generation=1; expected_transaction_generation=1; " +
+                "expected_offer_generation=1; decision_status=Rejected; " +
+                "decision_reason=answer_continuation_transaction_replaced; authority_effect=none; " +
+                "log_writer_id=writer_initiator"),
+            LogLine($"event=runtime_unlock_retired_pending_answer_slot_decided; decision_status=Released; " +
+                $"barrier_generation=1; barrier_phase=AwaitingHandoffDisposition; {initiatorScope}")
+        };
+        if (!recovered)
+        {
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_pending; trigger=runtime_unlock; " +
+                "retry_reason=runtime_unlock_answer_ack_timeout; session_id=sess_answer_handoff_transfer; " +
+                "payer_decision_id=4; generation=9; log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_sent; accepted=1; " +
+                "session_id=sess_answer_handoff_transfer; payer_decision_id=4; " +
+                "log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_timeout; trigger=runtime_unlock; " +
+                "retry_reason=runtime_unlock_answer_ack_timeout; session_id=sess_answer_handoff_transfer; " +
+                "payer_decision_id=4; generation=9; log_writer_id=writer_responder"));
+        }
+        if (recovered)
+        {
+            lines.Add(LogLine("event=runtime_unlock_precommit_probe_launch_requested; " +
+                "session_id=sess_answer_handoff_transfer; transfer_id=transfer-1; " +
+                "transaction_generation=1; offer_generation=1; launch_generation=1; " +
+                "log_writer_id=writer_initiator"));
+            lines.Add(LogLine("event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; " +
+                "session_id=sess_answer_handoff_transfer; transfer_id=transfer-1; " +
+                "launch_generation=1; log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_prepared; " +
+                "session_id=sess_answer_handoff_transfer; transfer_id=transfer-1; direction=inbound; " +
+                "transition_kind=PostTunaFallbackV6ToTunaV4; authority_id=fta2-answer-handoff; " +
+                "transition_generation=1; log_writer_id=writer_responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_draining; " +
+                "session_id=sess_answer_handoff_transfer; transfer_id=transfer-1; direction=inbound; " +
+                "transition_kind=PostTunaFallbackV6ToTunaV4; authority_id=fta2-answer-handoff; " +
+                "transition_generation=1; log_writer_id=writer_responder"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "runtime_unlock_answer_handoff_boundary_rejected",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "accepted_initial_activation_answer_handoff_rejected_on_unresolved_transfer_identity",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, "rejected")]
     [InlineData(true, "rejected")]
     [InlineData(false, "recovered")]

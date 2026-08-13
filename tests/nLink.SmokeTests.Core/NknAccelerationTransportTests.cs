@@ -19631,6 +19631,205 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     [Fact]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public void RuntimeUnlockAnswerHandoff_ResolvesMissingTransactionTransferFromExactLease()
+    {
+        const string sessionId = "session-answer-handoff-transfer";
+        const string transferId = "transfer-answer-handoff-transfer";
+        const string listenerRunId = "listener-answer-handoff-transfer";
+        const long transactionGeneration = 3;
+        const long offerGeneration = 5;
+        const long leaseGeneration = 7;
+        const long payerDecisionId = 11;
+        var transaction = new RuntimeUnlockTransactionSnapshot(
+            sessionId,
+            TransferId: null,
+            transactionGeneration,
+            offerGeneration,
+            RuntimeUnlockTransactionState.AnswerReceived,
+            CreatedUtcMs: 1,
+            UpdatedUtcMs: 2,
+            DeadlineUtcMs: 10_000,
+            ListenerReady: true,
+            ListenerUnavailable: false,
+            ObservedSend: true,
+            ObservedLane: "peer_answer",
+            PeerReceived: true,
+            AnswerReceived: true,
+            PathProbeId: null,
+            RuntimeUnlockPathProbeState.None,
+            FileTransferTransportKind.Unknown,
+            PathProbeAckedUtcMs: 0,
+            PathProbeFailureReason: null,
+            RouteCommitPending: false,
+            RouteCommitted: false,
+            FailureReason: null,
+            RetiredReason: null,
+            leaseGeneration,
+            RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            listenerRunId,
+            TunaPathLeaseCurrent: true,
+            TunaPathLeaseFailureReason: null);
+        var lease = new RuntimeUnlockTunaPathLeaseSnapshot(
+            sessionId,
+            transferId,
+            transactionGeneration,
+            offerGeneration,
+            leaseGeneration,
+            listenerRunId,
+            payerDecisionId,
+            RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            CreatedUtcMs: 1,
+            UpdatedUtcMs: 2,
+            DeadlineUtcMs: 10_000,
+            FailureReason: null,
+            RetiredReason: null);
+        var transportType = typeof(NknSignalingTransport);
+        var authorityModeType = transportType.GetNestedType(
+            "RuntimeUnlockOfferAuthorityMode",
+            BindingFlags.NonPublic)!;
+        var boundaryType = transportType.GetNestedType(
+            "RuntimeUnlockOfferAuthorityBoundary",
+            BindingFlags.NonPublic)!;
+        var captureType = transportType.GetNestedType(
+            "RuntimeUnlockHandoffBlockerCapture",
+            BindingFlags.NonPublic)!;
+        var matcher = transportType.GetMethod(
+            "RuntimeUnlockAnswerBoundaryMatchesTransactionSnapshot",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var boundary = Activator.CreateInstance(
+            boundaryType,
+            Enum.Parse(authorityModeType, "InitialActivation"),
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            "answer-handoff-transfer-nonce",
+            payerDecisionId,
+            offerGeneration,
+            transactionGeneration,
+            leaseGeneration,
+            listenerRunId,
+            "answer-handoff-semantic-fingerprint",
+            1L,
+            2L,
+            10_000L,
+            "answer-handoff-envelope-fingerprint",
+            null,
+            default(RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope))!;
+
+        bool Matches(
+            RuntimeUnlockTransactionSnapshot candidateTransaction,
+            RuntimeUnlockTunaPathLeaseSnapshot candidateLease,
+            out string? resolvedTransfer,
+            out string rejectionReason)
+        {
+            var capture = Activator.CreateInstance(
+                captureType,
+                candidateTransaction,
+                candidateLease,
+                1L,
+                true)!;
+            var args = new object?[] { boundary, capture, null, null };
+            var matched = Assert.IsType<bool>(matcher.Invoke(null, args));
+            resolvedTransfer = args[2] as string;
+            rejectionReason = Assert.IsType<string>(args[3]);
+            return matched;
+        }
+
+        Assert.True(Matches(
+            transaction,
+            lease,
+            out var resolvedTransfer,
+            out var acceptedReason));
+        Assert.Equal(transferId, resolvedTransfer);
+        Assert.Equal(
+            "accepted_initial_activation_answer_handoff_current",
+            acceptedReason);
+        Assert.True(Matches(
+            transaction with { TransferId = transferId },
+            lease,
+            out resolvedTransfer,
+            out _));
+        Assert.Equal(transferId, resolvedTransfer);
+
+        Assert.False(Matches(
+            transaction with { TransferId = "mutated-transfer" },
+            lease,
+            out _,
+            out var transactionConflict));
+        Assert.Equal(
+            "answer_continuation_transfer_identity_conflict",
+            transactionConflict);
+        Assert.False(Matches(
+            transaction,
+            lease with { TransferId = null },
+            out _,
+            out var unresolved));
+        Assert.Equal(
+            "answer_continuation_transfer_identity_unresolved",
+            unresolved);
+        Assert.False(Matches(
+            transaction,
+            lease with { TransferId = "mutated-transfer" },
+            out _,
+            out var leaseTransferConflict));
+        Assert.Equal(
+            "answer_continuation_transfer_identity_conflict",
+            leaseTransferConflict);
+        foreach (var mutatedTransaction in new[]
+        {
+            transaction with { SessionId = "mutated-session" },
+            transaction with { TransactionGeneration = transactionGeneration + 1 },
+            transaction with { OfferGeneration = offerGeneration + 1 },
+            transaction with { State = RuntimeUnlockTransactionState.Failed },
+            transaction with { AnswerReceived = false },
+            transaction with { TunaPathLeaseGeneration = leaseGeneration + 1 },
+            transaction with { TunaPathLeaseListenerRunId = "mutated-listener" },
+            transaction with { TunaPathLeaseCurrent = false },
+        })
+        {
+            Assert.False(Matches(
+                mutatedTransaction,
+                lease,
+                out _,
+                out _));
+        }
+        foreach (var mutatedLease in new[]
+        {
+            lease with { SessionId = "mutated-session" },
+            lease with { TransactionGeneration = transactionGeneration + 1 },
+            lease with { OfferGeneration = offerGeneration + 1 },
+            lease with { LeaseGeneration = leaseGeneration + 1 },
+            lease with { ListenerRunId = "mutated-listener" },
+            lease with { PayerDecisionId = payerDecisionId + 1 },
+            lease with { State = RuntimeUnlockTunaPathLeaseState.Retired },
+        })
+        {
+            Assert.False(Matches(
+                transaction,
+                mutatedLease,
+                out _,
+                out var leaseRejection));
+            Assert.Equal(
+                "answer_continuation_lease_not_current",
+                leaseRejection);
+        }
+
+        var staleBarrierCapture = Activator.CreateInstance(
+            captureType,
+            transaction,
+            lease,
+            2L,
+            false)!;
+        var staleBarrierArgs = new object?[] { boundary, staleBarrierCapture, null, null };
+        Assert.False(Assert.IsType<bool>(matcher.Invoke(null, staleBarrierArgs)));
+        Assert.Equal(
+            "answer_continuation_transaction_replaced",
+            Assert.IsType<string>(staleBarrierArgs[3]));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
     public async Task RuntimeUnlockRetryDispatch_ActiveInitialActivationAnswerDefersSuccessorUntilExactHandoffDisposition()
     {
         FakeNknClient.ResetNetwork();
@@ -19767,6 +19966,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.NotNull(GetPrivateField(
                 host,
                 "runtimeUnlockRetiredAnswerBarrier"));
+            Assert.DoesNotContain(
+                "event=runtime_unlock_answer_handoff_boundary_rejected;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=runtime_unlock_retry_dispatch_install_committed;",
                 ReadOperationalLogTail(logStart),

@@ -3112,6 +3112,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialAnswerPeerDelivery.Phase -ne 'runtime_unlock_initial_activation' -or $initialAnswerPeerDelivery.Reason -ne 'validated_offer_answer_not_delivered_to_initiator') { throw 'initial activation answer peer delivery lost precedence' }
             $receivedAnswerAuthorityRejected = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=validated_offer_answer_received_but_authority_tuple_rejected' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($receivedAnswerAuthorityRejected.Phase -ne 'runtime_unlock_initial_activation' -or $receivedAnswerAuthorityRejected.Reason -ne 'validated_offer_answer_received_but_authority_tuple_rejected') { throw 'received initial activation answer authority rejection lost precedence' }
+            $answerHandoffTransferIdentity = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=accepted_initial_activation_answer_handoff_rejected_on_unresolved_transfer_identity' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($answerHandoffTransferIdentity.Phase -ne 'runtime_unlock_initial_activation' -or $answerHandoffTransferIdentity.Reason -ne 'accepted_initial_activation_answer_handoff_rejected_on_unresolved_transfer_identity') { throw 'answer handoff transfer identity failure lost precedence' }
             $installedRetryPendingDial = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($installedRetryPendingDial.Phase -ne 'runtime_unlock_initial_activation' -or $installedRetryPendingDial.Reason -ne 'installed_retry_offer_pending_duplicate_not_replayed_after_other_dial_failure') { throw 'installed retry pending dial failure lost precedence' }
             $initialRecoveryHoldRefreshRelease = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -6810,6 +6812,67 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $"GUI answer-continuation slot test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains(
             "gui-answer-continuation-slot-collision-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitialActivationAnswerHandoffTransferIdentityFailureOutranksDeadline()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierMatch = Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Get-TunaGuiInitialActivationAnswerHandoffTransferIdentityFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$earlyEvidenceLineVisitCount\b");
+        Assert.True(classifierMatch.Success, "Could not find answer-handoff transfer-identity classifier body.");
+        var classifierBody = classifierMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Get-TunaGuiInitialActivationAnswerHandoffTransferIdentityFailure {
+                {{classifierBody}}
+            }
+            $scope = 'session_id=session-answer-handoff; transfer_id=transfer-1'
+            $lines = @(
+                "event=runtime_unlock_offer_authority_boundary_decided; boundary=answer_received; authority_mode=InitialActivation; decision_status=accepted; payer_decision_id=4; offer_generation=1; transaction_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener-start-1; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_transaction_answer_received; offer_generation=1; transaction_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener-start-1; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_retired_pending_answer_slot_decided; decision_status=Held; barrier_generation=1; barrier_phase=AwaitingHandoffDisposition; payer_decision_id=4; offer_generation=1; transaction_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener-start-1; $scope; log_writer_id=writer-initiator",
+                "event=tuna_acceleration_answer_ack_sent; payer_decision_id=4; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_answer_ack_probe_barrier_released; payer_decision_id=4; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_answer_handoff_boundary_rejected; decision_status=Rejected; decision_reason=answer_continuation_transaction_replaced; expected_transaction_generation=1; expected_offer_generation=1; transaction_generation=1; offer_generation=1; $scope; log_writer_id=writer-initiator; gui_evidence_sequence=6",
+                "event=runtime_unlock_retired_pending_answer_slot_decided; decision_status=Released; barrier_generation=1; barrier_phase=AwaitingHandoffDisposition; offer_generation=1; transaction_generation=1; $scope; log_writer_id=writer-initiator"
+            )
+            $result = Get-TunaGuiInitialActivationAnswerHandoffTransferIdentityFailure -Lines $lines
+            if (-not $result.Unresolved -or $result.FirstSequence -ne 6) {
+                throw 'answer handoff transfer identity failure was not detected'
+            }
+            $lines += @(
+                "event=runtime_unlock_precommit_probe_launch_requested; offer_generation=1; transaction_generation=1; $scope; log_writer_id=writer-initiator",
+                "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; launch_generation=1; $scope; log_writer_id=writer-responder",
+                "event=filetransfer_route_transition_prepared; direction=inbound; transition_kind=PostTunaFallbackV6ToTunaV4; $scope; log_writer_id=writer-responder",
+                "event=filetransfer_route_transition_draining; direction=inbound; transition_kind=PostTunaFallbackV6ToTunaV4; $scope; log_writer_id=writer-responder"
+            )
+            $result = Get-TunaGuiInitialActivationAnswerHandoffTransferIdentityFailure -Lines $lines
+            if ($result.Unresolved) { throw 'exact handoff continuation did not recover' }
+            Write-Output 'gui-answer-handoff-transfer-identity-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI answer-handoff transfer identity test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-answer-handoff-transfer-identity-ok",
             result.Stdout,
             StringComparison.Ordinal);
     }

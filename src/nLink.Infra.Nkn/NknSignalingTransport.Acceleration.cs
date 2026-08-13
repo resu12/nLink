@@ -568,6 +568,12 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockOfferAuthorityBoundary Boundary,
         long DeadlineUtcMs);
 
+    private readonly record struct RuntimeUnlockHandoffBlockerCapture(
+        RuntimeUnlockTransactionSnapshot Transaction,
+        RuntimeUnlockTunaPathLeaseSnapshot Lease,
+        long AnswerBarrierGeneration,
+        bool ExpectedAnswerBarrierCurrent);
+
     private sealed record RuntimeUnlockInitialActivationEnvelopeState(
         RuntimeUnlockOfferAuthorityBoundary Boundary,
         TransportAccelerationOfferPayload Offer,
@@ -1212,6 +1218,7 @@ public sealed partial class NknSignalingTransport
         var normalizedNonce = string.IsNullOrWhiteSpace(nonce) ? "test_nonce" : nonce.Trim();
         var initialActivationExpectedScope = default(
             RuntimeUnlockInitialActivationReceiveRecoveryExpectedScope);
+        string? transferId = null;
         if (installReceipt is null &&
             TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
                 normalizedSessionId,
@@ -1223,6 +1230,7 @@ public sealed partial class NknSignalingTransport
                 out _))
         {
             initialActivationExpectedScope = capturedExpectedScope;
+            transferId = ownerAuthority.TransferId;
         }
         RuntimeUnlockRecoveryRetryState? recoveryStateToClear = null;
         RuntimeUnlockRetryDispatchSettlementReport settlementReport = default;
@@ -1260,7 +1268,7 @@ public sealed partial class NknSignalingTransport
             var listenerRunId = $"listener-start-{leaseGeneration.ToString(CultureInfo.InvariantCulture)}";
             var lease = RuntimeUnlockTunaPathLease.Start(
                 normalizedSessionId,
-                transferId: null,
+                transferId,
                 leaseGeneration,
                 listenerRunId,
                 payerDecisionId,
@@ -3267,13 +3275,15 @@ public sealed partial class NknSignalingTransport
         string? sessionId,
         NknAccelerationLaneKind lanes,
         string reason,
-        RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary = null)
+        RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary = null,
+        long expectedAnswerBarrierGeneration = 0)
         => RequestFileTransferTunaActivationHandoffWithResponderPeerProbe(
             sessionId,
             lanes,
             reason,
             responderPeerProbeEvidence: null,
-            expectedAnswerBoundary: expectedAnswerBoundary);
+            expectedAnswerBoundary: expectedAnswerBoundary,
+            expectedAnswerBarrierGeneration: expectedAnswerBarrierGeneration);
 
     private RuntimeUnlockRetiredAnswerHandoffDisposition
         RequestFileTransferTunaActivationHandoffWithResponderPeerProbe(
@@ -3281,7 +3291,8 @@ public sealed partial class NknSignalingTransport
         NknAccelerationLaneKind lanes,
         string reason,
         RuntimeUnlockResponderPeerProbeHandoffEvidence? responderPeerProbeEvidence,
-        RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary = null)
+        RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary = null,
+        long expectedAnswerBarrierGeneration = 0)
     {
         if ((lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
             string.IsNullOrWhiteSpace(sessionId))
@@ -3320,16 +3331,21 @@ public sealed partial class NknSignalingTransport
 
         if (TryCaptureUncommittedRuntimeUnlockHandoffBlocker(
                 sessionId,
-                out var runtimeUnlockSnapshot))
+                expectedAnswerBoundary,
+                expectedAnswerBarrierGeneration,
+                out var runtimeUnlockCapture))
         {
+            var runtimeUnlockSnapshot = runtimeUnlockCapture.Transaction;
             if (expectedAnswerBoundary is { } answerBoundary &&
                 !RuntimeUnlockAnswerBoundaryMatchesTransactionSnapshot(
                     answerBoundary,
-                    runtimeUnlockSnapshot))
+                    runtimeUnlockCapture,
+                    out var resolvedTransferId,
+                    out var rejectionReason))
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=runtime_unlock_answer_handoff_boundary_rejected; session_id={SanitizeLogToken(sessionId)}; transaction_generation={runtimeUnlockSnapshot.TransactionGeneration}; offer_generation={runtimeUnlockSnapshot.OfferGeneration}; expected_transaction_generation={answerBoundary.TransactionGeneration}; expected_offer_generation={answerBoundary.OfferGeneration}; decision_status=Rejected; decision_reason=answer_continuation_transaction_replaced; authority_effect=none");
+                    $"event=runtime_unlock_answer_handoff_boundary_rejected; session_id={SanitizeLogToken(sessionId)}; transaction_generation={runtimeUnlockSnapshot.TransactionGeneration}; offer_generation={runtimeUnlockSnapshot.OfferGeneration}; expected_transaction_generation={answerBoundary.TransactionGeneration}; expected_offer_generation={answerBoundary.OfferGeneration}; expected_transfer_id={SanitizeLogToken(answerBoundary.TransferId ?? "(none)")}; transaction_transfer_id={SanitizeLogToken(runtimeUnlockSnapshot.TransferId ?? "(none)")}; lease_transfer_id={SanitizeLogToken(runtimeUnlockCapture.Lease.TransferId ?? "(none)")}; resolved_transfer_id={SanitizeLogToken(resolvedTransferId ?? "(none)")}; decision_status=Rejected; decision_reason={SanitizeLogToken(rejectionReason)}; authority_effect=none");
                 return RuntimeUnlockRetiredAnswerHandoffDisposition.Rejected;
             }
 
@@ -3379,28 +3395,78 @@ public sealed partial class NknSignalingTransport
 
     private static bool RuntimeUnlockAnswerBoundaryMatchesTransactionSnapshot(
         RuntimeUnlockOfferAuthorityBoundary boundary,
-        RuntimeUnlockTransactionSnapshot snapshot)
-        => boundary.Mode == RuntimeUnlockOfferAuthorityMode.InitialActivation &&
-           boundary.InstallReceipt is null &&
-           !snapshot.IsTerminal &&
-           snapshot.AnswerReceived &&
-           string.Equals(
-               snapshot.SessionId,
-               boundary.SessionId,
-               StringComparison.Ordinal) &&
-           string.Equals(
-               snapshot.TransferId,
-               boundary.TransferId,
-               StringComparison.Ordinal) &&
-           snapshot.TransactionGeneration == boundary.TransactionGeneration &&
-           snapshot.OfferGeneration == boundary.OfferGeneration &&
-           snapshot.TunaPathLeaseGeneration ==
-               boundary.TunaPathLeaseGeneration &&
-           snapshot.TunaPathLeaseCurrent &&
-           string.Equals(
-               snapshot.TunaPathLeaseListenerRunId,
-               boundary.TunaPathLeaseListenerRunId,
-               StringComparison.Ordinal);
+        RuntimeUnlockHandoffBlockerCapture capture,
+        out string? resolvedTransferId,
+        out string rejectionReason)
+    {
+        resolvedTransferId = null;
+        rejectionReason = "answer_continuation_transaction_replaced";
+        var snapshot = capture.Transaction;
+        var lease = capture.Lease;
+        if (boundary.Mode != RuntimeUnlockOfferAuthorityMode.InitialActivation ||
+            boundary.InstallReceipt is not null ||
+            snapshot.IsTerminal ||
+            !snapshot.AnswerReceived ||
+            !capture.ExpectedAnswerBarrierCurrent ||
+            !string.Equals(snapshot.SessionId, boundary.SessionId, StringComparison.Ordinal) ||
+            snapshot.TransactionGeneration != boundary.TransactionGeneration ||
+            snapshot.OfferGeneration != boundary.OfferGeneration)
+        {
+            return false;
+        }
+
+        var expectedTransferId = string.IsNullOrWhiteSpace(boundary.TransferId)
+            ? null
+            : boundary.TransferId.Trim();
+        var transactionTransferId = string.IsNullOrWhiteSpace(snapshot.TransferId)
+            ? null
+            : snapshot.TransferId.Trim();
+        var leaseTransferId = string.IsNullOrWhiteSpace(lease.TransferId)
+            ? null
+            : lease.TransferId.Trim();
+        if (expectedTransferId is null ||
+            (transactionTransferId is not null &&
+             !string.Equals(transactionTransferId, expectedTransferId, StringComparison.Ordinal)))
+        {
+            rejectionReason = "answer_continuation_transfer_identity_conflict";
+            return false;
+        }
+
+        if (!lease.IsCurrent ||
+            !string.Equals(lease.SessionId, boundary.SessionId, StringComparison.Ordinal) ||
+            lease.TransactionGeneration != boundary.TransactionGeneration ||
+            lease.OfferGeneration != boundary.OfferGeneration ||
+            lease.LeaseGeneration != boundary.TunaPathLeaseGeneration ||
+            lease.PayerDecisionId != boundary.PayerDecisionId ||
+            !string.Equals(
+                lease.ListenerRunId,
+                boundary.TunaPathLeaseListenerRunId,
+                StringComparison.Ordinal) ||
+            snapshot.TunaPathLeaseGeneration != lease.LeaseGeneration ||
+            !snapshot.TunaPathLeaseCurrent ||
+            !string.Equals(
+                snapshot.TunaPathLeaseListenerRunId,
+                lease.ListenerRunId,
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "answer_continuation_lease_not_current";
+            return false;
+        }
+
+        resolvedTransferId = transactionTransferId ?? leaseTransferId;
+        if (leaseTransferId is null ||
+            !string.Equals(leaseTransferId, expectedTransferId, StringComparison.Ordinal) ||
+            !string.Equals(resolvedTransferId, expectedTransferId, StringComparison.Ordinal))
+        {
+            rejectionReason = leaseTransferId is null
+                ? "answer_continuation_transfer_identity_unresolved"
+                : "answer_continuation_transfer_identity_conflict";
+            return false;
+        }
+
+        rejectionReason = "accepted_initial_activation_answer_handoff_current";
+        return true;
+    }
 
     private bool IsRuntimeUnlockPostTunaFallbackActivationAwaitingCommittedAuthority(
         string sessionId,
@@ -4231,9 +4297,11 @@ public sealed partial class NknSignalingTransport
 
     private bool TryCaptureUncommittedRuntimeUnlockHandoffBlocker(
         string? sessionId,
-        out RuntimeUnlockTransactionSnapshot snapshot)
+        RuntimeUnlockOfferAuthorityBoundary? expectedAnswerBoundary,
+        long expectedAnswerBarrierGeneration,
+        out RuntimeUnlockHandoffBlockerCapture capture)
     {
-        snapshot = default!;
+        capture = default;
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             return false;
@@ -4251,7 +4319,20 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            snapshot = state;
+            var expectedBarrierCurrent = expectedAnswerBoundary is null ||
+                (expectedAnswerBarrierGeneration > 0 &&
+                 runtimeUnlockRetiredAnswerBarrier is
+                 {
+                     Phase: RuntimeUnlockRetiredAnswerBarrierPhase
+                         .AwaitingHandoffDisposition,
+                 } barrier &&
+                 barrier.BarrierGeneration == expectedAnswerBarrierGeneration &&
+                 barrier.Boundary == expectedAnswerBoundary);
+            capture = new RuntimeUnlockHandoffBlockerCapture(
+                state,
+                runtimeUnlockTunaPathLeaseState,
+                expectedAnswerBarrierGeneration,
+                expectedBarrierCurrent);
             return true;
         }
     }
@@ -33206,7 +33287,8 @@ public sealed partial class NknSignalingTransport
                             answer.SessionId,
                             validation.AcceptedLanes,
                             "runtime_unlock_answer_ack_probe_ready",
-                            expectedOfferAuthorityBoundary);
+                            expectedOfferAuthorityBoundary,
+                            retainedAnswerHandoffBarrierGeneration);
                     CompleteRuntimeUnlockRetiredAnswerHandoffBarrier(
                         retainedAnswerHandoffBarrierGeneration,
                         handoffDisposition,
