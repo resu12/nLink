@@ -21548,6 +21548,136 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailUnblockRecheck")]
+    public async Task InboundPostTunaFallbackAuthorizedRepairProgress_WithoutRecoveryFlags_ForcesReceiverState()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId =
+            "transfer_inbound_authorized_repair_progress_forces_state";
+        var context = CreatePostTunaFallbackV6InboundContext(transferId);
+        var dataSession = new RecordingDataSession(
+            $"session_{transferId}",
+            transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var identity = serviceType
+            .GetMethod(
+                "CreateFallbackFrontierRepairIdentity",
+                BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [
+                    new[]
+                    {
+                        new FileTransferRangeV4
+                        {
+                            StartChunkIndex = 100,
+                            ChunkCount = 1,
+                        },
+                    },
+                    256,
+                    255,
+                ]);
+        Assert.NotNull(identity);
+        var issueArguments = new object?[]
+        {
+            context,
+            identity,
+            FallbackFrontierRepairSourceKind.ReceiverRequest,
+            "v6-frontier:100:1",
+            null,
+            "frontier",
+            "regular_nkn_frontier_stall",
+            "unit_test_authorized_repair",
+            null,
+            null,
+            null,
+        };
+        var issued = (bool)serviceType
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "TryIssueFallbackFrontierRepairContractLocked" &&
+                method.GetParameters()[0].ParameterType.Name == "InboundTransferContext")
+            .Invoke(service, issueArguments)!;
+        Assert.True(issued, Assert.IsType<string>(issueArguments[10]));
+        var contract = issueArguments[9];
+        Assert.NotNull(contract);
+        SetPrivateProperty(context, "CurrentFallbackFrontierRepairContract", contract);
+        var authority = GetPrivateProperty<FallbackFrontierRepairAuthority>(
+            contract!,
+            "Authority");
+        Assert.Equal(100, authority.FrontierChunkIndex);
+
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 0);
+        SetPrivateProperty(
+            context,
+            "V6PostTunaFallbackProofReplayReceiverStatePending",
+            false);
+        SetPrivateProperty(
+            context,
+            "V6PostTunaFallbackProofReplayFrontierRequestPending",
+            false);
+        SetPrivateProperty(context, "V6LastReceiverStateSentUtc", DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V6LastReceiverStateCommittedChunkIndex", 100);
+
+        SetPrivateProperty(context, "NextChunkIndex", 101);
+        var progressReceipt = serviceType
+            .GetMethod(
+                "TrySettleInboundFallbackFrontierProgressLocked",
+                BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [
+                    context,
+                    contract,
+                    authority.ProtocolRepairRequestId,
+                    authority.TransportEpoch,
+                    FileTransferTransportKind.RegularNkn,
+                    100,
+                    101,
+                    "unit_test_chunk_batch_committed",
+                ]);
+        Assert.NotNull(progressReceipt);
+
+        var logStart = GetOperationalLogLength();
+        var stateSent = await Assert.IsAssignableFrom<Task<bool>>(serviceType
+            .GetMethod(
+                "SendInboundV6ReceiverStateAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [context, "chunk_batch_committed", true, false, progressReceipt])!);
+
+        Assert.True(stateSent);
+        var receiverState = Assert.Single(
+            dataSession.SentFrames.OfType<FileTransferReceiverStateFrameV6>());
+        Assert.Equal(101, receiverState.ContiguousCommittedChunkIndex);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_v6_fallback_frontier_repair_progress_state_forced;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"authority_id={authority.AuthorityId};",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"request_correlation_id={authority.RequestCorrelationId};",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_v6_receiver_state_coalesced;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void PostTunaFallbackV6LateRepairAfterYield_DoesNotReopenControlOwner()
     {

@@ -12067,6 +12067,66 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackRepairProgressStateCoalesced_OwnsFirstProofEdge(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_repair_progress_state";
+        const string transferId = "transfer_repair_progress_state";
+        const string outboundWriter = "p100routbound";
+        const string inboundWriter = "p200rinbound";
+        const string pairAuthority = "fta2-fallback_tail_yield-pair";
+        const string repairAuthority = "fta2-repair_replay-outbound";
+        const string inboundAuthority = "fta2-repair_replay-inbound";
+        const string requestId = "v6-frontier:3192:2";
+        const string correlationId = "frq-repair-progress";
+        const string range = "frng-repair-progress";
+        var scope = $"session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; authority_id={pairAuthority}; direction=outbound; {scope}; yield_generation=1; log_writer_id={outboundWriter}", 1),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id={pairAuthority}; direction=outbound; recovery_contract_generation=1; retired_offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; source_route=post_tuna_fallback_v6; source_protocol_version=6; decision_status=Queued; log_writer_id={outboundWriter}; session_id={sessionId}; transfer_id={transferId}", 2),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; authority_id={repairAuthority}; predecessor_authority_id=(none); direction=outbound; {scope}; repair_generation=7; repair_request_key=fallback-frontier:3192:1:{range}; range_fingerprint={range}; frontier_chunk_index=3192; source_kind=PeerRequest; primary_protocol_repair_request_id={requestId}; primary_request_correlation_id={correlationId}; target_transport=regular_nkn; log_writer_id={outboundWriter}", 3),
+            LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; authority_id={repairAuthority}; direction=outbound; {scope}; repair_generation=7; protocol_repair_request_id={requestId}; request_correlation_id={correlationId}; dispatch_observed=1; log_writer_id={outboundWriter}", 4),
+            LogLine($"event=filetransfer_data_path_receive_result; direction=inbound; {scope}; delivery_result=received; frame_repair_request_id={requestId}; start_chunk_index=3192; last_end_chunk_exclusive=3193; log_writer_id={inboundWriter}", 5),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; authority_id={inboundAuthority}; direction=inbound; {scope}; settlement_outcome=ProgressObserved; primary_protocol_repair_request_id={requestId}; primary_request_correlation_id={correlationId}; range_fingerprint={range}; log_writer_id={inboundWriter}", 6),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; authority_id={inboundAuthority}; direction=inbound; {scope}; primary_protocol_repair_request_id={requestId}; primary_request_correlation_id={correlationId}; range_fingerprint={range}; previous_frontier_chunk_index=3192; current_frontier_chunk_index=3193; log_writer_id={inboundWriter}", 7),
+            LogLine($"event=filetransfer_v6_sparse_write_committed; session_id={sessionId}; transfer_id={transferId}; next_chunk_index=3193; log_writer_id={inboundWriter}", 8),
+            LogLine($"event=filetransfer_v6_receiver_state_coalesced; session_id={sessionId}; transfer_id={transferId}; previous_committed_chunk_index=3192; current_committed_chunk_index=3193; last_sent_committed_chunk_index=3192; committed_delta=1; log_writer_id={inboundWriter}", 9),
+            LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided; authority_id={repairAuthority}; repair_generation=7; session_id={sessionId}; transfer_id={transferId}; direction=outbound; decision_status=Accepted; log_writer_id={outboundWriter}", 10),
+            LogLine($"event=file_transfer_inbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=deadline", 11),
+            LogLine($"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=deadline", 12),
+        };
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_v6_receiver_state_coalesced", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("fallback_frontier_repair_progress_receiver_state_coalesced_without_peer_publication", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]

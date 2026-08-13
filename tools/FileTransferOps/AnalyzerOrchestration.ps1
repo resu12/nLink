@@ -2090,6 +2090,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_yield_granted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_tail_unblocked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_dispatched') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_path_receive_result') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_progress_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_sparse_write_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_contiguous_write_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_receiver_state_coalesced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_fallback_frontier_repair_progress_state_forced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_receiver_state_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_receiver_state_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_hold_bound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_hold_binding_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested') +
@@ -2731,6 +2740,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     foreach ($candidateEvent in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairHoldBindingUnresolvedCandidateEvents)) {
         $fallbackRepairHoldBindingMissingSequences[[int64]$candidateEvent.Sequence] = $true
     }
+    $fallbackRepairProgressStateSequences = @{}
+    foreach ($candidateEvent in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairProgressStateUnresolvedCandidateEvents)) {
+        $fallbackRepairProgressStateSequences[[int64]$candidateEvent.Sequence] = $true
+    }
     foreach ($candidateEvent in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing'
@@ -2740,6 +2753,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             }
             elseif ($fallbackRepairSettlementRecheckSequences.ContainsKey([int64]$candidateEvent.Sequence)) {
                 'settled_fallback_frontier_repair_did_not_republish_held_paired_tail_retry_request'
+            }
+            elseif ($fallbackRepairProgressStateSequences.ContainsKey([int64]$candidateEvent.Sequence)) {
+                'fallback_frontier_repair_progress_receiver_state_coalesced_without_peer_publication'
             }
             else {
                 'fallback_tail_unblock_retry_recheck_missing'

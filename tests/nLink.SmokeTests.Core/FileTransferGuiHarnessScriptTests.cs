@@ -5561,6 +5561,55 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-fallback-repair-hold-binding-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_FallbackRepairProgressStateCoalescedUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-repair-progress-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0'
+                @(
+                    "event=filetransfer_fallback_tail_paired_yield_granted; authority_id=pair; direction=outbound; $scope; log_writer_id=sender",
+                    'event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; authority_id=pair; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; decision_status=Queued; log_writer_id=sender',
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; authority_id=repair-out; direction=outbound; $scope; repair_generation=7; range_fingerprint=range; frontier_chunk_index=3192; primary_protocol_repair_request_id=req; primary_request_correlation_id=corr; log_writer_id=sender",
+                    "event=filetransfer_fallback_frontier_repair_dispatched; authority_id=repair-out; direction=outbound; $scope; repair_generation=7; dispatch_observed=1; log_writer_id=sender",
+                    "event=filetransfer_data_path_receive_result; direction=inbound; $scope; delivery_result=received; frame_repair_request_id=req; start_chunk_index=3192; last_end_chunk_exclusive=3193; log_writer_id=helper",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; authority_id=repair-in; direction=inbound; $scope; settlement_outcome=ProgressObserved; primary_protocol_repair_request_id=req; primary_request_correlation_id=corr; range_fingerprint=range; log_writer_id=helper",
+                    "event=filetransfer_fallback_frontier_repair_progress_observed; authority_id=repair-in; direction=inbound; $scope; primary_protocol_repair_request_id=req; primary_request_correlation_id=corr; range_fingerprint=range; previous_frontier_chunk_index=3192; current_frontier_chunk_index=3193; log_writer_id=helper",
+                    'event=filetransfer_v6_sparse_write_committed; session_id=sess; transfer_id=transfer; next_chunk_index=3193; log_writer_id=helper',
+                    'event=filetransfer_v6_receiver_state_coalesced; session_id=sess; transfer_id=transfer; previous_committed_chunk_index=3192; current_committed_chunk_index=3193; last_sent_committed_chunk_index=3192; log_writer_id=helper'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'fallback_frontier_repair_progress_receiver_state_coalesced_without_peer_publication' -or
+                    -not $result.RuntimeUnlockRetryFallbackTailUnblockRecheckMissing -or
+                    $result.ClassificationSource -ne 'immutable_evidence_fallback_repair_progress_state_index') {
+                    throw "fallback repair progress-state fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-fallback-repair-progress-state-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Fallback repair progress-state GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-fallback-repair-progress-state-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("healthy")]
     [InlineData("reverse_order")]

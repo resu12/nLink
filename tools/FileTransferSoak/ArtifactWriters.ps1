@@ -29341,6 +29341,39 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
         (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6'
     } | Sort-Object Sequence)
+    [object[]]$fallbackRepairDispatchedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+    } | Sort-Object Sequence)
+    [object[]]$inboundRepairProgressEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
+    } | Sort-Object Sequence)
+    [object[]]$inboundRepairSettlementEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'ProgressObserved'
+    } | Sort-Object Sequence)
+    [object[]]$inboundRepairReceiveEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_data_path_receive_result' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'delivery_result' -Default '') -eq 'received'
+    } | Sort-Object Sequence)
+    [object[]]$inboundV6CommitEvents = @($Events | Where-Object {
+        $_.EventName -in @('filetransfer_v6_sparse_write_committed', 'filetransfer_v6_contiguous_write_committed')
+    } | Sort-Object Sequence)
+    [object[]]$receiverStateCoalescedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_v6_receiver_state_coalesced'
+    } | Sort-Object Sequence)
+    [object[]]$repairProgressStateForcedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_v6_fallback_frontier_repair_progress_state_forced'
+    } | Sort-Object Sequence)
+    [object[]]$receiverStateSentEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_v6_receiver_state_sent'
+    } | Sort-Object Sequence)
+    [object[]]$receiverStateReceivedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_v6_receiver_state_received'
+    } | Sort-Object Sequence)
     [object[]]$fallbackTailHoldBoundEvents = @($Events | Where-Object {
         $_.EventName -in @(
             'runtime_unlock_retry_dispatch_fallback_tail_hold_bound',
@@ -30600,6 +30633,182 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
     $fallbackRepairSettlementAfterBoundHoldDistinct = New-Object System.Collections.Generic.List[object]
     $fallbackRepairSettlementAfterBoundHoldRecovered = New-Object System.Collections.Generic.List[object]
     $fallbackRepairSettlementAfterBoundHoldUnresolved = New-Object System.Collections.Generic.List[object]
+    $repairProgressStateRaw = New-Object System.Collections.Generic.List[object]
+    $repairProgressStateDistinct = New-Object System.Collections.Generic.List[object]
+    $repairProgressStateRecovered = New-Object System.Collections.Generic.List[object]
+    $repairProgressStateUnresolved = New-Object System.Collections.Generic.List[object]
+    $seenRepairProgressStateKeys = @{}
+
+    foreach ($coalesced in $receiverStateCoalescedEvents) {
+        $coalescedSequence = [int64]$coalesced.Sequence
+        $inboundWriter = Get-FallbackTailRecheckField -Event $coalesced -Names @('log_writer_id')
+        $sessionId = Get-FallbackTailRecheckField -Event $coalesced -Names @('session_id')
+        $transferId = Get-FallbackTailRecheckField -Event $coalesced -Names @('transfer_id')
+        $previousFrontier = Get-FallbackTailRecheckField -Event $coalesced -Names @('previous_committed_chunk_index')
+        $currentFrontier = Get-FallbackTailRecheckField -Event $coalesced -Names @('current_committed_chunk_index')
+        if ([string]::IsNullOrWhiteSpace($inboundWriter) -or
+            [string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($transferId) -or
+            $previousFrontier -notmatch '^[0-9]+$' -or
+            $currentFrontier -notmatch '^[1-9][0-9]*$' -or
+            [int]$currentFrontier -le [int]$previousFrontier -or
+            (Get-FallbackTailRecheckField -Event $coalesced -Names @('last_sent_committed_chunk_index')) -ne $previousFrontier) {
+            continue
+        }
+
+        $progress = @($inboundRepairProgressEvents | Where-Object {
+            [int64]$_.Sequence -lt $coalescedSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('previous_frontier_chunk_index')) -eq $previousFrontier -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('current_frontier_chunk_index')) -eq $currentFrontier
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($progress.Count -ne 1) { continue }
+        $repairRequestId = Get-FallbackTailRecheckField -Event $progress[0] -Names @('primary_protocol_repair_request_id', 'protocol_repair_request_id')
+        $correlationId = Get-FallbackTailRecheckField -Event $progress[0] -Names @('primary_request_correlation_id', 'request_correlation_id')
+        $rangeFingerprint = Get-FallbackTailRecheckField -Event $progress[0] -Names @('range_fingerprint')
+        $settlement = @($inboundRepairSettlementEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$progress[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $progress[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('primary_protocol_repair_request_id', 'protocol_repair_request_id')) -eq $repairRequestId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('primary_request_correlation_id', 'request_correlation_id')) -eq $correlationId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('range_fingerprint')) -eq $rangeFingerprint
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        $receive = @($inboundRepairReceiveEvents | Where-Object {
+            $settlement.Count -eq 1 -and [int64]$_.Sequence -lt [int64]$settlement[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('frame_repair_request_id')) -eq $repairRequestId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('start_chunk_index')) -eq $previousFrontier -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('last_end_chunk_exclusive')) -eq $currentFrontier
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        $commit = @($inboundV6CommitEvents | Where-Object {
+            $receive.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$progress[0].Sequence -and
+            [int64]$_.Sequence -lt $coalescedSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            [int](Get-FallbackTailRecheckField -Event $_ -Names @('next_chunk_index') -Default '-1') -ge [int]$currentFrontier
+        } | Sort-Object Sequence | Select-Object -First 1)
+        if ($settlement.Count -ne 1 -or $receive.Count -ne 1 -or $commit.Count -ne 1) { continue }
+
+        $outboundGrant = @($fallbackRepairGrantedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$receive[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -ne $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('primary_protocol_repair_request_id', 'protocol_repair_request_id')) -eq $repairRequestId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('primary_request_correlation_id', 'request_correlation_id')) -eq $correlationId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('range_fingerprint')) -eq $rangeFingerprint -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('frontier_chunk_index')) -eq $previousFrontier
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($outboundGrant.Count -ne 1) { continue }
+        $outboundWriter = Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('log_writer_id')
+        $pairedYield = @($pairedYieldEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$outboundGrant[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        $pairedRequest = @($pairedRetryRequestedEvents | Where-Object {
+            $pairedYield.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$pairedYield[0].Sequence -and
+            [int64]$_.Sequence -lt $coalescedSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $pairedYield[0] -Names @('authority_id'))
+        } | Select-Object -First 1)
+        if ($pairedYield.Count -ne 1 -or $pairedRequest.Count -ne 1) { continue }
+        $dispatch = @($fallbackRepairDispatchedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$outboundGrant[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$receive[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('repair_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('repair_generation')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('dispatch_observed')) -eq '1'
+        } | Select-Object -First 1)
+        if ($dispatch.Count -ne 1) { continue }
+        $holdBinding = @($fallbackTailHoldBoundEvents | Where-Object {
+            [int64]$_.Sequence -gt $coalescedSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('repair_generation')) -eq
+                (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('repair_generation'))
+        } | Select-Object -First 1)
+        if ($holdBinding.Count -ne 1) { continue }
+
+        $repairProgressStateRaw.Add($coalesced) | Out-Null
+        $rawCandidates.Add($coalesced) | Out-Null
+        $candidateKey = @($inboundWriter, $outboundWriter, $sessionId, $transferId, $repairRequestId,
+            $correlationId, $rangeFingerprint, $previousFrontier, $currentFrontier,
+            (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('authority_id')),
+            (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('repair_generation'))) -join '|'
+        if ($seenRepairProgressStateKeys.ContainsKey($candidateKey)) { continue }
+        $seenRepairProgressStateKeys[$candidateKey] = $true
+        $repairProgressStateDistinct.Add($coalesced) | Out-Null
+        $distinctCandidates.Add($coalesced) | Out-Null
+
+        $forced = @($repairProgressStateForcedEvents | Where-Object {
+            [int64]$_.Sequence -gt $coalescedSequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('protocol_repair_request_id')) -eq $repairRequestId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('request_correlation_id')) -eq $correlationId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('range_fingerprint')) -eq $rangeFingerprint -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('current_frontier_chunk_index')) -eq $currentFrontier
+        } | Select-Object -First 1)
+        $sent = @($receiverStateSentEvents | Where-Object {
+            $forced.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$forced[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $inboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('contiguous_committed_chunk_index')) -eq $currentFrontier
+        } | Select-Object -First 1)
+        $receivedState = @($receiverStateReceivedEvents | Where-Object {
+            $sent.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$sent[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            [int](Get-FallbackTailRecheckField -Event $_ -Names @('committed_frontier_chunk_index') -Default '-1') -ge [int]$currentFrontier
+        } | Select-Object -First 1)
+        $outboundSettlement = @($fallbackRepairSettledEvents | Where-Object {
+            $receivedState.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$receivedState[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq
+                (Get-FallbackTailRecheckField -Event $outboundGrant[0] -Names @('authority_id')) -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('settlement_outcome')) -eq 'ProgressObserved'
+        } | Select-Object -First 1)
+        $dispatchObserved = @($recoveryDispatchObservedEvents | Where-Object {
+            $outboundSettlement.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$outboundSettlement[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $outboundWriter -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId
+        } | Select-Object -First 1)
+        $prepared = @($fallbackToTunaPreparedEvents | Where-Object {
+            $dispatchObserved.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$dispatchObserved[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId
+        } | Select-Object -First 1)
+        if ($prepared.Count -eq 1) {
+            $repairProgressStateRecovered.Add($coalesced) | Out-Null
+            $recoveredCandidates.Add($coalesced) | Out-Null
+        }
+        else {
+            $repairProgressStateUnresolved.Add($coalesced) | Out-Null
+            $unresolvedCandidates.Add($coalesced) | Out-Null
+        }
+    }
     $seenFallbackRepairSettlementKeys = @{}
     foreach ($settlement in $fallbackRepairSettledEvents) {
         $settlementSequence = [int64]$settlement.Sequence
@@ -31331,6 +31540,11 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         FallbackFrontierRepairSettlementAfterBoundHoldRecoveredCount = $fallbackRepairSettlementAfterBoundHoldRecovered.Count
         FallbackFrontierRepairSettlementAfterBoundHoldUnresolvedCount = $fallbackRepairSettlementAfterBoundHoldUnresolved.Count
         FallbackFrontierRepairSettlementAfterBoundHoldUnresolvedCandidateEvents = @($fallbackRepairSettlementAfterBoundHoldUnresolved.ToArray())
+        FallbackFrontierRepairProgressStateRawCount = $repairProgressStateRaw.Count
+        FallbackFrontierRepairProgressStateDistinctCount = $repairProgressStateDistinct.Count
+        FallbackFrontierRepairProgressStateRecoveredCount = $repairProgressStateRecovered.Count
+        FallbackFrontierRepairProgressStateUnresolvedCount = $repairProgressStateUnresolved.Count
+        FallbackFrontierRepairProgressStateUnresolvedCandidateEvents = @($repairProgressStateUnresolved.ToArray())
     }
 }
 
@@ -59127,9 +59341,14 @@ function Get-FileTransferRecoveryFailureClassification {
     foreach ($event in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementUnresolvedCandidateEvents)) {
         $runtimeUnlockRetryFallbackTailUnblockRepairSettlementSequences[[int64]$event.Sequence] = $true
     }
+    $runtimeUnlockRetryFallbackTailUnblockRepairProgressStateSequences = @{}
+    foreach ($event in @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairProgressStateUnresolvedCandidateEvents)) {
+        $runtimeUnlockRetryFallbackTailUnblockRepairProgressStateSequences[[int64]$event.Sequence] = $true
+    }
     $runtimeUnlockRetryFallbackTailUnblockLegacyUnresolvedEvents = @(
         $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCandidateEvents | Where-Object {
-            -not $runtimeUnlockRetryFallbackTailUnblockRepairSettlementSequences.ContainsKey([int64]$_.Sequence)
+            -not $runtimeUnlockRetryFallbackTailUnblockRepairSettlementSequences.ContainsKey([int64]$_.Sequence) -and
+            -not $runtimeUnlockRetryFallbackTailUnblockRepairProgressStateSequences.ContainsKey([int64]$_.Sequence)
         }
     )
     Add-FileTransferProofChainFailureCandidates `
@@ -59137,6 +59356,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -Class 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' `
         -Events $runtimeUnlockRetryFallbackTailUnblockLegacyUnresolvedEvents `
         -DefaultReason 'fallback_tail_unblock_retry_recheck_missing' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' `
+        -Events @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairProgressStateUnresolvedCandidateEvents) `
+        -DefaultReason 'fallback_frontier_repair_progress_receiver_state_coalesced_without_peer_publication' `
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `

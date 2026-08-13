@@ -5308,6 +5308,7 @@ public sealed partial class SessionFileTransferService
         int postTunaFallbackRepairProgressBefore = 0;
         int postTunaFallbackRepairProgressAfter = 0;
         int postTunaFallbackRepairProgressRequestedCount = 0;
+        InboundFallbackFrontierProgressReceipt? fallbackFrontierProgressReceipt = null;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -5341,8 +5342,12 @@ public sealed partial class SessionFileTransferService
             if (committedChunkCount > 0)
             {
                 context.PullLastCommittedProgressUtc = progressUtc;
-                TrySettleInboundFallbackFrontierProgressLocked(
+                fallbackFrontierProgressReceipt = TrySettleInboundFallbackFrontierProgressLocked(
                     context,
+                    fallbackFrontierContract,
+                    batch.RepairRequestId,
+                    batch.TransportEpoch,
+                    receivedTransportKind,
                     previousCommittedChunkIndex,
                     context.NextChunkIndex,
                     "chunk_batch_committed");
@@ -5450,8 +5455,14 @@ public sealed partial class SessionFileTransferService
         if (committedChunkCount > 0)
         {
             var forceState = postTunaFallbackRepairProgressObserved ||
+                             fallbackFrontierProgressReceipt is not null ||
                              ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
-            await SendInboundV6ReceiverStateAsync(context, "chunk_batch_committed", forceSend: forceState).ConfigureAwait(false);
+            await SendInboundV6ReceiverStateAsync(
+                    context,
+                    "chunk_batch_committed",
+                    forceSend: forceState,
+                    fallbackFrontierProgressReceipt: fallbackFrontierProgressReceipt)
+                .ConfigureAwait(false);
         }
         else
         {
@@ -5545,6 +5556,7 @@ public sealed partial class SessionFileTransferService
         SessionFileTransferSnapshot? snapshot = null;
         int nextChunkIndexAfterCommit;
         int previousCommittedChunkIndex;
+        InboundFallbackFrontierProgressReceipt? fallbackFrontierProgressReceipt = null;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -5580,8 +5592,12 @@ public sealed partial class SessionFileTransferService
             if (context.NextChunkIndex > previousCommittedChunkIndex)
             {
                 context.PullLastCommittedProgressUtc = progressUtc;
-                TrySettleInboundFallbackFrontierProgressLocked(
+                fallbackFrontierProgressReceipt = TrySettleInboundFallbackFrontierProgressLocked(
                     context,
+                    fallbackFrontierContract,
+                    batch.RepairRequestId,
+                    batch.TransportEpoch,
+                    receivedTransportKind,
                     previousCommittedChunkIndex,
                     context.NextChunkIndex,
                     "contiguous_chunk_batch_committed");
@@ -5639,8 +5655,14 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        var forceState = ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
-        await SendInboundV6ReceiverStateAsync(context, "chunk_batch_committed", forceSend: forceState).ConfigureAwait(false);
+        var forceState = fallbackFrontierProgressReceipt is not null ||
+                         ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
+        await SendInboundV6ReceiverStateAsync(
+                context,
+                "chunk_batch_committed",
+                forceSend: forceState,
+                fallbackFrontierProgressReceipt: fallbackFrontierProgressReceipt)
+            .ConfigureAwait(false);
         await SendInboundV6FrontierRequestAsync(context, "chunk_batch_committed", forceSend: false).ConfigureAwait(false);
     }
 
@@ -5688,12 +5710,14 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         string reason,
         bool forceSend = false,
-        bool terminalReady = false)
+        bool terminalReady = false,
+        InboundFallbackFrontierProgressReceipt? fallbackFrontierProgressReceipt = null)
     {
         FileTransferReceiverStateFrameV6? state;
         IFileTransferDataSession? dataSession;
         int requestWindowChunks;
         bool frontierStalled;
+        InboundFallbackFrontierProgressReceipt? validatedFallbackFrontierProgressReceipt = null;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -5702,6 +5726,23 @@ public sealed partial class SessionFileTransferService
                 !context.PullManifestReceived)
             {
                 return false;
+            }
+
+            if (fallbackFrontierProgressReceipt is not null)
+            {
+                if (!TryValidateInboundFallbackFrontierProgressReceiptLocked(
+                        context,
+                        fallbackFrontierProgressReceipt,
+                        out var progressReceiptRejectionReason))
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_v6_fallback_frontier_repair_progress_state_force_rejected; {FormatFallbackFrontierRepairAuthorityTuple(fallbackFrontierProgressReceipt.Authority)}; protocol_repair_request_id={FormatProtocolLogValue(fallbackFrontierProgressReceipt.ProtocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(fallbackFrontierProgressReceipt.RequestCorrelationId)}; range_fingerprint={FormatProtocolLogValue(fallbackFrontierProgressReceipt.RangeFingerprint)}; received_transport={FormatFileTransferTransportKind(fallbackFrontierProgressReceipt.ReceivedTransport)}; data_session_identity={FormatProtocolLogValue(fallbackFrontierProgressReceipt.DataSessionIdentity)}; data_session_generation={fallbackFrontierProgressReceipt.DataSessionGeneration}; previous_frontier_chunk_index={fallbackFrontierProgressReceipt.PreviousFrontierChunkIndex}; current_frontier_chunk_index={fallbackFrontierProgressReceipt.CurrentFrontierChunkIndex}; authority_effect=none; decision_status=Rejected; decision_reason={FormatProtocolLogValue(progressReceiptRejectionReason)}");
+                    return false;
+                }
+
+                validatedFallbackFrontierProgressReceipt = fallbackFrontierProgressReceipt;
+                forceSend = true;
             }
 
             if (TrySuppressInboundV6ControlSendForTunaActivationBarrierLocked(
@@ -5724,6 +5765,7 @@ public sealed partial class SessionFileTransferService
                  IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg));
             var receiverStateRetryInterval = TimeSpan.FromMilliseconds(V6ReceiverStateRetryIntervalMs);
             if (forceSend &&
+                validatedFallbackFrontierProgressReceipt is null &&
                 !terminalReady &&
                 !postTunaFallbackCheckpoint &&
                 ShouldCoalesceForcedInboundV6PostTunaFallbackControlLocked(
@@ -5804,6 +5846,13 @@ public sealed partial class SessionFileTransferService
             context.V6LastReceiverStateCommittedChunkIndex = context.NextChunkIndex;
             context.V6LastReceiverStateHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
             dataSession = context.DataSession;
+        }
+
+        if (validatedFallbackFrontierProgressReceipt is { } progressReceipt)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_fallback_frontier_repair_progress_state_forced; {FormatFallbackFrontierRepairAuthorityTuple(progressReceipt.Authority)}; protocol_repair_request_id={FormatProtocolLogValue(progressReceipt.ProtocolRepairRequestId)}; request_correlation_id={FormatProtocolLogValue(progressReceipt.RequestCorrelationId)}; range_fingerprint={FormatProtocolLogValue(progressReceipt.RangeFingerprint)}; received_transport={FormatFileTransferTransportKind(progressReceipt.ReceivedTransport)}; data_session_identity={FormatProtocolLogValue(progressReceipt.DataSessionIdentity)}; data_session_generation={progressReceipt.DataSessionGeneration}; previous_frontier_chunk_index={progressReceipt.PreviousFrontierChunkIndex}; current_frontier_chunk_index={progressReceipt.CurrentFrontierChunkIndex}; receiver_state_epoch={state.Epoch}; authority_effect=none; decision_status=Accepted; decision_reason=exact_fallback_frontier_repair_progress");
         }
 
         try

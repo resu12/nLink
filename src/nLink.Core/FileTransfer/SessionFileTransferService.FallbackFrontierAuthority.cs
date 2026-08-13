@@ -16,6 +16,19 @@ public sealed partial class SessionFileTransferService
         int RangeCount,
         int RequestedChunkCount);
 
+    private sealed record InboundFallbackFrontierProgressReceipt(
+        FallbackFrontierRepairContract Contract,
+        FallbackFrontierRepairAuthority Authority,
+        string ProtocolRepairRequestId,
+        string RequestCorrelationId,
+        string RangeFingerprint,
+        FileTransferTransportKind ReceivedTransport,
+        IFileTransferDataSession DataSession,
+        string DataSessionIdentity,
+        long DataSessionGeneration,
+        int PreviousFrontierChunkIndex,
+        int CurrentFrontierChunkIndex);
+
     private enum FallbackFrontierRepairAcceptance
     {
         Rejected = 0,
@@ -1250,42 +1263,148 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private static void TrySettleInboundFallbackFrontierProgressLocked(
+    private static InboundFallbackFrontierProgressReceipt?
+        TrySettleInboundFallbackFrontierProgressLocked(
         InboundTransferContext context,
+        FallbackFrontierRepairContract? expectedContract,
+        string? protocolRepairRequestId,
+        long transportEpoch,
+        FileTransferTransportKind receivedTransport,
         int previousFrontierChunkIndex,
         int currentFrontierChunkIndex,
         string reason)
     {
-        var contract = context.CurrentFallbackFrontierRepairContract;
-        if (contract is null ||
-            contract.Lifecycle.IsSettled ||
+        if (expectedContract is null ||
+            !ReferenceEquals(context.CurrentFallbackFrontierRepairContract, expectedContract) ||
+            string.IsNullOrWhiteSpace(protocolRepairRequestId) ||
+            context.DataSession is null ||
+            context.DataSessionGeneration <= 0 ||
+            expectedContract.Lifecycle.IsSettled ||
+            transportEpoch != expectedContract.Authority.TransportEpoch ||
+            receivedTransport != expectedContract.Authority.TargetTransport ||
             currentFrontierChunkIndex <= previousFrontierChunkIndex ||
-            currentFrontierChunkIndex <= contract.Authority.FrontierChunkIndex)
+            currentFrontierChunkIndex <= expectedContract.Authority.FrontierChunkIndex)
         {
-            return;
+            return null;
         }
 
-        if (!IsFallbackFrontierRepairContractCurrent(context, contract, out var rejectionReason))
+        var normalizedProtocolRepairRequestId = protocolRepairRequestId.Trim();
+        var alias = expectedContract.Aliases.FirstOrDefault(candidate =>
+            string.Equals(
+                candidate.ProtocolRepairRequestId,
+                normalizedProtocolRepairRequestId,
+                StringComparison.Ordinal));
+        if (alias is null ||
+            !string.Equals(
+                alias.RangeFingerprint,
+                expectedContract.Authority.RangeFingerprint,
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (!IsFallbackFrontierRepairContractCurrent(context, expectedContract, out var rejectionReason))
         {
             TrySettleFallbackFrontierRepairContract(
-                contract,
+                expectedContract,
                 FallbackFrontierRepairSettlementOutcome.StaleRejected,
                 rejectionReason);
-            return;
+            return null;
         }
 
         if (!TrySettleFallbackFrontierRepairContract(
-                contract,
+                expectedContract,
                 FallbackFrontierRepairSettlementOutcome.ProgressObserved,
                 reason))
         {
-            return;
+            return null;
         }
 
-        var authority = contract.Authority;
+        var authority = expectedContract.Authority;
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_fallback_frontier_repair_progress_observed; {FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
+
+        return new InboundFallbackFrontierProgressReceipt(
+            expectedContract,
+            authority,
+            normalizedProtocolRepairRequestId,
+            alias.RequestCorrelationId,
+            alias.RangeFingerprint,
+            receivedTransport,
+            context.DataSession,
+            CreateReceiveRecoveryDataSessionIdentity(
+                context.TransferId,
+                context.DataSession,
+                context.DataSessionGeneration),
+            context.DataSessionGeneration,
+            previousFrontierChunkIndex,
+            currentFrontierChunkIndex);
+    }
+
+    private static bool TryValidateInboundFallbackFrontierProgressReceiptLocked(
+        InboundTransferContext context,
+        InboundFallbackFrontierProgressReceipt receipt,
+        out string rejectionReason)
+    {
+        if (!ReferenceEquals(context.CurrentFallbackFrontierRepairContract, receipt.Contract) ||
+            receipt.Authority != receipt.Contract.Authority)
+        {
+            rejectionReason = "fallback_frontier_contract_replaced";
+            return false;
+        }
+
+        if (receipt.Contract.Lifecycle.SettlementOutcome !=
+            FallbackFrontierRepairSettlementOutcome.ProgressObserved)
+        {
+            rejectionReason = "fallback_frontier_contract_not_progress_settled";
+            return false;
+        }
+
+        if (!IsFallbackFrontierRepairContractCurrent(context, receipt.Contract, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (!ReferenceEquals(context.DataSession, receipt.DataSession) ||
+            context.DataSessionGeneration != receipt.DataSessionGeneration ||
+            !string.Equals(
+                CreateReceiveRecoveryDataSessionIdentity(
+                    context.TransferId,
+                    context.DataSession,
+                    context.DataSessionGeneration),
+                receipt.DataSessionIdentity,
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "fallback_frontier_data_session_replaced";
+            return false;
+        }
+
+        var aliasCurrent = receipt.Contract.Aliases.Any(alias =>
+            string.Equals(
+                alias.ProtocolRepairRequestId,
+                receipt.ProtocolRepairRequestId,
+                StringComparison.Ordinal) &&
+            string.Equals(
+                alias.RequestCorrelationId,
+                receipt.RequestCorrelationId,
+                StringComparison.Ordinal) &&
+            string.Equals(
+                alias.RangeFingerprint,
+                receipt.RangeFingerprint,
+                StringComparison.Ordinal));
+        if (!aliasCurrent ||
+            receipt.ReceivedTransport != receipt.Authority.TargetTransport ||
+            receipt.CurrentFrontierChunkIndex <= receipt.PreviousFrontierChunkIndex ||
+            receipt.CurrentFrontierChunkIndex <= receipt.Authority.FrontierChunkIndex ||
+            context.NextChunkIndex < receipt.CurrentFrontierChunkIndex)
+        {
+            rejectionReason = "fallback_frontier_progress_receipt_not_current";
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
     }
 
     private bool
