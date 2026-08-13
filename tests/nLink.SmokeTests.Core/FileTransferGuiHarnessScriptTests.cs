@@ -3689,6 +3689,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.DoesNotContain("$state.ResponderHandoffGeneration |", classifierBody, StringComparison.Ordinal);
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -3719,7 +3720,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'event=tuna_acceleration_answer_ack_received; session_id=sess; lanes=file; payer_decision_id=4; log_writer_id=writer',
                     'event=runtime_unlock_answer_ack_probe_barrier_received; session_id=sess; lanes=file; payer_decision_id=4; log_writer_id=writer',
                     'event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id=sess; lanes=file; transaction_generation=1; offer_generation=6; state=routecommitpending; path_probe_state=acked; route_commit_pending=1; route_committed=0; log_writer_id=writer',
-                    'event=runtime_unlock_precommit_probe_launch_requested; session_id=sess; transfer_id=transfer; lanes=file; transaction_generation=1; offer_generation=6; launch_generation=2; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; path_probe_id=probe; path_probe_state=acked; launch_role=ResponderAdoptingAckedPeerProbe; peer_probe_adoption=1; duplicate=0; tuple_mutation=0; responder_waiting_for_peer_probe=0; log_writer_id=writer'
+                    'event=runtime_unlock_precommit_probe_launch_requested; session_id=sess; transfer_id=transfer; lanes=file; transaction_generation=1; offer_generation=6; launch_generation=2; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; path_probe_id=probe; path_probe_state=acked; launch_role=ResponderAdoptingAckedPeerProbe; peer_probe_adoption=1; duplicate=0; tuple_mutation=0; responder_waiting_for_peer_probe=0; log_writer_id=writer',
+                    'event=runtime_unlock_retry_dispatch_held_by_active_negotiation; authority_id=unrelated; session_id=other; transfer_id=other; direction=outbound; decision_status=Held; decision_reason=active_negotiation_pending; log_writer_id=writer'
                 ) | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
                 if ($result.Phase -ne 'route_runtime' -or
@@ -3729,7 +3731,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $result.RuntimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbe -or
                     $result.RuntimeUnlockResponderPeerProbeRouteTransitionHandoffMissingAfterBoundProbe -or
                     $result.ClassificationSource -ne 'immutable_evidence_responder_peer_probe_index' -or
-                    [long]$result.EvidenceLineVisitCount -ne 10 -or
+                    [long]$result.EvidenceLineVisitCount -ne 11 -or
                     [long]$result.EvidenceParsedRecordCount -ne 10 -or
                     [long]$result.EvidenceLookupCount -le 0) {
                     throw "responder peer-probe fast path mismatch: $($result | ConvertTo-Json -Compress)"
@@ -3738,7 +3740,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($deadlineResult.Phase -ne $result.Phase -or
                     $deadlineResult.Reason -ne $result.Reason -or
                     $deadlineResult.ClassificationSource -ne $result.ClassificationSource -or
-                    [long]$deadlineResult.EvidenceLineVisitCount -ne 10) {
+                    [long]$deadlineResult.EvidenceLineVisitCount -ne 11) {
                     throw "exact proof did not override scenario-deadline fallback: $($deadlineResult | ConvertTo-Json -Compress)"
                 }
                 Write-Output 'gui-responder-peer-probe-fast-path-ok'

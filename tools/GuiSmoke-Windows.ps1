@@ -13722,14 +13722,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
                     [long]$sequenceText
                 } else { [long]::MaxValue }
-                ParsedRecords = [long]$indexed.Count
+                ParsedRecords = [long]$Lines.Count
             }
         }
 
         return [pscustomobject]@{
             Unresolved = $false
             FirstSequence = [long]::MaxValue
-            ParsedRecords = [long]$indexed.Count
+            ParsedRecords = [long]$Lines.Count
         }
     }
 
@@ -14209,7 +14209,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
                         [long]$sequenceText
                     } else { [long]($slot.Index + 1) }
-                    ParsedRecords = [long]$records.Count
+                    ParsedRecords = [long](($records | Measure-Object).Count)
                     LookupCount = $lookupCount
                 }
             }
@@ -14218,7 +14218,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return [pscustomobject]@{
             Unresolved = $false
             FirstSequence = [long]::MaxValue
-            ParsedRecords = [long]$records.Count
+            ParsedRecords = [long](($records | Measure-Object).Count)
             LookupCount = $lookupCount
         }
     }
@@ -14380,7 +14380,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
                         [long]$sequenceText
                     } else { [long]($rejection.Index + 1) }
-                    ParsedRecords = [long]$records.Count
+                    ParsedRecords = [long](($records | Measure-Object).Count)
                     LookupCount = $lookupCount
                 }
             }
@@ -14389,7 +14389,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return [pscustomobject]@{
             Unresolved = $false
             FirstSequence = [long]::MaxValue
-            ParsedRecords = [long]$records.Count
+            ParsedRecords = [long](($records | Measure-Object).Count)
             LookupCount = $lookupCount
         }
     }
