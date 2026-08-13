@@ -13757,7 +13757,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
         }
 
-        foreach ($rejection in @($records | Where-Object {
+        foreach ($rejection in @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'runtime_unlock_peer_precommit_answer_acceptance_decided' -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -ieq 'Rejected' -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -ieq 'inbound' -and
@@ -13773,7 +13773,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $offer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'peer_offer_generation'
             $lease = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'peer_tuna_path_lease_generation'
             $probeId = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'probe_id'
-            $probeAck = @($records | Where-Object {
+            $probeAck = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'runtime_unlock_precommit_probe_ack_sent' -and
                     $_.Index -lt $rejection.Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
@@ -13784,7 +13784,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_generation') -eq $lease -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId
                 } | Select-Object -Last 1)
-            $authoritylessAck = @($records | Where-Object {
+            $authoritylessAck = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'tuna_acceleration_answer_ack_received' -and
                     $_.Index -lt $rejection.Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
@@ -13794,7 +13794,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             if ($probeAck.Count -ne 1 -or $authoritylessAck.Count -ne 1) { continue }
             $payer = Get-TunaGuiLogLineFieldValue -Line $authoritylessAck[0].Line -Name 'payer_decision_id'
             $answerGeneration = Get-TunaGuiLogLineFieldValue -Line $authoritylessAck[0].Line -Name 'pending_answer_ack_generation'
-            $answer = @($records | Where-Object {
+            $answer = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'tuna_acceleration_answer_sent' -and
                     $_.Index -lt $authoritylessAck[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
@@ -13802,7 +13802,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $answerGeneration -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'accepted') -eq '1'
                 } | Select-Object -Last 1)
-            $dispatch = @($records | Where-Object {
+            $dispatch = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'runtime_unlock_retry_dispatch_observed' -and
                     $_.Index -lt $rejection.Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer -and
@@ -13814,7 +13814,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 } | Select-Object -Last 1)
             if ($answer.Count -ne 1 -or $dispatch.Count -ne 1) { continue }
             $dispatchWriter = Get-TunaGuiLogLineFieldValue -Line $dispatch[0].Line -Name 'log_writer_id'
-            $offerQueued = @($records | Where-Object {
+            $offerQueued = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'tuna_acceleration_offer_queued' -and
                     $_.Index -ge $dispatch[0].Index -and $_.Index -lt $answer[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $dispatchWriter -and
@@ -13826,7 +13826,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 })
             if ($offerQueued.Count -eq 0) { continue }
 
-            $accepted = @($records | Where-Object {
+            $accepted = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'runtime_unlock_peer_precommit_answer_acceptance_decided' -and
                     $_.Index -gt $rejection.Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
@@ -13838,14 +13838,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -in @('Accepted', 'Held', 'Idempotent')
                 } | Select-Object -First 1)
-            $handoff = @($records | Where-Object {
+            $handoff = @(@($records.ToArray()) | Where-Object {
                     $accepted.Count -eq 1 -and $_.Event -eq
                         'runtime_unlock_precommit_responder_peer_probe_handoff_bound' -and
                     $_.Index -gt $accepted[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
                 } | Select-Object -First 1)
-            $prepared = @($records | Where-Object {
+            $prepared = @(@($records.ToArray()) | Where-Object {
                     $handoff.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_prepared' -and
                     $_.Index -gt $handoff[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
@@ -13854,7 +13854,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_kind') -eq
                         'PostTunaFallbackV6ToTunaV4'
                 } | Select-Object -First 1)
-            $draining = @($records | Where-Object {
+            $draining = @(@($records.ToArray()) | Where-Object {
                     $prepared.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_draining' -and
                     $_.Index -gt $prepared[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
