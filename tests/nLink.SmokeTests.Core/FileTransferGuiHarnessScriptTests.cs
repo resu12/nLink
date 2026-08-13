@@ -8419,6 +8419,30 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public void TunaGuiDirectManifest_ValidatesFullCaptureAndCompactAnalyzerInputIndependently()
+    {
+        var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var functionStart = wrapperText.IndexOf(
+            "function Write-TunaGuiDirectEvidenceManifest",
+            StringComparison.Ordinal);
+        var functionEnd = wrapperText.IndexOf(
+            "$repoRoot =",
+            functionStart,
+            StringComparison.Ordinal);
+        Assert.True(functionStart >= 0 && functionEnd > functionStart);
+        var manifestBody = wrapperText[functionStart..functionEnd];
+
+        Assert.Contains("$ledger.retainedSlice.sha256", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("$ledger.analyzerInput.captureSha256", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("$captureMatches -and", manifestBody, StringComparison.Ordinal);
+        Assert.Contains("$analyzerInputMatches", manifestBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$captureSha, $ledger.analyzerInput.captureSha256",
+            manifestBody,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RouteAcceptanceAttemptFinalization_RequiresExactDirectClaimsAndIdentity()
     {
         if (!OperatingSystem.IsWindows())

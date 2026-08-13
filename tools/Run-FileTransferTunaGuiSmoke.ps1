@@ -1717,15 +1717,19 @@ function Write-TunaGuiDirectEvidenceManifest {
         $null
     }
     $stateCaptureSha = if ($null -ne $state -and $state.PSObject.Properties.Name -contains 'captureSha256') { [string]$state.captureSha256 } else { '' }
-    $ledgerCaptureSha = if ($null -ne $ledger -and $null -ne $ledger.analyzerInput) { [string]$ledger.analyzerInput.captureSha256 } else { '' }
+    $ledgerCaptureSha = if ($null -ne $ledger -and $null -ne $ledger.retainedSlice) { [string]$ledger.retainedSlice.sha256 } else { '' }
+    $ledgerAnalyzerInputSha = if ($null -ne $ledger -and $null -ne $ledger.analyzerInput) { [string]$ledger.analyzerInput.captureSha256 } else { '' }
     $captureMatches = -not [string]::IsNullOrWhiteSpace($captureSha) -and
         [string]::Equals($captureSha, $ledgerCaptureSha, [System.StringComparison]::OrdinalIgnoreCase) -and
         ([string]::IsNullOrWhiteSpace($stateCaptureSha) -or [string]::Equals($captureSha, $stateCaptureSha, [System.StringComparison]::OrdinalIgnoreCase))
+    $analyzerInputMatches = -not [string]::IsNullOrWhiteSpace($analyzerInputSha) -and
+        [string]::Equals($analyzerInputSha, $ledgerAnalyzerInputSha, [System.StringComparison]::OrdinalIgnoreCase)
     $artifactFinalized = $null -ne $state -and
         -not ([bool]$state.timedOut) -and
         [string]$state.lastCompletedStage -eq 'gui_child_exited' -and
         $null -ne $ledger -and
-        $captureMatches
+        $captureMatches -and
+        $analyzerInputMatches
     $cursorPass = $null -ne $ledger -and [string]$ledger.cursorIntegrityVerdict -eq 'pass'
     $writerPass = $null -ne $ledger -and [int]$ledger.writerEvidenceVersion -eq 3 -and [string]$ledger.writerIntegrityVerdict -eq 'pass'
     $currentRuntimeProof = $artifactFinalized -and $cursorPass -and $writerPass
