@@ -27277,6 +27277,19 @@ function Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation {
     [object[]]$successorEvaluationEvents = @($Events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_successor_evaluation_requested'
     } | Sort-Object Sequence, LineNumber)
+    [object[]]$successorSuppressionEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_successor_evaluation_suppressed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'successor_evaluation_invalid'
+    } | Sort-Object Sequence, LineNumber)
+    [object[]]$successorSlotEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'intent_kind' -Default '') -eq
+            'SuccessorEvaluation' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+            @('Deferred', 'Reserved', 'Converted')
+    } | Sort-Object Sequence, LineNumber)
     [object[]]$pairedReleaseConsumedEvents = @($Events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_tail_paired_release_consumed' -and
         (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
@@ -27517,8 +27530,27 @@ function Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation {
             continue
         }
 
-        $rawCandidates.Add($intent) | Out-Null
-        $suppressedRawCandidates.Add($intent) | Out-Null
+        $matchingSuppression = @($successorSuppressionEvents | Where-Object {
+            [int64]$_.Sequence -ge [int64]$intent.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'successor_profile' -Default '') -eq
+                'pre_offer_missing_dispatch'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $matchingSlot = @($successorSlotEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$intent.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $intent -Name 'session_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $intent -Name 'transfer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'contract_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $intent -Name 'contract_generation' -Default '')
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($matchingSuppression.Count -ne 1 -or $matchingSlot.Count -gt 0) {
+            continue
+        }
+
+        $candidate = $matchingSuppression[0]
+        $rawCandidates.Add($candidate) | Out-Null
+        $suppressedRawCandidates.Add($candidate) | Out-Null
         $ownedSettlements.Add($matchingSettlement[0]) | Out-Null
         $key = [string]::Join('|', @(
                 (Get-FileTransferEventField -Event $intent -Name 'session_id' -Default ''),
@@ -27538,8 +27570,8 @@ function Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation {
         }
 
         $seen[$key] = 1
-        $distinctCandidates.Add($intent) | Out-Null
-        $suppressedDistinctCandidates.Add($intent) | Out-Null
+        $distinctCandidates.Add($candidate) | Out-Null
+        $suppressedDistinctCandidates.Add($candidate) | Out-Null
         $matchingGrant = @($grantEvents | Where-Object {
             [int64]$_.Sequence -gt [int64]$intent.Sequence -and
             (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '') -eq
@@ -27553,12 +27585,12 @@ function Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation {
             (Test-ZeroOfferReleaseTupleMatch -Left $matchingSettlement[0] -Right $_)
         } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
         if ($matchingGrant.Count -gt 0) {
-            $recoveredCandidates.Add($intent) | Out-Null
-            $suppressedRecoveredCandidates.Add($intent) | Out-Null
+            $recoveredCandidates.Add($candidate) | Out-Null
+            $suppressedRecoveredCandidates.Add($candidate) | Out-Null
         }
         else {
-            $unresolvedCandidates.Add($intent) | Out-Null
-            $suppressedUnresolvedCandidates.Add($intent) | Out-Null
+            $unresolvedCandidates.Add($candidate) | Out-Null
+            $suppressedUnresolvedCandidates.Add($candidate) | Out-Null
         }
     }
 
@@ -27756,6 +27788,10 @@ function Get-FileTransferRuntimeUnlockRetryCurrentListenerAdoptionCorrelation {
     $liveProjectionDistinct = New-Object System.Collections.Generic.List[object]
     $liveProjectionRecovered = New-Object System.Collections.Generic.List[object]
     $liveProjectionUnresolved = New-Object System.Collections.Generic.List[object]
+    $noCurrentListenerRaw = New-Object System.Collections.Generic.List[object]
+    $noCurrentListenerDistinct = New-Object System.Collections.Generic.List[object]
+    $noCurrentListenerRecovered = New-Object System.Collections.Generic.List[object]
+    $noCurrentListenerUnresolved = New-Object System.Collections.Generic.List[object]
     $seen = @{}
 
     function Test-RetryListenerAdoptionScopeMatch {
@@ -27939,6 +27975,162 @@ function Get-FileTransferRuntimeUnlockRetryCurrentListenerAdoptionCorrelation {
             $current = $parent[0]
         }
         return $false
+    }
+
+    foreach ($decision in $adoptionDecisionEvents) {
+        $writerId = Get-FileTransferEventField -Event $decision -Name 'log_writer_id' -Default ''
+        $install = @($installedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$decision.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId -and
+            (Get-FileTransferEventField -Event $_ -Name 'listener_execution_mode' -Default '') -eq
+                'AdoptCurrentCoordinatorScoped' -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $decision -Name 'authority_id' -Default '') -and
+            (Test-RetryListenerAdoptionScopeMatch -Install $_ -Candidate $decision)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($install.Count -ne 1) {
+            continue
+        }
+
+        $reservation = @($releaseReservedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$install[0].Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId -and
+            (Test-RetryListenerAdoptionReleaseMatch -Install $install[0] -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        $release = @($releaseConsumedEvents | Where-Object {
+            $reservation.Count -eq 1 -and
+            [int64]$_.Sequence -lt [int64]$decision.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId -and
+            (Test-RetryListenerAdoptionReleaseMatch -Install $install[0] -Candidate $_) -and
+            (Test-RetryListenerAdoptionPairedReleaseScopeMatch `
+                -Reservation $reservation[0] `
+                -Consumption $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        $grant = @($grantedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$decision.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $install[0] -Name 'authority_id' -Default '') -and
+            (Test-RetryListenerAdoptionScopeMatch -Install $install[0] -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($reservation.Count -ne 1 -or $release.Count -ne 1 -or $grant.Count -ne 1) {
+            continue
+        }
+
+        $hasCurrentListener = $false
+        foreach ($ready in @($pathLeaseReadyEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$decision.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $decision -Name 'session_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $decision -Name 'transfer_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId
+            })) {
+            $leaseGeneration = Get-FileTransferEventField -Event $ready -Name 'lease_generation' -Default ''
+            $listenerRunId = Get-FileTransferEventField -Event $ready -Name 'listener_run_id' -Default ''
+            $retired = @($pathLeaseRetiredEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$ready.Sequence -and
+                [int64]$_.Sequence -lt [int64]$decision.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $ready -Name 'session_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $ready -Name 'transfer_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'lease_generation' -Default '') -eq $leaseGeneration
+            }).Count -gt 0
+            if ($retired) {
+                continue
+            }
+            $started = @($pathLeaseStartedEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$ready.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $ready -Name 'session_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $ready -Name 'transfer_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'lease_generation' -Default '') -eq $leaseGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'listener_run_id' -Default '') -eq $listenerRunId -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+            if ($started.Count -ne 1) {
+                continue
+            }
+            $process = @($listenerStarts | Where-Object {
+                [int64]$_.Sequence -gt [int64]$started[0].Sequence -and
+                [int64]$_.Sequence -lt [int64]$ready.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+            if ($process.Count -ne 1) {
+                continue
+            }
+            $processId = Get-FileTransferEventField -Event $process[0] -Name 'pid' -Default ''
+            $processRunId = Get-FileTransferEventField -Event $process[0] -Name 'run_id' -Default ''
+            $stopped = @($listenerStops | Where-Object {
+                [int64]$_.Sequence -gt [int64]$process[0].Sequence -and
+                [int64]$_.Sequence -lt [int64]$decision.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'pid' -Default '') -eq $processId -and
+                (Get-FileTransferEventField -Event $_ -Name 'run_id' -Default '') -eq $processRunId
+            }).Count -gt 0
+            if (-not $stopped) {
+                $hasCurrentListener = $true
+                break
+            }
+        }
+        if ($hasCurrentListener) {
+            continue
+        }
+
+        $raw.Add($decision) | Out-Null
+        $noCurrentListenerRaw.Add($decision) | Out-Null
+        $key = [string]::Join('|', @(
+                'no-current-listener',
+                $writerId,
+                (Get-FileTransferEventField -Event $decision -Name 'session_id' -Default ''),
+                (Get-FileTransferEventField -Event $decision -Name 'transfer_id' -Default ''),
+                (Get-FileTransferEventField -Event $install[0] -Name 'authority_id' -Default ''),
+                (Get-FileTransferEventField -Event $install[0] -Name 'install_generation' -Default ''),
+                (Get-FileTransferEventField -Event $install[0] -Name 'release_authority_id' -Default ''),
+                (Get-FileTransferEventField -Event $install[0] -Name 'release_generation' -Default ''))).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($decision) | Out-Null
+        $noCurrentListenerDistinct.Add($decision) | Out-Null
+
+        $accepted = @($adoptionAcceptedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$decision.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId -and
+            (Test-RetryListenerAdoptionScopeMatch -Install $install[0] -Candidate $_)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $applied = @($adoptionAppliedEvents | Where-Object {
+            $accepted.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$accepted[0].Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $accepted[0] -Name 'authority_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $dispatch = @($offerEvents | Where-Object {
+            $applied.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$applied[0].Sequence -and
+            $_.EventName -eq 'runtime_unlock_retry_dispatch_observed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '1' -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writerId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $prepared = @($preparedEvents | Where-Object {
+            $dispatch.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$dispatch[0].Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $decision -Name 'session_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $decision -Name 'transfer_id' -Default '')
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($accepted.Count -eq 1 -and $applied.Count -eq 1 -and
+            $dispatch.Count -eq 1 -and $prepared.Count -eq 1) {
+            $recovered.Add($decision) | Out-Null
+            $noCurrentListenerRecovered.Add($decision) | Out-Null
+        }
+        else {
+            $unresolved.Add($decision) | Out-Null
+            $noCurrentListenerUnresolved.Add($decision) | Out-Null
+        }
     }
 
     foreach ($decision in $adoptionDecisionEvents) {
@@ -28626,6 +28818,14 @@ function Get-FileTransferRuntimeUnlockRetryCurrentListenerAdoptionCorrelation {
         LiveProjectionMissingDistinctCandidateEvents = @($liveProjectionDistinct.ToArray())
         LiveProjectionMissingRecoveredCandidateEvents = @($liveProjectionRecovered.ToArray())
         LiveProjectionMissingUnresolvedCandidateEvents = @($liveProjectionUnresolved.ToArray())
+        NoCurrentListenerRawCount = $noCurrentListenerRaw.Count
+        NoCurrentListenerDistinctCount = $noCurrentListenerDistinct.Count
+        NoCurrentListenerRecoveredCount = $noCurrentListenerRecovered.Count
+        NoCurrentListenerUnresolvedCount = $noCurrentListenerUnresolved.Count
+        NoCurrentListenerRawCandidateEvents = @($noCurrentListenerRaw.ToArray())
+        NoCurrentListenerDistinctCandidateEvents = @($noCurrentListenerDistinct.ToArray())
+        NoCurrentListenerRecoveredCandidateEvents = @($noCurrentListenerRecovered.ToArray())
+        NoCurrentListenerUnresolvedCandidateEvents = @($noCurrentListenerUnresolved.ToArray())
     }
 }
 
@@ -58862,8 +59062,9 @@ function Get-FileTransferRecoveryFailureClassification {
         -Class 'runtime_unlock_retry_dispatch_successor_attempt_mismatch' `
         -Events $runtimeUnlockRetryDispatchSuccessorAttemptMismatchEvents
     foreach ($candidateEvent in @($runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCandidateEvents)) {
-        $candidateReason = if ($candidateEvent.EventName -eq
-            'runtime_unlock_retry_missing_dispatch_successor_intent_created') {
+        $candidateReason = if ($candidateEvent.EventName -in @(
+                'runtime_unlock_retry_missing_dispatch_successor_intent_created',
+                'runtime_unlock_retry_dispatch_successor_evaluation_suppressed')) {
             'pre_offer_missing_dispatch_successor_evaluation_suppressed_as_default'
         }
         else {
@@ -58876,6 +59077,12 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason $candidateReason `
             -UseDefaultReason
     }
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_current_listener_adoption_missing' `
+        -Events @($runtimeUnlockRetryCurrentListenerAdoptionProof.NoCurrentListenerUnresolvedCandidateEvents) `
+        -DefaultReason 'installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener' `
+        -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_current_listener_adoption_missing' `

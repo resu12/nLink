@@ -11808,6 +11808,43 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 continue
             }
 
+            $laterAccepted = @(Get-TunaGuiAdoptionRecords `
+                -Event 'runtime_unlock_retry_dispatch_listener_adoption_decided' `
+                -After $held.Index -All -Match {
+                    param($record)
+                    $record.Writer -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $sessionId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $transferId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'status') -eq 'Accepted' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'listener_execution_mode') -eq
+                        'AdoptCurrentCoordinatorScoped'
+                })
+            $laterApplied = @(Get-TunaGuiAdoptionRecords `
+                -Event 'runtime_unlock_retry_dispatch_listener_adoption_applied' `
+                -After $held.Index -All -Match {
+                    param($record)
+                    $record.Writer -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $sessionId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $transferId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'status') -eq 'Accepted'
+                })
+            $laterDispatch = @(Get-TunaGuiAdoptionRecords `
+                -Event 'runtime_unlock_retry_dispatch_observed' `
+                -After $held.Index -All -Match {
+                    param($record)
+                    $record.Writer -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $sessionId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $transferId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'dispatch_observed') -eq '1'
+                })
+            $laterPrepared = @(Get-TunaGuiAdoptionRecords `
+                -Event 'filetransfer_route_transition_prepared' `
+                -After $held.Index -All -Match {
+                    param($record)
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'session_id') -eq $sessionId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $record.Line -Name 'transfer_id') -eq $transferId
+                })
+
             $liveListeners = @()
             $readyEvents = @(Get-TunaGuiAdoptionRecords -Event 'tuna_path_lease_listener_ready' `
                 -Before $held.Index -All -Match {
@@ -11886,6 +11923,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
             }
             if ($liveListeners.Count -ne 1) {
+                if ($liveListeners.Count -eq 0 -and $readyEvents.Count -eq 0 -and
+                    ($laterAccepted.Count -eq 0 -or $laterApplied.Count -eq 0 -or
+                    $laterDispatch.Count -eq 0 -or $laterPrepared.Count -eq 0)) {
+                    return [pscustomobject]@{
+                        Unresolved = $true
+                        FirstSequence = [long]$held.Sequence
+                        LineVisits = $visits
+                    }
+                }
                 continue
             }
             $listener = $liveListeners[0]
@@ -13665,6 +13711,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $earlyPredicateEventSets[$predicateName] = $eventSet
         $earlyPredicateLines[$predicateName] = [System.Collections.Generic.List[string]]::new()
     }
+    function Test-TunaGuiLogLineHasEvent {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+            [Parameter(Mandatory = $true)][string[]]$Events
+        )
+
+        foreach ($eventName in $Events) {
+            if ($Line.IndexOf("event=$eventName", [System.StringComparison]::Ordinal) -ge 0) {
+                return $true
+            }
+        }
+        return $false
+    }
     function Get-TunaGuiInitialActivationAnswerContinuationSlotCollision {
         param(
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -14401,21 +14460,6 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceParsedRecordCount 0L `
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
-    }
-
-    function Test-TunaGuiLogLineHasEvent {
-        param(
-            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
-            [Parameter(Mandatory = $true)][string[]]$Events
-        )
-
-        foreach ($eventName in $Events) {
-            if ($Line.IndexOf("event=$eventName", [System.StringComparison]::Ordinal) -ge 0) {
-                return $true
-            }
-        }
-
-        return $false
     }
 
     function Test-TunaGuiLogLineFieldMatch {

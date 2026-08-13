@@ -2126,6 +2126,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_successor_intent_created') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_successor_evaluation_suppressed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_negotiation_slot_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_successor_intent_rejected') +
@@ -2745,8 +2747,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         }) | Out-Null
     }
     foreach ($candidateEvent in @($runtimeUnlockRetryZeroOfferSuccessorProof.UnresolvedCandidateEvents)) {
-        $candidateReason = if ($candidateEvent.EventName -eq
-            'runtime_unlock_retry_missing_dispatch_successor_intent_created') {
+        $candidateReason = if ($candidateEvent.EventName -in @(
+                'runtime_unlock_retry_missing_dispatch_successor_intent_created',
+                'runtime_unlock_retry_dispatch_successor_evaluation_suppressed')) {
             'pre_offer_missing_dispatch_successor_evaluation_suppressed_as_default'
         }
         else {
@@ -2763,6 +2766,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_retry_dispatch_current_listener_adoption_missing'
             Event = $candidateEvent
             Reason = 'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockRetryCurrentListenerAdoptionProof.NoCurrentListenerUnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_current_listener_adoption_missing'
+            Event = $candidateEvent
+            Reason = 'installed_fallback_retry_did_not_adopt_current_coordinator_scoped_listener'
         }) | Out-Null
     }
     foreach ($candidateEvent in @($runtimeUnlockRetryCurrentListenerAdoptionProof.RestartExpiredUnresolvedCandidateEvents)) {

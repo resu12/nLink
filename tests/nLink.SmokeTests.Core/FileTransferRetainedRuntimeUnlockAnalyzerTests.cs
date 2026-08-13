@@ -7457,10 +7457,13 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorEvaluationSuppressed_SelectsIntent(
-        bool compact)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorEvaluationSuppressed_SelectsExplicitSuppression(
+        bool compact,
+        bool explicitlySuppressed)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -7501,6 +7504,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             .Replace("offer_generation=12", "offer_generation=0", StringComparison.Ordinal)
             .Replace("offer_nonce=nonce-1", "offer_nonce=(none)", StringComparison.Ordinal);
         lines.Add(LogLine(intent, secondsOffset: 7));
+        lines.Add(LogLine(
+            explicitlySuppressed
+                ? "event=runtime_unlock_retry_dispatch_successor_evaluation_suppressed; retired_generation=0; successor_profile=pre_offer_missing_dispatch; decision_status=Rejected; decision_reason=successor_evaluation_invalid"
+                : "event=runtime_unlock_retry_negotiation_slot_decided; intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=0; decision_status=Deferred; retired_generation=0; authority_effect=none; decision_reason=retry_dispatch_negotiation_slot_busy",
+            secondsOffset: 8));
         lines.Add(baseFixture[^2]);
         lines.Add(baseFixture[^1]);
 
@@ -7516,22 +7524,22 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        if (!compact)
+        if (!compact && explicitlySuppressed)
         {
             Assert.Equal("runtime_unlock_retry_dispatch_zero_offer_successor_rejected", verdict["recovery_failure_class"]);
-            Assert.Equal("runtime_unlock_retry_missing_dispatch_successor_intent_created", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("runtime_unlock_retry_dispatch_successor_evaluation_suppressed", verdict["first_proof_chain_failure_event"]);
             Assert.Equal(
                 "pre_offer_missing_dispatch_successor_evaluation_suppressed_as_default",
                 verdict["first_proof_chain_failure_reason"]);
         }
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count"]);
+        Assert.Equal(explicitlySuppressed ? "1" : "0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_raw_count"]);
+        Assert.Equal(explicitlySuppressed ? "1" : "0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_distinct_count"]);
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_recovered_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_raw_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_distinct_count"]);
+        Assert.Equal(explicitlySuppressed ? "1" : "0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_rejected_unresolved_count"]);
+        Assert.Equal(explicitlySuppressed ? "1" : "0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_raw_count"]);
+        Assert.Equal(explicitlySuppressed ? "1" : "0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_distinct_count"]);
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_recovered_count"]);
-        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count"]);
+        Assert.Equal(explicitlySuppressed ? "1" : "0", verdict["runtime_unlock_retry_dispatch_zero_offer_successor_evaluation_suppressed_unresolved_count"]);
         if (!compact)
         {
             Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count"]);
