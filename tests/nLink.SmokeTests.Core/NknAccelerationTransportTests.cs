@@ -31615,6 +31615,118 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     }
 
     [Theory]
+    [InlineData("fallback_tail_quiescent", true)]
+    [InlineData("accepted", false)]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
+    public async Task PostFallbackPairedRetryOffer_BindsOnlyExactResponderLineageBeforeAnswerVisibility(
+        string routeHintSource,
+        bool expectedBound)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.post-fallback-paired-offer.address");
+            var helperClient = new FakeNknClient("helper.post-fallback-paired-offer.address");
+            var helperLane = new RetryableTunaAccelerationSession(
+                canListen: false,
+                failedDialAttemptsBeforeSuccess: 0,
+                supportedLanes: NknAccelerationLaneKind.File);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-post-fallback-paired-offer-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-post-fallback-paired-offer-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_post_fallback_paired_offer";
+            _ = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                helper,
+                "TrackAuthorizedFileTransferRouteHintForTestsCore",
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                routeHintSource,
+                false,
+                "fallback_tail_quiescent",
+                "active",
+                true,
+                3L,
+                "(none)",
+                2,
+                1L,
+                1,
+                FileTransferDirection.Inbound);
+            var offer = CreateOfferPayload(
+                sessionId,
+                "postfallbackpaired0011223344556677",
+                supportedLanes: new[] { "file" },
+                payerDecisionId: 91L);
+            offer.Trigger = "fallback_paired_tail_yield";
+            offer.SenderRole = "helpee";
+            var logStart = GetOperationalLogLength();
+
+            var task = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(
+                helper,
+                "HandleTransportAccelerationOfferAsync",
+                hostClient.Address,
+                offer,
+                "post-fallback-paired-offer-message",
+                cts.Token));
+            await task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("trigger=fallback_paired_tail_yield", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_answer_ack_pending;", logTail, StringComparison.Ordinal);
+            if (expectedBound)
+            {
+                var transaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                    GetPrivateField(helper, "runtimeUnlockTransactionState"));
+                Assert.True(transaction.AnswerReceived);
+                Assert.False(transaction.IsTerminal);
+                Assert.True(transaction.TunaPathLeaseCurrent);
+                Assert.True(transaction.TunaPathLeaseGeneration > 0);
+                var proofProvider =
+                    Assert.IsAssignableFrom<IRuntimeUnlockRouteCommitProofProvider>(helper);
+                Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                    sessionId,
+                    transferId,
+                    out var proof));
+                Assert.Equal(transferId, proof.TransferId);
+                Assert.Equal(
+                    "InitialActivation",
+                    GetPrivateField(helper, "pendingAccelerationAnswerAckAuthorityMode")?.ToString());
+            }
+            else
+            {
+                var transaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
+                    GetPrivateField(helper, "runtimeUnlockTransactionState"));
+                Assert.False(transaction.AnswerReceived);
+                Assert.Equal(0, transaction.TransactionGeneration);
+                Assert.Equal(0, transaction.OfferGeneration);
+                Assert.Null(GetPrivateField(helper, "pendingAccelerationAnswerAckAuthorityMode"));
+            }
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryLifecycle")]
     [InlineData(false)]

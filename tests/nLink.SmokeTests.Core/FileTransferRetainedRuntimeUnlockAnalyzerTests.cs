@@ -14,10 +14,13 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, "runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch")]
+    [InlineData(true, "runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch")]
+    [InlineData(false, "runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch")]
+    [InlineData(true, "runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch")]
     public async Task AnalyzeRetained_PairedRetryResponderBindingMissing_ClassifiesInFullAndCompact(
-        bool compact)
+        bool compact,
+        string rejectionReason)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -54,7 +57,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=tuna_acceleration_answer_sent; accepted=1; payer_decision_id=5; generation=9; log_writer_id={responder}", 2),
             LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; payer_decision_id=5; pending_answer_ack_generation=9; authority_mode=none; log_writer_id={responder}", 3),
             LogLine($"event=runtime_unlock_precommit_probe_ack_sent; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=3; probe_id={probeId}; received_transport=tuna; log_writer_id={responder}", 4),
-            LogLine($"event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Rejected; decision_status=Rejected; direction=inbound; session_id={sessionId}; transfer_id={transferId}; peer_transaction_generation=1; peer_offer_generation=2; peer_tuna_path_lease_generation=3; probe_id={probeId}; received_transport=tuna; received_utc_ms=1; probe_ack_sent_utc_ms=2; probe_frame_fingerprint=probe-fingerprint; responder_transition_mode=post_fallback_v6_paired; {scope}; decision_reason=runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch; log_writer_id={responder}", 5),
+            LogLine($"event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Rejected; decision_status=Rejected; direction=inbound; session_id={sessionId}; transfer_id={transferId}; peer_transaction_generation=1; peer_offer_generation=2; peer_tuna_path_lease_generation=3; probe_id={probeId}; received_transport=tuna; received_utc_ms=1; probe_ack_sent_utc_ms=2; probe_frame_fingerprint=probe-fingerprint; responder_transition_mode=post_fallback_v6_paired; {scope}; decision_reason={rejectionReason}; log_writer_id={responder}", 5),
             LogLine($"event=file_transfer_inbound_terminal; role=Helper; direction=inbound; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; log_writer_id={responder}", 6)
         };
 

@@ -3756,6 +3756,64 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_PairedRetryScopeMismatchUsesBindingFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-paired-retry-binding-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=runtime_unlock_retry_dispatch_observed; authority_id=retry-authority; authority_generation=1; direction=outbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; retry_reason=fallback_paired_tail_yield; offer_generation=2; observed_lane=control_plane_peer_visible; log_writer_id=sender',
+                    'event=tuna_acceleration_offer_queued; reason=fallback_paired_tail_yield; session_id=sess; payer_decision_id=5; generation=2; observed_lane=control_plane_peer_visible; queue_local_only=0; log_writer_id=sender',
+                    'event=tuna_acceleration_answer_sent; accepted=1; payer_decision_id=5; generation=9; log_writer_id=responder',
+                    'event=tuna_acceleration_answer_ack_received; session_id=sess; payer_decision_id=5; pending_answer_ack_generation=9; authority_mode=none; log_writer_id=responder',
+                    'event=runtime_unlock_precommit_probe_ack_sent; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=3; probe_id=probe; received_transport=tuna; log_writer_id=responder',
+                    'event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Rejected; decision_status=Rejected; direction=inbound; session_id=sess; transfer_id=transfer; peer_transaction_generation=1; peer_offer_generation=2; peer_tuna_path_lease_generation=3; probe_id=probe; received_transport=tuna; responder_transition_mode=post_fallback_v6_paired; decision_reason=runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch; log_writer_id=responder'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'Gui_Smoke_Scenario_Deadline_Exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance' -or
+                    -not $result.RuntimeUnlockResponderPeerProbeHandoffMissing -or
+                    $result.FailureVariant -ne 'runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_paired_retry_responder_binding_index') {
+                    throw "paired-retry responder binding fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-paired-retry-binding-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Paired-retry responder-binding GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-paired-retry-binding-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_InitialResponderPeerAcceptanceScopeRejectionUsesEarliestExactStage()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

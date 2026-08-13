@@ -1161,6 +1161,32 @@ public sealed partial class NknSignalingTransport
             => new(false, reason, NknAccelerationLaneKind.None);
     }
 
+    private readonly record struct InboundPostFallbackPairedRetryOfferScope(
+        FileTransferRoutePublicationAuthority PublicationAuthority,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        string CheckpointRequestId,
+        string DataSessionIdentity,
+        long DataSessionGeneration,
+        string SourceFingerprint,
+        string MessageId)
+    {
+        public bool IsDefault =>
+            PublicationAuthority is null ||
+            PublicationAuthority.Direction != FileTransferDirection.Inbound ||
+            !string.Equals(
+                PublicationAuthority.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            PublicationAuthority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            TransportEpoch <= 0 ||
+            BridgeRecoveryGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+            DataSessionGeneration <= 0 ||
+            SourceFingerprint.Length != 64 ||
+            string.IsNullOrWhiteSpace(MessageId);
+    }
+
     internal bool IsAccelerationAvailableForTests => IsAccelerationNegotiatedAndHealthy();
 
     internal bool HasAccelerationLaneForTests => accelerationLane is not null;
@@ -8216,6 +8242,138 @@ public sealed partial class NknSignalingTransport
             }
 
             dataSessionGeneration = session.Generation;
+            rejectionReason = "accepted";
+            return true;
+        }
+    }
+
+    private bool TryCaptureInboundPostFallbackPairedRetryOfferScope(
+        string source,
+        TransportAccelerationOfferPayload offer,
+        string messageId,
+        out InboundPostFallbackPairedRetryOfferScope scope)
+    {
+        scope = default;
+        if (!string.Equals(
+                SanitizeLogToken(offer.Trigger),
+                "fallback_paired_tail_yield",
+                StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(offer.SessionId) ||
+            string.IsNullOrWhiteSpace(messageId))
+        {
+            return false;
+        }
+
+        var sessionId = offer.SessionId.Trim();
+        if (!AddressMatchesForSessionPolicy(
+                source,
+                ResolveExpectedRemotePeerAddressForCurrentSession()) ||
+            !TryCaptureCurrentRuntimeUnlockFileTransferOwnerAndDataSession(
+                sessionId,
+                out var authority,
+                out var dataSessionGeneration,
+                out _) ||
+            authority.Direction != FileTransferDirection.Inbound ||
+            !string.Equals(
+                authority.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            authority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            var key = CreateFileTransferRouteHintKey(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction);
+            if (!fileTransferRouteHints.TryGetValue(key, out var routeHint) ||
+                routeHint.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                !string.Equals(
+                    routeHint.Source,
+                    "fallback_tail_quiescent",
+                    StringComparison.Ordinal) ||
+                routeHint.LiveRouteEpoch != authority.LiveRouteEpoch ||
+                routeHint.RuntimeGeneration != authority.RuntimeGeneration ||
+                routeHint.TerminalGeneration != authority.TerminalGeneration ||
+                routeHint.PublicationLegGeneration != authority.LegGeneration ||
+                routeHint.RoutePublicationGeneration !=
+                    authority.RoutePublicationGeneration ||
+                routeHint.FallbackTransportEpoch <= 0 ||
+                routeHint.FallbackBridgeRecoveryGeneration <= 0 ||
+                !fileTransferDataSessions.TryGetValue(
+                    authority.TransferId,
+                    out var dataSession) ||
+                dataSession.IsDisposed ||
+                dataSession.Generation != dataSessionGeneration)
+            {
+                return false;
+            }
+
+            scope = new InboundPostFallbackPairedRetryOfferScope(
+                authority,
+                routeHint.FallbackTransportEpoch,
+                routeHint.FallbackBridgeRecoveryGeneration,
+                routeHint.FallbackCheckpointRequestId ?? "(none)",
+                $"{authority.TransferId}:{dataSession.Generation}",
+                dataSession.Generation,
+                Convert.ToHexString(
+                        SHA256.HashData(
+                            Encoding.UTF8.GetBytes(source.Trim())))
+                    .ToLowerInvariant(),
+                messageId.Trim());
+            return !scope.IsDefault;
+        }
+    }
+
+    private bool TryRecaptureInboundPostFallbackPairedRetryOfferScope(
+        TransportAccelerationOfferPayload offer,
+        InboundPostFallbackPairedRetryOfferScope expected,
+        out string rejectionReason)
+    {
+        rejectionReason = "post_fallback_paired_retry_scope_not_current";
+        lock (gate)
+        {
+            var authority = expected.PublicationAuthority;
+            var key = CreateFileTransferRouteHintKey(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction);
+            if (!string.Equals(
+                    offer.SessionId?.Trim(),
+                    authority.SessionId,
+                    StringComparison.Ordinal) ||
+                !fileTransferRoutePublicationAuthorities.TryGetValue(
+                    key,
+                    out var currentAuthority) ||
+                currentAuthority != authority ||
+                !fileTransferRouteHints.TryGetValue(key, out var routeHint) ||
+                !string.Equals(
+                    routeHint.Source,
+                    "fallback_tail_quiescent",
+                    StringComparison.Ordinal) ||
+                routeHint.FallbackTransportEpoch != expected.TransportEpoch ||
+                routeHint.FallbackBridgeRecoveryGeneration !=
+                    expected.BridgeRecoveryGeneration ||
+                !string.Equals(
+                    routeHint.FallbackCheckpointRequestId ?? "(none)",
+                    expected.CheckpointRequestId,
+                    StringComparison.Ordinal) ||
+                !fileTransferDataSessions.TryGetValue(
+                    authority.TransferId,
+                    out var dataSession) ||
+                dataSession.IsDisposed ||
+                dataSession.Generation != expected.DataSessionGeneration ||
+                !string.Equals(
+                    $"{authority.TransferId}:{dataSession.Generation}",
+                    expected.DataSessionIdentity,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
             rejectionReason = "accepted";
             return true;
         }
@@ -23274,10 +23432,12 @@ public sealed partial class NknSignalingTransport
 
     private void MarkInboundRuntimeUnlockOfferAccepted(
         TransportAccelerationOfferPayload offer,
-        long answerAckGeneration)
+        long answerAckGeneration,
+        InboundPostFallbackPairedRetryOfferScope? pairedRetryScope = null)
     {
         if (answerAckGeneration <= 0 ||
-            !IsRuntimeUnlockActivationReason(offer.Trigger))
+            (!IsRuntimeUnlockActivationReason(offer.Trigger) &&
+             pairedRetryScope is not { IsDefault: false }))
         {
             return;
         }
@@ -23293,10 +23453,27 @@ public sealed partial class NknSignalingTransport
         FileTransferRoutePublicationAuthority? runtimeUnlockFileTransferOwnerAuthority = null;
         if (IsFileTransferRuntimeUnlockContextObserved(sessionId))
         {
-            if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
-                    sessionId,
-                    out var capturedOwnerAuthority,
-                    out var ownerRejectionReason))
+            if (pairedRetryScope is { IsDefault: false } paired)
+            {
+                if (!TryRecaptureInboundPostFallbackPairedRetryOfferScope(
+                        offer,
+                        paired,
+                        out var ownerRejectionReason))
+                {
+                    LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
+                        sessionId,
+                        offer.Trigger,
+                        ownerRejectionReason);
+                    return;
+                }
+
+                runtimeUnlockFileTransferOwnerAuthority =
+                    paired.PublicationAuthority;
+            }
+            else if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                         sessionId,
+                         out var capturedOwnerAuthority,
+                         out var ownerRejectionReason))
             {
                 LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
                     sessionId,
@@ -23304,10 +23481,13 @@ public sealed partial class NknSignalingTransport
                     ownerRejectionReason);
                 return;
             }
+            else
+            {
+                runtimeUnlockFileTransferOwnerAuthority = capturedOwnerAuthority;
+            }
 
-            runtimeUnlockFileTransferOwnerAuthority = capturedOwnerAuthority;
             LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
-                capturedOwnerAuthority,
+                runtimeUnlockFileTransferOwnerAuthority,
                 offer.Trigger);
         }
 
@@ -26755,6 +26935,21 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var pairedRetryScope = validation.IsValid &&
+                               TryCaptureInboundPostFallbackPairedRetryOfferScope(
+                                   source,
+                                   offer,
+                                   messageId,
+                                   out var capturedPairedRetryScope)
+            ? capturedPairedRetryScope
+            : (InboundPostFallbackPairedRetryOfferScope?)null;
+        if (pairedRetryScope is { IsDefault: false } paired)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_post_fallback_paired_retry_offer_classified; session_id={SanitizeLogToken(paired.PublicationAuthority.SessionId)}; transfer_id={SanitizeLogToken(paired.PublicationAuthority.TransferId)}; direction=inbound; payer_decision_id={offer.PayerDecisionId}; trigger=fallback_paired_tail_yield; route={SanitizeLogToken(paired.PublicationAuthority.RouteToken)}; protocol_version={paired.PublicationAuthority.ProtocolVersion}; live_route_epoch={paired.PublicationAuthority.LiveRouteEpoch}; runtime_generation={paired.PublicationAuthority.RuntimeGeneration}; terminal_generation={paired.PublicationAuthority.TerminalGeneration}; leg_generation={paired.PublicationAuthority.LegGeneration}; route_publication_generation={paired.PublicationAuthority.RoutePublicationGeneration}; transport_epoch={paired.TransportEpoch}; bridge_recovery_generation={paired.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(paired.CheckpointRequestId)}; data_session_generation={paired.DataSessionGeneration}; source_fingerprint={paired.SourceFingerprint}; inbound_msg_id={SanitizeLogToken(paired.MessageId)}; decision_status=Accepted; authority_effect=none");
+        }
+
         var replyTarget = CreateAccelerationReplyTargetEvidence(
             source,
             messageId,
@@ -26786,7 +26981,8 @@ public sealed partial class NknSignalingTransport
         }
 
         if (validation.IsValid &&
-            IsRuntimeUnlockActivationReason(offer.Trigger) &&
+            (IsRuntimeUnlockActivationReason(offer.Trigger) ||
+             pairedRetryScope is { IsDefault: false }) &&
             TryGetPendingRuntimeUnlockAnswerAckForOffer(
                 offer,
                 out var pendingAnswerAckGeneration,
@@ -26846,7 +27042,9 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        var isRuntimeUnlockOffer = validation.IsValid && IsRuntimeUnlockActivationReason(offer.Trigger);
+        var isRuntimeUnlockOffer = validation.IsValid &&
+            (IsRuntimeUnlockActivationReason(offer.Trigger) ||
+             pairedRetryScope is { IsDefault: false });
         if (isRuntimeUnlockOffer)
         {
             var dialDecision = DecideInboundRuntimeUnlockDialOffer(
@@ -26886,6 +27084,7 @@ public sealed partial class NknSignalingTransport
                     replyTarget,
                     runtimeUnlockDialAttemptStarted: true,
                     dialDecision.DialAttemptGeneration,
+                    pairedRetryScope,
                     ct)
                 .ConfigureAwait(false);
             return;
@@ -26898,6 +27097,7 @@ public sealed partial class NknSignalingTransport
                 replyTarget,
                 runtimeUnlockDialAttemptStarted: false,
                 dialAttemptGeneration: 0,
+                pairedRetryScope: null,
                 ct)
             .ConfigureAwait(false);
     }
@@ -26909,6 +27109,7 @@ public sealed partial class NknSignalingTransport
         AccelerationReplyTargetEvidence replyTarget,
         bool runtimeUnlockDialAttemptStarted,
         long dialAttemptGeneration,
+        InboundPostFallbackPairedRetryOfferScope? pairedRetryScope,
         CancellationToken ct)
     {
         var isRuntimeUnlockOffer = runtimeUnlockDialAttemptStarted;
@@ -26995,8 +27196,12 @@ public sealed partial class NknSignalingTransport
             var answerAckGeneration = BeginPendingAccelerationAnswerAck(
                 offer,
                 validation.AcceptedLanes,
-                replyTarget);
-            MarkInboundRuntimeUnlockOfferAccepted(offer, answerAckGeneration);
+                replyTarget,
+                pairedRetryScope);
+            MarkInboundRuntimeUnlockOfferAccepted(
+                offer,
+                answerAckGeneration,
+                pairedRetryScope);
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_answer_ack_pending; session_id={SanitizeLogToken(offer.SessionId)}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes)}; payer_decision_id={offer.PayerDecisionId}; generation={answerAckGeneration}");
@@ -28428,6 +28633,7 @@ public sealed partial class NknSignalingTransport
                     claimed.ReplyTarget,
                     runtimeUnlockDialAttemptStarted: true,
                     dialAttemptGeneration,
+                    pairedRetryScope: null,
                     ct)
                 .ConfigureAwait(false);
             return;
@@ -28677,7 +28883,8 @@ public sealed partial class NknSignalingTransport
     private long BeginPendingAccelerationAnswerAck(
         TransportAccelerationOfferPayload offer,
         NknAccelerationLaneKind lanes,
-        AccelerationReplyTargetEvidence replyTarget)
+        AccelerationReplyTargetEvidence replyTarget,
+        InboundPostFallbackPairedRetryOfferScope? pairedRetryScope = null)
     {
         var sessionId = string.IsNullOrWhiteSpace(offer.SessionId)
             ? currentSessionSecurityState.SessionId?.Value ?? string.Empty
@@ -28700,7 +28907,8 @@ public sealed partial class NknSignalingTransport
             pendingAccelerationAnswerAckLanes = lanes;
             pendingAccelerationAnswerAckPayerDecisionId = offer.PayerDecisionId;
             pendingAccelerationAnswerAckAuthorityMode =
-                IsRuntimeUnlockActivationReason(offer.Trigger)
+                IsRuntimeUnlockActivationReason(offer.Trigger) ||
+                pairedRetryScope is { IsDefault: false }
                     ? RuntimeUnlockOfferAuthorityMode.InitialActivation
                     : null;
             generation = ++pendingAccelerationAnswerAckGeneration;

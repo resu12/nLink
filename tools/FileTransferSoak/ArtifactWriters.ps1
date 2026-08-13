@@ -49623,8 +49623,9 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
             (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
             (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
                 'post_fallback_v6_paired' -and
-            (Get-ResponderProbeField -Event $_ -Names @('decision_reason', 'reason')) -eq
-                'runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch'
+            (Get-ResponderProbeField -Event $_ -Names @('decision_reason', 'reason')) -in @(
+                'runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch',
+                'runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch')
         } | Sort-Object Sequence, LineNumber)) {
         $writer = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('log_writer_id')
         $sessionId = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('session_id')

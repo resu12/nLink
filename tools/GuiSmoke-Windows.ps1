@@ -13763,8 +13763,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -ieq 'inbound' -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'responder_transition_mode') -eq
                         'post_fallback_v6_paired' -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
-                        'runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch'
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -in @(
+                        'runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch',
+                        'runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch')
                 } | Sort-Object Index)) {
             $writer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
             $session = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'session_id'
