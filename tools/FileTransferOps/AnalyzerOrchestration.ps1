@@ -1264,6 +1264,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation `
             -Events $runtimeUnlockPreCommitProbeStartHandoffEvents
     [object[]]$runtimeUnlockResponderPeerProbeHandoffEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_queued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_answer_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_path_probe_acked') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_acked') +

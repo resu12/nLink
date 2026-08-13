@@ -1533,7 +1533,8 @@ function Get-RouteAcceptanceScenarioEvidence {
         [string]$SelectionDisposition = 'selected_finalized_attempt'
     )
 
-    $cursor = if ($ArtifactFinalized) {
+    $analyzerDiagnosticsAvailable = Test-Path -LiteralPath $AnalyzerDiagnosticsPath -PathType Leaf
+    $cursor = if ($ArtifactFinalized -and $analyzerDiagnosticsAvailable) {
         Get-RouteAcceptanceCursorEvidence `
             -LogLedger $LogLedgerPath `
             -AnalyzerDiagnostics $AnalyzerDiagnosticsPath `
@@ -1541,6 +1542,70 @@ function Get-RouteAcceptanceScenarioEvidence {
             -ScenarioRunId $ScenarioRunId `
             -DirectManifestPath $DirectManifestPath `
             -DirectManifestSha256 $DirectManifestSha256
+    }
+    elseif ($ArtifactFinalized) {
+        $ledgerResult = Resolve-RouteAcceptanceEvidenceObject -Value $LogLedgerPath -Kind 'cursor_ledger'
+        $ledger = $ledgerResult.Object
+        $retainedSlice = Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'retainedSlice' -DefaultValue $null
+        [pscustomobject][ordered]@{
+            verdict = if ([string]::Equals(
+                    [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'cursorIntegrityVerdict' -DefaultValue ''),
+                    'pass',
+                    [System.StringComparison]::OrdinalIgnoreCase)) { 'PASS' } else { 'FAIL' }
+            reasons = @('retained_analysis_not_completed')
+            producerCursorIntegrityVerdict = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'cursorIntegrityVerdict' -DefaultValue '')
+            producerCursorIntegrityReasons = @(Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'cursorIntegrityReasons' -DefaultValue @())
+            acceptanceRunId = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'acceptanceRunId' -DefaultValue '')
+            scenarioRunId = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'scenarioRunId' -DefaultValue '')
+            ledgerId = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'ledgerId' -DefaultValue '')
+            initialGenerationKey = [string](Get-RouteAcceptanceEvidencePropertyValue -Object (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'initial' -DefaultValue $null) -Name 'activeGenerationKey' -DefaultValue '')
+            finalGenerationKey = [string](Get-RouteAcceptanceEvidencePropertyValue -Object (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'final' -DefaultValue $null) -Name 'activeGenerationKey' -DefaultValue '')
+            rotationCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'rotationCount' -DefaultValue 0)
+            transientRescanCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'transientRescanCount' -DefaultValue 0)
+            gapCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'gapCount' -DefaultValue 0)
+            duplicateIndexCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'duplicateIndexCount' -DefaultValue 0)
+            writerEvidenceVersion = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerEvidenceVersion' -DefaultValue 0)
+            writerGapCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerGapCount' -DefaultValue 0)
+            writerDuplicateCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerDuplicateCount' -DefaultValue 0)
+            writerIdentityMismatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIdentityMismatchCount' -DefaultValue 0)
+            writerWriteFailureCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerWriteFailureCount' -DefaultValue 0)
+            writerDeferredBatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerDeferredBatchCount' -DefaultValue 0)
+            writerDeferredLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerDeferredLineCount' -DefaultValue 0)
+            writerRecoveredBatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerRecoveredBatchCount' -DefaultValue 0)
+            writerRecoveredLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerRecoveredLineCount' -DefaultValue 0)
+            writerUnresolvedDeferredBatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerUnresolvedDeferredBatchCount' -DefaultValue 0)
+            writerUnresolvedDeferredLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerUnresolvedDeferredLineCount' -DefaultValue 0)
+            writerTerminalFailureCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerTerminalFailureCount' -DefaultValue 0)
+            writerRecoveryMismatchCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerRecoveryMismatchCount' -DefaultValue 0)
+            writerChronologyInversionCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerChronologyInversionCount' -DefaultValue 0)
+            writerChronologyCollisionCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerChronologyCollisionCount' -DefaultValue 0)
+            writerDrainMissingCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerDrainMissingCount' -DefaultValue 0)
+            writerRecoveryVerdict = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerRecoveryVerdict' -DefaultValue '')
+            writerChronologyVerdict = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerChronologyVerdict' -DefaultValue '')
+            writerChronologyBuildCount = 0L
+            writerChronologyLineVisitCount = 0L
+            writerChronologyCacheHitCount = 0L
+            writerChronologyReceiptReuseCount = 0L
+            producerWriterIntegrityVerdict = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityVerdict' -DefaultValue '')
+            producerWriterIntegrityReasons = @(Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityReasons' -DefaultValue @())
+            writerIntegrityVerdict = if ([string]::Equals(
+                    [string](Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityVerdict' -DefaultValue ''),
+                    'pass',
+                    [System.StringComparison]::OrdinalIgnoreCase)) { 'PASS' } else { 'FAIL' }
+            writerIntegrityReasons = @(Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'writerIntegrityReasons' -DefaultValue @())
+            consumedIndexCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'consumedIndexCount' -DefaultValue 0)
+            indexedEventCount = -1L
+            eventCount = -1L
+            logFileCount = -1L
+            ledgerPath = $ledgerResult.Path
+            ledgerSha256 = $ledgerResult.Sha256
+            diagnosticsPath = [System.IO.Path]::GetFullPath($AnalyzerDiagnosticsPath)
+            diagnosticsSha256 = ''
+            retainedSlicePath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $retainedSlice -Name 'path' -DefaultValue '')
+            retainedSliceSha256 = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $retainedSlice -Name 'sha256' -DefaultValue '')
+            retainedSliceLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $retainedSlice -Name 'lineCount' -DefaultValue 0)
+            finalLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'final' -DefaultValue $null) -Name 'lineCount' -DefaultValue 0)
+        }
     }
     else {
         [pscustomobject][ordered]@{
@@ -2117,6 +2182,7 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
     $manifestHasExplicitAttemptSelection = @($scenarioAttempts | Where-Object {
             $null -ne $_.PSObject.Properties['selected']
         }).Count -gt 0
+    $retainedAnalysisIncomplete = $false
     $selectedScenarioAttemptIdentities = @(
         Get-RouteAcceptanceEvidencePropertyValue `
             -Object $Manifest `
@@ -2311,25 +2377,24 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         if (-not (Test-RouteAcceptanceEvidenceSha256Value -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'sha256' -DefaultValue ''))) {
             $cursorReasons.Add('analyzer_input_sha256_missing') | Out-Null
         }
-        $eventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'eventCount' -DefaultValue -1) -DefaultValue -1
-        $indexedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'indexedEventCount' -DefaultValue -1) -DefaultValue -1
-        $ledgerIndexedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'indexedEventCount' -DefaultValue -1) -DefaultValue -1
-        if ($eventCount -lt 0 -or $indexedEventCount -lt 0 -or $eventCount -ne $indexedEventCount -or $ledgerIndexedEventCount -ne $indexedEventCount) {
-            $cursorReasons.Add('cursor_event_index_count_mismatch') | Out-Null
-        }
-        if ((ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'logFileCount' -DefaultValue -1) -DefaultValue -1) -ne 1) {
-            $cursorReasons.Add('cursor_log_file_count_mismatch') | Out-Null
-        }
-
         $ledgerPath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $logLedger -Name 'path' -DefaultValue '')
         $diagnosticsPath = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'diagnosticsPath' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($diagnosticsPath) -or -not (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
+            $retainedAnalysisIncomplete = $true
+        }
         if ([string]::IsNullOrWhiteSpace($ledgerPath) -or -not (Test-Path -LiteralPath $ledgerPath -PathType Leaf)) {
             $cursorReasons.Add('cursor_ledger_missing') | Out-Null
         }
-        elseif ([string]::IsNullOrWhiteSpace($diagnosticsPath) -or -not (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
-            $cursorReasons.Add('analyzer_diagnostics_missing') | Out-Null
-        }
-        else {
+        elseif (-not [string]::IsNullOrWhiteSpace($diagnosticsPath) -and (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
+            $eventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'eventCount' -DefaultValue -1) -DefaultValue -1
+            $indexedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'indexedEventCount' -DefaultValue -1) -DefaultValue -1
+            $analyzerInputLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'lineCount' -DefaultValue -1) -DefaultValue -1
+            if ($eventCount -lt 0 -or $indexedEventCount -lt 0 -or $eventCount -ne $indexedEventCount -or $analyzerInputLineCount -ne $indexedEventCount) {
+                $cursorReasons.Add('cursor_event_index_count_mismatch') | Out-Null
+            }
+            if ((ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'logFileCount' -DefaultValue -1) -DefaultValue -1) -ne 1) {
+                $cursorReasons.Add('cursor_log_file_count_mismatch') | Out-Null
+            }
             $currentCursor = Get-RouteAcceptanceCursorEvidence `
                 -LogLedger $ledgerPath `
                 -AnalyzerDiagnostics $diagnosticsPath `
@@ -2425,12 +2490,15 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
     if ($executionMode -ne 'live') {
         $proofReasons.Add('execution_mode_not_live') | Out-Null
     }
+    if ($retainedAnalysisIncomplete) {
+        $proofReasons.Add('retained_analysis_not_completed') | Out-Null
+    }
 
     return [pscustomobject][ordered]@{
         verdict = $verdict
         provenanceVerdict = if (($structural.Count + $provenance.Count) -eq 0) { 'PASS' } else { 'FAIL' }
         cursorIntegrityVerdict = if ($cursor.Count -eq 0) { 'PASS' } else { 'FAIL' }
-        currentRuntimeProof = $verdict -eq 'PASS' -and $executionMode -eq 'live'
+        currentRuntimeProof = $verdict -eq 'PASS' -and $executionMode -eq 'live' -and -not $retainedAnalysisIncomplete
         reasons = @($proofReasons | Select-Object -Unique)
         structuralReasons = $structural
         provenanceReasons = $provenance

@@ -48983,6 +48983,20 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
     [object[]]$acceptedAnswerAcks = @($orderedEvents | Where-Object {
         $_.EventName -eq 'tuna_acceleration_answer_ack_received'
     })
+    [object[]]$retryDispatchObserved = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_observed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -ieq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'retry_reason' -Default '') -eq
+            'fallback_paired_tail_yield' -and
+        (Get-FileTransferEventField -Event $_ -Name 'observed_lane' -Default '') -eq
+            'control_plane_peer_visible'
+    })
+    [object[]]$pairedRetryOfferQueues = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_offer_queued' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'fallback_paired_tail_yield' -and
+        (Get-FileTransferEventField -Event $_ -Name 'queue_local_only' -Default '1') -eq '0'
+    })
     [object[]]$answerAckBarriers = @($orderedEvents | Where-Object {
         $_.EventName -eq 'runtime_unlock_answer_ack_probe_barrier_received'
     })
@@ -49593,6 +49607,8 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
     $afterBoundRecords = New-Object System.Collections.Generic.List[object]
     $ackBeforeProbeRawCandidates = New-Object System.Collections.Generic.List[object]
     $ackBeforeProbeRecords = New-Object System.Collections.Generic.List[object]
+    $pairedRetryProbeMismatchRawCandidates = New-Object System.Collections.Generic.List[object]
+    $pairedRetryProbeMismatchRecords = New-Object System.Collections.Generic.List[object]
     $seen = @{}
     [object[]]$answerReceivedBoundaries = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_runtime_unlock_handoff_pending_route_commit' -and
@@ -49601,6 +49617,172 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
         (Get-FileTransferEventField -Event $_ -Name 'route_commit_pending' -Default '0') -eq '0' -and
         (Get-FileTransferEventField -Event $_ -Name 'route_committed' -Default '0') -eq '0'
     })
+
+    foreach ($pairedRetryProbeMismatch in @($peerPreCommitAnswerAcceptanceDecisions | Where-Object {
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -eq 'Rejected' -and
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                'post_fallback_v6_paired' -and
+            (Get-ResponderProbeField -Event $_ -Names @('decision_reason', 'reason')) -eq
+                'runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch'
+        } | Sort-Object Sequence, LineNumber)) {
+        $writer = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('log_writer_id')
+        $sessionId = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('session_id')
+        $transferId = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('transfer_id')
+        $peerTransaction = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_transaction_generation')
+        $peerOffer = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_offer_generation')
+        $peerLease = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_tuna_path_lease_generation')
+        $probeId = Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('probe_id')
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($sessionId) -or
+            [string]::IsNullOrWhiteSpace($transferId) -or
+            $peerTransaction -notmatch '^[1-9][0-9]*$' -or
+            $peerOffer -notmatch '^[1-9][0-9]*$' -or
+            $peerLease -notmatch '^[1-9][0-9]*$' -or
+            [string]::IsNullOrWhiteSpace($probeId) -or
+            -not (Test-ResponderPeerReceiptScopeShape -Receipt $pairedRetryProbeMismatch)) {
+            continue
+        }
+
+        [object[]]$matchingProbeAcks = @($peerProbeAckSends | Where-Object {
+            [int64]$_.Sequence -lt [int64]$pairedRetryProbeMismatch.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+            (Get-ResponderProbeField -Event $_ -Names @('received_transport')) -ieq 'tuna' -and
+            (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $peerTransaction -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $peerOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -eq $peerLease -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_id')) -eq $probeId
+        } | Sort-Object Sequence, LineNumber)
+        if ($matchingProbeAcks.Count -eq 0) { continue }
+
+        [object[]]$authoritylessAcks = @($acceptedAnswerAcks | Where-Object {
+            [int64]$_.Sequence -lt [int64]$matchingProbeAcks[-1].Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('authority_mode')) -in @('', 'none', '(none)') -and
+            (Get-ResponderProbeField -Event $_ -Names @('pending_answer_ack_generation')) -match '^[1-9][0-9]*$' -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -match '^[1-9][0-9]*$'
+        } | Sort-Object Sequence, LineNumber)
+        if ($authoritylessAcks.Count -eq 0) { continue }
+        $authoritylessAck = $authoritylessAcks[-1]
+        $payer = Get-ResponderProbeField -Event $authoritylessAck -Names @('payer_decision_id')
+        $pendingAckGeneration = Get-ResponderProbeField -Event $authoritylessAck -Names @('pending_answer_ack_generation')
+        [object[]]$matchingAnswerSends = @($answerSends | Where-Object {
+            [int64]$_.Sequence -lt [int64]$authoritylessAck.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer -and
+            (Get-ResponderProbeField -Event $_ -Names @('generation')) -eq $pendingAckGeneration -and
+            (Get-ResponderProbeField -Event $_ -Names @('accepted')) -eq '1'
+        } | Sort-Object Sequence, LineNumber)
+        if ($matchingAnswerSends.Count -eq 0) { continue }
+
+        [object[]]$matchingDispatches = @($retryDispatchObserved | Where-Object {
+            [int64]$_.Sequence -lt [int64]$matchingAnswerSends[-1].Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -ne $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $peerOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('route')) -ieq 'post_tuna_fallback_v6' -and
+            (Get-ResponderProbeField -Event $_ -Names @('protocol_version')) -eq '6'
+        } | Sort-Object Sequence, LineNumber)
+        if ($matchingDispatches.Count -eq 0) { continue }
+        $dispatch = $matchingDispatches[-1]
+        [object[]]$matchingOfferQueues = @($pairedRetryOfferQueues | Where-Object {
+            [int64]$_.Sequence -ge [int64]$dispatch.Sequence -and
+            [int64]$_.Sequence -lt [int64]$matchingAnswerSends[-1].Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq
+                (Get-ResponderProbeField -Event $dispatch -Names @('log_writer_id')) -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('generation')) -eq $peerOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('payer_decision_id')) -eq $payer
+        })
+        if ($matchingOfferQueues.Count -eq 0) { continue }
+
+        $semanticKey = ((@(
+            (Get-ResponderProbeField -Event $dispatch -Names @('log_writer_id')),
+            $writer,
+            $sessionId,
+            $transferId,
+            (Get-ResponderProbeField -Event $dispatch -Names @('authority_id')),
+            (Get-ResponderProbeField -Event $dispatch -Names @('authority_generation')),
+            $peerTransaction,
+            $peerOffer,
+            $peerLease,
+            $payer,
+            $pendingAckGeneration,
+            $probeId,
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_route_publication_generation')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_runtime_generation')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_terminal_generation')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_leg_generation')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_transport_epoch')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_bridge_recovery_generation')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_checkpoint_request_id')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_data_session_identity')),
+            (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('peer_data_session_generation'))
+        )) -join '|').ToLowerInvariant()
+        $pairedRetryProbeMismatchRawCandidates.Add($pairedRetryProbeMismatch) | Out-Null
+        if ($seen.ContainsKey($semanticKey)) { continue }
+        $seen[$semanticKey] = $true
+
+        $recovered = $false
+        [object[]]$acceptedLineage = @($peerPreCommitAnswerAcceptanceDecisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pairedRetryProbeMismatch.Sequence -and
+            (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Accepted', 'Idempotent', 'Held') -and
+            (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+            (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+            (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_transaction_generation')) -eq $peerTransaction -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_offer_generation')) -eq $peerOffer -and
+            (Get-ResponderProbeField -Event $_ -Names @('peer_tuna_path_lease_generation')) -eq $peerLease -and
+            (Get-ResponderProbeField -Event $_ -Names @('probe_id')) -eq $probeId -and
+            (Get-ResponderProbeField -Event $_ -Names @('responder_transition_mode')) -eq
+                'post_fallback_v6_paired'
+        } | Sort-Object Sequence, LineNumber)
+        foreach ($accepted in $acceptedLineage) {
+            $blocked = @($terminalEvents + $scopeReplacementEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$pairedRetryProbeMismatch.Sequence -and
+                [int64]$_.Sequence -lt [int64]$accepted.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId
+            }).Count -gt 0
+            if ($blocked) { continue }
+            [object[]]$matchingPrepared = @($prepared | Where-Object {
+                [int64]$_.Sequence -gt [int64]$accepted.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transition_kind')) -eq
+                    'PostTunaFallbackV6ToTunaV4' -and
+                (Get-ResponderProbeField -Event $_ -Names @('direction')) -ieq 'inbound' -and
+                (Get-ResponderProbeField -Event $_ -Names @('activation_authority_mode')) -ieq 'responder'
+            } | Sort-Object Sequence, LineNumber)
+            foreach ($prepare in $matchingPrepared) {
+                $authorityId = Get-ResponderProbeField -Event $prepare -Names @('authority_id')
+                $transitionGeneration = Get-ResponderProbeField -Event $prepare -Names @('transition_generation')
+                if (@($draining | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$prepare.Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authorityId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                    }).Count -gt 0) {
+                    $recovered = $true
+                    break
+                }
+            }
+            if ($recovered) { break }
+        }
+        $pairedRetryProbeMismatchRecords.Add([pscustomobject]@{
+            Event = $pairedRetryProbeMismatch
+            Recovered = $recovered
+            Reason = 'post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance'
+            Variant = 'runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch'
+        }) | Out-Null
+    }
 
     foreach ($initialScopeRejection in @($peerPreCommitAnswerAcceptanceObservations | Where-Object {
             (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -eq 'Rejected' -and
@@ -51864,21 +52046,26 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
     [object[]]$ackBeforeProbeDistinct = @($ackBeforeProbeRecords.ToArray() | ForEach-Object { $_.Event })
     [object[]]$ackBeforeProbeRecovered = @($ackBeforeProbeRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$ackBeforeProbeUnresolved = @($ackBeforeProbeRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$pairedRetryProbeMismatchDistinct = @($pairedRetryProbeMismatchRecords.ToArray() | ForEach-Object { $_.Event })
+    [object[]]$pairedRetryProbeMismatchRecovered = @($pairedRetryProbeMismatchRecords.ToArray() | Where-Object { $_.Recovered } | ForEach-Object { $_.Event })
+    [object[]]$pairedRetryProbeMismatchUnresolved = @($pairedRetryProbeMismatchRecords.ToArray() | Where-Object { -not $_.Recovered } | ForEach-Object { $_.Event })
     [object[]]$rawCandidates = @(
         @($initialScopeRejectedRawCandidates.ToArray()) +
         @($ackBeforeProbeRawCandidates.ToArray()) +
         @($bindingRawCandidates.ToArray()) +
-        @($afterBoundRawCandidates.ToArray()) |
+        @($afterBoundRawCandidates.ToArray()) +
+        @($pairedRetryProbeMismatchRawCandidates.ToArray()) |
             Sort-Object Sequence, LineNumber
     )
-    [object[]]$distinct = @($initialScopeRejectedDistinct + $ackBeforeProbeDistinct + $bindingDistinct + $afterBoundDistinct | Sort-Object Sequence, LineNumber)
-    [object[]]$recoveredEvents = @($initialScopeRejectedRecovered + $ackBeforeProbeRecovered + $bindingRecovered + $afterBoundRecovered | Sort-Object Sequence, LineNumber)
-    [object[]]$unresolved = @($initialScopeRejectedUnresolved + $ackBeforeProbeUnresolved + $bindingUnresolved + $afterBoundUnresolved | Sort-Object Sequence, LineNumber)
+    [object[]]$distinct = @($initialScopeRejectedDistinct + $ackBeforeProbeDistinct + $bindingDistinct + $afterBoundDistinct + $pairedRetryProbeMismatchDistinct | Sort-Object Sequence, LineNumber)
+    [object[]]$recoveredEvents = @($initialScopeRejectedRecovered + $ackBeforeProbeRecovered + $bindingRecovered + $afterBoundRecovered + $pairedRetryProbeMismatchRecovered | Sort-Object Sequence, LineNumber)
+    [object[]]$unresolved = @($initialScopeRejectedUnresolved + $ackBeforeProbeUnresolved + $bindingUnresolved + $afterBoundUnresolved + $pairedRetryProbeMismatchUnresolved | Sort-Object Sequence, LineNumber)
     [object[]]$unresolvedRecords = @(
         @($initialScopeRejectedRecords.ToArray()) +
         @($ackBeforeProbeRecords.ToArray()) +
         @($bindingRecords.ToArray()) +
-        @($afterBoundRecords.ToArray()) |
+        @($afterBoundRecords.ToArray()) +
+        @($pairedRetryProbeMismatchRecords.ToArray()) |
             Where-Object { -not $_.Recovered } |
             Sort-Object { [int64]$_.Event.Sequence }, { [int]$_.Event.LineNumber }
     )

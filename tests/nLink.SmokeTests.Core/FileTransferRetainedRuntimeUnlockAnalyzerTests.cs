@@ -16,6 +16,74 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_PairedRetryResponderBindingMissing_ClassifiesInFullAndCompact(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_paired_retry_binding";
+        const string transferId = "transfer_paired_retry_binding";
+        const string sender = "writer_sender";
+        const string responder = "writer_responder";
+        const string probeId = "runtime-unlock-precommit:1:2:probe";
+        const string scope =
+            "peer_runtime_owner_session_id=sess_paired_retry_binding; " +
+            "peer_runtime_owner_transfer_id=transfer_paired_retry_binding; " +
+            "peer_runtime_owner_direction=inbound; peer_runtime_owner_route=posttunafallbackv6; " +
+            "peer_runtime_owner_route_token=post_tuna_fallback_v6; peer_runtime_owner_protocol_version=6; " +
+            "peer_runtime_owner_live_route_epoch=2; peer_runtime_generation=3; " +
+            "peer_runtime_owner_terminal_generation=0; " +
+            "peer_route_publication_session_id=sess_paired_retry_binding; " +
+            "peer_route_publication_transfer_id=transfer_paired_retry_binding; " +
+            "peer_route_publication_direction=inbound; peer_route_publication_route=posttunafallbackv6; " +
+            "peer_route_publication_route_token=post_tuna_fallback_v6; peer_route_publication_protocol_version=6; " +
+            "peer_route_publication_live_route_epoch=2; peer_route_publication_runtime_generation=3; " +
+            "peer_route_publication_terminal_generation=0; peer_route_publication_leg_generation=3; " +
+            "peer_route_publication_commit_generation=0; peer_route_publication_generation=3; " +
+            "admission_generation=3; peer_admission_generation=3; peer_terminal_generation=0; " +
+            "peer_leg_generation=3; peer_transport_epoch=1; peer_bridge_recovery_generation=1; " +
+            "peer_checkpoint_request_id=(none); peer_checkpoint_generation=1; " +
+            "peer_data_session_identity=data-session-1; peer_data_session_generation=1; data_session_generation=1";
+        var lines = new[]
+        {
+            LogLine($"event=runtime_unlock_retry_dispatch_observed; authority_id=retry-authority-1; authority_generation=1; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; retry_reason=fallback_paired_tail_yield; offer_generation=2; observed_lane=control_plane_peer_visible; log_writer_id={sender}", 0),
+            LogLine($"event=tuna_acceleration_offer_queued; reason=fallback_paired_tail_yield; session_id={sessionId}; payer_decision_id=5; generation=2; observed_lane=control_plane_peer_visible; queue_local_only=0; log_writer_id={sender}", 1),
+            LogLine($"event=tuna_acceleration_answer_sent; accepted=1; payer_decision_id=5; generation=9; log_writer_id={responder}", 2),
+            LogLine($"event=tuna_acceleration_answer_ack_received; session_id={sessionId}; payer_decision_id=5; pending_answer_ack_generation=9; authority_mode=none; log_writer_id={responder}", 3),
+            LogLine($"event=runtime_unlock_precommit_probe_ack_sent; direction=inbound; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=3; probe_id={probeId}; received_transport=tuna; log_writer_id={responder}", 4),
+            LogLine($"event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Rejected; decision_status=Rejected; direction=inbound; session_id={sessionId}; transfer_id={transferId}; peer_transaction_generation=1; peer_offer_generation=2; peer_tuna_path_lease_generation=3; probe_id={probeId}; received_transport=tuna; received_utc_ms=1; probe_ack_sent_utc_ms=2; probe_frame_fingerprint=probe-fingerprint; responder_transition_mode=post_fallback_v6_paired; {scope}; decision_reason=runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch; log_writer_id={responder}", 5),
+            LogLine($"event=file_transfer_inbound_terminal; role=Helper; direction=inbound; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; log_writer_id={responder}", 6)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_responder_acked_probe_route_transition_handoff_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_peer_precommit_answer_acceptance_decided", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch", verdict["failure_variant"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_ReceiveRecoverySameRouteRuntimeSuccessorLivenessHandoff(
         bool compact)
     {

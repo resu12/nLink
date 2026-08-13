@@ -6391,6 +6391,12 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         throw "Retained log slice missing: $logPath"
     }
 
+    if (Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts `
+            -ArtifactDir $ArtifactDir `
+            -LiveRouteProofMode $LiveRouteProofMode) {
+        return
+    }
+
     $analysisStdoutPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stdout.txt'
     $analysisStderrPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stderr.txt'
     $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
@@ -8296,16 +8302,14 @@ function Invoke-TunaRouteAcceptanceRun {
             $exitCode = Invoke-RouteAcceptanceChildScriptNoThrow -ScriptPath $scriptPath -Arguments $arguments
 
             Select-RouteAcceptanceMeasuredFallbackLogSlice -ArtifactDir $attemptDir
+            try {
+                Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $attemptDir -LiveRouteProofMode $LiveProofMode
+            }
+            catch {
+                $failureMessage = $_.Exception.Message
+            }
             if ($exitCode -ne 0) {
                 $failureMessage = "Tuna GUI {0} attempt {1} failed with exit code {2}." -f $RouteMode, $attempt, $exitCode
-            }
-            else {
-                try {
-                Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $attemptDir -LiveRouteProofMode $LiveProofMode
-                }
-                catch {
-                    $failureMessage = $_.Exception.Message
-                }
             }
 
             if ([string]::IsNullOrWhiteSpace($failureMessage)) {
@@ -8355,13 +8359,22 @@ function Invoke-TunaRouteAcceptanceRun {
         $arguments += @('-LiveToggleSequence', $LiveToggleSequence)
     }
 
-    Invoke-RouteAcceptanceChildScript -ScriptPath $scriptPath -Description ("Tuna GUI {0}" -f $RouteMode) -Arguments $arguments
+    $childExitCode = Invoke-RouteAcceptanceChildScriptNoThrow `
+        -ScriptPath $scriptPath `
+        -Arguments $arguments
 
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
         Select-RouteAcceptanceMeasuredFallbackLogSlice -ArtifactDir $ArtifactDir
     }
 
-    Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode
+    try {
+        Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode
+    }
+    finally {
+        if ($childExitCode -ne 0) {
+            throw ("Tuna GUI {0} failed with exit code {1}." -f $RouteMode, $childExitCode)
+        }
+    }
 }
 
 function New-Phase4RouteAcceptanceScenario {

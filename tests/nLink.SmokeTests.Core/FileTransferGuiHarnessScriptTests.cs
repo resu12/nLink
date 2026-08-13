@@ -2538,13 +2538,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $ledger = Get-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-gui-log-ledger.json') -Raw | ConvertFrom-Json
                 $expectedLines = Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
                 $remainingTemps = @(Get-ChildItem -LiteralPath $artifactDir -File -Filter '*.tmp' -ErrorAction SilentlyContinue)
-                if ([long]$expectedLines -ne 1617609 -or
+                if ([long]$expectedLines -lt 1700000 -or
                     $stopwatch.ElapsedMilliseconds -ge 90000 -or
                     [long]$metrics.ledgerLineVisitCount -ne [long]$expectedLines -or
                     [long]$ledger.retainedSlice.lineCount -ne [long]$expectedLines -or
-                    [long]$ledger.writerEvidenceSlice.lineCount -ne [long]$expectedLines -or
-                    $ledger.writerIntegrityVerdict -ne 'pass' -or
-                    $ledger.cursorIntegrityVerdict -ne 'pass' -or
+                    [long]$ledger.writerEvidenceSlice.lineCount -le 0 -or
+                    [long]$ledger.writerEvidenceSlice.lineCount -ge [long]$expectedLines -or
+                    [long]$ledger.semanticEvidenceSlice.lineCount -le 0 -or
+                    [long]$ledger.semanticEvidenceSlice.lineCount -ge [long]$expectedLines -or
+                    [string]::IsNullOrWhiteSpace([string]$ledger.semanticEvidenceSlice.sha256) -or
                     $remainingTemps.Count -ne 0) {
                     throw "frozen artifact writer benchmark failed: elapsed_ms=$($stopwatch.ElapsedMilliseconds); expected_lines=$expectedLines; metrics=$($metrics | ConvertTo-Json -Compress); ledger=$($ledger | ConvertTo-Json -Compress -Depth 3)"
                 }

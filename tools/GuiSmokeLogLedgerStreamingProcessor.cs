@@ -46,6 +46,7 @@ namespace NLink.Tools
         {
             RetainedSha256 = "";
             WriterSha256 = "";
+            SemanticSha256 = "";
             Writers = new GuiSmokeLedgerWriterResult[0];
             DeferredBatches = new GuiSmokeLedgerBatchResult[0];
             Drains = new GuiSmokeLedgerDrainResult[0];
@@ -56,6 +57,9 @@ namespace NLink.Tools
         public string WriterSha256 { get; set; }
         public long WriterLineCount { get; set; }
         public long WriterByteCount { get; set; }
+        public string SemanticSha256 { get; set; }
+        public long SemanticLineCount { get; set; }
+        public long SemanticByteCount { get; set; }
         public long SourceLineVisitCount { get; set; }
         public long WriterGapCount { get; set; }
         public long WriterDuplicateCount { get; set; }
@@ -110,13 +114,18 @@ namespace NLink.Tools
             string writerTempPath,
             string expectedAcceptanceRunId,
             string expectedScenarioRunId,
-            string[] deferredBatchKeys)
+            string[] deferredBatchKeys,
+            string semanticTempPath = null,
+            string[] semanticEventNames = null)
         {
             if (frozenLineCount < 0 || bookmark < 0 || bookmark > frozenLineCount)
                 throw new InvalidDataException("writer_evidence_invalid_frozen_range");
 
             var deferredKeys = new HashSet<string>(
                 deferredBatchKeys ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+            var semanticNames = new HashSet<string>(
+                semanticEventNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+            bool writeSemantic = !String.IsNullOrWhiteSpace(semanticTempPath);
             var writers = new Dictionary<string, GuiSmokeLedgerWriterResult>(StringComparer.OrdinalIgnoreCase);
             var unknownAfterBookmark = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var currentBatches = new Dictionary<string, BatchState>(StringComparer.OrdinalIgnoreCase);
@@ -129,13 +138,17 @@ namespace NLink.Tools
             long retainedByteCount = 0;
             long writerLineCount = 0;
             long writerByteCount = 0;
+            long semanticLineCount = 0;
+            long semanticByteCount = 0;
             var utf8 = new UTF8Encoding(false, true);
             var separator = utf8.GetBytes(Environment.NewLine);
 
             using (var retained = NewOutput(retainedTempPath))
             using (var writer = NewOutput(writerTempPath))
+            using (var semantic = writeSemantic ? (Stream)NewOutput(semanticTempPath) : Stream.Null)
             using (var retainedHash = SHA256.Create())
             using (var writerHash = SHA256.Create())
+            using (var semanticHash = SHA256.Create())
             using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete, 1024 * 1024, FileOptions.SequentialScan))
             using (var reader = new StreamReader(input, utf8, true, 1024 * 1024))
@@ -155,6 +168,10 @@ namespace NLink.Tools
                             ref retainedLineCount, ref retainedByteCount);
 
                     ParsedLine parsed = Parse(line);
+                    string eventName = Get(parsed, "event");
+                    if (writeSemantic && semanticNames.Contains(eventName))
+                        WriteLine(semantic, semanticHash, separator, lineBytes,
+                            ref semanticLineCount, ref semanticByteCount);
                     string writerId = Get(parsed, "log_writer_id");
                     if (parsed.DuplicateWriterEvidenceField)
                     {
@@ -181,7 +198,6 @@ namespace NLink.Tools
                         continue;
                     }
 
-                    string eventName = Get(parsed, "event");
                     bool isStart = String.Equals(eventName, "operational_log_writer_started",
                         StringComparison.OrdinalIgnoreCase);
                     GuiSmokeLedgerWriterResult writerState;
@@ -295,14 +311,19 @@ namespace NLink.Tools
                     FoldBatch(batch, result, previousTicks);
                 FinalizeHash(retainedHash);
                 FinalizeHash(writerHash);
+                FinalizeHash(semanticHash);
                 retained.Flush(true);
                 writer.Flush(true);
+                if (writeSemantic) ((FileStream)semantic).Flush(true);
                 result.RetainedSha256 = Hex(retainedHash.Hash);
                 result.WriterSha256 = Hex(writerHash.Hash);
                 result.RetainedLineCount = retainedLineCount;
                 result.RetainedByteCount = retainedByteCount;
                 result.WriterLineCount = writerLineCount;
                 result.WriterByteCount = writerByteCount;
+                result.SemanticSha256 = writeSemantic ? Hex(semanticHash.Hash) : "";
+                result.SemanticLineCount = semanticLineCount;
+                result.SemanticByteCount = semanticByteCount;
             }
 
             var writerResults = new List<GuiSmokeLedgerWriterResult>(writers.Values);
@@ -339,7 +360,7 @@ namespace NLink.Tools
                 1024 * 1024, FileOptions.SequentialScan);
         }
 
-        private static void WriteLine(FileStream stream, HashAlgorithm hash, byte[] separator,
+        private static void WriteLine(Stream stream, HashAlgorithm hash, byte[] separator,
             byte[] line, ref long lineCount, ref long byteCount)
         {
             if (lineCount > 0) Write(stream, hash, separator, ref byteCount);
@@ -347,7 +368,7 @@ namespace NLink.Tools
             lineCount++;
         }
 
-        private static void Write(FileStream stream, HashAlgorithm hash, byte[] bytes, ref long byteCount)
+        private static void Write(Stream stream, HashAlgorithm hash, byte[] bytes, ref long byteCount)
         {
             stream.Write(bytes, 0, bytes.Length);
             hash.TransformBlock(bytes, 0, bytes.Length, bytes, 0);

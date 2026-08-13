@@ -4,6 +4,34 @@ if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
     Add-Type -Path (Join-Path $PSScriptRoot 'GuiSmokeLogLedgerStreamingProcessor.cs')
 }
 
+function Get-GuiSmokeSemanticEvidenceEventNames {
+    $names = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in @(
+            (Join-Path $PSScriptRoot 'GuiSmoke-Windows.ps1'),
+            (Join-Path $PSScriptRoot 'FileTransferOps\AnalyzerOrchestration.ps1'),
+            (Join-Path $PSScriptRoot 'FileTransferSoak\ArtifactWriters.ps1'))) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false, $true))
+        foreach ($match in [regex]::Matches(
+                $text,
+                '(?<quote>[''"])(?<name>(?:filetransfer|file_transfer|runtime_unlock|tuna_|session_|transfer_terminal|nkn_|screenshare_)[a-z0-9_]{2,})\k<quote>',
+                [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+            [void]$names.Add([string]$match.Groups['name'].Value)
+        }
+    }
+    foreach ($name in @(
+            'filetransfer_route_transition_physical_send_lease_registered',
+            'filetransfer_route_transition_physical_send_lease_retired',
+            'filetransfer_outbound_physical_send_lease_registered',
+            'filetransfer_outbound_physical_send_lease_retired')) {
+        [void]$names.Remove($name)
+    }
+    return [string[]]@($names | Sort-Object)
+}
+
 function New-GuiSmokeLogLedgerState {
     param(
         [int]$MaxLines = 500000,

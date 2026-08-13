@@ -3255,6 +3255,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
     $retainedSliceSha256 = $null
     $writerEvidencePath = Join-Path $ArtifactDir 'filetransfer-gui-log-writer-evidence-slice.log'
     $writerEvidenceTempPath = '{0}.{1}.tmp' -f $writerEvidencePath, ([guid]::NewGuid().ToString('N'))
+    $semanticEvidencePath = Join-Path $ArtifactDir 'filetransfer-gui-semantic-evidence-slice.log'
+    $semanticEvidenceTempPath = '{0}.{1}.tmp' -f $semanticEvidencePath, ([guid]::NewGuid().ToString('N'))
+    $semanticEvidenceSlice = $null
     $writerEvidenceStream = $null
     $writerEvidenceSha256 = $null
     $writerLedgerReader = $null
@@ -3286,6 +3289,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
         if (Test-Path -LiteralPath $writerEvidencePath -PathType Leaf) {
             throw "writer_evidence_slice_already_exists:$writerEvidencePath"
         }
+        if (Test-Path -LiteralPath $semanticEvidencePath -PathType Leaf) {
+            throw "semantic_evidence_slice_already_exists:$semanticEvidencePath"
+        }
         $writerEvidenceEncoding = [System.Text.UTF8Encoding]::new($false)
         $writerEvidenceSeparator = $writerEvidenceEncoding.GetBytes([Environment]::NewLine)
         $retainedSliceLineCount = 0L
@@ -3303,7 +3309,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
                     $writerEvidenceTempPath,
                     $expectedAcceptanceRunId,
                     $expectedScenarioRunId,
-                    [string[]]@($deferredMarkersByBatch.Keys))
+                    [string[]]@($deferredMarkersByBatch.Keys),
+                    $semanticEvidenceTempPath,
+                    [string[]](Get-GuiSmokeSemanticEvidenceEventNames))
         }
         else {
             $retainedSliceStream = [System.IO.FileStream]::new(
@@ -3782,15 +3790,37 @@ function Write-FileTransferGuiLogLedgerEvidence {
             ByteCount = $writerEvidenceByteCount
         }
 
+        if ($null -ne $nativeStreamingResult) {
+            [System.IO.File]::Move($semanticEvidenceTempPath, $semanticEvidencePath)
+            $semanticEvidenceTempPath = ''
+            $semanticEvidenceSlice = [pscustomobject]@{
+                Path = [System.IO.Path]::GetFullPath($semanticEvidencePath)
+                Sha256 = [string]$nativeStreamingResult.SemanticSha256
+                LineCount = [long]$nativeStreamingResult.SemanticLineCount
+                ByteCount = [long]$nativeStreamingResult.SemanticByteCount
+            }
+        }
+
         $analyzerInput = Copy-GuiSmokeFileAtomicCreateNew `
-            -SourcePath ([string]$retainedSlice.Path) `
+            -SourcePath ([string]$(if ($null -ne $semanticEvidenceSlice) {
+                        $semanticEvidenceSlice.Path
+                    }
+                    else {
+                        $retainedSlice.Path
+                    })) `
             -DestinationPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log')
+        $expectedAnalyzerInput = if ($null -ne $semanticEvidenceSlice) {
+            $semanticEvidenceSlice
+        }
+        else {
+            $retainedSlice
+        }
         if (-not [string]::Equals(
-                [string]$retainedSlice.Sha256,
+                [string]$expectedAnalyzerInput.Sha256,
                 [string]$analyzerInput.Sha256,
                 [System.StringComparison]::OrdinalIgnoreCase) -or
-            [long]$retainedSlice.ByteCount -ne [long]$analyzerInput.ByteCount -or
-            [long]$retainedSlice.LineCount -ne [long]$analyzerInput.LineCount) {
+            [long]$expectedAnalyzerInput.ByteCount -ne [long]$analyzerInput.ByteCount -or
+            [long]$expectedAnalyzerInput.LineCount -ne [long]$analyzerInput.LineCount) {
             throw 'analyzer_input_capture_mismatch'
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH)) {
@@ -3830,6 +3860,10 @@ function Write-FileTransferGuiLogLedgerEvidence {
         if (-not [string]::IsNullOrWhiteSpace($writerEvidenceTempPath) -and
             (Test-Path -LiteralPath $writerEvidenceTempPath -PathType Leaf)) {
             Remove-Item -LiteralPath $writerEvidenceTempPath -Force -ErrorAction SilentlyContinue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($semanticEvidenceTempPath) -and
+            (Test-Path -LiteralPath $semanticEvidenceTempPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $semanticEvidenceTempPath -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -4121,6 +4155,17 @@ function Write-FileTransferGuiLogLedgerEvidence {
                     path = [string]$writerEvidenceSlice.Path
                     sha256 = [string]$writerEvidenceSlice.Sha256
                     lineCount = [long]$writerEvidenceSlice.LineCount
+                }
+            })
+        semanticEvidenceSlice = $(if ($null -eq $semanticEvidenceSlice) {
+                [ordered]@{ path = ''; sha256 = ''; lineCount = 0; byteCount = 0 }
+            }
+            else {
+                [ordered]@{
+                    path = [string]$semanticEvidenceSlice.Path
+                    sha256 = [string]$semanticEvidenceSlice.Sha256
+                    lineCount = [long]$semanticEvidenceSlice.LineCount
+                    byteCount = [long]$semanticEvidenceSlice.ByteCount
                 }
             })
         consumedIndexCount = [int]$diagnostics.ConsumedIndexCount
@@ -5170,6 +5215,14 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'route_runtime'
                     Reason = if ($ErrorMessage.IndexOf(
+                            'post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $ErrorMessage.IndexOf(
+                            'runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
                             'runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                         $ErrorMessage.IndexOf(
@@ -5482,6 +5535,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $explicitResult.RuntimeUnlockResponderPeerProbeAdoptionRecheckMissingAfterAnswerAckBeforeProbe = $true
                 $explicitResult.FailureVariant =
                     'runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe'
+            }
+            elseif ($ErrorMessage.IndexOf(
+                    'failure_variant=runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch',
+                    [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $explicitResult.Reason -eq
+                    'post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance') {
+                $explicitResult.FailureVariant =
+                    'runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch'
             }
             elseif ($ErrorMessage.IndexOf(
                     'failure_variant=runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe',
@@ -13672,6 +13733,147 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiPairedRetryResponderBindingFailure {
+        param([AllowEmptyCollection()][string[]]$Lines = @())
+
+        $records = New-Object System.Collections.Generic.List[object]
+        $index = 0L
+        foreach ($line in $Lines) {
+            $index++
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ($eventName -in @(
+                    'runtime_unlock_retry_dispatch_observed',
+                    'tuna_acceleration_offer_queued',
+                    'tuna_acceleration_answer_sent',
+                    'tuna_acceleration_answer_ack_received',
+                    'runtime_unlock_precommit_probe_ack_sent',
+                    'runtime_unlock_peer_precommit_answer_acceptance_decided',
+                    'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
+                    'filetransfer_route_transition_prepared',
+                    'filetransfer_route_transition_draining',
+                    'file_transfer_inbound_terminal',
+                    'transfer_terminal')) {
+                $records.Add([pscustomobject]@{ Index = $index; Event = $eventName; Line = $line })
+            }
+        }
+
+        foreach ($rejection in @($records | Where-Object {
+                    $_.Event -eq 'runtime_unlock_peer_precommit_answer_acceptance_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -ieq 'Rejected' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -ieq 'inbound' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'responder_transition_mode') -eq
+                        'post_fallback_v6_paired' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                        'runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch'
+                } | Sort-Object Index)) {
+            $writer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'transfer_id'
+            $transaction = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'peer_transaction_generation'
+            $offer = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'peer_offer_generation'
+            $lease = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'peer_tuna_path_lease_generation'
+            $probeId = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'probe_id'
+            $probeAck = @($records | Where-Object {
+                    $_.Event -eq 'runtime_unlock_precommit_probe_ack_sent' -and
+                    $_.Index -lt $rejection.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -eq $transaction -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq $offer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_generation') -eq $lease -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId
+                } | Select-Object -Last 1)
+            $authoritylessAck = @($records | Where-Object {
+                    $_.Event -eq 'tuna_acceleration_answer_ack_received' -and
+                    $_.Index -lt $rejection.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_mode') -in @('', 'none', '(none)')
+                } | Select-Object -Last 1)
+            if ($probeAck.Count -ne 1 -or $authoritylessAck.Count -ne 1) { continue }
+            $payer = Get-TunaGuiLogLineFieldValue -Line $authoritylessAck[0].Line -Name 'payer_decision_id'
+            $answerGeneration = Get-TunaGuiLogLineFieldValue -Line $authoritylessAck[0].Line -Name 'pending_answer_ack_generation'
+            $answer = @($records | Where-Object {
+                    $_.Event -eq 'tuna_acceleration_answer_sent' -and
+                    $_.Index -lt $authoritylessAck[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $answerGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'accepted') -eq '1'
+                } | Select-Object -Last 1)
+            $dispatch = @($records | Where-Object {
+                    $_.Event -eq 'runtime_unlock_retry_dispatch_observed' -and
+                    $_.Index -lt $rejection.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retry_reason') -eq
+                        'fallback_paired_tail_yield' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq $offer
+                } | Select-Object -Last 1)
+            if ($answer.Count -ne 1 -or $dispatch.Count -ne 1) { continue }
+            $dispatchWriter = Get-TunaGuiLogLineFieldValue -Line $dispatch[0].Line -Name 'log_writer_id'
+            $offerQueued = @($records | Where-Object {
+                    $_.Event -eq 'tuna_acceleration_offer_queued' -and
+                    $_.Index -ge $dispatch[0].Index -and $_.Index -lt $answer[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $dispatchWriter -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $offer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                        'fallback_paired_tail_yield'
+                })
+            if ($offerQueued.Count -eq 0) { continue }
+
+            $accepted = @($records | Where-Object {
+                    $_.Event -eq 'runtime_unlock_peer_precommit_answer_acceptance_decided' -and
+                    $_.Index -gt $rejection.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'peer_transaction_generation') -eq $transaction -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'peer_offer_generation') -eq $offer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'peer_tuna_path_lease_generation') -eq $lease -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -in @('Accepted', 'Held', 'Idempotent')
+                } | Select-Object -First 1)
+            $handoff = @($records | Where-Object {
+                    $accepted.Count -eq 1 -and $_.Event -eq
+                        'runtime_unlock_precommit_responder_peer_probe_handoff_bound' -and
+                    $_.Index -gt $accepted[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+                } | Select-Object -First 1)
+            $prepared = @($records | Where-Object {
+                    $handoff.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_prepared' -and
+                    $_.Index -gt $handoff[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_kind') -eq
+                        'PostTunaFallbackV6ToTunaV4'
+                } | Select-Object -First 1)
+            $draining = @($records | Where-Object {
+                    $prepared.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_draining' -and
+                    $_.Index -gt $prepared[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
+                        (Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'authority_id')
+                } | Select-Object -First 1)
+            if ($accepted.Count -eq 1 -and $handoff.Count -eq 1 -and
+                $prepared.Count -eq 1 -and $draining.Count -eq 1) { continue }
+
+            $sequenceText = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') { [long]$sequenceText } else { $rejection.Index }
+                ParsedRecords = [long]$records.Count
+                LookupCount = 0L
+            }
+        }
+        return [pscustomobject]@{ Unresolved = $false; FirstSequence = [long]::MaxValue; ParsedRecords = [long]$records.Count; LookupCount = 0L }
+    }
+
     $earlyPredicateEventNames = @{
         RouteDrain = @(
             'filetransfer_route_transition_prepared',
@@ -13687,6 +13889,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_live_route_epoch_terminal', 'filetransfer_v6_epoch_terminal',
             'file_transfer_inbound_terminal', 'transfer_terminal')
         Responder = @(
+            'runtime_unlock_retry_dispatch_observed', 'tuna_acceleration_offer_queued',
             'nkn_inbound_envelope_received', 'runtime_unlock_transaction_answer_received',
              'tuna_acceleration_answer_ack_pending', 'tuna_acceleration_answer_sent',
              'runtime_unlock_precommit_probe_receive_dispatched',
@@ -14207,6 +14410,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $responderPeerProbeFastPath =
         Get-TunaGuiRuntimeUnlockResponderPeerProbeHandoffFailure `
             -Lines ([string[]]$earlyPredicateLines.Responder.ToArray())
+    $pairedRetryResponderBindingFastPath =
+        Get-TunaGuiPairedRetryResponderBindingFailure `
+            -Lines ([string[]]$earlyPredicateLines.Responder.ToArray())
     $initialResponderDrainFastPath =
         Get-TunaGuiInitialResponderDrainReceiptFailure `
             -Lines ([string[]]$earlyPredicateLines.RouteDrain.ToArray())
@@ -14254,6 +14460,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     foreach ($candidate in @(
             [pscustomobject]@{ Kind = 'RouteDrain'; Result = $initialResponderDrainFastPath },
             [pscustomobject]@{ Kind = 'Responder'; Result = $responderPeerProbeFastPath },
+            [pscustomobject]@{ Kind = 'PairedRetryResponderBinding'; Result = $pairedRetryResponderBindingFastPath },
             [pscustomobject]@{ Kind = 'Checkpoint'; Result = $fallbackFrontierCheckpointAcceptanceRecheckFastPath },
             [pscustomobject]@{ Kind = 'Adoption'; Result = $currentListenerAdoptionFastPath },
             [pscustomobject]@{ Kind = 'Unblock'; Result = $fallbackTailRepairUnblockFastPath },
@@ -14435,6 +14642,28 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         else {
             'runtime_unlock_responder_acked_probe_binding_missing'
         }
+        return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'PairedRetryResponderBinding') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource =
+                "${classificationSource}_paired_retry_responder_binding_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'post_fallback_paired_retry_offer_not_bound_before_peer_probe_acceptance' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_paired_retry_responder_binding_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$pairedRetryResponderBindingFastPath.ParsedRecords) `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.RuntimeUnlockResponderPeerProbeHandoffMissing = $true
+        $result.FailureVariant =
+            'runtime_unlock_responder_acked_probe_post_fallback_peer_acceptance_probe_mismatch'
         return $result
     }
 
@@ -22208,17 +22437,23 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
         }
 
         $evidencePaths = New-Object System.Collections.Generic.List[string]
-        $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
-        if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
-            $evidencePaths.Add([System.IO.Path]::GetFullPath($retainedPath)) | Out-Null
+        $semanticPath = Join-Path $ArtifactDir 'filetransfer-gui-semantic-evidence-slice.log'
+        if (Test-Path -LiteralPath $semanticPath -PathType Leaf) {
+            $evidencePaths.Add([System.IO.Path]::GetFullPath($semanticPath)) | Out-Null
         }
-        $snapshotRoot =
-            Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
-        if (Test-Path -LiteralPath $snapshotRoot -PathType Container) {
-            foreach ($snapshot in @(
-                    Get-ChildItem -LiteralPath $snapshotRoot -File |
-                        Sort-Object FullName)) {
-                $evidencePaths.Add($snapshot.FullName) | Out-Null
+        else {
+            $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+            if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
+                $evidencePaths.Add([System.IO.Path]::GetFullPath($retainedPath)) | Out-Null
+            }
+            $snapshotRoot =
+                Join-Path $ArtifactDir 'filetransfer-gui-log-writer-output-snapshots'
+            if (Test-Path -LiteralPath $snapshotRoot -PathType Container) {
+                foreach ($snapshot in @(
+                        Get-ChildItem -LiteralPath $snapshotRoot -File |
+                            Sort-Object FullName)) {
+                    $evidencePaths.Add($snapshot.FullName) | Out-Null
+                }
             }
         }
 
