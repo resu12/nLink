@@ -6930,6 +6930,66 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task InstalledRetryRecoveryJoinDetectsExactPostFallbackMissAndHandlesSmallInputs()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiInstalledRetryRecoveryJoinFailure",
+            "Get-TunaGuiInstalledRetryAnswerContinuationWakeFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Get-TunaGuiInstalledRetryRecoveryJoinFailure {
+                {{classifierBody}}
+            }
+            $session = 'session_id=session-recovery-join; transfer_id=transfer-1'
+            $lines = @(
+                "event=runtime_unlock_retry_dispatch_observed; authority_id=retry-1; offer_generation=2; $session; log_writer_id=writer-initiator",
+                "event=runtime_unlock_post_fallback_paired_retry_offer_classified; decision_status=Accepted; payer_decision_id=5; $session; log_writer_id=writer-responder",
+                'event=tuna_acceleration_answer_sent; accepted=1; payer_decision_id=5; generation=10; log_writer_id=writer-responder',
+                "event=filetransfer_bridge_recovery_execution_command_issued; direction=outbound; route=post_tuna_fallback_v6; bridge_decision_generation=2; $session; log_writer_id=writer-initiator",
+                "event=filetransfer_bridge_recovery_execution_start_decided; status=started; bridge_decision_generation=2; $session; log_writer_id=writer-initiator",
+                "event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; purpose=offer_replay; rejection_reason=transport_callback_without_coordinator_authority; $session; log_writer_id=writer-initiator",
+                "event=runtime_unlock_offer_authority_boundary_decided; boundary=offer_send_recovery_before_request; authority_mode=InstalledRetry; decision_status=accepted; payer_decision_id=5; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; tuna_path_lease_listener_run_id=listener-start-2; retry_authority_id=retry-1; install_generation=1; $session; log_writer_id=writer-initiator",
+                'event=tuna_activation_control_send_recovery_requested; purpose=offer_replay; trigger=observed_send_timeout; accepted=0; post_tuna_fallback_offer_recovery=1; session_id=session-recovery-join; log_writer_id=writer-initiator',
+                'event=tuna_acceleration_offer_replay_rejected; session_id=session-recovery-join; payer_decision_id=5; generation=2; log_writer_id=writer-initiator'
+            )
+            $result = Get-TunaGuiInstalledRetryRecoveryJoinFailure -Lines $lines
+            if (-not $result.Unresolved) { throw 'exact recovery join miss was not detected' }
+            $result = Get-TunaGuiInstalledRetryRecoveryJoinFailure -Lines @()
+            if ($result.Unresolved -or $result.ParsedRecords -ne 0) {
+                throw 'empty indexed input did not remain safe'
+            }
+            $result = Get-TunaGuiInstalledRetryRecoveryJoinFailure -Lines @($lines[-1])
+            if ($result.Unresolved -or $result.ParsedRecords -ne 1) {
+                throw 'singleton indexed input did not remain safe'
+            }
+            Write-Output 'gui-installed-retry-recovery-join-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI installed-retry recovery-join test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-installed-retry-recovery-join-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task InstalledRetryAnswerContinuationWakeDetectsPhysicalOwnershipBeforeOriginalAck()
     {
         var guiText = File.ReadAllText(

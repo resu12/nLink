@@ -21839,6 +21839,257 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     [Fact]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task RuntimeUnlockRetryDispatch_PostFallbackOfferJoinsExactCurrentReceiveRecovery()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromSeconds(2);
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-installed-recovery-join.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-installed-recovery-join.address");
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+                Task.FromResult(
+                    !EnvelopeCodec.TryDeserialize(payload, out var sent) ||
+                    sent.Type != MsgType.TransportAccelerationAnswer);
+            var hostLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0,
+                supportedLanes: NknAccelerationLaneKind.File);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-installed-recovery-join-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-installed-recovery-join-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_runtime_unlock_installed_recovery_join";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            hostLane.MarkCoordinatorScopedListenerAvailableForTests(
+                helperClient.Address);
+            var logStart = GetOperationalLogLength();
+
+            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                host,
+                sessionId,
+                transferId,
+                "runtime_unlock_offer_send_not_observed",
+                "post_tuna_fallback_session_liveness_timeout_pending");
+            await host
+                .DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            try
+            {
+                await WaitUntilAsync(
+                    () =>
+                        GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host)
+                            is not null &&
+                        GetPrivateField(
+                            host,
+                            "outboundRuntimeUnlockOfferAuthorityBoundary") is not
+                            null,
+                    TimeSpan.FromSeconds(8));
+            }
+            catch (TimeoutException ex)
+            {
+                throw new TimeoutException(ReadOperationalLogTail(logStart), ex);
+            }
+
+            var receipt = Assert.IsType<
+                RuntimeUnlockRetryDispatchInstallReceipt>(
+                GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            var offerGeneration = Assert.IsType<long>(GetPrivateField(
+                host,
+                "outboundAccelerationOfferGeneration"));
+            if (!ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_observed;",
+                    StringComparison.Ordinal))
+            {
+                Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                    host,
+                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                    sessionId,
+                    offerGeneration,
+                    "control_plane_peer_visible")));
+            }
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_observed;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+            var authority = receipt.Authority;
+            var command = new FileTransferBridgeRecoveryExecutionCommand(
+                new BridgeRecoveryDecision(
+                    Accepted: true,
+                    RecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                    Reason: "test_installed_retry_answer_delivery_recovery",
+                    BridgeDecisionGeneration: checked(
+                        authority.BridgeDecisionGeneration + 1),
+                    CurrentRoute: authority.Route,
+                    CurrentProtocolVersion: authority.ProtocolVersion,
+                    CurrentLiveRouteEpoch: authority.LiveRouteEpoch,
+                    CurrentRuntimeGeneration: authority.RuntimeGeneration,
+                    CurrentTerminalGeneration: authority.TerminalGeneration,
+                    CurrentLegGeneration: authority.LegGeneration,
+                    TransportEpoch: 0,
+                    BridgeRecoveryGeneration: 0,
+                    RuntimeOwner: authority.RuntimeOwner),
+                RecoveryLivenessLease: null,
+                CheckpointRequestId: null);
+
+            var mutatedCommand = command with
+            {
+                Decision = command.Decision with
+                {
+                    CurrentRuntimeGeneration = checked(
+                        command.Decision.CurrentRuntimeGeneration + 1),
+                },
+            };
+            Assert.False(Assert.IsType<bool>(
+                InvokePrivateMethod(
+                    host,
+                    "TryBindFileTransferTunaActivationBridgeRecoveryExecutionCommand",
+                    mutatedCommand)));
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(GetPrivateField(
+                    host,
+                    "fileTransferTunaActivationBridgeRecoveryGeneration")));
+
+            var recoveryBound = Assert.IsType<bool>(
+                InvokePrivateMethod(
+                    host,
+                    "TryBindFileTransferTunaActivationBridgeRecoveryExecutionCommand",
+                    command));
+            Assert.True(recoveryBound, ReadOperationalLogTail(logStart));
+            Assert.True(
+                Assert.IsType<long>(
+                    GetPrivateField(
+                        host,
+                        "fileTransferTunaActivationBridgeRecoveryGeneration")) > 0);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(1100), cts.Token);
+
+            var heldState = host.RuntimeUnlockOfferStateForTests;
+            var heldTail = ReadOperationalLogTail(logStart);
+            Assert.True(heldState.HasOutboundOffer);
+            Assert.False(heldState.IsRetired);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_activation_offer_not_observed;",
+                heldTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_installed_retry_answer_delivery_recovery_hold_decided;",
+                heldTail,
+                StringComparison.Ordinal);
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferTunaActivationBridgeRecoverySettled",
+                "test_recovery_completed",
+                command);
+            await Task.Delay(TimeSpan.FromMilliseconds(150), cts.Token);
+            Assert.True(host.RuntimeUnlockOfferStateForTests.HasOutboundOffer);
+
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TryBindFileTransferTunaActivationBridgeRecoveryExecutionCommand",
+                command)));
+            var boundary = GetPrivateField(
+                host,
+                "outboundRuntimeUnlockOfferAuthorityBoundary");
+            Assert.NotNull(boundary);
+            var failedRecoveryTask = Assert.IsAssignableFrom<Task>(
+                InvokePrivateMethod(
+                    host,
+                    "WaitForRuntimeUnlockInstalledRetryAnswerDeliveryRecoveryAsync",
+                    boundary,
+                    "test_failed_recovery"));
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferTunaActivationBridgeRecoverySettled",
+                "test_recovery_failed",
+                command,
+                false);
+            await failedRecoveryTask;
+            var failedRecoveryResult = failedRecoveryTask.GetType()
+                .GetProperty("Result")?
+                .GetValue(failedRecoveryTask);
+            Assert.NotNull(failedRecoveryResult);
+            Assert.Equal("Failed", failedRecoveryResult.ToString());
+
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TryBindFileTransferTunaActivationBridgeRecoveryExecutionCommand",
+                command)));
+            SetPrivateField(
+                host,
+                "fileTransferTunaActivationBridgeRecoveryAnswerDeadlineUtcMs",
+                DateTimeOffset.UtcNow.AddMilliseconds(75).ToUnixTimeMilliseconds());
+            var expirationTask = Assert.IsAssignableFrom<Task>(
+                InvokePrivateMethod(
+                    host,
+                    "WaitForRuntimeUnlockInstalledRetryAnswerDeliveryRecoveryAsync",
+                    boundary,
+                    "test_absolute_answer_deadline"));
+            await expirationTask;
+            var expirationResult = expirationTask.GetType()
+                .GetProperty("Result")?
+                .GetValue(expirationTask);
+            Assert.NotNull(expirationResult);
+            Assert.Equal("Expired", expirationResult.ToString());
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(GetPrivateField(
+                    host,
+                    "fileTransferTunaActivationBridgeRecoveryGeneration")));
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
     public async Task RuntimeUnlockRetryDispatch_ExactReceiptWithoutDispatchStillRejects()
     {
         FakeNknClient.ResetNetwork();

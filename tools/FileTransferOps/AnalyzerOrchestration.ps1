@@ -1433,6 +1433,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_payer_decision_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_payer_intent_queued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_post_fallback_paired_retry_offer_classified') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_control_priority_failed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_activation_control_send_recovery_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_activation_control_send_recovery_joined_existing') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_offer_replay_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_installed_retry_answer_delivery_recovery_hold_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_listener_sidecar_event') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_state_changed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_reset') +
@@ -1482,6 +1488,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_peer_down') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_session_end') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_disposition_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_ignored_obsolete') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_advanced_remote_frontier') +
@@ -3083,6 +3090,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_initial_activation_answer_peer_delivery_missing'
             Event = $candidateEvent
             Reason = if (@(
+                    $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryRecoveryJoinUnresolvedCandidateEvents |
+                        Where-Object {
+                            [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence
+                        }).Count -gt 0) {
+                'post_fallback_installed_retry_offer_replay_failed_to_join_existing_filetransfer_recovery'
+            }
+            elseif (@(
                     $runtimeUnlockInitialActivationAnswerPeerDeliveryProof.InstalledRetryPendingAnswerClearedUnresolvedCandidateEvents |
                         Where-Object {
                             [int64]$_.Sequence -eq [int64]$candidateEvent.Sequence

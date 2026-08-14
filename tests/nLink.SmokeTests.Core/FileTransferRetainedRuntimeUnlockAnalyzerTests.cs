@@ -1832,6 +1832,130 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_InstalledRetryOfferReplayRecoveryJoin(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string session = "session_id=sess-recovery-join; transfer_id=transfer-1";
+        const string offer =
+            "payer_decision_id=5; transaction_generation=1; offer_generation=2; " +
+            "tuna_path_lease_generation=2; tuna_path_lease_listener_run_id=listener-start-2";
+        const string receipt =
+            "retry_authority_id=retry-authority-1; install_generation=1";
+        var lines = new List<string>
+        {
+            LogLine("event=runtime_unlock_retry_dispatch_observed; " +
+                "authority_id=retry-authority-1; offer_generation=2; direction=outbound; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=runtime_unlock_post_fallback_paired_retry_offer_classified; " +
+                "direction=inbound; payer_decision_id=5; decision_status=Accepted; " +
+                $"{session}; log_writer_id=writer-responder"),
+            LogLine("event=tuna_acceleration_answer_sent; accepted=1; " +
+                "payer_decision_id=5; generation=10; msg_id=answer-1; " +
+                "log_writer_id=writer-responder"),
+            LogLine("event=filetransfer_bridge_recovery_execution_command_issued; " +
+                "direction=outbound; route=post_tuna_fallback_v6; " +
+                "bridge_decision_generation=2; bridge_recovery_generation=1; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=filetransfer_bridge_recovery_execution_start_decided; " +
+                "direction=outbound; status=started; bridge_decision_generation=2; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; " +
+                "direction=outbound; purpose=offer_replay; " +
+                "rejection_reason=transport_callback_without_coordinator_authority; " +
+                $"{session}; log_writer_id=writer-initiator"),
+            LogLine("event=runtime_unlock_offer_authority_boundary_decided; " +
+                "boundary=offer_send_recovery_before_request; authority_mode=InstalledRetry; " +
+                $"decision_status=accepted; {session}; {offer}; {receipt}; " +
+                "log_writer_id=writer-initiator"),
+            LogLine("event=tuna_activation_control_send_recovery_requested; purpose=offer_replay; " +
+                "trigger=observed_send_timeout; accepted=0; " +
+                "post_tuna_fallback_offer_recovery=1; " +
+                $"session_id=sess-recovery-join; log_writer_id=writer-initiator")
+        };
+
+        if (recovered)
+        {
+            lines.Add(LogLine("event=tuna_activation_control_send_recovery_joined_existing; " +
+                "purpose=offer_replay; existing_recovery=1; session_id=sess-recovery-join; " +
+                "log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_received_raw; " +
+                "session_id=sess-recovery-join; payer_decision_id=5; msg_id=answer-1; " +
+                "log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=runtime_unlock_offer_authority_boundary_decided; " +
+                "boundary=answer_received; authority_mode=InstalledRetry; decision_status=accepted; " +
+                $"{session}; {offer}; {receipt}; log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=runtime_unlock_transaction_answer_received; " +
+                $"{session}; {offer}; log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=runtime_unlock_retired_pending_answer_slot_decided; " +
+                "decision_status=Held; barrier_phase=AwaitingHandoffDisposition; " +
+                $"{session}; {offer}; log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=tuna_acceleration_answer_ack_sent; " +
+                "session_id=sess-recovery-join; payer_decision_id=5; " +
+                "log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=runtime_unlock_answer_ack_probe_barrier_released; " +
+                "session_id=sess-recovery-join; log_writer_id=writer-initiator"));
+            lines.Add(LogLine("event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; " +
+                "session_id=sess-recovery-join; launch_generation=1; " +
+                "log_writer_id=writer-responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_prepared; " +
+                "session_id=sess-recovery-join; direction=inbound; " +
+                "transition_kind=PostTunaFallbackV6ToTunaV4; log_writer_id=writer-responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_draining; " +
+                "session_id=sess-recovery-join; direction=inbound; " +
+                "transition_kind=PostTunaFallbackV6ToTunaV4; log_writer_id=writer-responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_committed; " +
+                "session_id=sess-recovery-join; log_writer_id=writer-responder"));
+            lines.Add(LogLine("event=filetransfer_route_transition_disposition_applied; " +
+                "session_id=sess-recovery-join; log_writer_id=writer-responder"));
+        }
+        else
+        {
+            lines.Add(LogLine("event=tuna_acceleration_offer_replay_rejected; " +
+                "session_id=sess-recovery-join; payer_decision_id=5; generation=2; " +
+                "log_writer_id=writer-initiator"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["runtime_unlock_initial_activation_answer_peer_delivery_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal(
+                "tuna_activation_control_send_recovery_requested",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "post_fallback_installed_retry_offer_replay_failed_to_join_existing_filetransfer_recovery",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_InstalledRetryPendingAnswerCleared_OwnsBeforeNonceRejection(
