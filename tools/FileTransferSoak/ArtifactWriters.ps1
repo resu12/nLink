@@ -10639,15 +10639,15 @@ function Get-FileTransferRouteTransitionCorrelation {
             $pause.Count -gt 0 -and
             $draining.Count -gt 0 -and
             [int64]$pause[0].Sequence -lt [int64]$draining[0].Sequence -and
-            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+            (Test-ResponderRouteTransitionDrainTupleMatch `
                 -Prepared $prepared `
                 -Candidate $pause[0]) -and
-            (Test-InitialResponderRouteTransitionDrainTupleMatch `
+            (Test-ResponderRouteTransitionDrainTupleMatch `
                 -Prepared $prepared `
                 -Candidate $draining[0])) {
             [object[]]$terminalInvalidations = @($invalidationEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
-                    (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                    (Test-ResponderRouteTransitionDrainTupleMatch `
                         -Prepared $prepared `
                         -Candidate $_) -and
                     (Test-RouteTransitionStatus `
@@ -10663,13 +10663,13 @@ function Get-FileTransferRouteTransitionCorrelation {
                 [object[]]$anyExactDrainReceipts = @($receiptEvents | Where-Object {
                         [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
                         [int64]$_.Sequence -lt $firstTerminalInvalidationSequence -and
-                        (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                        (Test-ResponderRouteTransitionDrainTupleMatch `
                             -Prepared $prepared `
                             -Candidate $_)
                     })
                 [object[]]$terminalInvalidationDispositions = @($dispositionEvents | Where-Object {
                         [int64]$_.Sequence -gt $firstTerminalInvalidationSequence -and
-                        (Test-InitialResponderRouteTransitionDrainTupleMatch `
+                        (Test-ResponderRouteTransitionDrainTupleMatch `
                             -Prepared $prepared `
                             -Candidate $_) -and
                         ((Get-RouteTransitionField -Event $_ -Name 'disposition') -eq

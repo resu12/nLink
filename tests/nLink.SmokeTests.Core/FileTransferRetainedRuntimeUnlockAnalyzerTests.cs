@@ -974,17 +974,13 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 "event=filetransfer_route_transition_drain_receipt_decided;",
                 StringComparison.Ordinal))
             .ToList();
+        var pauseIndex = lines.FindIndex(line => line.Contains(
+            "event=filetransfer_route_transition_pause_bound;",
+            StringComparison.Ordinal));
         var drainingIndex = lines.FindIndex(line => line.Contains(
             "event=filetransfer_route_transition_draining;",
             StringComparison.Ordinal));
-        Assert.True(drainingIndex >= 0);
-        lines.Insert(
-            drainingIndex,
-            LogLine(
-                $"event=filetransfer_route_transition_pause_bound; direction=inbound; " +
-                $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
-                $"decision_status=Installed; decision_reason=filetransfer_route_transition_pause_bound; log_writer_id={writerId}",
-                secondsOffset: 29));
+        Assert.True(pauseIndex >= 0 && drainingIndex > pauseIndex);
         if (completedBeforeTerminal)
         {
             lines.Add(LogLine(
@@ -1394,6 +1390,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includeDrain)
             {
+                lines.Add(LogLine($"event=filetransfer_route_transition_pause_bound; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Installed; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
                 lines.Add(LogLine($"event=filetransfer_route_transition_draining; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Draining; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
             }
             if (includeCommit)
