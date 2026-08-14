@@ -9162,7 +9162,9 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                     $_.Sequence -gt $sourceSend.Sequence -and
                     $_.Sequence -lt $mismatchSequence -and
                     (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
-                    (Get-FileTransferEventField -Event $_ -Name 'previous_route' -Default '') -eq 'regular_nkn_v4_fast' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'previous_route' -Default '') -in @(
+                        'regular_nkn_v4_fast',
+                        'post_tuna_fallback_v6') -and
                     (Get-FileTransferEventField -Event $_ -Name 'new_route' -Default '') -eq 'file_tuna_v4' -and
                     [string]::Equals(
                         (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
@@ -9193,9 +9195,56 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                     }
                 }
 
-                if ($transitionMatches) {
-                    $matchingReceiverTransitionCount++
+                if (-not $transitionMatches) {
+                    continue
                 }
+
+                $previousRoute = Get-FileTransferEventField `
+                    -Event $receiverTransition `
+                    -Name 'previous_route' `
+                    -Default ''
+                if ($previousRoute -eq 'post_tuna_fallback_v6') {
+                    [object[]]$tunaResends = @(
+                        Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents `
+                            -Index $DataPathIndex `
+                            -Event $Mismatch |
+                        Where-Object {
+                            $_.Sequence -gt $sourceSend.Sequence -and
+                            $_.Sequence -lt $mismatchSequence -and
+                            $_.EventName -eq 'filetransfer_data_path_send_result' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'tuna' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'delivery_result' -Default '') -eq 'sent' -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'raw_payload_bytes' -Default 0) -eq $mismatchRawBytes -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'batch_chunk_count' -Default 0) -eq $mismatchChunkCount -and
+                            (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $_)
+                        })
+                    [object[]]$tunaReceipts = @(
+                        Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents `
+                            -Index $DataPathIndex `
+                            -Event $Mismatch |
+                        Where-Object {
+                            $_.Sequence -gt $sourceSend.Sequence -and
+                            $_.Sequence -lt $mismatchSequence -and
+                            $_.EventName -eq 'filetransfer_data_path_receive_result' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -and
+                            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'tuna' -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'raw_payload_bytes' -Default 0) -eq $mismatchRawBytes -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'batch_chunk_count' -Default 0) -eq $mismatchChunkCount -and
+                            (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $_)
+                        })
+                    if ($tunaResends.Count -eq 0 -or $tunaReceipts.Count -eq 0) {
+                        continue
+                    }
+                }
+
+                $matchingReceiverTransitionCount++
             }
             if ($matchingReceiverTransitionCount -eq 1) {
                 return $true
@@ -47671,6 +47720,18 @@ function Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation {
             Get-FileTransferEventField -Event $_ -Name 'failure_reason' -Default '')) -eq
             'runtime_unlock_probe_start_timeout'
     })
+    [object[]]$missingTransitionAuthorityLaunches = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'status' -Default (
+            Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '')) -eq 'Accepted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'route_commit_send_drain_staged' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'drain_generation' -Default -1) -eq 0 -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default (
+            Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '')) -eq
+            'post_tuna_fallback_v6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+    })
     [object[]]$startedEvents = @($orderedEvents | Where-Object {
         $_.EventName -in @(
             'runtime_unlock_precommit_probe_started',
@@ -47818,6 +47879,53 @@ function Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation {
         $distinctRecords.Add([pscustomobject]@{
             Event = $timeout
             Recovered = $resolutions.Count -gt 0
+        }) | Out-Null
+    }
+
+    foreach ($launch in $missingTransitionAuthorityLaunches) {
+        $rawCandidates.Add($launch) | Out-Null
+        $key = 'post_fallback_missing_transition|' + (Get-ProbeKey -Launch $launch)
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+
+        $writerId = Get-FileTransferEventField -Event $launch -Name 'log_writer_id' -Default ''
+        $cursor = [int64]$launch.Sequence
+        $isRecovered = $true
+        foreach ($stage in @(
+                @{ Name = 'filetransfer_route_transition_prepared'; Status = @('Prepared', 'Idempotent') },
+                @{ Name = 'filetransfer_route_transition_pause_bound'; Status = @('Installed', 'Idempotent', 'Accepted') },
+                @{ Name = 'filetransfer_route_transition_draining'; Status = @('Draining', 'Idempotent') },
+                @{ Name = 'filetransfer_route_transition_drain_receipt_decided'; Status = @('Accepted', 'Applied', 'Idempotent') },
+                @{ Name = 'filetransfer_route_transition_committed'; Status = @('Committed', 'Idempotent') },
+                @{ Name = 'filetransfer_route_transition_disposition_applied'; Status = @('Applied', 'Idempotent') })) {
+            [object[]]$matches = @($orderedEvents | Where-Object {
+                [int64]$_.Sequence -gt $cursor -and
+                $_.EventName -eq $stage.Name -and
+                ([string]::IsNullOrWhiteSpace($writerId) -or
+                    [string]::Equals(
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
+                        $writerId,
+                        [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq
+                    'PostTunaFallbackV6ToTunaV4' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'transition_generation' -Default 0) -gt 0 -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default (
+                    Get-FileTransferEventField -Event $_ -Name 'status' -Default (
+                        Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default ''))) -in $stage.Status -and
+                (Test-ProbeCoreMatch -Launch $launch -Candidate $_)
+            } | Sort-Object Sequence, LineNumber)
+            if ($matches.Count -eq 0) {
+                $isRecovered = $false
+                break
+            }
+            $cursor = [int64]$matches[0].Sequence
+        }
+
+        $distinctRecords.Add([pscustomobject]@{
+            Event = $launch
+            Recovered = $isRecovered
         }) | Out-Null
     }
 
@@ -60658,12 +60766,21 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($runtimeUnlockRetryDispatchPostGrantHoldEvents) `
         -DefaultReason 'retry_dispatch_held_after_authority_granted' `
         -UseDefaultReason
-    Add-FileTransferProofChainFailureCandidates `
-        -Candidates $proofChainFailureCandidates `
-        -Class 'runtime_unlock_precommit_probe_start_handoff_missing' `
-        -Events @($runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCandidateEvents) `
-        -DefaultReason 'runtime_unlock_probe_start_timeout' `
-        -UseDefaultReason
+    foreach ($candidateEvent in @($runtimeUnlockPreCommitProbeStartHandoffProof.UnresolvedCandidateEvents)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_precommit_probe_start_handoff_missing' `
+            -Events @($candidateEvent) `
+            -DefaultReason $(if ($candidateEvent.EventName -eq
+                    'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided' -and
+                (Get-FileTransferEventInt64Field -Event $candidateEvent -Name 'drain_generation' -Default -1) -eq 0) {
+                    'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority'
+                }
+                else {
+                    'runtime_unlock_probe_start_timeout'
+                }) `
+            -UseDefaultReason
+    }
     foreach ($candidateRecord in @($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateRecords)) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
@@ -61631,6 +61748,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_held_after_authority_granted',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+                'file_tuna_data_path_mismatch',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
                 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',
@@ -63386,8 +63504,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveHardFailures.Add($dispatchFailureText) | Out-Null
     }
 
-    if ($recoveryClassification.Class -in @(
-            'runtime_unlock_precommit_probe_start_handoff_missing',
+    if (($recoveryClassification.Class -eq
+            'runtime_unlock_precommit_probe_start_handoff_missing' -and
+         $recoveryClassification.FirstProofChainFailureReason -ne
+            'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') -or
+        $recoveryClassification.Class -in @(
             'regular_v4_frontier_repair_initial_pressure_install_missing',
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         $effectiveVerdict = 'INCONCLUSIVE'
@@ -63403,13 +63524,19 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
     }
 
-    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
+    $operatorAcceptanceFailureClass = if ($recoveryClassification.Class -eq
+            'runtime_unlock_precommit_probe_start_handoff_missing' -and
+        $recoveryClassification.FirstProofChainFailureReason -eq
+            'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') {
+        'route_runtime'
+    }
+    elseif ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {

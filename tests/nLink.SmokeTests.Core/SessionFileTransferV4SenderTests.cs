@@ -5660,6 +5660,94 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         TrySetPrivateProperty(context, "PostTunaFallbackControlPlanePressureTuple", null);
     }
 
+    private static RuntimeUnlockRetryDispatchInstallReceipt
+        SeedInstalledFallbackRuntimeUnlockRetryForTest(object context)
+    {
+        var state = CreateCoordinatorStateForTest(context);
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            state.PersistentState.FallbackTailYield.CurrentOperation);
+        var release = Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
+            operation.PairedRelease);
+        var peer = release.PeerProof.Proof;
+        var evidence = new FallbackPairedTailYieldReleaseEvidence(
+            operation.Decision,
+            peer.AuthorityId,
+            peer.PredecessorAuthorityId,
+            peer.YieldGeneration,
+            peer.Direction.ToString().ToLowerInvariant(),
+            peer.OwnerKey,
+            peer.PairKey,
+            peer.LiveRouteEpoch,
+            peer.LegGeneration,
+            peer.BridgeRecoveryGeneration,
+            peer.TransportEpoch,
+            peer.CheckpointRequestIdSnapshot);
+        Assert.True(
+            FileTransferCoordinator.TryCreateFallbackPairedTailYieldRuntimeUnlockRetryDispatchRequest(
+                state,
+                operation.Decision,
+                evidence,
+                "fallback_paired_tail_yield",
+                "fallback_paired_tail_yield",
+                out var request,
+                out var requestRejection),
+            requestRejection);
+        state = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                FallbackTailYield = state.PersistentState.FallbackTailYield with
+                {
+                    PendingRetryRecheckRequest = request,
+                },
+            },
+        };
+        var authorization = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            operation.Decision.AuthorityId,
+            operation.Decision.YieldGeneration,
+            FallbackTailYieldKind.Quiescent.ToString());
+        Assert.True(authorization.Granted, authorization.Reason);
+
+        var stagedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var stageResult = new RuntimeUnlockRetryDispatchDecisionStageResult(
+            RuntimeUnlockRetryDispatchDecisionStageStatus.Staged,
+            "unit_test_installed_fallback_retry",
+            authorization)
+        {
+            StageDisposition = RuntimeUnlockRetryDispatchStageDisposition.Retained,
+            StagedUtcMs = stagedUtcMs,
+        };
+        var staged = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchStage(
+            authorization.State,
+            stageResult,
+            stagedUtcMs);
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, staged.Status);
+        var stagedAuthorization = authorization with { State = staged.State };
+        var issued = FileTransferCoordinator.IssueRuntimeUnlockRetryDispatchInstallReceipt(
+            staged.State,
+            stagedAuthorization,
+            request,
+            stagedUtcMs + 1);
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, issued.Status);
+        var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(issued.Receipt);
+        var committed = FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall(
+            issued.State,
+            new RuntimeUnlockRetryDispatchInstallResult(
+                RuntimeUnlockRetryDispatchInstallStatus.Installed,
+                "unit_test_installed_fallback_retry",
+                receipt),
+            stagedUtcMs + 2);
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, committed.Status);
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            committed.State.PersistentState);
+        return receipt;
+    }
+
     private static bool HasPairedFallbackTailYieldInAggregate(object context)
         => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
                 context,

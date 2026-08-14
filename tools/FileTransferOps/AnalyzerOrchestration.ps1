@@ -1258,7 +1258,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_precommit_probe_pending_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_launch_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_started') +
-        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_start_timeout')
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_start_timeout') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_pause_bound') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_draining') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_drain_receipt_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_disposition_applied')
     )
     $runtimeUnlockPreCommitProbeStartHandoffProof =
         Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation `
@@ -3303,7 +3309,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_precommit_probe_start_handoff_missing'
             Event = $candidateEvent
-            Reason = 'runtime_unlock_probe_start_timeout'
+            Reason = if ($candidateEvent.EventName -eq
+                    'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided' -and
+                (Get-FileTransferEventInt64Field -Event $candidateEvent -Name 'drain_generation' -Default -1) -eq 0) {
+                    'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority'
+                }
+                else {
+                    'runtime_unlock_probe_start_timeout'
+                }
         }) | Out-Null
     }
     foreach ($candidateRecord in @($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateRecords)) {
@@ -3464,7 +3477,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     # vice versa).
     if ($null -ne $firstCompactProofChainFailure) {
         $firstCompactClass = [string]$firstCompactProofChainFailure.Class
-        if ($firstCompactClass -in @(
+        if ($firstCompactClass -eq 'runtime_unlock_precommit_probe_start_handoff_missing' -and
+            [string]$firstCompactProofChainFailure.Reason -eq
+                'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') {
+            $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+            $gateStatus = 'fail'
+            $acceptanceFailureClass = 'route_runtime'
+        }
+        elseif ($firstCompactClass -in @(
                 'filetransfer_gui_live_fallback_fault_window_missed',
                 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
                 'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
@@ -3533,7 +3553,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         elseif ($firstCompactClass -eq 'file_tuna_data_path_mismatch') {
             $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
             $gateStatus = 'fail'
-            $acceptanceFailureClass = 'file_tuna_data_path_mismatch'
+            $acceptanceFailureClass = 'route_runtime'
         }
     }
 

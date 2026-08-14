@@ -9390,6 +9390,94 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("runtime_unlock_precommit_probe_start_handoff_missing", verdict["recovery_failure_class"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostFallbackProbeLaunchWithoutPreparedTransition_IsRouteRuntimeFailure(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_postfallback_probe_without_transition";
+        var launch =
+            $"event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; " +
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; " +
+            "transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; " +
+            "launch_generation=4; status=Accepted; drain_generation=0; route=post_tuna_fallback_v6; " +
+            "protocol_version=6; decision_reason=route_commit_send_drain_staged; log_writer_sequence=25037";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(transferId, launch),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("runtime_unlock_precommit_probe_start_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "post_fallback_initiator_probe_launch_accepted_without_route_transition_authority",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("25037", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_start_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_start_handoff_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_start_handoff_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostFallbackProbeLaunchLaterCompletesExactPreparedTransition_Recovers(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_postfallback_probe_transition_recovered";
+        const string tuple =
+            "session_id=sess_runtime_unlock_dispatch_proof; direction=outbound; " +
+            "transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; launch_generation=4";
+        const string transition =
+            "transition_kind=PostTunaFallbackV6ToTunaV4; transition_generation=7";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                $"event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; transfer_id={transferId}; {tuple}; status=Accepted; drain_generation=0; route=post_tuna_fallback_v6; protocol_version=6; decision_reason=route_commit_send_drain_staged",
+                $"event=filetransfer_route_transition_prepared; transfer_id={transferId}; {tuple}; {transition}; decision_status=Prepared",
+                $"event=filetransfer_route_transition_pause_bound; transfer_id={transferId}; {tuple}; {transition}; decision_status=Installed",
+                $"event=filetransfer_route_transition_draining; transfer_id={transferId}; {tuple}; {transition}; decision_status=Draining",
+                $"event=filetransfer_route_transition_drain_receipt_decided; transfer_id={transferId}; {tuple}; {transition}; decision_status=Accepted; drain_outcome=Completed",
+                $"event=filetransfer_route_transition_committed; transfer_id={transferId}; {tuple}; {transition}; decision_status=Committed",
+                $"event=filetransfer_route_transition_disposition_applied; transfer_id={transferId}; {tuple}; {transition}; decision_status=Applied; apply_status=Applied; disposition=committed"),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_start_handoff_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_start_handoff_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_start_handoff_missing_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_start_handoff_missing_unresolved_count"]);
+        Assert.NotEqual("runtime_unlock_precommit_probe_start_handoff_missing", verdict["recovery_failure_class"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PreCommitProbeResponderWait_IsNotInitiatorHandoffFailure()

@@ -27426,6 +27426,10 @@ internal static class FileTransferCoordinator
                         receipt,
                         pairedRelease,
                         activation,
+                        out rejectionReason) ||
+                    !TryValidateRuntimeUnlockPostFallbackInitiatorLaunchBoundary(
+                        state,
+                        activation,
                         out rejectionReason))
                 {
                     if (string.Equals(
@@ -27803,7 +27807,6 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        var commitProofReason = "accepted";
         if (
             activation.PendingPreCommitProbe.AdmissionToken !=
                 activation.RuntimeUnlockAdmission ||
@@ -27817,18 +27820,66 @@ internal static class FileTransferCoordinator
                 activation.PendingPreCommitProbe.TunaPathLeaseListenerRunId,
                 activation.AcceptedLaunchBoundary.TunaPathLeaseListenerRunId,
                 StringComparison.Ordinal) ||
-            activation.LaunchGeneration <= 0 ||
-            !RuntimeUnlockTransaction.CanCommitRoute(
-                activation.AcceptedLaunchBoundary,
-                state,
-                out commitProofReason))
+            activation.LaunchGeneration <= 0)
         {
-            rejectionReason = string.Equals(
-                commitProofReason,
-                "accepted",
-                StringComparison.Ordinal)
-                ? "filetransfer_route_transition_fallback_launch_boundary_mismatch"
-                : commitProofReason;
+            rejectionReason =
+                "filetransfer_route_transition_fallback_launch_boundary_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool
+        TryValidateRuntimeUnlockPostFallbackInitiatorLaunchBoundary(
+            FileTransferCoordinatorState state,
+            FileTransferTunaActivationTransitionProofBoundary activation,
+            out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var proof = activation.AcceptedLaunchBoundary;
+        if (!string.Equals(proof.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(proof.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            proof.TransactionGeneration <= 0 ||
+            proof.OfferGeneration <= 0 ||
+            !proof.PeerVisibleProof ||
+            !proof.PeerReceived ||
+            !proof.AnswerReceived ||
+            proof.TransactionState != RuntimeUnlockTransactionState.AnswerReceived ||
+            proof.AdmissionToken != activation.RuntimeUnlockAdmission ||
+            proof.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            proof.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            proof.HandoffKind !=
+                FileTransferTransportHandoffKind.NormalToTunaActivation ||
+            proof.TargetTransport != FileTransferTransportKind.Tuna ||
+            !proof.TunaPathLeaseRequired ||
+            proof.TunaPathLeaseGeneration <= 0 ||
+            proof.TunaPathLeaseState != RuntimeUnlockTunaPathLeaseState.ListenerReady ||
+            !proof.TunaPathLeaseCurrent ||
+            string.IsNullOrWhiteSpace(proof.TunaPathLeaseListenerRunId) ||
+            !string.IsNullOrWhiteSpace(proof.TunaPathLeaseFailureReason) ||
+            !string.IsNullOrWhiteSpace(proof.PathProbeFailureReason) ||
+            !string.IsNullOrWhiteSpace(proof.SamePathTunaProbeAckId))
+        {
+            rejectionReason =
+                "filetransfer_route_transition_fallback_launch_boundary_mismatch";
+            return false;
+        }
+
+        var canonicalNone =
+            proof.PathProbeState == RuntimeUnlockPathProbeState.None &&
+            string.IsNullOrWhiteSpace(proof.PathProbeId) &&
+            proof.PathProbeTransport == FileTransferTransportKind.Unknown &&
+            proof.PathProbeAckedUtcMs == 0;
+        var canonicalStarted =
+            proof.PathProbeState == RuntimeUnlockPathProbeState.Started &&
+            !string.IsNullOrWhiteSpace(proof.PathProbeId) &&
+            proof.PathProbeTransport == FileTransferTransportKind.Tuna &&
+            proof.PathProbeAckedUtcMs == 0;
+        if (!canonicalNone && !canonicalStarted)
+        {
+            rejectionReason =
+                "filetransfer_route_transition_fallback_launch_probe_state_invalid";
             return false;
         }
 
@@ -28375,7 +28426,6 @@ internal static class FileTransferCoordinator
 
         if (authority.TargetRoute != FileTransferRoute.FileTunaV4 ||
             finalProof is not { } proof ||
-            proof.PathProbeState != RuntimeUnlockPathProbeState.Acked ||
             authority.ProofBoundary is not
                 FileTransferTunaActivationTransitionProofBoundary activation ||
             activation.IsDefault ||
@@ -28412,6 +28462,14 @@ internal static class FileTransferCoordinator
             return false;
         }
 
+        if (!RuntimeUnlockTransaction.CanCommitRoute(
+                proof,
+                state,
+                out rejectionReason))
+        {
+            return false;
+        }
+
         if (authority.Kind ==
             FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4)
         {
@@ -28435,7 +28493,9 @@ internal static class FileTransferCoordinator
                     ? RuntimeUnlockPostFallbackResponderCommitProofMatchesAcceptedBoundary(
                         proof,
                         activation.AcceptedLaunchBoundary)
-                    : proof == activation.AcceptedLaunchBoundary) &&
+                    : RuntimeUnlockPostFallbackInitiatorCommitProofMatchesAcceptedBoundary(
+                        proof,
+                        activation.AcceptedLaunchBoundary)) &&
                 activation.InitialResponderPeerProbeObservation is null &&
                 initiatorMode != responderMode;
             if (validBoundary && initiatorMode)
@@ -28538,6 +28598,49 @@ internal static class FileTransferCoordinator
             RuntimeUnlockRouteCommitProof current,
             RuntimeUnlockRouteCommitProof accepted)
         => current with { Reason = accepted.Reason } == accepted;
+
+    private static bool
+        RuntimeUnlockPostFallbackInitiatorCommitProofMatchesAcceptedBoundary(
+            RuntimeUnlockRouteCommitProof current,
+            RuntimeUnlockRouteCommitProof accepted)
+    {
+        var acceptedProbeStateValid =
+            (accepted.PathProbeState == RuntimeUnlockPathProbeState.None &&
+             string.IsNullOrWhiteSpace(accepted.PathProbeId)) ||
+            (accepted.PathProbeState == RuntimeUnlockPathProbeState.Started &&
+             !string.IsNullOrWhiteSpace(accepted.PathProbeId) &&
+             string.Equals(
+                 accepted.PathProbeId,
+                 current.PathProbeId,
+                 StringComparison.Ordinal));
+        if (!acceptedProbeStateValid ||
+            accepted.TransactionState != RuntimeUnlockTransactionState.AnswerReceived ||
+            current.TransactionState != RuntimeUnlockTransactionState.RouteCommitPending ||
+            current.PathProbeState != RuntimeUnlockPathProbeState.Acked ||
+            current.PathProbeTransport != FileTransferTransportKind.Tuna ||
+            string.IsNullOrWhiteSpace(current.PathProbeId) ||
+            current.PathProbeAckedUtcMs <= 0 ||
+            !string.IsNullOrWhiteSpace(current.PathProbeFailureReason) ||
+            !string.Equals(
+                current.SamePathTunaProbeAckId,
+                current.PathProbeId,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return current with
+        {
+            TransactionState = accepted.TransactionState,
+            Reason = accepted.Reason,
+            PathProbeId = accepted.PathProbeId,
+            PathProbeState = accepted.PathProbeState,
+            PathProbeTransport = accepted.PathProbeTransport,
+            PathProbeAckedUtcMs = accepted.PathProbeAckedUtcMs,
+            PathProbeFailureReason = accepted.PathProbeFailureReason,
+            SamePathTunaProbeAckId = accepted.SamePathTunaProbeAckId,
+        } == accepted;
+    }
 
     private static bool FileTransferTunaActivationProofMatchesTarget(
         RuntimeUnlockRouteCommitProof proof)

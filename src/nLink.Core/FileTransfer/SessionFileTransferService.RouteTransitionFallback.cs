@@ -2076,6 +2076,21 @@ public sealed partial class SessionFileTransferService
                 out fallbackCheckpointDispatch);
             if (!committed)
             {
+                if (execution.Authority?.Kind ==
+                        FileTransferRouteTransitionKind
+                            .PostTunaFallbackV6ToTunaV4 &&
+                    (string.Equals(
+                         rejectionReason,
+                         "runtime_unlock_probe_missing",
+                         StringComparison.Ordinal) ||
+                     string.Equals(
+                         rejectionReason,
+                         "transaction_not_commit_ready",
+                         StringComparison.Ordinal)))
+                {
+                    return;
+                }
+
                 LogFileTransferRouteTransitionDecision(
                     "filetransfer_route_transition_drain_receipt_decided",
                     context.SessionId,

@@ -3864,9 +3864,15 @@ public sealed partial class SessionFileTransferService
         }
         else
         {
-            if (!IsRuntimeUnlockRegularV4PreCommitAuthorityCreationSnapshot(
-                    snapshot,
-                    context))
+            var validCreationSnapshot =
+                context.RouteRuntime.UsesPostTunaFallbackV6Runtime
+                    ? IsRuntimeUnlockPostFallbackPreCommitAuthorityCreationSnapshot(
+                        snapshot,
+                        context)
+                    : IsRuntimeUnlockRegularV4PreCommitAuthorityCreationSnapshot(
+                        snapshot,
+                        context);
+            if (!validCreationSnapshot)
             {
                 return false;
             }
@@ -4015,6 +4021,44 @@ public sealed partial class SessionFileTransferService
            snapshot.HandoffKind ==
                 FileTransferTransportHandoffKind.NormalToTunaActivation &&
            snapshot.TargetTransport == FileTransferTransportKind.Tuna;
+
+    private static bool IsRuntimeUnlockPostFallbackPreCommitAuthorityCreationSnapshot(
+        RuntimeUnlockRouteCommitSnapshot snapshot,
+        OutboundTransferContext context)
+    {
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            context.NegotiatedDataProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV6 ||
+            !IsRuntimeUnlockRegularV4PreCommitAuthorityCreationSnapshot(
+                snapshot,
+                context.SessionId,
+                context.TransferId) ||
+            !string.Equals(
+                snapshot.TransactionState,
+                RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                snapshot.TunaPathLeaseState,
+                RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(snapshot.TunaPathLeaseListenerRunId) ||
+            !string.IsNullOrWhiteSpace(snapshot.PathProbeFailureReason))
+        {
+            return false;
+        }
+
+        return
+            (string.Equals(
+                snapshot.PathProbeState,
+                RuntimeUnlockPathProbeState.None.ToString(),
+                StringComparison.OrdinalIgnoreCase) &&
+             string.IsNullOrWhiteSpace(snapshot.PathProbeId)) ||
+            (string.Equals(
+                snapshot.PathProbeState,
+                RuntimeUnlockPathProbeState.Started.ToString(),
+                StringComparison.OrdinalIgnoreCase) &&
+             !string.IsNullOrWhiteSpace(snapshot.PathProbeId));
+    }
 
     private static bool IsRuntimeUnlockRegularV4RouteCommitBoundarySnapshot(
         RuntimeUnlockRouteCommitSnapshot snapshot,

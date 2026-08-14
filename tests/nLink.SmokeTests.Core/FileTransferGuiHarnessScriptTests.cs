@@ -3100,6 +3100,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
             $postFallbackResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_fallback_release_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($postFallbackResponderDrain.Phase -ne 'route_transition' -or $postFallbackResponderDrain.Reason -ne 'filetransfer_route_transition_fallback_release_not_current') { throw 'post-fallback responder drain rejection lost precedence' }
+            $postFallbackProbeTransition = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_precommit_probe_start_handoff_missing; first_proof_chain_failure_reason=post_fallback_initiator_probe_launch_accepted_without_route_transition_authority' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($postFallbackProbeTransition.Phase -ne 'route_runtime' -or $postFallbackProbeTransition.Reason -ne 'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') { throw 'post-fallback probe transition authority lost precedence' }
             $initialResponderMissingDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_invalidated; first_proof_chain_failure_reason=initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderMissingDrain.Phase -ne 'route_transition' -or $initialResponderMissingDrain.Reason -ne 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt') { throw 'initial responder missing drain lost precedence' }
             $initialRecoveryHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_offer_receive_recovery_hold_not_preserved; retained_event=tuna_acceleration_activation_offer_not_observed' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -6985,6 +6987,65 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $"GUI installed-retry recovery-join test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains(
             "gui-installed-retry-recovery-join-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PostFallbackProbeLaunchDetectsMissingPreparedTransitionAndExactRecovery()
+    {
+        var guiText = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure",
+            "Get-TunaGuiInitialActivationAnswerHandoffTransferIdentityFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure {
+                {{classifierBody}}
+            }
+            $tuple = 'session_id=session-probe-transition; transfer_id=transfer-1; direction=outbound; transaction_generation=1; offer_generation=2; log_writer_id=writer-initiator'
+            $lines = @(
+                "event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; status=Accepted; decision_reason=route_commit_send_drain_staged; drain_generation=0; route=post_tuna_fallback_v6; protocol_version=6; $tuple"
+            )
+            $result = Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure -Lines $lines
+            if (-not $result.Unresolved) { throw 'zero-generation post-fallback launch was not detected' }
+            $transition = 'transition_kind=PostTunaFallbackV6ToTunaV4; transition_generation=7'
+            $recovered = @($lines) + @(
+                "event=filetransfer_route_transition_prepared; decision_status=Prepared; $transition; $tuple",
+                "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $transition; $tuple",
+                "event=filetransfer_route_transition_draining; decision_status=Draining; $transition; $tuple",
+                "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Accepted; $transition; $tuple",
+                "event=filetransfer_route_transition_committed; decision_status=Committed; $transition; $tuple",
+                "event=filetransfer_route_transition_disposition_applied; decision_status=Applied; $transition; $tuple"
+            )
+            $result = Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure -Lines $recovered
+            if ($result.Unresolved) { throw 'exact transition lifecycle did not recover launch' }
+            $result = Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure -Lines @()
+            if ($result.Unresolved -or $result.ParsedRecords -ne 0) { throw 'empty input was not safe' }
+            $result = Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure -Lines @($recovered[-1])
+            if ($result.Unresolved -or $result.ParsedRecords -ne 1) { throw 'singleton input was not safe' }
+            Write-Output 'gui-post-fallback-probe-transition-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI post-fallback probe-transition test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-post-fallback-probe-transition-ok",
             result.Stdout,
             StringComparison.Ordinal);
     }

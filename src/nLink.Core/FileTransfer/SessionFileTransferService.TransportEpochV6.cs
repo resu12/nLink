@@ -385,6 +385,44 @@ public sealed partial class SessionFileTransferService
                     ?.TransitionGeneration ?? 0;
         }
 
+        if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+            context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+            context.DataSession is not null)
+        {
+            RuntimeUnlockRouteCommitSnapshot? transitionSnapshot =
+                acceptedSnapshot;
+            if (transitionSnapshot is null &&
+                transport is IRuntimeUnlockRouteCommitProofProvider proofProvider &&
+                proofProvider.TryGetRuntimeUnlockRouteCommitProof(
+                    context.SessionId,
+                    context.TransferId,
+                    out var currentSnapshot))
+            {
+                transitionSnapshot = currentSnapshot;
+            }
+
+            if (transitionSnapshot is not { } suppliedSnapshot ||
+                !TryPrepareOutboundPostTunaFallbackToTunaRouteTransitionLocked(
+                    context,
+                    suppliedSnapshot,
+                    "runtime_unlock_precommit_probe_launch",
+                    out _) ||
+                context.FileTransferRouteTransitionExecution?.Authority is not
+                    {
+                        Kind:
+                            FileTransferRouteTransitionKind
+                                .PostTunaFallbackV6ToTunaV4,
+                        TransitionGeneration: > 0,
+                    } transitionAuthority)
+            {
+                rejectionReason =
+                    "post_fallback_route_commit_send_drain_not_staged";
+                return false;
+            }
+
+            drainGeneration = transitionAuthority.TransitionGeneration;
+        }
+
         var dataSession = context.DataSession;
         var dataSessionGeneration = context.DataSessionGeneration;
         var sessionId = context.SessionId;

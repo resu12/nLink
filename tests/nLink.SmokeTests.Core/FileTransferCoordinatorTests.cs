@@ -18368,7 +18368,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             "filetransfer_route_transition_activation_proof_mismatch",
             missingProofReason);
-        Assert.False(
+        Assert.True(
             FileTransferCoordinator.TryValidateFileTransferRouteTransitionCommitProof(
                 draining.State,
                 authority,
@@ -18376,10 +18376,20 @@ public sealed class FileTransferCoordinatorTests
                 {
                     Reason = "runtime_unlock_transaction_peer_proof",
                 },
-                out var initiatorReasonDriftReason));
-        Assert.Equal(
-            "filetransfer_route_transition_fallback_release_not_current",
+                out var initiatorReasonDriftReason),
             initiatorReasonDriftReason);
+        Assert.False(
+            FileTransferCoordinator.TryValidateFileTransferRouteTransitionCommitProof(
+                draining.State,
+                authority,
+                setup.FinalProof with
+                {
+                    OfferGeneration = setup.FinalProof.OfferGeneration + 1,
+                },
+                out var initiatorTupleMutationReason));
+        Assert.Equal(
+            "filetransfer_route_transition_activation_proof_mismatch",
+            initiatorTupleMutationReason);
         Assert.True(
             FileTransferCoordinator
                 .TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
@@ -19447,6 +19457,15 @@ public sealed class FileTransferCoordinatorTests
                 admission),
             pending.TunaPathLeaseGeneration,
             pending.TunaPathLeaseListenerRunId!);
+        var launchBoundary = finalProof with
+        {
+            TransactionState = RuntimeUnlockTransactionState.AnswerReceived,
+            PathProbeId = null,
+            PathProbeState = RuntimeUnlockPathProbeState.None,
+            PathProbeTransport = FileTransferTransportKind.Unknown,
+            PathProbeAckedUtcMs = 0,
+            SamePathTunaProbeAckId = null,
+        };
         var owner = state.CurrentRuntimeOwner!.Value;
         var publication = state.CurrentRoutePublicationToken!.Value;
         var leg = state.CurrentLeg!;
@@ -19474,7 +19493,7 @@ public sealed class FileTransferCoordinatorTests
             new FileTransferTunaActivationTransitionProofBoundary(
                 admission,
                 pending,
-                finalProof,
+                launchBoundary,
                 LaunchGeneration: 31,
                 installReceipt,
                 pairedRelease),

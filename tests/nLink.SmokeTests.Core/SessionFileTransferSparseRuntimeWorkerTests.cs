@@ -781,7 +781,7 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
-    public async Task RuntimeUnlockPreCommitProbe_PostTunaFallbackLaunchDoesNotRequireRegularV4Drain()
+    public async Task RuntimeUnlockPreCommitProbe_PostTunaFallbackLaunchPreparesExactTransitionAuthority()
     {
         const string transferId = "precommit_launch_post_tuna_fallback";
         const string sessionId = "session_precommit_launch_post_tuna_fallback";
@@ -794,6 +794,11 @@ public sealed partial class SessionFileTransferV4SenderTests
             .SetValue(service, context);
         var dataSession = new RecordingDataSession(sessionId, transferId);
         ReplaceOutboundDataSession(service, context, dataSession);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        var leg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        SeedPairedFallbackTailYieldForTest(context, leg);
+        SeedInstalledFallbackRuntimeUnlockRetryForTest(context);
         var admission = SeedRuntimeUnlockAdmissionForTest(
             context,
             FileTransferDirection.Outbound,
@@ -830,17 +835,23 @@ public sealed partial class SessionFileTransferV4SenderTests
             null,
             snapshot,
         };
+        var logStart = GetOperationalLogLength();
 
         var started = Assert.IsType<bool>(typeof(SessionFileTransferService)
             .GetMethod("StartOutboundRuntimeUnlockPreCommitProbe", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args));
 
-        Assert.True(started, Assert.IsType<string>(args[3]));
+        Assert.True(
+            started,
+            Assert.IsType<string>(args[3]) + Environment.NewLine +
+            ReadOperationalLogTail(logStart));
         await WaitUntilAsync(
             () => dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>().Any(),
             timeoutMs: 5000);
         Assert.Single(dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>());
-        Assert.Null(GetCurrentFileTransferRouteTransitionDrain(context));
+        Assert.True(Assert.IsType<long>(args[4]) > 0);
+        Assert.NotNull(GetPrivatePropertyValue(context, "RuntimeUnlockPendingPreCommitProbe"));
+        Assert.NotNull(GetCurrentFileTransferRouteTransitionDrain(context));
     }
 
     [Fact]

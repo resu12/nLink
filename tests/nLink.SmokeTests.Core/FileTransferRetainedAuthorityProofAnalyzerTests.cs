@@ -1122,11 +1122,11 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
         Assert.Equal("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
 
         var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("file_tuna_data_path_mismatch", compactVerdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", compactVerdict["acceptance_failure_class"]);
         Assert.Equal("file_tuna_data_path_mismatch", compactVerdict["recovery_failure_class"]);
         Assert.Equal("file_tuna_data_path_mismatch", compactVerdict["first_proof_chain_failure_class"]);
     }
@@ -1199,7 +1199,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -1234,6 +1234,37 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         Assert.Equal("none", compactVerdict["recovery_failure_class"]);
         Assert.NotEqual("file_tuna_data_path_mismatch", fullVerdict["first_proof_chain_failure_class"]);
         Assert.NotEqual("file_tuna_data_path_mismatch", compactVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_SecondTunaCycleLateRegularDuplicateRejectedFailClosed_DoesNotFail(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_second_tuna_late_regular_rejected";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4RejectedReceiveFixture(
+                transferId,
+                secondTunaCycle: true),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["file_tuna_v4_data_path_mismatch_count"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
     }
 
     [Theory]
@@ -4163,7 +4194,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                 : await RunAnalyzeFixtureAsync(lines);
             Assert.Equal(0, result.Script.ExitCode);
             var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-            Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+            Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
             Assert.Equal("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
             Assert.Equal("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
         }
@@ -4236,7 +4267,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -4402,7 +4433,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -4430,7 +4461,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -4464,7 +4495,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -4573,7 +4604,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -4601,7 +4632,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
-        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
     }
 
     [Fact]
@@ -4672,7 +4703,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     private static List<string> BuildFileTunaV4RejectedReceiveFixture(
         string transferId,
         string? omittedCompanionEvidence = null,
-        bool includeOutboundTransition = true)
+        bool includeOutboundTransition = true,
+        bool secondTunaCycle = false)
     {
         const string sourceWriterId = "writer_source_regular";
         const string writerId = "writer_receive_regular_rejected";
@@ -4687,13 +4719,13 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             $"log_writer_id={sourceWriterId}; log_writer_sequence=1";
         var outboundTransition =
             $"event=filetransfer_route_transitioned; direction=outbound; transfer_id={transferId}; session_id=sess_a; " +
-            "route=file_tuna_v4; protocol_version=4; previous_route=regular_nkn_v4_fast; new_route=file_tuna_v4; " +
+            $"route=file_tuna_v4; protocol_version=4; previous_route={(secondTunaCycle ? "post_tuna_fallback_v6" : "regular_nkn_v4_fast")}; new_route=file_tuna_v4; " +
             "live_route_epoch=3; runtime_generation=7; terminal_generation=0; leg_generation=4; " +
             "route_publication_generation=9; route_commit_generation=0; target_route=file_tuna_v4; " +
-            $"target_protocol_version=4; target_transport=tuna; log_writer_id={sourceWriterId}; log_writer_sequence=2";
+            $"target_protocol_version=4; target_transport=tuna; log_writer_id={sourceWriterId}; log_writer_sequence={(secondTunaCycle ? 3 : 2)}";
         var inboundTransition =
             $"event=filetransfer_route_transitioned; direction=inbound; transfer_id={transferId}; session_id=sess_a; " +
-            "route=file_tuna_v4; protocol_version=4; previous_route=regular_nkn_v4_fast; new_route=file_tuna_v4; " +
+            $"route=file_tuna_v4; protocol_version=4; previous_route={(secondTunaCycle ? "post_tuna_fallback_v6" : "regular_nkn_v4_fast")}; new_route=file_tuna_v4; " +
             "live_route_epoch=3; runtime_generation=7; terminal_generation=0; leg_generation=4; " +
             "route_publication_generation=9; route_commit_generation=0; target_route=file_tuna_v4; " +
             $"target_protocol_version=4; target_transport=tuna; log_writer_id={writerId}; log_writer_sequence=9";
@@ -4732,6 +4764,31 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         {
             sourceSend
         };
+        if (secondTunaCycle)
+        {
+            messages.Add(
+                FileTunaV4DataPathActualMessage(
+                    transferId,
+                    actualTransport: "tuna",
+                    eventName: "filetransfer_data_path_send_result",
+                    proofDirection: "send",
+                    startChunkIndex: 0).Replace(
+                        "delivery_result=accepted",
+                        "delivery_result=sent",
+                        StringComparison.Ordinal) +
+                $"; log_writer_id={sourceWriterId}; log_writer_sequence=2");
+            messages.Add(
+                FileTunaV4DataPathActualMessage(
+                    transferId,
+                    actualTransport: "tuna",
+                    eventName: "filetransfer_data_path_receive_result",
+                    proofDirection: "receive",
+                    startChunkIndex: 0).Replace(
+                        "direction=outbound",
+                        "direction=inbound",
+                        StringComparison.Ordinal) +
+                $"; log_writer_id={writerId}; log_writer_sequence=8");
+        }
         if (includeOutboundTransition)
         {
             messages.Add(outboundTransition);
