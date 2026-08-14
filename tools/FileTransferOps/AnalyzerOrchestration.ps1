@@ -1651,7 +1651,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     [object[]]$runtimeUnlockRegularV4RecoveryOrderedEvents = @(
         ($runtimeUnlockRegularV4RecoveryLeaseEvents + $postTunaDeferredPhysicalLeaseRetirementEvents) |
             Where-Object { $null -ne $_ } |
-            Sort-Object Sequence, LineNumber
+            Sort-Object Sequence, LineNumber, EventName -Unique
     )
     [object[]]$bridgeRecoveryExecutionPayloadHoldEvents = @(
         $runtimeUnlockRegularV4RecoveryOrderedEvents
