@@ -14431,9 +14431,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
-        $records = for ($index = 0; $index -lt $Lines.Count; $index++) {
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
             [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
-        }
+        })
         $lookupCount = 0L
         foreach ($wake in @($records | Where-Object {
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
@@ -14510,9 +14510,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
-        $records = for ($index = 0; $index -lt $Lines.Count; $index++) {
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
             [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
-        }
+        })
         $lookupCount = 0L
         foreach ($wake in @($records | Where-Object {
                     (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
