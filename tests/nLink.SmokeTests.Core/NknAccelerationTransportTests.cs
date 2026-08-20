@@ -16034,6 +16034,129 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     [Fact]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task RuntimeUnlockRetryDispatch_PairedRequestReadyWhileUserStopped_UnlockRechecksExactIntent()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-paired-request-user-stopped.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-paired-request-user-stopped.address");
+            var hostLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-paired-request-user-stopped-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-paired-request-user-stopped-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_runtime_unlock_paired_request_user_stopped";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            InvokePrivateMethod(
+                host,
+                "MarkAccelerationUserStoppedForCurrentSession",
+                sessionId);
+            Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
+
+            var logStart = GetOperationalLogLength();
+            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                host,
+                sessionId,
+                transferId,
+                "runtime_unlock_offer_send_not_observed",
+                "fallback_tail_pairing_committed");
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "decision_reason=retry_dispatch_negotiation_slot_ineligible",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var heldTail = ReadOperationalLogTail(logStart);
+            Assert.Null(
+                GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            Assert.DoesNotContain(
+                "event=tuna_payer_decision_started;",
+                heldTail,
+                StringComparison.Ordinal);
+
+            await ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync(
+                    "runtime_unlock",
+                    cts.Token);
+            await host
+                .DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await WaitUntilAsync(
+                () => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host) is not null,
+                TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_observed;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var resumedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_post_fallback_retry_intent_recheck_decided; " +
+                "decision_status=Accepted; intent_kind=CoordinatorPreparedRequest; " +
+                "intent_generation=1;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_retry_negotiation_slot_decided; " +
+                "decision_status=Reserved; intent_kind=CoordinatorPreparedRequest;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_install_committed;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_observed;",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_payer_decision_started; payer_decision_id=1; reason=runtime_unlock",
+                resumedTail,
+                StringComparison.Ordinal);
+            Assert.False(host.IsAccelerationUserStoppedForCurrentSessionForTests);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
     public async Task RuntimeUnlockRetryDispatch_PostFallbackUnlockBeforePairedRequest_DoesNotAcquireGenericSlot()
     {
         FakeNknClient.ResetNetwork();

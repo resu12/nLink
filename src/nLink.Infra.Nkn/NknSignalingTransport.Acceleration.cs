@@ -8792,6 +8792,87 @@ public sealed partial class NknSignalingTransport
             $"event=runtime_unlock_post_fallback_negotiation_deferred; decision_status=Deferred; authority_mode=InitialActivation; authority_effect=none; trigger={SanitizeLogToken(trigger)}; decision_reason={SanitizeLogToken(decisionReason)}; session_id={SanitizeLogToken(publication?.SessionId ?? "none")}; transfer_id={SanitizeLogToken(publication?.TransferId ?? "none")}; direction={publication?.Direction.ToString().ToLowerInvariant() ?? "none"}; source_route={SanitizeLogToken(publication?.RouteToken ?? "none")}; source_protocol_version={publication?.ProtocolVersion ?? 0}; source_live_route_epoch={publication?.LiveRouteEpoch ?? 0}; source_runtime_generation={publication?.RuntimeGeneration ?? 0}; source_terminal_generation={publication?.TerminalGeneration ?? 0}; source_leg_generation={publication?.LegGeneration ?? 0}; source_publication_generation={publication?.RoutePublicationGeneration ?? 0}; source_transport_epoch={source.TransportEpoch}; source_bridge_recovery_generation={source.BridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(source.CheckpointRequestId ?? "(none)")}; data_session_identity={SanitizeLogToken(source.DataSessionIdentity ?? "none")}; data_session_generation={source.DataSessionGeneration}");
     }
 
+    private void RecheckPendingRuntimeUnlockRetryNegotiationIntentAfterUnlock(
+        RuntimeUnlockPostFallbackSchedulingBoundary boundary,
+        string trigger)
+    {
+        RuntimeUnlockRetryNegotiationIntent? exactIntent = null;
+        var decisionStatus = "Deferred";
+        var decisionReason = "exact_pending_intent_missing";
+        lock (accelerationGate)
+        {
+            var current = pendingRuntimeUnlockRetryNegotiationIntent;
+            if (current is not null &&
+                current.Kind ==
+                    RuntimeUnlockRetryNegotiationIntentKind
+                        .CoordinatorPreparedRequest &&
+                RuntimeUnlockRetryNegotiationSourceScopeMatchesBoundary(
+                    current.SourceScope,
+                    boundary.SourceScope))
+            {
+                if (current.BackoffSatisfied)
+                {
+                    exactIntent = current;
+                    decisionStatus = "Requested";
+                    decisionReason = "exact_pending_intent_recheck_requested";
+                }
+                else
+                {
+                    decisionReason = "exact_pending_intent_backoff_pending";
+                }
+            }
+        }
+
+        LogRuntimeUnlockPostFallbackRetryIntentRecheck(
+            decisionStatus,
+            exactIntent?.IntentGeneration ?? 0,
+            boundary.SourceScope,
+            trigger,
+            decisionReason);
+        if (exactIntent is null)
+        {
+            return;
+        }
+
+        SchedulePendingRuntimeUnlockRetryNegotiationIntent(
+            "runtime_unlock_session_eligible",
+            exactIntent.IntentGeneration,
+            exactIntent.SourceScope);
+    }
+
+    private static bool RuntimeUnlockRetryNegotiationSourceScopeMatchesBoundary(
+        RuntimeUnlockRetryNegotiationSourceScope intentScope,
+        RuntimeUnlockRetryNegotiationSourceScope boundaryScope)
+        => RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent(
+               boundaryScope.SourcePublicationAuthority,
+               intentScope.SourcePublicationAuthority) &&
+           intentScope.TransportEpoch == boundaryScope.TransportEpoch &&
+           intentScope.BridgeRecoveryGeneration ==
+               boundaryScope.BridgeRecoveryGeneration &&
+           string.Equals(
+               intentScope.CheckpointRequestId,
+               boundaryScope.CheckpointRequestId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               intentScope.DataSessionIdentity,
+               boundaryScope.DataSessionIdentity,
+               StringComparison.Ordinal) &&
+           intentScope.DataSessionGeneration ==
+               boundaryScope.DataSessionGeneration;
+
+    private static void LogRuntimeUnlockPostFallbackRetryIntentRecheck(
+        string disposition,
+        long intentGeneration,
+        RuntimeUnlockRetryNegotiationSourceScope sourceScope,
+        string trigger,
+        string reason)
+    {
+        var publication = sourceScope.SourcePublicationAuthority;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_post_fallback_retry_intent_recheck_decided; decision_status={SanitizeLogToken(disposition)}; intent_kind=CoordinatorPreparedRequest; intent_generation={intentGeneration}; authority_effect=none; trigger={SanitizeLogToken(trigger)}; decision_reason={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(publication?.SessionId ?? "none")}; transfer_id={SanitizeLogToken(publication?.TransferId ?? "none")}; direction={publication?.Direction.ToString().ToLowerInvariant() ?? "none"}; source_route={SanitizeLogToken(publication?.RouteToken ?? "none")}; source_protocol_version={publication?.ProtocolVersion ?? 0}; source_live_route_epoch={publication?.LiveRouteEpoch ?? 0}; source_runtime_generation={publication?.RuntimeGeneration ?? 0}; source_terminal_generation={publication?.TerminalGeneration ?? 0}; source_leg_generation={publication?.LegGeneration ?? 0}; source_publication_generation={publication?.RoutePublicationGeneration ?? 0}; source_transport_epoch={sourceScope.TransportEpoch}; source_bridge_recovery_generation={sourceScope.BridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(sourceScope.CheckpointRequestId ?? "(none)")}; data_session_identity={SanitizeLogToken(sourceScope.DataSessionIdentity ?? "none")}; data_session_generation={sourceScope.DataSessionGeneration}");
+    }
+
     private bool TryCaptureInboundPostFallbackPairedRetryOfferScope(
         string source,
         TransportAccelerationOfferPayload offer,
@@ -28467,7 +28548,9 @@ public sealed partial class NknSignalingTransport
     }
 
     private void SchedulePendingRuntimeUnlockRetryNegotiationIntent(
-        string trigger)
+        string trigger,
+        long expectedIntentGeneration = 0,
+        RuntimeUnlockRetryNegotiationSourceScope expectedSourceScope = default)
     {
         RuntimeUnlockRetryNegotiationIntent? intent;
         RuntimeUnlockRetryNegotiationSlotReceipt? slotReceipt = null;
@@ -28479,6 +28562,13 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             capturedIntent = pendingRuntimeUnlockRetryNegotiationIntent;
+            if (expectedIntentGeneration > 0 &&
+                (capturedIntent is null ||
+                 capturedIntent.IntentGeneration != expectedIntentGeneration ||
+                 capturedIntent.SourceScope != expectedSourceScope))
+            {
+                capturedIntent = null;
+            }
             capturedRetiredAnswerBarrier =
                 runtimeUnlockRetiredAnswerBarrier;
         }
@@ -28495,32 +28585,44 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             intent = pendingRuntimeUnlockRetryNegotiationIntent;
-            if (intent is null || !intent.BackoffSatisfied)
+            if (expectedIntentGeneration > 0 &&
+                (intent is null ||
+                 intent.IntentGeneration != expectedIntentGeneration ||
+                 intent.SourceScope != expectedSourceScope ||
+                 !ReferenceEquals(intent, capturedIntent)))
             {
-                return;
+                intent = null;
+                rejectionReason = "exact_pending_intent_replaced";
+            }
+            else if (intent is null || !intent.BackoffSatisfied)
+            {
+                intent = null;
+                rejectionReason = "exact_pending_intent_backoff_pending";
             }
 
             var state = runtimeUnlockRecoveryRetryState;
-            if (!ReferenceEquals(state, intent.State) ||
+            if (intent is not null &&
+                (!ReferenceEquals(state, intent.State) ||
                 state.ContractState is SessionRecoveryContractState.Completed or
                     SessionRecoveryContractState.Failed ||
                 state.SourcePublicationAuthority !=
                     intent.SourcePublicationAuthority ||
                 state.SourceDataSessionGeneration !=
                     intent.SourceDataSessionGeneration ||
-                disposed)
+                disposed))
             {
                 pendingRuntimeUnlockRetryNegotiationIntent = null;
                 rejectionReason = "retry_dispatch_intent_scope_replaced";
             }
-            else if (!ReferenceEquals(intent, capturedIntent) ||
-                     !sourceScopeCurrent)
+            else if (intent is not null &&
+                     (!ReferenceEquals(intent, capturedIntent) ||
+                      !sourceScopeCurrent))
             {
                 pendingRuntimeUnlockRetryNegotiationIntent = null;
                 rejectionReason =
                     "retry_dispatch_intent_source_scope_replaced";
             }
-            else
+            else if (intent is not null)
             {
                 if (runtimeUnlockRetiredAnswerBarrier is { } barrier &&
                     ReferenceEquals(
@@ -28562,7 +28664,7 @@ public sealed partial class NknSignalingTransport
                             .InstalledRuntimeUnlockRetry &&
                     predecessorReceipt.Authority ==
                         successor.PredecessorAuthority &&
-                    state.DispatchContract is { } predecessorContract &&
+                    state!.DispatchContract is { } predecessorContract &&
                     predecessorContract.Authority ==
                         successor.PredecessorAuthority &&
                     predecessorContract.Lifecycle.DispatchObserved ==
@@ -28629,6 +28731,15 @@ public sealed partial class NknSignalingTransport
 
         if (intent is null)
         {
+            if (expectedIntentGeneration > 0)
+            {
+                LogRuntimeUnlockPostFallbackRetryIntentRecheck(
+                    "Rejected",
+                    expectedIntentGeneration,
+                    expectedSourceScope,
+                    trigger,
+                    rejectionReason ?? "exact_pending_intent_not_current");
+            }
             return;
         }
 
@@ -28643,6 +28754,15 @@ public sealed partial class NknSignalingTransport
                 intent,
                 slotGeneration: 0,
                 rejectionReason ?? "retry_dispatch_intent_not_current");
+            if (expectedIntentGeneration > 0)
+            {
+                LogRuntimeUnlockPostFallbackRetryIntentRecheck(
+                    slotBusy ? "Deferred" : "Rejected",
+                    intent.IntentGeneration,
+                    intent.SourceScope,
+                    trigger,
+                    rejectionReason ?? "retry_dispatch_intent_not_current");
+            }
             if (!slotBusy)
             {
                 SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperation(
@@ -28663,6 +28783,15 @@ public sealed partial class NknSignalingTransport
             intent,
             slotReceipt.SlotGeneration,
             trigger);
+        if (expectedIntentGeneration > 0)
+        {
+            LogRuntimeUnlockPostFallbackRetryIntentRecheck(
+                "Accepted",
+                intent.IntentGeneration,
+                intent.SourceScope,
+                trigger,
+                "exact_pending_intent_reserved");
+        }
         if (intent.State.ListenerExecutionMode ==
             RuntimeUnlockRetryDispatchListenerExecutionMode
                 .AdoptCurrentCoordinatorScoped)
@@ -37919,6 +38048,14 @@ public sealed partial class NknSignalingTransport
                 postFallbackSchedulingBoundary.Kind !=
                     RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback)
             {
+                if (postFallbackSchedulingBoundary.Kind ==
+                    RuntimeUnlockPostFallbackSchedulingBoundaryKind
+                        .AwaitingRetryAuthority)
+                {
+                    RecheckPendingRuntimeUnlockRetryNegotiationIntentAfterUnlock(
+                        postFallbackSchedulingBoundary,
+                        reason);
+                }
                 LogRuntimeUnlockPostFallbackSchedulingBoundary(
                     postFallbackSchedulingBoundary,
                     reason,

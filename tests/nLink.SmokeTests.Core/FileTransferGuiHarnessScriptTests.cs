@@ -3096,6 +3096,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($postGrantHold.Phase -ne 'runtime_unlock_retry' -or $postGrantHold.Reason -ne 'retry_dispatch_held_after_authority_granted') { throw 'runtime unlock post-grant hold lost precedence' }
             $pairedYieldSourceScope = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=paired_fallback_tail_yield_missing; failure_variant=paired_yield_retry_request_source_scope_not_current; retained_event=runtime_unlock_retry_dispatch_authority_request_queue_rejected' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($pairedYieldSourceScope.Phase -ne 'route_runtime' -or $pairedYieldSourceScope.Reason -ne 'fallback_paired_tail_yield_retry_request_source_scope_not_current') { throw 'paired-yield retry source-scope rejection lost precedence' }
+            $pairedYieldIntentRecheck = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=paired_fallback_tail_yield_missing; failure_variant=paired_yield_retry_intent_not_rechecked_after_runtime_unlock_eligibility_restored; first_reason=fallback_paired_tail_yield_retry_intent_not_rechecked_after_runtime_unlock_eligibility_restored' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($pairedYieldIntentRecheck.Phase -ne 'route_runtime' -or $pairedYieldIntentRecheck.Reason -ne 'fallback_paired_tail_yield_retry_intent_not_rechecked_after_runtime_unlock_eligibility_restored') { throw 'paired-yield retry intent recheck lost precedence' }
             $initialResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_initial_responder_boundary_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
             $postFallbackResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_fallback_release_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
@@ -5258,6 +5260,74 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_PostFallbackRetryIntentNotRecheckedUsesIndexedProofBeforeDeadline()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-retry-recheck-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $writer = 'writer-a'
+                @(
+                    "event=filetransfer_route_selected; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; log_writer_id=$writer",
+                    "event=tuna_runtime_locked; source=header; stop_requested=1; reason=header_switch_off; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_pairing_committed; session_id=sess; transfer_id=transfer; authority_id=yield-a; yield_generation=1; yield_kind=Quiescent; decision_status=Accepted; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_paired_yield_granted; authority_id=yield-a; yield_generation=1; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_authority_request_queued; session_id=sess; transfer_id=transfer; contract_generation=1; queue_generation=1; source_route=post_tuna_fallback_v6; source_route_publication_generation=3; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_negotiation_slot_decided; session_id=sess; transfer_id=transfer; decision_status=Deferred; intent_kind=CoordinatorPreparedRequest; intent_generation=1; slot_generation=0; contract_generation=1; source_route=post_tuna_fallback_v6; source_publication_generation=3; decision_reason=retry_dispatch_authority_backoff_pending; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_negotiation_slot_decided; session_id=sess; transfer_id=transfer; decision_status=Deferred; intent_kind=CoordinatorPreparedRequest; intent_generation=1; slot_generation=0; contract_generation=1; source_route=post_tuna_fallback_v6; source_publication_generation=3; decision_reason=retry_dispatch_negotiation_slot_ineligible; log_writer_id=$writer",
+                    "event=runtime_unlock_post_fallback_negotiation_deferred; session_id=sess; transfer_id=transfer; direction=outbound; decision_status=Deferred; authority_mode=InitialActivation; authority_effect=none; trigger=runtime_unlock; decision_reason=post_fallback_retry_authority_pending; source_route=post_tuna_fallback_v6; source_publication_generation=3; log_writer_id=$writer",
+                    'event=filetransfer_gui_progress_timeout; session_id=sess; transfer_id=transfer; reason=normal_to_tuna_live_epoch_missing'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'fallback_paired_tail_yield_retry_intent_not_rechecked_after_runtime_unlock_eligibility_restored' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_post_fallback_retry_intent_recheck_index') {
+                    throw "post-fallback retry recheck fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                @("event=runtime_unlock_post_fallback_negotiation_deferred; decision_status=Deferred; trigger=runtime_unlock; decision_reason=post_fallback_retry_authority_pending; source_route=post_tuna_fallback_v6; log_writer_id=$writer") |
+                    Set-Content -LiteralPath $path
+                $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($singleton.Reason -eq 'fallback_paired_tail_yield_retry_intent_not_rechecked_after_runtime_unlock_eligibility_restored') {
+                    throw 'singleton unlock deferral was classified without exact intent history'
+                }
+                Write-Output 'gui-post-fallback-retry-recheck-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Post-fallback retry-recheck GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-post-fallback-retry-recheck-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_CurrentListenerAdoptionUsesExactIndexedProjection()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
@@ -6228,6 +6298,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     param($Milliseconds)
                     return [bool]$this.WaitResult
                 }
+                $process | Add-Member -MemberType ScriptMethod -Name Refresh -Value { }
                 return $process
             }
             function Start-Process {
@@ -6327,15 +6398,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
                 $script:fakeProcessMode = 'process-failed'
                 $processFailure = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
-                Assert-BaseClassificationPreserved $processFailure 'failed' 'evidence_enrichment_failed'
+                Assert-BaseClassificationPreserved $processFailure 'failed' 'evidence_enrichment_child_exit_9'
 
                 $script:fakeProcessMode = 'missing-response'
                 $missingResponse = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
-                Assert-BaseClassificationPreserved $missingResponse 'failed' 'evidence_enrichment_failed'
+                Assert-BaseClassificationPreserved $missingResponse 'failed' 'evidence_enrichment_response_missing'
 
                 $script:fakeProcessMode = 'invalid-response'
                 $invalidResponse = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
-                Assert-BaseClassificationPreserved $invalidResponse 'failed' 'evidence_enrichment_failed'
+                Assert-BaseClassificationPreserved $invalidResponse 'failed' 'evidence_enrichment_response_classification_invalid'
 
                 $script:fakeProcessMode = 'completed'
                 $completed = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
@@ -6364,6 +6435,112 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Failure-classification enrichment receipt test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-enrichment-receipt-outcomes-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_EnrichmentRealChildHydratesExitCodeBeforeValidation()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var budgetBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds",
+            "ConvertTo-GuiSmokeProcessArgument");
+        var argumentBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "ConvertTo-GuiSmokeProcessArgument",
+            "New-TunaGuiFailureClassificationEnrichmentReceipt");
+        var receiptBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFailureClassificationEnrichmentReceipt",
+            "Test-TunaGuiCompletedFailureClassificationResult");
+        var completedBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Test-TunaGuiCompletedFailureClassificationResult",
+            "Invoke-TunaGuiFailureClassificationRequest");
+        var enrichmentBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Invoke-TunaGuiFailureClassificationEnrichment",
+            "Wait-TunaGuiFileTransferAcceptOrThrow");
+        var scriptText = $$"""
+            param([string]$FailureClassificationRequestPath)
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiFailureClassificationBudgetMilliseconds { {{budgetBody}} }
+            function ConvertTo-GuiSmokeProcessArgument { {{argumentBody}} }
+            function New-TunaGuiFailureClassificationEnrichmentReceipt { {{receiptBody}} }
+            function Test-TunaGuiCompletedFailureClassificationResult { {{completedBody}} }
+            function Invoke-TunaGuiFailureClassificationEnrichment { {{enrichmentBody}} }
+            function Write-GuiSmokeAtomicJson {
+                param($Path, $Value)
+                $Value | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $Path -Encoding UTF8
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($FailureClassificationRequestPath)) {
+                if ($env:NLINK_TEST_ENRICHMENT_CHILD_MODE -eq 'nonzero') { exit 9 }
+                $request = Get-Content -LiteralPath $FailureClassificationRequestPath -Raw | ConvertFrom-Json
+                $candidate = New-TunaGuiFileTransferFailureClassificationResult `
+                    -Phase 'route_runtime' `
+                    -Reason 'real_child_exact_proof' `
+                    -RouteMode ([string]$request.routeMode) `
+                    -ClassificationSource 'immutable_evidence_real_child'
+                Write-GuiSmokeAtomicJson -Path ([string]$request.responsePath) -Value ([ordered]@{
+                    schemaVersion = 1
+                    event = 'filetransfer_tuna_gui_failure_classification_response'
+                    classification = $candidate
+                })
+                exit 0
+            }
+
+            $artifactRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-enrichment-real-child-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($artifactRoot)
+            try {
+                $base = New-TunaGuiFileTransferFailureClassificationResult `
+                    -Phase 'progress_failure' `
+                    -Reason 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ClassificationSource 'explicit_error'
+
+                $env:NLINK_TEST_ENRICHMENT_CHILD_MODE = 'success'
+                $completed = Invoke-TunaGuiFailureClassificationEnrichment `
+                    -ArtifactDir $artifactRoot `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -BaseClassification $base
+                if ($completed.ClassificationEnrichmentStatus -ne 'completed' -or
+                    $completed.Classification.Reason -ne 'real_child_exact_proof') {
+                    throw "real child response was rejected: $($completed | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $env:NLINK_TEST_ENRICHMENT_CHILD_MODE = 'nonzero'
+                $failed = Invoke-TunaGuiFailureClassificationEnrichment `
+                    -ArtifactDir $artifactRoot `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -BaseClassification $base
+                if ($failed.ClassificationEnrichmentStatus -ne 'failed' -or
+                    $failed.ClassificationEnrichmentReason -ne 'evidence_enrichment_child_exit_9' -or
+                    $failed.Classification.Reason -ne 'gui_smoke_scenario_deadline_exceeded') {
+                    throw "real child nonzero exit was not fail-closed: $($failed | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                Write-Output 'gui-enrichment-real-child-exit-hydrated-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_TEST_ENRICHMENT_CHILD_MODE -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $artifactRoot) {
+                    Remove-Item -LiteralPath $artifactRoot -Recurse -Force
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Real enrichment child process regression failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-enrichment-real-child-exit-hydrated-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
