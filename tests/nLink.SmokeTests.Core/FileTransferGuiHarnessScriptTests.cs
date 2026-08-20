@@ -5186,6 +5186,78 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_PostFallbackRetryBlockedByGenericUsesIndexedProofBeforeDeadline()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-retry-blocked-generic-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $writer = 'writer-a'
+                @(
+                    "event=filetransfer_route_selected; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_local_proof_receipt_decided; authority_id=yield-a; yield_generation=1; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_peer_proof_receipt_decided; authority_id=yield-a; yield_generation=1; log_writer_id=$writer",
+                    "event=tuna_payer_decision_started; payer_decision_id=6; reason=runtime_unlock; log_writer_id=$writer",
+                    "event=runtime_unlock_filetransfer_owner_accepted_before_path_lease; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; trigger=runtime_unlock; log_writer_id=$writer",
+                    "event=tuna_acceleration_payer_intent_queued; payer_decision_id=6; intent=will_listen; trigger=runtime_unlock; lanes=file; log_writer_id=$writer",
+                    "event=tuna_path_lease_started; session_id=sess; transfer_id=transfer; payer_decision_id=6; transaction_generation=0; offer_generation=0; lease_generation=2; listener_run_id=listener-2; reason=runtime_unlock; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_pairing_committed; session_id=sess; transfer_id=transfer; authority_id=yield-a; yield_generation=1; yield_kind=Quiescent; decision_status=Accepted; log_writer_id=$writer",
+                    "event=filetransfer_fallback_tail_paired_yield_granted; authority_id=yield-a; yield_generation=1; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_dispatch_authority_request_queued; session_id=sess; transfer_id=transfer; contract_generation=1; queue_generation=1; source_route=post_tuna_fallback_v6; source_route_publication_generation=3; log_writer_id=$writer",
+                    "event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id=sess; transfer_id=transfer; authority_id=yield-a; yield_generation=1; decision_status=Queued; log_writer_id=$writer",
+                    "event=runtime_unlock_retry_negotiation_slot_decided; session_id=sess; transfer_id=transfer; decision_status=Deferred; intent_kind=CoordinatorPreparedRequest; intent_generation=1; slot_generation=0; contract_generation=1; source_route=post_tuna_fallback_v6; source_publication_generation=3; decision_reason=retry_dispatch_negotiation_slot_busy; log_writer_id=$writer",
+                    'event=filetransfer_gui_progress_timeout; session_id=sess; transfer_id=transfer; reason=normal_to_tuna_live_epoch_missing'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'fallback_paired_tail_yield_retry_intent_blocked_by_preexisting_initial_activation' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_post_fallback_retry_blocked_by_generic_index') {
+                    throw "post-fallback retry-blocked fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                @("event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Deferred; intent_kind=CoordinatorPreparedRequest; intent_generation=1; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy; log_writer_id=$writer") |
+                    Set-Content -LiteralPath $path
+                $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($singleton.Reason -eq 'fallback_paired_tail_yield_retry_intent_blocked_by_preexisting_initial_activation') {
+                    throw 'singleton slot-busy event was classified without paired and generic ownership evidence'
+                }
+                Write-Output 'gui-post-fallback-retry-blocked-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Post-fallback retry-blocked GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-post-fallback-retry-blocked-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_CurrentListenerAdoptionUsesExactIndexedProjection()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

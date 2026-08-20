@@ -5411,6 +5411,14 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'route_runtime'
                     Reason = if ($ErrorMessage.IndexOf(
+                            'fallback_paired_tail_yield_retry_intent_blocked_by_preexisting_initial_activation',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        $ErrorMessage.IndexOf(
+                            'paired_yield_retry_intent_blocked_by_preexisting_initial_activation',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'fallback_paired_tail_yield_retry_intent_blocked_by_preexisting_initial_activation'
+                    }
+                    elseif ($ErrorMessage.IndexOf(
                             'paired_yield_retry_request_source_scope_not_current',
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                         $ErrorMessage.IndexOf(
@@ -13953,6 +13961,24 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_runtime_terminalized', 'filetransfer_live_route_epoch_terminal',
             'filetransfer_v6_epoch_terminal', 'file_transfer_outbound_terminal',
             'transfer_terminal')
+        PairedRetrySlot = @(
+            'filetransfer_route_selected',
+            'filetransfer_fallback_tail_local_proof_receipt_decided',
+            'filetransfer_fallback_tail_peer_proof_receipt_decided',
+            'filetransfer_fallback_tail_pairing_committed',
+            'filetransfer_fallback_tail_paired_yield_granted',
+            'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested',
+            'runtime_unlock_retry_dispatch_authority_request_queued',
+            'runtime_unlock_retry_negotiation_slot_decided',
+            'tuna_payer_decision_started',
+            'runtime_unlock_filetransfer_owner_accepted_before_path_lease',
+            'tuna_acceleration_payer_intent_queued',
+            'tuna_path_lease_started',
+            'runtime_unlock_retry_dispatch_authority_granted',
+            'runtime_unlock_retry_dispatch_settlement_decided',
+            'filetransfer_route_transition_prepared',
+            'filetransfer_runtime_terminalized', 'filetransfer_live_route_epoch_terminal',
+            'file_transfer_outbound_terminal', 'transfer_terminal')
         Responder = @(
             'runtime_unlock_retry_dispatch_observed', 'tuna_acceleration_offer_queued',
             'nkn_inbound_envelope_received', 'runtime_unlock_transaction_answer_received',
@@ -14174,6 +14200,210 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
         return $false
     }
+    function Get-TunaGuiPostFallbackRetryBlockedByGenericActivationFailure {
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [AllowEmptyString()]
+            [string[]]$Lines
+        )
+
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        })
+        $lookupCount = 0L
+        foreach ($busy in @($records | Where-Object {
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'runtime_unlock_retry_negotiation_slot_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                        'Deferred' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'intent_kind') -eq
+                        'CoordinatorPreparedRequest' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'slot_generation') -eq '0' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                        'retry_dispatch_negotiation_slot_busy'
+                })) {
+            $lookupCount++
+            $writer = Get-TunaGuiLogLineFieldValue -Line $busy.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $busy.Line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $busy.Line -Name 'transfer_id'
+            $intentGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $busy.Line -Name 'intent_generation'
+            $contractGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $busy.Line -Name 'contract_generation'
+            $publicationGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $busy.Line -Name 'source_publication_generation'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                [string]::IsNullOrWhiteSpace($transfer) -or
+                [string]::IsNullOrWhiteSpace($intentGeneration)) {
+                continue
+            }
+
+            [object[]]$queued = @($records | Where-Object {
+                    $_.Index -lt $busy.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'runtime_unlock_retry_dispatch_authority_request_queued' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'queue_generation') -eq
+                        $intentGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'contract_generation') -eq
+                        $contractGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_route') -eq
+                        'post_tuna_fallback_v6' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_route_publication_generation') -eq
+                        $publicationGeneration
+                } | Select-Object -Last 1)
+            if ($queued.Count -ne 1) { continue }
+
+            [object[]]$pairing = @($records | Where-Object {
+                    $_.Index -lt $queued[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_fallback_tail_pairing_committed' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'yield_kind') -eq 'Quiescent' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                        'Accepted', 'Idempotent')
+                } | Select-Object -Last 1)
+            if ($pairing.Count -ne 1) { continue }
+            $authority = Get-TunaGuiLogLineFieldValue -Line $pairing[0].Line -Name 'authority_id'
+            $yieldGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $pairing[0].Line -Name 'yield_generation'
+
+            [object[]]$localProof = @($records | Where-Object {
+                    $_.Index -lt $pairing[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_fallback_tail_local_proof_receipt_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'yield_generation') -eq
+                        $yieldGeneration
+                } | Select-Object -First 1)
+            [object[]]$peerProof = @($records | Where-Object {
+                    $_.Index -lt $pairing[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_fallback_tail_peer_proof_receipt_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'yield_generation') -eq
+                        $yieldGeneration
+                } | Select-Object -First 1)
+            [object[]]$grant = @($records | Where-Object {
+                    $_.Index -ge $pairing[0].Index -and $_.Index -lt $queued[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_fallback_tail_paired_yield_granted' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'yield_generation') -eq
+                        $yieldGeneration
+                } | Select-Object -First 1)
+            if ($localProof.Count -ne 1 -or $peerProof.Count -ne 1 -or $grant.Count -ne 1) {
+                continue
+            }
+
+            [object[]]$payer = @($records | Where-Object {
+                    $_.Index -lt $pairing[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'tuna_payer_decision_started' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq 'runtime_unlock'
+                } | Select-Object -Last 1)
+            if ($payer.Count -ne 1) { continue }
+            $payerId = Get-TunaGuiLogLineFieldValue -Line $payer[0].Line -Name 'payer_decision_id'
+            [object[]]$owner = @($records | Where-Object {
+                    $_.Index -gt $payer[0].Index -and $_.Index -lt $pairing[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'runtime_unlock_filetransfer_owner_accepted_before_path_lease' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq
+                        'post_tuna_fallback_v6'
+                } | Select-Object -First 1)
+            [object[]]$intent = @($records | Where-Object {
+                    $_.Index -gt $payer[0].Index -and $_.Index -lt $pairing[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'tuna_acceleration_payer_intent_queued' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq 'runtime_unlock'
+                } | Select-Object -First 1)
+            [object[]]$lease = @($records | Where-Object {
+                    $_.Index -gt $payer[0].Index -and $_.Index -lt $pairing[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'tuna_path_lease_started' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payerId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -eq '0' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq '0'
+                } | Select-Object -First 1)
+            if ($owner.Count -ne 1 -or $intent.Count -ne 1 -or $lease.Count -ne 1) {
+                continue
+            }
+
+            [object[]]$reserved = @($records | Where-Object {
+                    $_.Index -gt $busy.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'runtime_unlock_retry_negotiation_slot_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Reserved' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'intent_generation') -eq
+                        $intentGeneration
+                } | Select-Object -First 1)
+            [object[]]$dispatch = @($records | Where-Object {
+                    $reserved.Count -eq 1 -and $_.Index -gt $reserved[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'runtime_unlock_retry_dispatch_settlement_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @(
+                        'Accepted', 'Idempotent') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome') -eq
+                        'DispatchObserved' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer
+                } | Select-Object -First 1)
+            [object[]]$prepared = @($records | Where-Object {
+                    $dispatch.Count -eq 1 -and $_.Index -gt $dispatch[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_route_transition_prepared' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_kind') -eq
+                        'PostTunaFallbackV6ToTunaV4'
+                } | Select-Object -First 1)
+            if ($reserved.Count -eq 1 -and $dispatch.Count -eq 1 -and $prepared.Count -eq 1) {
+                continue
+            }
+
+            $sequenceText = Get-TunaGuiLogLineFieldValue `
+                -Line $busy.Line -Name 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
+                    [long]$sequenceText
+                } else { [long]($busy.Index + 1) }
+                ParsedRecords = [long]$records.Count
+                LookupCount = $lookupCount
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
+    }
+
     function Get-TunaGuiPostFallbackGenericActivationPauseFailure {
         param(
             [Parameter(Mandatory = $true)]
@@ -15243,6 +15473,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $postFallbackGenericPauseFastPath =
         Get-TunaGuiPostFallbackGenericActivationPauseFailure `
             -Lines ([string[]]$earlyPredicateLines.PostFallbackPause.ToArray())
+    $postFallbackRetryBlockedByGenericFastPath =
+        Get-TunaGuiPostFallbackRetryBlockedByGenericActivationFailure `
+            -Lines ([string[]]$earlyPredicateLines.PairedRetrySlot.ToArray())
     $fallbackFrontierCheckpointAcceptanceRecheckFastPath =
         Get-TunaGuiFallbackFrontierCheckpointAcceptanceRecheckFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
@@ -15302,6 +15535,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{
                 Kind = 'PostFallbackPause'
                 Result = $postFallbackGenericPauseFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'PairedRetrySlot'
+                Result = $postFallbackRetryBlockedByGenericFastPath
             },
             [pscustomobject]@{ Kind = 'Responder'; Result = $responderPeerProbeFastPath },
             [pscustomobject]@{ Kind = 'PairedRetryResponderBinding'; Result = $pairedRetryResponderBindingFastPath },
@@ -15403,6 +15640,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
             -EvidenceParsedRecordCount ([long]$postFallbackGenericPauseFastPath.ParsedRecords) `
             -EvidenceLookupCount ([long]$postFallbackGenericPauseFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'PairedRetrySlot') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$postFallbackRetryBlockedByGenericFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_post_fallback_retry_blocked_by_generic_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'fallback_paired_tail_yield_retry_intent_blocked_by_preexisting_initial_activation' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_post_fallback_retry_blocked_by_generic_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$postFallbackRetryBlockedByGenericFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$postFallbackRetryBlockedByGenericFastPath.LookupCount) `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 

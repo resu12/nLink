@@ -359,6 +359,13 @@ public sealed partial class NknSignalingTransport
         InstalledRuntimeUnlockRetry = 3,
     }
 
+    private enum RuntimeUnlockPostFallbackSchedulingBoundaryKind
+    {
+        NoFallback = 0,
+        AwaitingRetryAuthority = 1,
+        ExactInstalledRetry = 2,
+    }
+
     private enum RuntimeUnlockRetryNegotiationIntentKind
     {
         CoordinatorPreparedRequest = 0,
@@ -859,6 +866,18 @@ public sealed partial class NknSignalingTransport
             DataSessionGeneration <= 0 ||
             TransportEpoch < 0 ||
             BridgeRecoveryGeneration < 0;
+    }
+
+    private readonly record struct RuntimeUnlockPostFallbackSchedulingBoundary(
+        RuntimeUnlockPostFallbackSchedulingBoundaryKind Kind,
+        RuntimeUnlockRetryNegotiationSourceScope SourceScope,
+        RuntimeUnlockRetryDispatchInstallReceipt? InstallReceipt)
+    {
+        public static RuntimeUnlockPostFallbackSchedulingBoundary NoFallback =>
+            new(
+                RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback,
+                default,
+                null);
     }
 
     private sealed record RuntimeUnlockRetryNegotiationSlotReceipt(
@@ -8663,6 +8682,116 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private RuntimeUnlockPostFallbackSchedulingBoundary
+        CaptureRuntimeUnlockPostFallbackSchedulingBoundary(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !TryCaptureCurrentPostTunaFallbackRuntimeUnlockSchedulingScope(
+                sessionId,
+                out var initialScope))
+        {
+            return RuntimeUnlockPostFallbackSchedulingBoundary.NoFallback;
+        }
+
+        RuntimeUnlockRetryDispatchInstallReceipt? exactReceipt = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is not null &&
+                state.SourcePublicationAuthority is { } statePublication &&
+                RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent(
+                    initialScope.SourcePublicationAuthority,
+                    statePublication) &&
+                state.SourceDataSessionGeneration ==
+                    initialScope.DataSessionGeneration &&
+                HasCurrentGrantedRuntimeUnlockRetryDispatchContractUnsafe(
+                    state,
+                    out var currentContract) &&
+                runtimeUnlockRetryDispatchInstallShadow.LastCommittedReceipt is
+                    { } receipt &&
+                !receipt.IsDefault &&
+                receipt.Authority == currentContract.Authority &&
+                receipt.Authority.ReleaseKind ==
+                    RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield &&
+                receipt.Authority.ReleaseOutcome ==
+                    FallbackTailYieldKind.Quiescent.ToString() &&
+                RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent(
+                    initialScope.SourcePublicationAuthority,
+                    receipt.Request.SourcePublicationAuthority))
+            {
+                exactReceipt = receipt;
+            }
+        }
+
+        if (!TryCaptureCurrentPostTunaFallbackRuntimeUnlockSchedulingScope(
+                sessionId,
+                out var currentScope) ||
+            currentScope != initialScope)
+        {
+            return new RuntimeUnlockPostFallbackSchedulingBoundary(
+                RuntimeUnlockPostFallbackSchedulingBoundaryKind
+                    .AwaitingRetryAuthority,
+                initialScope,
+                null);
+        }
+
+        return exactReceipt is { } installedReceipt
+            ? new RuntimeUnlockPostFallbackSchedulingBoundary(
+                RuntimeUnlockPostFallbackSchedulingBoundaryKind
+                    .ExactInstalledRetry,
+                currentScope,
+                installedReceipt)
+            : new RuntimeUnlockPostFallbackSchedulingBoundary(
+                RuntimeUnlockPostFallbackSchedulingBoundaryKind
+                    .AwaitingRetryAuthority,
+                currentScope,
+                null);
+    }
+
+    private bool TryCaptureCurrentPostTunaFallbackRuntimeUnlockSchedulingScope(
+        string sessionId,
+        out RuntimeUnlockRetryNegotiationSourceScope sourceScope)
+    {
+        sourceScope = default;
+        FileTransferRoutePublicationAuthority? publication;
+        lock (gate)
+        {
+            publication = fileTransferRoutePublicationAuthorities.Values
+                .Where(authority =>
+                    string.Equals(
+                        authority.SessionId,
+                        sessionId.Trim(),
+                        StringComparison.Ordinal) &&
+                    authority.Direction == FileTransferDirection.Outbound &&
+                    string.Equals(
+                        authority.RouteToken,
+                        FileTransferRouteResolver.PostTunaFallbackV6Token,
+                        StringComparison.Ordinal) &&
+                    authority.ProtocolVersion ==
+                        FileTransferProtocol.ProtocolVersionV6)
+                .OrderByDescending(static authority =>
+                    authority.RoutePublicationGeneration)
+                .FirstOrDefault();
+        }
+
+        return publication is not null &&
+               TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+                   publication,
+                   out sourceScope);
+    }
+
+    private static void LogRuntimeUnlockPostFallbackSchedulingBoundary(
+        RuntimeUnlockPostFallbackSchedulingBoundary boundary,
+        string trigger,
+        string decisionReason)
+    {
+        var source = boundary.SourceScope;
+        var publication = source.SourcePublicationAuthority;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_post_fallback_negotiation_deferred; decision_status=Deferred; authority_mode=InitialActivation; authority_effect=none; trigger={SanitizeLogToken(trigger)}; decision_reason={SanitizeLogToken(decisionReason)}; session_id={SanitizeLogToken(publication?.SessionId ?? "none")}; transfer_id={SanitizeLogToken(publication?.TransferId ?? "none")}; direction={publication?.Direction.ToString().ToLowerInvariant() ?? "none"}; source_route={SanitizeLogToken(publication?.RouteToken ?? "none")}; source_protocol_version={publication?.ProtocolVersion ?? 0}; source_live_route_epoch={publication?.LiveRouteEpoch ?? 0}; source_runtime_generation={publication?.RuntimeGeneration ?? 0}; source_terminal_generation={publication?.TerminalGeneration ?? 0}; source_leg_generation={publication?.LegGeneration ?? 0}; source_publication_generation={publication?.RoutePublicationGeneration ?? 0}; source_transport_epoch={source.TransportEpoch}; source_bridge_recovery_generation={source.BridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(source.CheckpointRequestId ?? "(none)")}; data_session_identity={SanitizeLogToken(source.DataSessionIdentity ?? "none")}; data_session_generation={source.DataSessionGeneration}");
+    }
+
     private bool TryCaptureInboundPostFallbackPairedRetryOfferScope(
         string source,
         TransportAccelerationOfferPayload offer,
@@ -13278,29 +13407,74 @@ public sealed partial class NknSignalingTransport
                 AccelerationNegotiationSlotOwner
                     .InstalledRuntimeUnlockRetry;
         }
-        else if (!TryAcquireGenericAccelerationNegotiationSlot(
-                     out negotiationSlotGeneration))
+        else
         {
-            SchedulePendingRuntimeUnlockRetryNegotiationIntent(
-                "generic_negotiation_deferred_for_retry_intent");
-            if (runtimeUnlockActivation)
+            if (initialRuntimeUnlockActivation)
             {
-                MarkPendingRuntimeUnlockAccelerationNegotiation(
-                    reason,
-                    expectedInstallReceipt,
-                    requireRuntimeUnlockRetryDispatchInstall
-                        ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
-                        : RuntimeUnlockOfferAuthorityMode.InitialActivation);
-                if (requireRuntimeUnlockRetryDispatchInstall)
+                var schedulingBoundary =
+                    CaptureRuntimeUnlockPostFallbackSchedulingBoundary(
+                        currentSessionSecurityState.SessionId?.Value);
+                if (schedulingBoundary.Kind !=
+                    RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback)
                 {
-                    MarkRuntimeUnlockRecoveryContractQueuedBehindActiveNegotiation(reason);
+                    LogRuntimeUnlockPostFallbackSchedulingBoundary(
+                        schedulingBoundary,
+                        reason,
+                        schedulingBoundary.Kind ==
+                            RuntimeUnlockPostFallbackSchedulingBoundaryKind
+                                .ExactInstalledRetry
+                            ? "exact_installed_retry_already_owns_post_fallback_unlock"
+                            : "post_fallback_retry_authority_pending");
+                    return;
                 }
-                LocalOperationalLog.Info(
-                    "NKN.Tuna",
-                    $"event=tuna_acceleration_runtime_unlock_queued_behind_active_negotiation; reason={SanitizeLogToken(reason)}; authority_mode={SanitizeLogToken((requireRuntimeUnlockRetryDispatchInstall ? RuntimeUnlockOfferAuthorityMode.InstalledRetry : RuntimeUnlockOfferAuthorityMode.InitialActivation).ToString())}");
             }
 
-            return;
+            if (!TryAcquireGenericAccelerationNegotiationSlot(
+                    out negotiationSlotGeneration))
+            {
+                SchedulePendingRuntimeUnlockRetryNegotiationIntent(
+                    "generic_negotiation_deferred_for_retry_intent");
+                if (runtimeUnlockActivation)
+                {
+                    MarkPendingRuntimeUnlockAccelerationNegotiation(
+                        reason,
+                        expectedInstallReceipt,
+                        requireRuntimeUnlockRetryDispatchInstall
+                            ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
+                            : RuntimeUnlockOfferAuthorityMode.InitialActivation);
+                    if (requireRuntimeUnlockRetryDispatchInstall)
+                    {
+                        MarkRuntimeUnlockRecoveryContractQueuedBehindActiveNegotiation(reason);
+                    }
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_runtime_unlock_queued_behind_active_negotiation; reason={SanitizeLogToken(reason)}; authority_mode={SanitizeLogToken((requireRuntimeUnlockRetryDispatchInstall ? RuntimeUnlockOfferAuthorityMode.InstalledRetry : RuntimeUnlockOfferAuthorityMode.InitialActivation).ToString())}");
+                }
+
+                return;
+            }
+
+            if (initialRuntimeUnlockActivation)
+            {
+                var schedulingBoundary =
+                    CaptureRuntimeUnlockPostFallbackSchedulingBoundary(
+                        currentSessionSecurityState.SessionId?.Value);
+                if (schedulingBoundary.Kind !=
+                    RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback)
+                {
+                    lock (accelerationGate)
+                    {
+                        _ = TryReleaseAccelerationNegotiationSlotUnsafe(
+                            negotiationSlotGeneration,
+                            AccelerationNegotiationSlotOwner.Generic);
+                    }
+                    LogRuntimeUnlockPostFallbackSchedulingBoundary(
+                        schedulingBoundary,
+                        reason,
+                        "post_fallback_became_current_before_generic_effects");
+                    return;
+                }
+            }
         }
 
         var payerDecisionId = ResolvePayerDecisionIdForNegotiation(reason);
@@ -37694,6 +37868,9 @@ public sealed partial class NknSignalingTransport
     {
         var runtimeUnlockRequested = IsRuntimeUnlockNegotiationReason(reason);
         var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        var postFallbackSchedulingBoundary = runtimeUnlockRequested
+            ? CaptureRuntimeUnlockPostFallbackSchedulingBoundary(currentSessionId)
+            : RuntimeUnlockPostFallbackSchedulingBoundary.NoFallback;
         RuntimeUnlockRetryDispatchInstallReceipt? retryInstallReceipt = null;
         FileTransferRouteTransitionAuthority? routeTransitionAuthority = null;
         var requiresRuntimeUnlockRetryDispatchInstall = false;
@@ -37737,6 +37914,22 @@ public sealed partial class NknSignalingTransport
             ClearAccelerationUserStoppedForCurrentSession();
             ClearAccelerationPeerUserStoppedForCurrentSession();
             Interlocked.Exchange(ref accelerationEarlyDropRetryAttempts, 0);
+
+            if (runtimeUnlockRequested &&
+                postFallbackSchedulingBoundary.Kind !=
+                    RuntimeUnlockPostFallbackSchedulingBoundaryKind.NoFallback)
+            {
+                LogRuntimeUnlockPostFallbackSchedulingBoundary(
+                    postFallbackSchedulingBoundary,
+                    reason,
+                    postFallbackSchedulingBoundary.Kind ==
+                        RuntimeUnlockPostFallbackSchedulingBoundaryKind
+                            .ExactInstalledRetry
+                        ? "exact_installed_retry_coalesced"
+                        : "post_fallback_retry_authority_pending");
+                return Task.CompletedTask;
+            }
+
             SchedulePendingRuntimeUnlockRetryNegotiationIntent(
                 "runtime_unlock_session_eligible");
 

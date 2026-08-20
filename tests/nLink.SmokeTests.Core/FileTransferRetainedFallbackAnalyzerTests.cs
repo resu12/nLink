@@ -2739,6 +2739,54 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackPairedYieldRetryBlockedByGenericActivation_CorrelatesAndRecovers(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFallbackPairedYieldRetryBlockedByGenericActivationFixture(recovered),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+        if (!recovered && !compact)
+        {
+            Assert.Equal("paired_fallback_tail_yield_missing", verdict["recovery_failure_class"]);
+            Assert.Equal(
+                "paired_yield_retry_intent_blocked_by_preexisting_initial_activation",
+                verdict["failure_variant"]);
+            Assert.Equal(
+                "runtime_unlock_retry_negotiation_slot_decided",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "fallback_paired_tail_yield_retry_intent_blocked_by_preexisting_initial_activation",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, "retry_contract")]
     [InlineData(true, "retry_contract")]
     [InlineData(false, "outbound_terminal")]
@@ -5546,6 +5594,171 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
                 "log_writer_id=writer_a; log_writer_sequence=23",
                 secondsOffset: 22)
         ]);
+        return lines.ToArray();
+    }
+
+    private static string[] BuildFallbackPairedYieldRetryBlockedByGenericActivationFixture(
+        bool recovered)
+    {
+        const string sessionId = "sess_retry_blocked_by_generic";
+        const string transferId = "transfer_retry_blocked_by_generic";
+        const string yieldAuthority = "fta2-fallback_tail_yield-111111111111111111111111";
+        const string retryAuthority = "fta2-runtime_unlock-retry-222222222222222222222222";
+        const string writer = "writer_a";
+        var scope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "route_publication_generation=5; route_commit_generation=0; transport_epoch=2; " +
+            "bridge_recovery_generation=1; checkpoint_generation=0; checkpoint_request_id=(none); " +
+            "data_session_identity=data-session-1; data_session_generation=1";
+        var source =
+            "source_route=post_tuna_fallback_v6; source_protocol_version=6; " +
+            "source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; " +
+            "source_leg_generation=3; source_route_publication_generation=5; " +
+            "source_route_commit_generation=(none); source_route_commit_generation_present=0; " +
+            "source_target_route=post_tuna_fallback_v6; source_target_protocol_version=6; " +
+            "source_target_transport=regular_nkn; source_route_publication_action_kind=RoutePublication; " +
+            "source_coordinator_decision_reason=fallback_paired_tail_yield";
+        var lines = new List<string>
+        {
+            LogLine(
+                $"event=filetransfer_route_selected; {scope}; target_route=post_tuna_fallback_v6; " +
+                "target_protocol_version=6; target_transport=regular_nkn; " +
+                "route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted; " +
+                $"log_writer_id={writer}; log_writer_sequence=1",
+                secondsOffset: 1),
+            LogLine(
+                $"event=filetransfer_fallback_tail_local_proof_receipt_decided; {scope}; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; yield_kind=Quiescent; " +
+                $"decision_status=Applied; log_writer_id={writer}; log_writer_sequence=2",
+                secondsOffset: 2),
+            LogLine(
+                $"event=filetransfer_fallback_tail_peer_proof_receipt_decided; {scope}; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; yield_kind=Quiescent; " +
+                $"decision_status=Applied; log_writer_id={writer}; log_writer_sequence=3",
+                secondsOffset: 3),
+            LogLine(
+                $"event=tuna_payer_decision_started; payer_decision_id=6; reason=runtime_unlock; " +
+                $"log_writer_id={writer}; log_writer_sequence=4",
+                secondsOffset: 4),
+            LogLine(
+                $"event=runtime_unlock_filetransfer_owner_accepted_before_path_lease; {scope}; " +
+                "trigger=runtime_unlock; decision_reason=current_coordinator_route_publication_authority; " +
+                $"log_writer_id={writer}; log_writer_sequence=5",
+                secondsOffset: 5),
+            LogLine(
+                "event=tuna_acceleration_payer_intent_queued; intent=will_listen; role=helpee; " +
+                "trigger=runtime_unlock; lanes=file; payer_decision_id=6; " +
+                $"log_writer_id={writer}; log_writer_sequence=6",
+                secondsOffset: 6),
+            LogLine(
+                $"event=tuna_path_lease_started; session_id={sessionId}; transfer_id={transferId}; " +
+                "transaction_generation=0; offer_generation=0; lease_generation=2; " +
+                "listener_run_id=listener-start-2; payer_decision_id=6; state=listenerstarting; " +
+                $"reason=runtime_unlock; log_writer_id={writer}; log_writer_sequence=7",
+                secondsOffset: 7),
+            LogLine(
+                $"event=filetransfer_fallback_tail_pairing_committed; {scope}; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; yield_kind=Quiescent; " +
+                "decision_status=Accepted; release_kind=FallbackPairedTailYield; release_outcome=Quiescent; " +
+                $"log_writer_id={writer}; log_writer_sequence=8",
+                secondsOffset: 8),
+            LogLine(
+                $"event=filetransfer_fallback_tail_paired_yield_granted; {scope}; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; reason=fallback_tail_paired_yield; " +
+                $"log_writer_id={writer}; log_writer_sequence=9",
+                secondsOffset: 9),
+            LogLine(
+                $"event=runtime_unlock_retry_dispatch_authority_request_queued; session_id={sessionId}; " +
+                $"transfer_id={transferId}; direction=outbound; contract_generation=1; retired_generation=1; " +
+                "dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; " +
+                "predecessor_authority_id=(none); request_active_predecessor_supersession=0; " +
+                "retry_reason=fallback_paired_tail_yield; recovery_reason=fallback_tail_pairing_committed; " +
+                $"{source}; queue_generation=1; delay_ms=1000; decision_reason=coordinator_request_queued; " +
+                $"log_writer_id={writer}; log_writer_sequence=10",
+                secondsOffset: 10),
+            LogLine(
+                $"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; " +
+                $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; yield_kind=Quiescent; " +
+                "source_route=post_tuna_fallback_v6; source_protocol_version=6; " +
+                "source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; " +
+                "source_leg_generation=3; source_route_publication_generation=5; " +
+                "source_route_commit_generation=0; recovery_contract_generation=1; " +
+                "retired_offer_generation=1; dispatch_attempt_generation=1; " +
+                "missing_dispatch_successor_generation=0; predecessor_authority_id=(none); " +
+                "request_active_predecessor_supersession=0; decision_status=Queued; " +
+                $"decision_reason=fallback_paired_tail_yield_request_queued; log_writer_id={writer}; " +
+                "log_writer_sequence=11",
+                secondsOffset: 11),
+            LogLine(
+                $"event=runtime_unlock_retry_negotiation_slot_decided; session_id={sessionId}; " +
+                $"transfer_id={transferId}; decision_status=Deferred; " +
+                "intent_kind=CoordinatorPreparedRequest; intent_generation=1; slot_generation=0; " +
+                "contract_generation=1; retired_generation=1; source_route=post_tuna_fallback_v6; " +
+                "source_publication_generation=5; source_transport_epoch=2; " +
+                "source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); " +
+                "data_session_identity=data-session-1; data_session_generation=1; authority_effect=none; " +
+                "decision_reason=retry_dispatch_negotiation_slot_busy; " +
+                $"log_writer_id={writer}; log_writer_sequence=12",
+                secondsOffset: 12)
+        };
+
+        if (recovered)
+        {
+            lines.Add(LogLine(
+                $"event=runtime_unlock_retry_negotiation_slot_decided; session_id={sessionId}; " +
+                $"transfer_id={transferId}; decision_status=Reserved; " +
+                "intent_kind=CoordinatorPreparedRequest; intent_generation=1; slot_generation=7; " +
+                "contract_generation=1; retired_generation=1; source_route=post_tuna_fallback_v6; " +
+                "source_publication_generation=5; source_transport_epoch=2; " +
+                "source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); " +
+                "data_session_identity=data-session-1; data_session_generation=1; authority_effect=none; " +
+                $"decision_reason=retry_dispatch_slot_reserved; log_writer_id={writer}; log_writer_sequence=13",
+                secondsOffset: 13));
+            lines.Add(LogLine(
+                $"event=filetransfer_fallback_tail_paired_release_reserved; {scope}; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; retry_authority_id={retryAuthority}; " +
+                "reservation_generation=1; decision_status=Accepted; " +
+                $"log_writer_id={writer}; log_writer_sequence=14",
+                secondsOffset: 14));
+            foreach (var installLine in BuildFallbackTailCoordinatorPhase2InstallLines(
+                         sessionId,
+                         transferId,
+                         yieldAuthority,
+                         retryAuthority,
+                         secondsOffsetBase: 15))
+            {
+                lines.Add(installLine + $"; log_writer_id={writer}");
+            }
+            lines.Add(LogLine(
+                $"event=filetransfer_fallback_tail_paired_release_consumed; {scope}; " +
+                $"authority_id={yieldAuthority}; yield_generation=1; retry_authority_id={retryAuthority}; " +
+                "reservation_generation=1; install_generation=7; decision_status=Accepted; " +
+                $"log_writer_id={writer}; log_writer_sequence=19",
+                secondsOffset: 19));
+            lines.Add(LogLine(
+                $"event=runtime_unlock_retry_dispatch_settlement_decided; session_id={sessionId}; " +
+                $"transfer_id={transferId}; authority_id={retryAuthority}; install_generation=7; " +
+                "settlement_outcome=DispatchObserved; decision_status=Accepted; " +
+                $"log_writer_id={writer}; log_writer_sequence=20",
+                secondsOffset: 20));
+            lines.Add(LogLine(
+                $"event=filetransfer_route_transition_prepared; session_id={sessionId}; transfer_id={transferId}; " +
+                "direction=outbound; transition_kind=PostTunaFallbackV6ToTunaV4; " +
+                "source_route=post_tuna_fallback_v6; target_route=file_tuna_v4; " +
+                $"fallback_yield_authority_id={yieldAuthority}; fallback_yield_generation=1; " +
+                "retry_install_generation=7; decision_status=Prepared; " +
+                $"log_writer_id={writer}; log_writer_sequence=21",
+                secondsOffset: 21));
+        }
+
+        lines.Add(LogLine(
+            $"event=file_transfer_outbound_terminal; session_id={sessionId}; transfer_id={transferId}; " +
+            $"state={(recovered ? "Completed" : "Failed")}; error_code={(recovered ? "(none)" : "route_cycle_missing")}; " +
+            $"log_writer_id={writer}; log_writer_sequence=22",
+            secondsOffset: 22));
         return lines.ToArray();
     }
 
