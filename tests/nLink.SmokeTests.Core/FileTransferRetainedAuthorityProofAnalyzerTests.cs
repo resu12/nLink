@@ -1240,6 +1240,69 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_FileTunaV4AdjacentLateRegularRejections_CloseIndependently(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_adjacent_regular_rejected";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4RejectedReceiveFixture(
+                transferId,
+                adjacentRejectedReceiveCopies: 2),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["file_tuna_v4_data_path_mismatch_count"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_FileTunaV4AdjacentLateRegularRejection_DoesNotBorrowNextIgnore(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_adjacent_regular_missing_ignore";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4RejectedReceiveFixture(
+                transferId,
+                adjacentRejectedReceiveCopies: 2,
+                omitFirstAdjacentIgnore: true),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
+        Assert.Equal("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
     public async Task AnalyzeRetained_SecondTunaCycleLateRegularDuplicateRejectedFailClosed_DoesNotFail(
         bool compact)
     {
@@ -3037,24 +3100,78 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
     [Trait("RetainedAuthorityProofSuite", "SettlementDisposition")]
     public async Task AnalyzeRetained_RegularV4FrontierRepairSettlementAtomicTransition_HasFullCompactParity(
-        bool compact)
+        bool compact,
+        bool regularToTuna,
+        bool publicationMissing)
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        const string transferId = "transfer_atomic_transition_settlement";
+        var transferId = regularToTuna
+            ? "transfer_regular_to_tuna_atomic_transition_settlement"
+            : "transfer_tuna_to_fallback_atomic_transition_settlement";
+        var sourceRoute = regularToTuna ? "regular_nkn_v4_fast" : "file_tuna_v4";
+        const int sourceProtocol = 4;
+        var sourceTransport = regularToTuna ? "regular_nkn" : "tuna";
+        var transitionKind = regularToTuna ? "RegularV4ToTunaV4" : "TunaV4ToPostTunaFallbackV6";
+        var targetRoute = regularToTuna ? "file_tuna_v4" : "post_tuna_fallback_v6";
+        var targetProtocol = regularToTuna ? 4 : 6;
+        var targetTransport = regularToTuna ? "tuna" : "regular_nkn";
+        var sourceEpoch = regularToTuna ? 0 : 1;
+        var sourceRuntime = regularToTuna ? 1 : 2;
+        var sourceLeg = regularToTuna ? 1 : 2;
+        var sourcePublication = regularToTuna ? 1 : 2;
+        var sourceCommit = regularToTuna ? 0 : 1;
+        var targetEpoch = sourceEpoch + 1;
+        var targetRuntime = sourceRuntime + 1;
+        var targetLeg = sourceLeg + 1;
+        var targetPublication = sourcePublication + 1;
+        var targetCommit = sourceCommit + 1;
+        var scope =
+            $"session_id=sess_a; transfer_id={transferId}; direction=outbound; " +
+            $"route={sourceRoute}; protocol_version={sourceProtocol}; live_route_epoch={sourceEpoch}; " +
+            $"runtime_generation={sourceRuntime}; terminal_generation=0; leg_generation={sourceLeg}; " +
+            "transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; " +
+            $"route_publication_generation={sourcePublication}; route_commit_generation={sourceCommit}; " +
+            $"target_transport={sourceTransport}";
+        var transitionScope =
+            $"session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=transition-authority; " +
+            $"transition_generation=2; transition_kind={transitionKind}; source_route={sourceRoute}; " +
+            $"source_protocol_version={sourceProtocol}; source_transport={sourceTransport}; " +
+            $"source_live_route_epoch={sourceEpoch}; source_runtime_generation={sourceRuntime}; " +
+            $"source_terminal_generation=0; source_leg_generation={sourceLeg}; source_transport_epoch=0; " +
+            $"source_bridge_recovery_generation=0; source_route_publication_generation={sourcePublication}; " +
+            $"source_route_commit_generation={sourceCommit}; source_data_session_generation=1; " +
+            $"target_route={targetRoute}; target_protocol_version={targetProtocol}; target_transport={targetTransport}";
         var messages = new[]
         {
-            $"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; session_id=sess_a; transfer_id={transferId}; direction=outbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=2; route_commit_generation=1; target_transport=tuna; repair_request_key=4017:12:4017:12; frontier_chunk_index=4017; requested_chunk_count=12; decision_generation=2; authority_id=repair-authority; successor_authority_id=(none); successor_install_generation=2; outcome=StaleRejected; settlement_reason=filetransfer_route_transition_pressure_handoff; log_writer_id=writer_out; log_writer_sequence=101",
-            $"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=2; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id=writer_out; log_writer_sequence=102",
-            $"event=filetransfer_route_transition_committed; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=transition-authority; transition_generation=2; transition_kind=TunaV4ToPostTunaFallbackV6; source_route=file_tuna_v4; source_protocol_version=4; target_route=post_tuna_fallback_v6; target_protocol_version=6; decision_status=Committed; log_writer_id=writer_out; log_writer_sequence=103"
+            $"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; {scope}; repair_request_key=4017:12:4017:12; frontier_chunk_index=4017; requested_chunk_count=12; decision_generation=2; authority_id=repair-authority; install_generation=2; log_writer_id=writer_out; log_writer_sequence=100",
+            $"event=filetransfer_route_transition_prepared; {transitionScope}; decision_status=Prepared; log_writer_id=writer_out; log_writer_sequence=101",
+            $"event=filetransfer_route_transition_pause_bound; {transitionScope}; decision_status=Installed; log_writer_id=writer_out; log_writer_sequence=102",
+            $"event=filetransfer_route_transition_draining; {transitionScope}; decision_status=Draining; log_writer_id=writer_out; log_writer_sequence=103",
+            $"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; {scope}; repair_request_key=4017:12:4017:12; frontier_chunk_index=4017; requested_chunk_count=12; decision_generation=2; authority_id=repair-authority; successor_authority_id=(none); successor_install_generation=2; outcome=StaleRejected; settlement_reason=filetransfer_route_transition_pressure_handoff; log_writer_id=writer_out; log_writer_sequence=104",
+            $"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=2; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id=writer_out; log_writer_sequence=105",
+            $"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=sess_a; transfer_id={transferId}; direction=outbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=2; settlement_outcome=StaleRejected; apply_status=Idempotent; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id=writer_out; log_writer_sequence=106",
+            $"event=filetransfer_route_transition_drain_receipt_decided; {transitionScope}; decision_status=Accepted; decision_reason=filetransfer_route_transition_committed; log_writer_id=writer_out; log_writer_sequence=107",
+            $"event=filetransfer_route_transition_committed; {transitionScope}; target_live_route_epoch={targetEpoch}; target_runtime_generation={targetRuntime}; target_terminal_generation=0; target_leg_generation={targetLeg}; target_route_commit_generation={targetCommit}; target_route_publication_generation={targetPublication}; decision_status=Committed; log_writer_id=writer_out; log_writer_sequence=108",
+            $"event=filetransfer_route_transition_disposition_applied; {transitionScope}; resulting_live_route_epoch={targetEpoch}; resulting_runtime_generation={targetRuntime}; resulting_terminal_generation=0; resulting_leg_generation={targetLeg}; resulting_route_commit_generation={targetCommit}; resulting_route_publication_generation={targetPublication}; decision_status=Applied; decision_reason=filetransfer_route_transition_committed; log_writer_id=writer_out; log_writer_sequence=109",
+            $"event=filetransfer_route_selected; session_id=sess_a; transfer_id={transferId}; direction=outbound; route={targetRoute}; protocol_version={targetProtocol}; live_route_epoch={targetEpoch}; runtime_generation={targetRuntime}; terminal_generation=0; leg_generation={targetLeg}; route_commit_generation={targetCommit}; route_publication_generation={targetPublication}; target_route={targetRoute}; target_protocol_version={targetProtocol}; target_transport={targetTransport}; log_writer_id=writer_out; log_writer_sequence=110"
         };
+
+        if (publicationMissing)
+        {
+            messages = messages[..^1];
+        }
 
         var result = await RunAnalyzeFixtureAsync(
             BuildFileTunaV4DataPathProofFixture(transferId, messages),
@@ -3069,8 +3186,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("1", verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count"]);
         Assert.Equal("1", verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count"]);
-        Assert.Equal("1", verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count"]);
-        Assert.Equal("0", verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count"]);
+        Assert.Equal(publicationMissing ? "0" : "1", verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count"]);
+        Assert.Equal(publicationMissing ? "1" : "0", verdict["regular_v4_frontier_repair_settlement_disposition_unverifiable_unresolved_count"]);
     }
 
     [Fact]
@@ -4704,7 +4821,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         string transferId,
         string? omittedCompanionEvidence = null,
         bool includeOutboundTransition = true,
-        bool secondTunaCycle = false)
+        bool secondTunaCycle = false,
+        int adjacentRejectedReceiveCopies = 1,
+        bool omitFirstAdjacentIgnore = false)
     {
         const string sourceWriterId = "writer_source_regular";
         const string writerId = "writer_receive_regular_rejected";
@@ -4735,6 +4854,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                 eventName: "filetransfer_data_path_receive_result",
                 proofDirection: "receive",
                 startChunkIndex: 0)
+            .Replace("; proof_direction=receive", string.Empty, StringComparison.Ordinal)
             + $"; log_writer_id={writerId}; log_writer_sequence=10";
         var mismatch = FileTunaV4DataPathActualMessage(
                 transferId,
@@ -4793,20 +4913,45 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         {
             messages.Add(outboundTransition);
         }
-        messages.AddRange(
-        [
-            inboundTransition,
-            FileTunaV4DataPathIntentMessage(transferId),
-            receive,
-            mismatch,
-            ignored,
+        messages.Add(inboundTransition);
+        messages.Add(FileTunaV4DataPathIntentMessage(transferId));
+        if (adjacentRejectedReceiveCopies <= 1)
+        {
+            messages.Add(receive);
+            messages.Add(mismatch);
+            messages.Add(ignored);
+        }
+        else
+        {
+            for (var copy = 0; copy < adjacentRejectedReceiveCopies; copy++)
+            {
+                var receiveSequence = 10 + (copy * 5);
+                var mismatchSequence = receiveSequence + 1;
+                var ignoredSequence = receiveSequence + 2;
+                messages.Add(receive.Replace(
+                    "log_writer_sequence=10",
+                    $"log_writer_sequence={receiveSequence}",
+                    StringComparison.Ordinal));
+                messages.Add(mismatch.Replace(
+                    "log_writer_sequence=14",
+                    $"log_writer_sequence={mismatchSequence}",
+                    StringComparison.Ordinal));
+                if (copy != 0 || !omitFirstAdjacentIgnore)
+                {
+                    messages.Add(ignored.Replace(
+                        "log_writer_sequence=21",
+                        $"log_writer_sequence={ignoredSequence}",
+                        StringComparison.Ordinal));
+                }
+            }
+        }
+        messages.Add(
             FileTunaV4DataPathActualMessage(
                 transferId,
                 actualTransport: "tuna",
                 eventName: "filetransfer_tuna_data_path_peer_visible",
                 proofDirection: "send",
-                startChunkIndex: 0)
-        ]);
+                startChunkIndex: 0));
         var lines = BuildFileTunaV4DataPathProofFixture(transferId, messages.ToArray());
         var sourceLineIndex = lines.FindIndex(line => line.Contains(sourceSend, StringComparison.Ordinal));
         Assert.True(sourceLineIndex >= 0);

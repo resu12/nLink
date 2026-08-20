@@ -288,6 +288,57 @@ function Request-TunaGuiScenarioDeadline {
     Write-TunaGuiAtomicJson -Path $RequestPath -Value $request
 }
 
+function Get-TunaGuiTerminalPhaseDeadlineRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$StartedUtc,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$OriginalScenarioDeadlineUtc,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $request = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $requestedUtc = [DateTimeOffset]::MinValue
+        $deadlineUtc = [DateTimeOffset]::MinValue
+        $expectedTimeoutMilliseconds = [long]$TimeoutSeconds * 1000L
+        if ($null -eq $request -or
+            -not [string]::Equals([string]$request.event, 'filetransfer_gui_terminal_phase_deadline_requested', [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$request.acceptanceRunId, [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$request.scenarioRunId, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$request.routeMode, 'live-regular-activation-cycle', [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$request.phase, 'terminal_integrity', [System.StringComparison]::Ordinal) -or
+            [long]$request.phaseGeneration -ne 1L -or
+            [long]$request.liveRouteEpoch -lt 4L -or
+            [long]$request.actionBookmark -lt 0L -or
+            [long]$request.proofEndBookmark -lt [long]$request.actionBookmark -or
+            [long]$request.timeoutMilliseconds -ne $expectedTimeoutMilliseconds -or
+            -not [DateTimeOffset]::TryParse([string]$request.requestedUtc, [ref]$requestedUtc) -or
+            -not [DateTimeOffset]::TryParse([string]$request.deadlineUtc, [ref]$deadlineUtc)) {
+            return $null
+        }
+
+        $maximumDeadlineUtc = $StartedUtc.AddSeconds(2L * [long]$TimeoutSeconds)
+        $requestedDurationMilliseconds = ($deadlineUtc - $requestedUtc).TotalMilliseconds
+        if ($deadlineUtc -le $OriginalScenarioDeadlineUtc -or
+            $deadlineUtc -gt $maximumDeadlineUtc -or
+            [Math]::Abs($requestedDurationMilliseconds - $expectedTimeoutMilliseconds) -gt 2000D) {
+            return $null
+        }
+
+        return [pscustomobject]@{
+            Request = $request
+            DeadlineUtc = $deadlineUtc
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
 function Invoke-TunaGuiSmokeWithHardDeadline {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -298,12 +349,15 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
 
     $finalizationGraceSeconds = Get-TunaGuiFinalizationGraceSeconds
     $hardDeadlineSeconds = [long]$TimeoutSeconds + [long]$finalizationGraceSeconds
+    $maximumHardDeadlineSeconds = (2L * [long]$TimeoutSeconds) + [long]$finalizationGraceSeconds
     $startedUtc = [DateTimeOffset]::UtcNow
-    $scenarioDeadlineUtc = $startedUtc.AddSeconds($TimeoutSeconds)
-    $deadlineUtc = $startedUtc.AddSeconds($hardDeadlineSeconds)
+    $originalScenarioDeadlineUtc = $startedUtc.AddSeconds($TimeoutSeconds)
+    $scenarioDeadlineUtc = $originalScenarioDeadlineUtc
+    $deadlineUtc = $scenarioDeadlineUtc.AddSeconds($finalizationGraceSeconds)
     $statePath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-state.json'
     $timeoutPath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
     $scenarioDeadlineRequestPath = Join-Path $ArtifactDir 'filetransfer-gui-scenario-deadline-request.json'
+    $terminalPhaseDeadlinePath = Join-Path $ArtifactDir 'filetransfer-gui-terminal-phase-deadline.json'
     $stdoutPath = Join-Path $ArtifactDir 'gui-smoke-stdout.log'
     $stderrPath = Join-Path $ArtifactDir 'gui-smoke-stderr.log'
     $arguments = @(
@@ -316,10 +370,16 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
 
     $oldStatePath = $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH
     $oldScenarioDeadlineRequestPath = $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH
+    $oldTerminalPhaseDeadlinePath = $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH
     $process = $null
     try {
+        Remove-Item -LiteralPath $terminalPhaseDeadlinePath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $terminalPhaseDeadlinePath -PathType Leaf) {
+            throw "Unable to clear stale terminal-phase deadline request: $terminalPhaseDeadlinePath"
+        }
         $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = $statePath
         $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = $scenarioDeadlineRequestPath
+        $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH = $terminalPhaseDeadlinePath
         $state = [ordered]@{
             schemaVersion = 1
             event = 'filetransfer_gui_evidence_finalization_state'
@@ -330,12 +390,16 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             scenarioTimeoutSeconds = $TimeoutSeconds
             finalizationGraceSeconds = $finalizationGraceSeconds
             hardDeadlineSeconds = $hardDeadlineSeconds
+            maximumHardDeadlineSeconds = $maximumHardDeadlineSeconds
             startedUtc = $startedUtc.ToString('O')
             scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
             deadlineUtc = $deadlineUtc.ToString('O')
             scenarioDeadlineRequested = $false
             scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
             scenarioDeadlineRequestedUtc = ''
+            terminalPhaseDeadlinePath = $terminalPhaseDeadlinePath
+            terminalPhaseDeadlineAdopted = $false
+            terminalPhaseDeadlineUtc = ''
             lastCompletedStage = 'gui_child_starting'
             timedOut = $false
             exitCode = $null
@@ -361,6 +425,8 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         $timedOut = $false
         $scenarioDeadlineRequested = $false
         $scenarioDeadlineRequestedUtc = ''
+        $terminalPhaseDeadlineAdopted = $false
+        $terminalPhaseDeadlineUtc = ''
         while ($true) {
             $process.Refresh()
             if ($process.HasExited) {
@@ -368,6 +434,21 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             }
 
             $nowUtc = [DateTimeOffset]::UtcNow
+            if (-not $terminalPhaseDeadlineAdopted) {
+                $terminalPhaseDeadline = Get-TunaGuiTerminalPhaseDeadlineRequest `
+                    -Path $terminalPhaseDeadlinePath `
+                    -StartedUtc $startedUtc `
+                    -OriginalScenarioDeadlineUtc $originalScenarioDeadlineUtc `
+                    -TimeoutSeconds $TimeoutSeconds
+                if ($null -ne $terminalPhaseDeadline) {
+                    $scenarioDeadlineUtc = [DateTimeOffset]$terminalPhaseDeadline.DeadlineUtc
+                    $deadlineUtc = $scenarioDeadlineUtc.AddSeconds($finalizationGraceSeconds)
+                    $hardDeadlineSeconds = [long][Math]::Ceiling(
+                        ($deadlineUtc - $startedUtc).TotalSeconds)
+                    $terminalPhaseDeadlineAdopted = $true
+                    $terminalPhaseDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
+                }
+            }
             if (-not $scenarioDeadlineRequested -and $nowUtc -ge $scenarioDeadlineUtc) {
                 $process.Refresh()
                 if ($process.HasExited) {
@@ -448,11 +529,15 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 scenarioTimeoutSeconds = $TimeoutSeconds
                 finalizationGraceSeconds = $finalizationGraceSeconds
                 hardDeadlineSeconds = $hardDeadlineSeconds
+                maximumHardDeadlineSeconds = $maximumHardDeadlineSeconds
                 startedUtc = $startedUtc.ToString('O')
                 scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
                 scenarioDeadlineRequested = $scenarioDeadlineRequested
                 scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
                 scenarioDeadlineRequestedUtc = $scenarioDeadlineRequestedUtc
+                terminalPhaseDeadlinePath = $terminalPhaseDeadlinePath
+                terminalPhaseDeadlineAdopted = $terminalPhaseDeadlineAdopted
+                terminalPhaseDeadlineUtc = $terminalPhaseDeadlineUtc
                 deadlineUtc = $deadlineUtc.ToString('O')
                 endedUtc = $endedUtc.ToString('O')
                 elapsedMilliseconds = [long][Math]::Max(0, ($endedUtc - $startedUtc).TotalMilliseconds)
@@ -476,11 +561,15 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 scenarioTimeoutSeconds = $TimeoutSeconds
                 finalizationGraceSeconds = $finalizationGraceSeconds
                 hardDeadlineSeconds = $hardDeadlineSeconds
+                maximumHardDeadlineSeconds = $maximumHardDeadlineSeconds
                 startedUtc = $startedUtc.ToString('O')
                 scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
                 scenarioDeadlineRequested = $scenarioDeadlineRequested
                 scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
                 scenarioDeadlineRequestedUtc = $scenarioDeadlineRequestedUtc
+                terminalPhaseDeadlinePath = $terminalPhaseDeadlinePath
+                terminalPhaseDeadlineAdopted = $terminalPhaseDeadlineAdopted
+                terminalPhaseDeadlineUtc = $terminalPhaseDeadlineUtc
                 deadlineUtc = $deadlineUtc.ToString('O')
                 endedUtc = $endedUtc.ToString('O')
                 lastCompletedStage = $lastCompletedStage
@@ -549,11 +638,15 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             scenarioTimeoutSeconds = $TimeoutSeconds
             finalizationGraceSeconds = $finalizationGraceSeconds
             hardDeadlineSeconds = $hardDeadlineSeconds
+            maximumHardDeadlineSeconds = $maximumHardDeadlineSeconds
             startedUtc = $startedUtc.ToString('O')
             scenarioDeadlineUtc = $scenarioDeadlineUtc.ToString('O')
             scenarioDeadlineRequested = $scenarioDeadlineRequested
             scenarioDeadlineRequestPath = $scenarioDeadlineRequestPath
             scenarioDeadlineRequestedUtc = $scenarioDeadlineRequestedUtc
+            terminalPhaseDeadlinePath = $terminalPhaseDeadlinePath
+            terminalPhaseDeadlineAdopted = $terminalPhaseDeadlineAdopted
+            terminalPhaseDeadlineUtc = $terminalPhaseDeadlineUtc
             deadlineUtc = $deadlineUtc.ToString('O')
             endedUtc = $endedUtc.ToString('O')
             lastCompletedStage = 'gui_child_exited'
@@ -585,6 +678,12 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         }
         else {
             $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = $oldScenarioDeadlineRequestPath
+        }
+        if ($null -eq $oldTerminalPhaseDeadlinePath) {
+            Remove-Item Env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH = $oldTerminalPhaseDeadlinePath
         }
 
         if ($process -is [System.IDisposable]) {

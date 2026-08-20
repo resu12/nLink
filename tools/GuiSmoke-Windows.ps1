@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
 $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
 $script:GuiSmokeScenarioDeadlineName = ''
+$script:GuiSmokeTerminalPhaseGeneration = 0L
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -78,6 +79,60 @@ function Get-GuiSmokeScenarioRemainingTimeoutMs {
     }
 
     return [int][Math]::Min([int]::MaxValue, [Math]::Max(1, $remainingMs))
+}
+
+function Start-GuiSmokeTerminalPhaseDeadline {
+    param(
+        [Parameter(Mandatory = $true)][string]$RouteMode,
+        [Parameter(Mandatory = $true)][int]$TimeoutMs,
+        [Parameter(Mandatory = $true)]$Projection,
+        [Parameter(Mandatory = $true)][int]$ActionBookmark
+    )
+
+    if (-not [string]::Equals(
+            $RouteMode,
+            'live-regular-activation-cycle',
+            [System.StringComparison]::OrdinalIgnoreCase) -or
+        $TimeoutMs -le 0 -or
+        $null -eq $Projection -or
+        [int]$Projection.LiveRouteEpoch -lt 4 -or
+        [int]$Projection.EndBookmark -lt $ActionBookmark) {
+        return $null
+    }
+    if ($script:GuiSmokeTerminalPhaseGeneration -ne 0L) {
+        return $null
+    }
+
+    $requestedUtc = [DateTimeOffset]::UtcNow
+    $deadlineUtc = $requestedUtc.AddMilliseconds($TimeoutMs)
+    if ($script:GuiSmokeScenarioDeadlineUtc -eq [DateTimeOffset]::MaxValue -or
+        $deadlineUtc -le $script:GuiSmokeScenarioDeadlineUtc) {
+        return $null
+    }
+
+    $script:GuiSmokeTerminalPhaseGeneration = 1L
+    $script:GuiSmokeScenarioDeadlineUtc = $deadlineUtc
+    $request = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_gui_terminal_phase_deadline_requested'
+        acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+        scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+        routeMode = $RouteMode
+        phase = 'terminal_integrity'
+        phaseGeneration = 1
+        actionBookmark = $ActionBookmark
+        proofEndBookmark = [int]$Projection.EndBookmark
+        liveRouteEpoch = [int]$Projection.LiveRouteEpoch
+        timeoutMilliseconds = $TimeoutMs
+        requestedUtc = $requestedUtc.ToString('O')
+        deadlineUtc = $deadlineUtc.ToString('O')
+        authorityEffect = 'none'
+    }
+    $requestPath = [string]$env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH
+    if (-not [string]::IsNullOrWhiteSpace($requestPath)) {
+        Write-GuiSmokeAtomicJson -Path $requestPath -Value $request
+    }
+    return [pscustomobject]$request
 }
 
 function Wait-Until {
@@ -21861,6 +21916,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'filetransfer_regular_v4_frontier_repair_pressure_binding_committed',
                     'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided',
                     'filetransfer_regular_v4_frontier_repair_pressure_binding_retired',
+                    'filetransfer_route_transition_prepared',
+                    'filetransfer_route_transition_pause_bound',
+                    'filetransfer_route_transition_draining',
+                    'filetransfer_route_transition_drain_receipt_decided',
+                    'filetransfer_route_transition_committed',
+                    'filetransfer_route_transition_disposition_applied',
+                    'filetransfer_route_selected',
+                    'filetransfer_live_route_epoch_recovered',
+                    'filetransfer_manifest_replaced',
+                    'filetransfer_session_replaced',
+                    'filetransfer_data_session_recreated',
+                    'filetransfer_runtime_terminalized',
+                    'transfer_terminal',
+                    'file_transfer_inbound_terminal',
+                    'file_transfer_outbound_terminal',
                     'filetransfer_regular_v4_frontier_repair_contract_settled',
                     'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared',
                     'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed',
@@ -22075,6 +22145,263 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [string]::Equals($Actual, $Expected, [System.StringComparison]::OrdinalIgnoreCase)
         }
 
+        function Test-TunaGuiRegularV4AtomicRouteTransitionSettlementClosed {
+            param([Parameter(Mandatory = $true)]$Accepted)
+
+            if ((Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'outcome').
+                    Replace('_', '').ToLowerInvariant() -ne 'stalerejected' -or
+                (Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'settlement_reason') -ne
+                    'filetransfer_route_transition_pressure_handoff') {
+                return $false
+            }
+
+            $authority = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'authority_id'
+            $installGeneration = Get-TunaGuiLogLineFieldValue `
+                -Line $Accepted.Line `
+                -Name 'successor_install_generation'
+            $repairKey = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'repair_request_key'
+            $writer = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'log_writer_id'
+            $acceptedRoute = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'route'
+            $acceptedProtocol = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'protocol_version'
+            $acceptedTransport = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name 'target_transport'
+            if ([string]::IsNullOrWhiteSpace($authority) -or
+                $authority -in @('[redacted]', 'redacted') -or
+                [string]::IsNullOrWhiteSpace($installGeneration) -or
+                [string]::IsNullOrWhiteSpace($repairKey) -or
+                [string]::IsNullOrWhiteSpace($writer)) {
+                return $false
+            }
+
+            $transitionKind = ''
+            $targetRoute = ''
+            $targetProtocol = ''
+            $targetTransport = ''
+            if ($acceptedRoute -eq 'regular_nkn_v4_fast' -and
+                $acceptedProtocol -eq '4' -and
+                $acceptedTransport -eq 'regular_nkn') {
+                $transitionKind = 'RegularV4ToTunaV4'
+                $targetRoute = 'file_tuna_v4'
+                $targetProtocol = '4'
+                $targetTransport = 'tuna'
+            }
+            elseif ($acceptedRoute -eq 'file_tuna_v4' -and
+                $acceptedProtocol -eq '4' -and
+                $acceptedTransport -eq 'tuna') {
+                $transitionKind = 'TunaV4ToPostTunaFallbackV6'
+                $targetRoute = 'post_tuna_fallback_v6'
+                $targetProtocol = '6'
+                $targetTransport = 'regular_nkn'
+            }
+            else {
+                return $false
+            }
+
+            $testSourceScope = {
+                param([string]$CandidateLine)
+                if ((Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'log_writer_id') -ne $writer -or
+                    -not (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $CandidateLine -FieldName 'session_id') -or
+                    -not (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $CandidateLine -FieldName 'transfer_id') -or
+                    -not (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $CandidateLine -FieldName 'direction') -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'transition_kind') -ne $transitionKind -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'target_route') -ne $targetRoute -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'target_protocol_version') -ne $targetProtocol -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'target_transport') -ne $targetTransport) {
+                    return $false
+                }
+                foreach ($pair in @(
+                        @('route', 'source_route'),
+                        @('protocol_version', 'source_protocol_version'),
+                        @('live_route_epoch', 'source_live_route_epoch'),
+                        @('runtime_generation', 'source_runtime_generation'),
+                        @('terminal_generation', 'source_terminal_generation'),
+                        @('leg_generation', 'source_leg_generation'),
+                        @('transport_epoch', 'source_transport_epoch'),
+                        @('bridge_recovery_generation', 'source_bridge_recovery_generation'),
+                        @('route_publication_generation', 'source_route_publication_generation'),
+                        @('route_commit_generation', 'source_route_commit_generation'))) {
+                    $left = Get-TunaGuiLogLineFieldValue -Line $Accepted.Line -Name $pair[0]
+                    $right = Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name $pair[1]
+                    if ([string]::IsNullOrWhiteSpace($left) -or
+                        [string]::IsNullOrWhiteSpace($right) -or
+                        $left -ne $right) {
+                        return $false
+                    }
+                }
+                return $true
+            }
+
+            $binding = @(
+                Get-TunaGuiSettlementIndexRecords `
+                    -Events @('filetransfer_regular_v4_frontier_repair_pressure_binding_committed') `
+                    -Authority $authority `
+                    -InstallGeneration $installGeneration `
+                    -RepairKey $repairKey |
+                    Where-Object {
+                $_.Index -lt $Accepted.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Test-TunaGuiRegularV4SupersededScopeMatch `
+                    -SourceLine $Accepted.Line `
+                    -CandidateLine $_.Line)
+            } | Select-Object -Last 1)
+            if ($binding.Count -ne 1) {
+                return $false
+            }
+
+            $prepared = @(
+                Get-TunaGuiSettlementIndexRecords -Events @('filetransfer_route_transition_prepared') |
+                    Where-Object {
+                $_.Index -gt $binding[0].Index -and
+                $_.Index -lt $Accepted.Index -and
+                (& $testSourceScope $_.Line) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Prepared'
+            } | Select-Object -Last 1)
+            if ($prepared.Count -ne 1) {
+                return $false
+            }
+            $transitionAuthority = Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'authority_id'
+            $transitionGeneration = Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'transition_generation'
+            $dataSessionGeneration = Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'source_data_session_generation'
+            if ([string]::IsNullOrWhiteSpace($transitionAuthority) -or
+                $transitionAuthority -in @('[redacted]', 'redacted') -or
+                $transitionGeneration -notmatch '^[1-9][0-9]*$' -or
+                [string]::IsNullOrWhiteSpace($dataSessionGeneration)) {
+                return $false
+            }
+
+            $testTransitionIdentity = {
+                param([string]$CandidateLine, [bool]$RequireDataSession)
+                if (-not (& $testSourceScope $CandidateLine) -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'authority_id') -ne $transitionAuthority -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'transition_generation') -ne $transitionGeneration) {
+                    return $false
+                }
+                return -not $RequireDataSession -or
+                    (Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'source_data_session_generation') -eq
+                        $dataSessionGeneration
+            }
+
+            $pause = @(
+                Get-TunaGuiSettlementIndexRecords -Events @('filetransfer_route_transition_pause_bound') |
+                    Where-Object {
+                $_.Index -gt $prepared[0].Index -and $_.Index -lt $Accepted.Index -and
+                (& $testTransitionIdentity $_.Line $false)
+            } | Select-Object -First 1)
+            $draining = @(
+                Get-TunaGuiSettlementIndexRecords -Events @('filetransfer_route_transition_draining') |
+                    Where-Object {
+                $pause.Count -eq 1 -and $_.Index -gt $pause[0].Index -and $_.Index -lt $Accepted.Index -and
+                (& $testTransitionIdentity $_.Line $true) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Draining'
+            } | Select-Object -First 1)
+            if ($pause.Count -ne 1 -or $draining.Count -ne 1) {
+                return $false
+            }
+
+            $drain = @(
+                Get-TunaGuiSettlementIndexRecords -Events @('filetransfer_route_transition_drain_receipt_decided') |
+                    Where-Object {
+                $_.Index -gt $Accepted.Index -and
+                (& $testTransitionIdentity $_.Line $true) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Accepted', 'Idempotent')
+            } | Select-Object -First 1)
+            if ($drain.Count -ne 1) {
+                return $false
+            }
+
+            $lineageApplies = @(
+                Get-TunaGuiSettlementIndexRecords `
+                    -Events @('filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided') `
+                    -InstallGeneration $installGeneration |
+                    Where-Object {
+                $_.Index -gt $Accepted.Index -and $_.Index -lt $drain[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'direction')
+            })
+            if ($lineageApplies.Count -eq 0) {
+                return $false
+            }
+            foreach ($apply in $lineageApplies) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $apply.Line -Name 'settlement_outcome').Replace('_', '').ToLowerInvariant() -ne 'stalerejected' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $apply.Line -Name 'apply_status').ToLowerInvariant() -notin @('applied', 'idempotent') -or
+                    (Get-TunaGuiLogLineFieldValue -Line $apply.Line -Name 'current_authority_cleared') -ne '1' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $apply.Line -Name 'retained_predecessor_cleared') -ne '0' -or
+                    -not (Test-TunaGuiVisibleAuthorityMatch `
+                        -Actual (Get-TunaGuiLogLineFieldValue -Line $apply.Line -Name 'authority_id') `
+                        -Expected $authority)) {
+                    return $false
+                }
+            }
+
+            $commit = @(
+                Get-TunaGuiSettlementIndexRecords -Events @('filetransfer_route_transition_committed') |
+                    Where-Object {
+                $_.Index -gt $drain[0].Index -and
+                (& $testTransitionIdentity $_.Line $true) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Committed', 'Idempotent')
+            } | Select-Object -First 1)
+            $disposition = @(
+                Get-TunaGuiSettlementIndexRecords -Events @('filetransfer_route_transition_disposition_applied') |
+                    Where-Object {
+                $commit.Count -eq 1 -and $_.Index -gt $commit[0].Index -and
+                (& $testTransitionIdentity $_.Line $true) -and
+                ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Applied', 'Idempotent') -or
+                    ((Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'disposition') -eq 'committed' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status') -in @('applied', 'idempotent')))
+            } | Select-Object -First 1)
+            if ($commit.Count -ne 1 -or $disposition.Count -ne 1) {
+                return $false
+            }
+
+            $publication = @(
+                Get-TunaGuiSettlementIndexRecords `
+                    -Events @('filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered') |
+                    Where-Object {
+                $_.Index -gt $disposition[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'direction') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq $targetRoute -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'protocol_version') -eq $targetProtocol -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'live_route_epoch') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $commit[0].Line -Name 'target_live_route_epoch') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'runtime_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $commit[0].Line -Name 'target_runtime_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'terminal_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $commit[0].Line -Name 'target_terminal_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'leg_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $commit[0].Line -Name 'target_leg_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route_commit_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $commit[0].Line -Name 'target_route_commit_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route_publication_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $commit[0].Line -Name 'target_route_publication_generation')
+            } | Select-Object -First 1)
+            if ($publication.Count -ne 1) {
+                return $false
+            }
+
+            $poison = @(
+                Get-TunaGuiSettlementIndexRecords `
+                    -Events @(
+                        'filetransfer_manifest_replaced',
+                        'filetransfer_session_replaced',
+                        'filetransfer_data_session_recreated',
+                        'filetransfer_runtime_terminalized',
+                        'transfer_terminal',
+                        'file_transfer_inbound_terminal',
+                        'file_transfer_outbound_terminal') |
+                    Where-Object {
+                $_.Index -gt $prepared[0].Index -and $_.Index -lt $publication[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'session_id') -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'transfer_id') -and
+                (Test-TunaGuiLogLineFieldMatch -SourceLine $Accepted.Line -CandidateLine $_.Line -FieldName 'direction')
+            } | Select-Object -First 1)
+            return $poison.Count -eq 0
+        }
+
         $acceptedSettlements = @(
             Get-TunaGuiSettlementIndexRecords `
                 -Events @('filetransfer_regular_v4_frontier_repair_settlement_accepted') |
@@ -22236,6 +22563,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
 
                 continue
+            }
+
+            if ($normalizedSettlementOutcome -eq 'stalerejected' -and
+                (Get-TunaGuiLogLineFieldValue -Line $accepted.Line -Name 'settlement_reason') -eq
+                    'filetransfer_route_transition_pressure_handoff') {
+                if (Test-TunaGuiRegularV4AtomicRouteTransitionSettlementClosed -Accepted $accepted) {
+                    continue
+                }
+                return $false
             }
 
             if ($normalizedSettlementOutcome -in @(
@@ -26185,8 +26521,7 @@ function Get-TunaGuiFaultAdmissionProjectionKey {
                 @('source_transport_epoch', 'fallback_transport_epoch', 'transport_epoch'),
                 @('source_bridge_recovery_generation', 'fallback_bridge_recovery_generation', 'bridge_recovery_generation'),
                 @('checkpoint_request_id'),
-                @('source_data_session_generation', 'data_session_generation'),
-                @('data_session_identity'))) {
+                @('source_data_session_generation', 'data_session_generation'))) {
             $value = '(none)'
             foreach ($alias in $aliases) {
                 $candidate = Get-GuiSmokeFieldValue -Fields $Fields -Name $alias -Default ''
@@ -29076,6 +29411,27 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $fallbackEpochRecoveredObserved = $true
                 if ($fallbackStartedEpoch -gt $lastObservedLiveRouteEpoch) {
                     $lastObservedLiveRouteEpoch = $fallbackStartedEpoch
+                }
+
+                if ($RouteMode -eq 'live-regular-activation-cycle' -and
+                    [string]::IsNullOrWhiteSpace($nextAction) -and
+                    $null -ne $fallbackProjection) {
+                    $terminalPhase = Start-GuiSmokeTerminalPhaseDeadline `
+                        -RouteMode $RouteMode `
+                        -TimeoutMs $TimeoutMs `
+                        -Projection $fallbackProjection `
+                        -ActionBookmark $stepBookmark
+                    if ($null -ne $terminalPhase) {
+                        $observedEvidenceLines.Add((
+                                "[{0}] [INFO] [GuiSmoke] event=filetransfer_gui_terminal_phase_deadline_started; route_mode={1}; phase_generation={2}; live_route_epoch={3}; action_bookmark={4}; proof_end_bookmark={5}; deadline_utc={6}; authority_effect=none" -f
+                                ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')),
+                                $RouteMode,
+                                $terminalPhase.phaseGeneration,
+                                $terminalPhase.liveRouteEpoch,
+                                $terminalPhase.actionBookmark,
+                                $terminalPhase.proofEndBookmark,
+                                $terminalPhase.deadlineUtc)) | Out-Null
+                    }
                 }
 
                 if ($RouteMode -eq 'live-regular-activation-cycle' -and
@@ -32677,9 +33033,11 @@ function Invoke-Scenario {
     )
     $previousDeadlineUtc = $script:GuiSmokeScenarioDeadlineUtc
     $previousDeadlineName = $script:GuiSmokeScenarioDeadlineName
+    $previousTerminalPhaseGeneration = $script:GuiSmokeTerminalPhaseGeneration
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSec)
     $script:GuiSmokeScenarioDeadlineName = $Name
+    $script:GuiSmokeTerminalPhaseGeneration = 0L
     try {
         Write-Host "[GUI Smoke][$Name] START" -ForegroundColor Cyan
         & $Action
@@ -32689,6 +33047,7 @@ function Invoke-Scenario {
     finally {
         $script:GuiSmokeScenarioDeadlineUtc = $previousDeadlineUtc
         $script:GuiSmokeScenarioDeadlineName = $previousDeadlineName
+        $script:GuiSmokeTerminalPhaseGeneration = $previousTerminalPhaseGeneration
     }
 }
 

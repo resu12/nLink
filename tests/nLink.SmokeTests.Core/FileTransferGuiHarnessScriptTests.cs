@@ -885,6 +885,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var requestDeadlineBody = ExtractPowerShellFunctionBody(
             wrapperText,
             "Request-TunaGuiScenarioDeadline",
+            "Get-TunaGuiTerminalPhaseDeadlineRequest");
+        var terminalPhaseDeadlineBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Get-TunaGuiTerminalPhaseDeadlineRequest",
             "Invoke-TunaGuiSmokeWithHardDeadline");
         var watchdogBody = ExtractPowerShellFunctionBody(
             wrapperText,
@@ -898,6 +902,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Stop-TunaGuiSmokeProcessTree { {{stopTreeBody}} }
             function Stop-TunaGuiSmokeApplicationDescendants { {{stopApplicationsBody}} }
             function Request-TunaGuiScenarioDeadline { {{requestDeadlineBody}} }
+            function Get-TunaGuiTerminalPhaseDeadlineRequest { {{terminalPhaseDeadlineBody}} }
             function Invoke-TunaGuiSmokeWithHardDeadline { {{watchdogBody}} }
             function Assert-GuiSmokeScenarioDeadline { {{scenarioDeadlineBody}} }
 
@@ -905,11 +910,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $toolsDir = Join-Path $tempRoot 'tools'
             $cooperativeArtifact = Join-Path $tempRoot 'cooperative-artifact'
             $routeWaitArtifact = Join-Path $tempRoot 'route-wait-artifact'
+            $terminalPhaseArtifact = Join-Path $tempRoot 'terminal-phase-artifact'
             $timeoutArtifact = Join-Path $tempRoot 'timeout-artifact'
             $successArtifact = Join-Path $tempRoot 'success-artifact'
             [void][IO.Directory]::CreateDirectory($toolsDir)
             [void][IO.Directory]::CreateDirectory($cooperativeArtifact)
             [void][IO.Directory]::CreateDirectory($routeWaitArtifact)
+            [void][IO.Directory]::CreateDirectory($terminalPhaseArtifact)
             [void][IO.Directory]::CreateDirectory($timeoutArtifact)
             [void][IO.Directory]::CreateDirectory($successArtifact)
             try {
@@ -930,6 +937,33 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     throw 'GUI child did not consume the wrapper scenario-deadline request'
                 }
                 Remove-Item -LiteralPath $deadlineProbePath -Force
+
+                $invalidPhasePath = Join-Path $tempRoot 'invalid-terminal-phase.json'
+                $invalidStartedUtc = [DateTimeOffset]::UtcNow
+                [ordered]@{
+                    event = 'filetransfer_gui_terminal_phase_deadline_requested'
+                    acceptanceRunId = 'acceptance-run'
+                    scenarioRunId = 'scenario-run'
+                    routeMode = 'live-regular-activation-cycle'
+                    phase = 'terminal_integrity'
+                    phaseGeneration = 1
+                    actionBookmark = 10
+                    proofEndBookmark = 20
+                    liveRouteEpoch = 4
+                    timeoutMilliseconds = 1000
+                    requestedUtc = $invalidStartedUtc.ToString('O')
+                    deadlineUtc = $invalidStartedUtc.AddSeconds(3).ToString('O')
+                } | ConvertTo-Json | Set-Content -LiteralPath $invalidPhasePath -Encoding UTF8
+                $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'acceptance-run'
+                $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'scenario-run'
+                $invalidPhase = Get-TunaGuiTerminalPhaseDeadlineRequest `
+                    -Path $invalidPhasePath `
+                    -StartedUtc $invalidStartedUtc `
+                    -OriginalScenarioDeadlineUtc ($invalidStartedUtc.AddSeconds(1)) `
+                    -TimeoutSeconds 1
+                if ($null -ne $invalidPhase) {
+                    throw 'out-of-bound terminal phase request was accepted'
+                }
 
                 $script:stoppedApplicationPids = [System.Collections.Generic.List[int]]::new()
                 function Get-CimInstance {
@@ -974,6 +1008,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY = '1'
                 $env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH = 'sentinel-state-path'
                 $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH = 'sentinel-request-path'
+                $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH = 'sentinel-terminal-phase-path'
                 $stubPath = Join-Path $toolsDir 'GuiSmoke-Windows.ps1'
                 @'
             param([string]$ExePath, [int]$TimeoutSeconds)
@@ -1004,6 +1039,43 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $cooperativeState.childLastCompletedStage -ne 'capture_persisted' -or
                     $cooperativeState.capturePath -ne 'cooperative-capture.log') {
                     throw "cooperative finalization state was incomplete: $($cooperativeState | ConvertTo-Json -Compress)"
+                }
+
+                @'
+            param([string]$ExePath, [int]$TimeoutSeconds)
+            Start-Sleep -Milliseconds 600
+            $requestedUtc = [DateTimeOffset]::UtcNow
+            [ordered]@{
+                schemaVersion = 1
+                event = 'filetransfer_gui_terminal_phase_deadline_requested'
+                acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+                scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+                routeMode = 'live-regular-activation-cycle'
+                phase = 'terminal_integrity'
+                phaseGeneration = 1
+                actionBookmark = 10
+                proofEndBookmark = 20
+                liveRouteEpoch = 4
+                timeoutMilliseconds = 1000
+                requestedUtc = $requestedUtc.ToString('O')
+                deadlineUtc = $requestedUtc.AddSeconds(1).ToString('O')
+                authorityEffect = 'none'
+            } | ConvertTo-Json | Set-Content -LiteralPath $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH -Encoding UTF8
+            Start-Sleep -Milliseconds 800
+            exit 0
+            '@ | Set-Content -LiteralPath $stubPath -Encoding UTF8
+                $terminalPhase = Invoke-TunaGuiSmokeWithHardDeadline `
+                    -RepoRoot $tempRoot `
+                    -ArtifactDir $terminalPhaseArtifact `
+                    -ExePath 'unused.exe' `
+                    -TimeoutSeconds 1
+                $terminalPhaseState = Get-Content -LiteralPath (Join-Path $terminalPhaseArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
+                if ($terminalPhase.TimedOut -or
+                    -not $terminalPhaseState.terminalPhaseDeadlineAdopted -or
+                    [string]::IsNullOrWhiteSpace([string]$terminalPhaseState.terminalPhaseDeadlineUtc) -or
+                    $terminalPhaseState.scenarioDeadlineRequested -or
+                    (Test-Path -LiteralPath (Join-Path $terminalPhaseArtifact 'filetransfer-gui-scenario-deadline-request.json'))) {
+                    throw "terminal phase deadline was not adopted exactly once: result=$($terminalPhase | ConvertTo-Json -Compress); state=$($terminalPhaseState | ConvertTo-Json -Compress)"
                 }
 
                 @'
@@ -1053,6 +1125,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 if ($env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH -ne 'sentinel-request-path') {
                     throw 'watchdog did not restore the parent deadline-request environment value'
+                }
+                if ($env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH -ne 'sentinel-terminal-phase-path') {
+                    throw 'watchdog did not restore the parent terminal-phase environment value'
                 }
                 $timeoutPath = Join-Path $timeoutArtifact 'filetransfer-gui-evidence-finalization-timeout.json'
                 $statePath = Join-Path $timeoutArtifact 'filetransfer-gui-evidence-finalization-state.json'
@@ -1104,6 +1179,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 Remove-Item Env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY -ErrorAction SilentlyContinue
                 Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
                 Remove-Item Env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH -ErrorAction SilentlyContinue
                 if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
             }
             """;
@@ -1112,6 +1188,81 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.True(result.ExitCode == 0, $"Tuna GUI watchdog test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("tuna-gui-watchdog-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TunaGuiTerminalPhaseDeadline_RebasesOnceAfterExactFinalFallbackProjection()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var atomicJsonBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Write-GuiSmokeAtomicJson",
+            "New-TunaGuiFileTransferFailureClassificationResult");
+        var terminalPhaseBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Start-GuiSmokeTerminalPhaseDeadline",
+            "Wait-Until");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Write-GuiSmokeAtomicJson { {{atomicJsonBody}} }
+            function Start-GuiSmokeTerminalPhaseDeadline { {{terminalPhaseBody}} }
+
+            $requestPath = Join-Path ([IO.Path]::GetTempPath()) ('nlink-terminal-phase-' + [guid]::NewGuid().ToString('N') + '.json')
+            try {
+                $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID = 'acceptance-a'
+                $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID = 'scenario-a'
+                $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH = $requestPath
+                $script:GuiSmokeTerminalPhaseGeneration = 0L
+                $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::UtcNow.AddMilliseconds(100)
+                $projection = [pscustomobject]@{ LiveRouteEpoch = 4; EndBookmark = 40 }
+
+                $started = Start-GuiSmokeTerminalPhaseDeadline `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -TimeoutMs 1000 `
+                    -Projection $projection `
+                    -ActionBookmark 20
+                $duplicate = Start-GuiSmokeTerminalPhaseDeadline `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -TimeoutMs 1000 `
+                    -Projection $projection `
+                    -ActionBookmark 20
+                $request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json
+                if ($null -eq $started -or $null -ne $duplicate -or
+                    [long]$script:GuiSmokeTerminalPhaseGeneration -ne 1L -or
+                    $request.event -ne 'filetransfer_gui_terminal_phase_deadline_requested' -or
+                    $request.phase -ne 'terminal_integrity' -or
+                    [long]$request.phaseGeneration -ne 1L -or
+                    [long]$request.liveRouteEpoch -ne 4L -or
+                    [long]$request.actionBookmark -ne 20L -or
+                    [long]$request.proofEndBookmark -ne 40L -or
+                    [long]$request.timeoutMilliseconds -ne 1000L -or
+                    $request.authorityEffect -ne 'none') {
+                    throw "terminal phase request was invalid: started=$($started | ConvertTo-Json -Compress); request=$($request | ConvertTo-Json -Compress)"
+                }
+
+                $script:GuiSmokeTerminalPhaseGeneration = 0L
+                $invalid = Start-GuiSmokeTerminalPhaseDeadline `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -TimeoutMs 1000 `
+                    -Projection ([pscustomobject]@{ LiveRouteEpoch = 3; EndBookmark = 40 }) `
+                    -ActionBookmark 20
+                if ($null -ne $invalid -or [long]$script:GuiSmokeTerminalPhaseGeneration -ne 0L) {
+                    throw 'pre-final fallback projection rebased the deadline'
+                }
+                Write-Output 'terminal-phase-deadline-ok'
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_SCENARIO_RUN_ID -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Terminal phase deadline test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("terminal-phase-deadline-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2802,7 +2953,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($direction in @('outbound', 'inbound')) {
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "authority-$direction"
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=1; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
+                $dataSessionIdentity = if ($direction -eq 'inbound') { 'data-session-inbound:1' } else { '(none)' }
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=1; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=$dataSessionIdentity; decision_status=Committed")
                 $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; live_route_epoch=1")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=1; disposition=committed")
                 $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1")
@@ -7147,6 +7299,70 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             result.ExitCode == 0,
             $"Current-pressure GUI classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-current-pressure-cleanup-correlation-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RepairSettlement_RegularV4ToTunaAtomicTransitionClosesStaleRejectedPressure()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var settlementClosedBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiRegularV4FrontierRepairSettlementClosed",
+            "Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Test-TunaGuiRegularV4FrontierRepairSettlementClosed { {{settlementClosedBody}} }
+
+            $source = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0; target_transport=regular_nkn'
+            $transition = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; authority_id=transition-a; transition_generation=1; transition_kind=RegularV4ToTunaV4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_transport=regular_nkn; source_live_route_epoch=0; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_route_publication_generation=1; source_route_commit_generation=0; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna'
+            $lines = @(
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; $source; authority_id=repair-a; install_generation=46; repair_request_key=600:12:600:6,609:6; log_writer_id=writer-a; log_writer_sequence=1",
+                "event=filetransfer_route_transition_prepared; $transition; decision_status=Prepared; log_writer_id=writer-a; log_writer_sequence=2",
+                "event=filetransfer_route_transition_pause_bound; $transition; decision_status=Installed; log_writer_id=writer-a; log_writer_sequence=3",
+                "event=filetransfer_route_transition_draining; $transition; decision_status=Draining; log_writer_id=writer-a; log_writer_sequence=4",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; $source; authority_id=repair-a; successor_authority_id=(none); successor_install_generation=46; outcome=StaleRejected; settlement_reason=filetransfer_route_transition_pressure_handoff; repair_request_key=600:12:600:6,609:6; log_writer_id=writer-a; log_writer_sequence=5",
+                'event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-a; transfer_id=transfer-a; direction=outbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=46; settlement_outcome=StaleRejected; apply_status=Applied; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id=writer-a; log_writer_sequence=6',
+                'event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; session_id=session-a; transfer_id=transfer-a; direction=outbound; authority_id=[redacted]; successor_authority_id=(none); current_authority_id=[redacted]; retained_predecessor_authority_id=(none); install_generation=46; settlement_outcome=StaleRejected; apply_status=Idempotent; current_authority_cleared=1; retained_predecessor_cleared=0; log_writer_id=writer-a; log_writer_sequence=7',
+                "event=filetransfer_route_transition_drain_receipt_decided; $transition; decision_status=Accepted; log_writer_id=writer-a; log_writer_sequence=8",
+                "event=filetransfer_route_transition_committed; $transition; target_live_route_epoch=1; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_commit_generation=1; target_route_publication_generation=2; decision_status=Committed; log_writer_id=writer-a; log_writer_sequence=9",
+                "event=filetransfer_route_transition_disposition_applied; $transition; decision_status=Applied; log_writer_id=writer-a; log_writer_sequence=10",
+                'event=filetransfer_route_selected; session_id=session-a; transfer_id=transfer-a; direction=outbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=1; route_publication_generation=2; log_writer_id=writer-a; log_writer_sequence=11'
+            )
+            if (-not (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $lines -RequireRecoveryProof)) {
+                throw 'exact Regular-to-Tuna atomic settlement was not accepted'
+            }
+
+            $mutated = @($lines)
+            $mutated[10] = $mutated[10].Replace('route_publication_generation=2', 'route_publication_generation=3')
+            if (Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $mutated -RequireRecoveryProof) {
+                throw 'mutated Tuna publication recovered the settlement'
+            }
+
+            Write-Output 'gui-regular-to-tuna-atomic-settlement-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Regular-to-Tuna GUI settlement test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-regular-to-tuna-atomic-settlement-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -8940,6 +8940,92 @@ function Get-FileTransferFileTunaV4DataPathIndexedReceiverTransitions {
     return $events
 }
 
+function Test-FileTransferFileTunaV4DataPathSameReceiveTuple {
+    param(
+        [Parameter(Mandatory = $true)]$Reference,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if ($Candidate.EventName -ne 'filetransfer_data_path_receive_result') {
+        return $false
+    }
+
+    $referencePayloadKey =
+        Get-FileTransferFileTunaV4DataPathPayloadIdentityKey -Event $Reference
+    $candidatePayloadKey =
+        Get-FileTransferFileTunaV4DataPathPayloadIdentityKey -Event $Candidate
+    if ([string]::IsNullOrWhiteSpace($referencePayloadKey) -or
+        [string]::IsNullOrWhiteSpace($candidatePayloadKey) -or
+        -not [string]::Equals(
+            $referencePayloadKey,
+            $candidatePayloadKey,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    foreach ($fieldName in @(
+            'log_writer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'route_publication_generation',
+            'route_commit_generation',
+            'actual_transport',
+            'delivery_transport',
+            'target_transport')) {
+        $referenceValue =
+            Get-FileTransferEventField -Event $Reference -Name $fieldName -Default ''
+        $candidateValue =
+            Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($referenceValue) -or
+            [string]::IsNullOrWhiteSpace($candidateValue) -or
+            -not [string]::Equals(
+                $referenceValue,
+                $candidateValue,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferFileTunaV4DataPathIgnoredCompanionMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Reference,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if ($Candidate.EventName -ne 'filetransfer_data_frame_ignored' -or
+        (Get-FileTransferEventField -Event $Candidate -Name 'reason' -Default '') -ne
+            'file_tuna_v4_payload_requires_tuna') {
+        return $false
+    }
+
+    foreach ($fieldName in @('log_writer_id', 'transfer_id', 'session_id', 'frame_type', 'route', 'protocol_version')) {
+        $referenceValue =
+            Get-FileTransferEventField -Event $Reference -Name $fieldName -Default ''
+        $candidateValue =
+            Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($referenceValue) -or
+            [string]::IsNullOrWhiteSpace($candidateValue) -or
+            -not [string]::Equals(
+                $referenceValue,
+                $candidateValue,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Reference -Actual $Candidate) -and
+        (Get-FileTransferEventField -Event $Candidate -Name 'actual_transport' -Default '') -eq 'regular_nkn' -and
+        (Get-FileTransferEventField -Event $Candidate -Name 'target_transport' -Default '') -eq 'tuna'
+}
+
 function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
     param(
         [Parameter(Mandatory = $true)]$Mismatch,
@@ -8964,15 +9050,38 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
         return $false
     }
 
+    [object[]]$writerWindow = @(
+        Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
+            -Index $DataPathIndex `
+            -WriterId $writerId `
+            -AfterSequence $writerSequence)
+    $nextReceiveBoundarySequence = 0L
+    foreach ($candidate in @($writerWindow | Sort-Object {
+                Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
+            })) {
+        if (Test-FileTransferFileTunaV4DataPathSameReceiveTuple `
+                -Reference $Mismatch `
+                -Candidate $candidate) {
+            $nextReceiveBoundarySequence =
+                Get-FileTransferEventInt64Field `
+                    -Event $candidate `
+                    -Name 'log_writer_sequence' `
+                    -Default 0
+            break
+        }
+    }
+
     $ignoredWindowAnchorSequence = $writerSequence
     if ($Mismatch.EventName -eq 'filetransfer_data_path_receive_result') {
         [object[]]$exactMismatchCompanions = @(
-            Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
-                -Index $DataPathIndex `
-                -WriterId $writerId `
-                -AfterSequence $writerSequence |
+            $writerWindow |
             Where-Object {
                 $companion = $_
+                $companionWriterSequence =
+                    Get-FileTransferEventInt64Field `
+                        -Event $companion `
+                        -Name 'log_writer_sequence' `
+                        -Default 0
                 if ($companion.EventName -ne 'filetransfer_tuna_data_path_mismatch' -or
                     (Get-FileTransferEventField -Event $companion -Name 'proof_direction' -Default '') -ne 'receive' -or
                     (Get-FileTransferEventField -Event $companion -Name 'mismatch_reason' -Default '') -ne 'file_tuna_v4_resolved_to_regular_nkn' -or
@@ -8980,8 +9089,10 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                         (Get-FileTransferEventField -Event $companion -Name 'log_writer_id' -Default ''),
                         $writerId,
                         [System.StringComparison]::OrdinalIgnoreCase) -or
-                    (Get-FileTransferEventInt64Field -Event $companion -Name 'log_writer_sequence' -Default 0) -le $writerSequence -or
-                    (Get-FileTransferEventInt64Field -Event $companion -Name 'log_writer_sequence' -Default 0) -gt ($writerSequence + 8) -or
+                    $companionWriterSequence -le $writerSequence -or
+                    $companionWriterSequence -gt ($writerSequence + 8) -or
+                    ($nextReceiveBoundarySequence -gt 0 -and
+                        $companionWriterSequence -ge $nextReceiveBoundarySequence) -or
                     (Get-FileTransferEventField -Event $companion -Name 'actual_transport' -Default '') -ne 'regular_nkn' -or
                     (Get-FileTransferEventField -Event $companion -Name 'delivery_transport' -Default '') -ne 'regular_nkn' -or
                     (Get-FileTransferEventField -Event $companion -Name 'target_transport' -Default '') -ne 'tuna' -or
@@ -9051,39 +9162,27 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
             -WriterId $writerId `
             -AfterSequence $ignoredWindowAnchorSequence |
         Where-Object {
-            $_.EventName -eq 'filetransfer_data_frame_ignored' -and
-            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
-                'file_tuna_v4_payload_requires_tuna'
+            $ignoredWriterSequence =
+                Get-FileTransferEventInt64Field `
+                    -Event $_ `
+                    -Name 'log_writer_sequence' `
+                    -Default 0
+            ($nextReceiveBoundarySequence -le 0 -or
+                $ignoredWriterSequence -lt $nextReceiveBoundarySequence) -and
+                (Test-FileTransferFileTunaV4DataPathIgnoredCompanionMatches `
+                    -Reference $Mismatch `
+                    -Candidate $_)
         })
+    if ($ignoredEvents.Count -ne 1) {
+        return $false
+    }
+
     foreach ($ignored in @($ignoredEvents)) {
         $ignoredWriterId = Get-FileTransferEventField -Event $ignored -Name 'log_writer_id' -Default ''
         $ignoredWriterSequence = Get-FileTransferEventInt64Field -Event $ignored -Name 'log_writer_sequence' -Default 0
         if (-not [string]::Equals($writerId, $ignoredWriterId, [System.StringComparison]::OrdinalIgnoreCase) -or
             $ignoredWriterSequence -le $ignoredWindowAnchorSequence -or
             $ignoredWriterSequence -gt ($ignoredWindowAnchorSequence + 8)) {
-            continue
-        }
-
-        $scopeMatches = $true
-        foreach ($fieldName in @('transfer_id', 'session_id', 'frame_type', 'route', 'protocol_version')) {
-            $mismatchValue = Get-FileTransferEventField -Event $Mismatch -Name $fieldName -Default ''
-            $ignoredValue = Get-FileTransferEventField -Event $ignored -Name $fieldName -Default ''
-            if ([string]::IsNullOrWhiteSpace($mismatchValue) -or
-                [string]::IsNullOrWhiteSpace($ignoredValue) -or
-                -not [string]::Equals($mismatchValue, $ignoredValue, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $scopeMatches = $false
-                break
-            }
-        }
-
-        if (-not $scopeMatches -or
-            -not (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $ignored)) {
-            continue
-        }
-
-        $actualTransport = Get-FileTransferEventField -Event $ignored -Name 'actual_transport' -Default ''
-        $targetTransport = Get-FileTransferEventField -Event $ignored -Name 'target_transport' -Default ''
-        if ($actualTransport -ne 'regular_nkn' -or $targetTransport -ne 'tuna') {
             continue
         }
 
@@ -43309,6 +43408,34 @@ function Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof {
     [object[]]$routeTransitionCommitEvents = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_route_transition_committed'
     })
+    [object[]]$routeTransitionPreparedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared'
+    })
+    [object[]]$routeTransitionPauseBoundEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_pause_bound'
+    })
+    [object[]]$routeTransitionDrainingEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_draining'
+    })
+    [object[]]$routeTransitionDrainReceiptEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_drain_receipt_decided'
+    })
+    [object[]]$routeTransitionDispositionEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_disposition_applied'
+    })
+    [object[]]$routePublicationEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @('filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered')
+    })
+    [object[]]$scopeReplacementEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_manifest_replaced',
+            'filetransfer_session_replaced',
+            'filetransfer_data_session_recreated',
+            'filetransfer_runtime_terminalized',
+            'transfer_terminal',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal')
+    })
     [object[]]$legacyRecoveryOwnershipEvents = @($orderedEvents | Where-Object {
         $_.EventName -in @(
             'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery',
@@ -43866,35 +43993,232 @@ function Get-FileTransferRegularV4FrontierRepairSettlementDispositionProof {
         if ([string]::IsNullOrWhiteSpace($installGeneration)) {
             return $false
         }
+        $authority = Get-RegularV4SettlementField -Event $Accepted -Names @('authority_id')
+        $repairKey = Get-RegularV4SettlementField -Event $Accepted -Names @('repair_request_key')
         $session = Get-RegularV4SettlementField -Event $Accepted -Names @('session_id')
         $transfer = Get-RegularV4SettlementField -Event $Accepted -Names @('transfer_id')
         $direction = Get-RegularV4SettlementField -Event $Accepted -Names @('direction')
-        [object[]]$applies = @($pressureSettlementApplyEvents | Where-Object {
-                [int64]$_.Sequence -gt [int64]$Accepted.Sequence -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('install_generation')) -eq $installGeneration -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('settlement_outcome')).Replace('_', '').ToLowerInvariant() -eq $outcome -and
-                (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '').ToLowerInvariant() -in @('applied', 'idempotent') -and
-                (Get-FileTransferEventField -Event $_ -Name 'current_authority_cleared' -Default '0') -eq '1' -and
-                (Get-FileTransferEventField -Event $_ -Name 'retained_predecessor_cleared' -Default '1') -eq '0' -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('session_id')) -eq $session -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('transfer_id')) -eq $transfer -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('direction')) -eq $direction
-            } | Group-Object {
-                Get-RegularV4TerminalPressureApplyTupleKey -Event $_
-            } | ForEach-Object { @($_.Group | Sort-Object Sequence, LineNumber)[0] })
-        if ($applies.Count -ne 1) {
+        $writer = Get-RegularV4SettlementField -Event $Accepted -Names @('log_writer_id')
+        if ([string]::IsNullOrWhiteSpace($authority) -or
+            $authority -in @('[redacted]', 'redacted') -or
+            [string]::IsNullOrWhiteSpace($repairKey) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or
+            [string]::IsNullOrWhiteSpace($direction) -or
+            [string]::IsNullOrWhiteSpace($writer)) {
             return $false
         }
-        [object[]]$commits = @($routeTransitionCommitEvents | Where-Object {
-                [int64]$_.Sequence -gt [int64]$applies[0].Sequence -and
+
+        $acceptedRoute = Get-RegularV4SettlementField -Event $Accepted -Names @('route')
+        $acceptedProtocol = Get-RegularV4SettlementField -Event $Accepted -Names @('protocol_version')
+        $acceptedTransport = Get-RegularV4SettlementField -Event $Accepted -Names @('target_transport')
+        $transitionKind = ''
+        $targetRoute = ''
+        $targetProtocol = ''
+        $targetTransport = ''
+        if ($acceptedRoute -eq 'regular_nkn_v4_fast' -and
+            $acceptedProtocol -eq '4' -and
+            $acceptedTransport -eq 'regular_nkn') {
+            $transitionKind = 'RegularV4ToTunaV4'
+            $targetRoute = 'file_tuna_v4'
+            $targetProtocol = '4'
+            $targetTransport = 'tuna'
+        }
+        elseif ($acceptedRoute -eq 'file_tuna_v4' -and
+            $acceptedProtocol -eq '4' -and
+            $acceptedTransport -eq 'tuna') {
+            $transitionKind = 'TunaV4ToPostTunaFallbackV6'
+            $targetRoute = 'post_tuna_fallback_v6'
+            $targetProtocol = '6'
+            $targetTransport = 'regular_nkn'
+        }
+        else {
+            return $false
+        }
+
+        $testTransitionSourceScope = {
+            param($Candidate)
+            if ((Get-RegularV4SettlementField -Event $Candidate -Names @('log_writer_id')) -ne $writer -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('session_id')) -ne $session -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('transfer_id')) -ne $transfer -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('direction')) -ne $direction -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('transition_kind')) -ne $transitionKind -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('target_route')) -ne $targetRoute -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('target_protocol_version')) -ne $targetProtocol -or
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('target_transport')) -ne $targetTransport) {
+                return $false
+            }
+            foreach ($aliases in @(
+                    [pscustomobject]@{ Accepted = 'route'; Candidate = 'source_route' },
+                    [pscustomobject]@{ Accepted = 'protocol_version'; Candidate = 'source_protocol_version' },
+                    [pscustomobject]@{ Accepted = 'live_route_epoch'; Candidate = 'source_live_route_epoch' },
+                    [pscustomobject]@{ Accepted = 'runtime_generation'; Candidate = 'source_runtime_generation' },
+                    [pscustomobject]@{ Accepted = 'terminal_generation'; Candidate = 'source_terminal_generation' },
+                    [pscustomobject]@{ Accepted = 'leg_generation'; Candidate = 'source_leg_generation' },
+                    [pscustomobject]@{ Accepted = 'transport_epoch'; Candidate = 'source_transport_epoch' },
+                    [pscustomobject]@{ Accepted = 'bridge_recovery_generation'; Candidate = 'source_bridge_recovery_generation' },
+                    [pscustomobject]@{ Accepted = 'route_publication_generation'; Candidate = 'source_route_publication_generation' },
+                    [pscustomobject]@{ Accepted = 'route_commit_generation'; Candidate = 'source_route_commit_generation' })) {
+                $left = Get-RegularV4SettlementField -Event $Accepted -Names @($aliases.Accepted)
+                $right = Get-RegularV4SettlementField -Event $Candidate -Names @($aliases.Candidate)
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or
+                    $left -ne $right) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        $binding = @($pressureBindingCommittedEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$Accepted.Sequence -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('authority_id')) -eq $authority -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('install_generation')) -eq $installGeneration -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('repair_request_key')) -eq $repairKey -and
+                (Test-FileTransferRegularV4FrontierRepairLifecycleMatch -Source $Accepted -Candidate $_)
+            } | Select-Object -Last 1)
+        if ($binding.Count -ne 1) {
+            return $false
+        }
+
+        [object[]]$preparedCandidates = @($routeTransitionPreparedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$binding[0].Sequence -and
+                [int64]$_.Sequence -lt [int64]$Accepted.Sequence -and
+                (& $testTransitionSourceScope $_) -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('decision_status', 'status')) -eq 'Prepared'
+            } | Sort-Object Sequence, LineNumber)
+        if ($preparedCandidates.Count -eq 0) {
+            return $false
+        }
+        $prepared = $preparedCandidates[-1]
+        $transitionAuthority = Get-RegularV4SettlementField -Event $prepared -Names @('authority_id', 'transition_authority_id')
+        $transitionGeneration = Get-RegularV4SettlementField -Event $prepared -Names @('transition_generation')
+        $sourceDataSessionGeneration = Get-RegularV4SettlementField -Event $prepared -Names @('source_data_session_generation')
+        [long]$parsedTransitionGeneration = 0
+        if ([string]::IsNullOrWhiteSpace($transitionAuthority) -or
+            $transitionAuthority -in @('[redacted]', 'redacted') -or
+            -not [long]::TryParse($transitionGeneration, [ref]$parsedTransitionGeneration) -or
+            $parsedTransitionGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace($sourceDataSessionGeneration)) {
+            return $false
+        }
+
+        $testTransitionIdentity = {
+            param($Candidate)
+            return (& $testTransitionSourceScope $Candidate) -and
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('authority_id', 'transition_authority_id')) -eq
+                    $transitionAuthority -and
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('transition_generation')) -eq
+                    $transitionGeneration -and
+                (Get-RegularV4SettlementField -Event $Candidate -Names @('source_data_session_generation')) -eq
+                    $sourceDataSessionGeneration
+        }
+
+        $pause = @($routeTransitionPauseBoundEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$prepared.Sequence -and
+                [int64]$_.Sequence -lt [int64]$Accepted.Sequence -and
+                (& $testTransitionIdentity $_)
+            } | Select-Object -First 1)
+        $draining = @($routeTransitionDrainingEvents | Where-Object {
+                $pause.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$pause[0].Sequence -and
+                [int64]$_.Sequence -lt [int64]$Accepted.Sequence -and
+                (& $testTransitionIdentity $_) -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('decision_status', 'status')) -eq 'Draining'
+            } | Select-Object -First 1)
+        if ($pause.Count -ne 1 -or $draining.Count -ne 1) {
+            return $false
+        }
+
+        $drain = @($routeTransitionDrainReceiptEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$Accepted.Sequence -and
+                (& $testTransitionIdentity $_) -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('decision_status', 'status')) -in @('Accepted', 'Idempotent')
+            } | Select-Object -First 1)
+        if ($drain.Count -ne 1) {
+            return $false
+        }
+
+        [object[]]$lineageApplies = @($pressureSettlementApplyEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$Accepted.Sequence -and
+                [int64]$_.Sequence -lt [int64]$drain[0].Sequence -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('log_writer_id')) -eq $writer -and
                 (Get-RegularV4SettlementField -Event $_ -Names @('session_id')) -eq $session -and
                 (Get-RegularV4SettlementField -Event $_ -Names @('transfer_id')) -eq $transfer -and
                 (Get-RegularV4SettlementField -Event $_ -Names @('direction')) -eq $direction -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('source_route')) -eq 'file_tuna_v4' -and
-                (Get-RegularV4SettlementField -Event $_ -Names @('target_route')) -eq 'post_tuna_fallback_v6' -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('install_generation')) -eq $installGeneration
+            } | Sort-Object Sequence, LineNumber)
+        if ($lineageApplies.Count -eq 0) {
+            return $false
+        }
+        foreach ($apply in $lineageApplies) {
+            $applyAuthority = Get-RegularV4SettlementField -Event $apply -Names @('authority_id')
+            if ((Get-RegularV4SettlementField -Event $apply -Names @('settlement_outcome')).Replace('_', '').ToLowerInvariant() -ne $outcome -or
+                (Get-FileTransferEventField -Event $apply -Name 'apply_status' -Default '').ToLowerInvariant() -notin @('applied', 'idempotent') -or
+                (Get-FileTransferEventField -Event $apply -Name 'current_authority_cleared' -Default '0') -ne '1' -or
+                (Get-FileTransferEventField -Event $apply -Name 'retained_predecessor_cleared' -Default '1') -ne '0' -or
+                (-not [string]::IsNullOrWhiteSpace($applyAuthority) -and
+                    $applyAuthority -notin @('[redacted]', 'redacted') -and
+                    $applyAuthority -ne $authority)) {
+                return $false
+            }
+        }
+
+        $commit = @($routeTransitionCommitEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$drain[0].Sequence -and
+                (& $testTransitionIdentity $_) -and
                 (Get-RegularV4SettlementField -Event $_ -Names @('decision_status', 'status')) -in @('Committed', 'Idempotent')
             } | Select-Object -First 1)
-        return $commits.Count -eq 1
+        if ($commit.Count -ne 1) {
+            return $false
+        }
+
+        $disposition = @($routeTransitionDispositionEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$commit[0].Sequence -and
+                (& $testTransitionIdentity $_) -and
+                ((Get-RegularV4SettlementField -Event $_ -Names @('decision_status', 'status')) -in @('Applied', 'Idempotent') -or
+                    ((Get-RegularV4SettlementField -Event $_ -Names @('disposition')) -eq 'committed' -and
+                        (Get-RegularV4SettlementField -Event $_ -Names @('apply_status')) -in @('applied', 'idempotent')))
+            } | Select-Object -First 1)
+        if ($disposition.Count -ne 1) {
+            return $false
+        }
+
+        $targetLiveRouteEpoch = Get-RegularV4SettlementField -Event $commit[0] -Names @('target_live_route_epoch')
+        $targetRuntimeGeneration = Get-RegularV4SettlementField -Event $commit[0] -Names @('target_runtime_generation')
+        $targetTerminalGeneration = Get-RegularV4SettlementField -Event $commit[0] -Names @('target_terminal_generation')
+        $targetLegGeneration = Get-RegularV4SettlementField -Event $commit[0] -Names @('target_leg_generation')
+        $targetRouteCommitGeneration = Get-RegularV4SettlementField -Event $commit[0] -Names @('target_route_commit_generation')
+        $targetRoutePublicationGeneration = Get-RegularV4SettlementField -Event $commit[0] -Names @('target_route_publication_generation')
+        $publication = @($routePublicationEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$disposition[0].Sequence -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('session_id')) -eq $session -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('transfer_id')) -eq $transfer -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('direction')) -eq $direction -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('route', 'target_route')) -eq $targetRoute -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('protocol_version', 'target_protocol_version')) -eq $targetProtocol -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('live_route_epoch')) -eq $targetLiveRouteEpoch -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('runtime_generation')) -eq $targetRuntimeGeneration -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('terminal_generation')) -eq $targetTerminalGeneration -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('leg_generation')) -eq $targetLegGeneration -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('route_commit_generation')) -eq $targetRouteCommitGeneration -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('route_publication_generation')) -eq $targetRoutePublicationGeneration
+            } | Select-Object -First 1)
+        if ($publication.Count -ne 1) {
+            return $false
+        }
+
+        $poison = @($scopeReplacementEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$prepared.Sequence -and
+                [int64]$_.Sequence -lt [int64]$publication[0].Sequence -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('session_id')) -eq $session -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('transfer_id')) -eq $transfer -and
+                (Get-RegularV4SettlementField -Event $_ -Names @('direction')) -eq $direction
+            } | Select-Object -First 1)
+        return $poison.Count -eq 0
     }
 
     function Test-RegularV4CurrentPressureDisposition {
