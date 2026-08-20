@@ -4221,7 +4221,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("suppress_reason=recovery_active", logTail, StringComparison.Ordinal);
+            Assert.Contains(
+                "suppress_reason=fallback_paired_tail_yield_install_receipt_missing",
+                logTail,
+                StringComparison.Ordinal);
             Assert.Contains("trigger=runtime_unlock", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
@@ -5364,7 +5367,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("suppress_reason=recovery_active", logTail, StringComparison.Ordinal);
+            Assert.Contains(
+                "suppress_reason=fallback_paired_tail_yield_install_receipt_missing",
+                logTail,
+                StringComparison.Ordinal);
             Assert.True(
                 logTail.Contains("trigger=post_tuna_fallback_offer_send_prepare", StringComparison.Ordinal) ||
                 logTail.Contains("trigger=offer_send_prepare", StringComparison.Ordinal) ||
@@ -16020,6 +16026,113 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 StringComparison.Ordinal);
             Assert.Null(
                 GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task PostTunaFallbackV6Route_InstalledRetryReceiptDoesNotAuthorizeGenericActivationPause()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.activation.post-fallback-installed-retry-no-pause.address");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.activation.post-fallback-installed-retry-no-pause.address");
+            var hostLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-tuna-activation-post-fallback-installed-retry-no-pause-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-activation-post-fallback-installed-retry-no-pause-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_tuna_activation_post_fallback_installed_retry_no_pause";
+            var dataSession = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            var availabilityEvents =
+                new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+
+            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                host,
+                sessionId,
+                transferId,
+                "runtime_unlock_offer_send_not_observed",
+                "fallback_tail_pairing_committed");
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await WaitUntilAsync(
+                () => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host) is not null,
+                TimeSpan.FromSeconds(3));
+            Assert.NotNull(
+                GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+
+            var sharedPredicateArgs = new object?[] { sessionId, null };
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "ShouldKeepPostTunaFallbackDataSessionsAvailableDuringTunaActivation",
+                sharedPredicateArgs)));
+            Assert.Equal(
+                "committed_retry_dispatch_authority",
+                Assert.IsType<string>(sharedPredicateArgs[1]));
+
+            var logStart = GetOperationalLogLength();
+            var paused = Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "PauseFileTransferDataSessionsForTunaActivationNegotiation",
+                "activation_negotiation_pending",
+                sessionId,
+                "offer_send_prepare"));
+
+            Assert.False(paused);
+            Assert.True(dataSession.IsAvailable);
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => !e.IsAvailable &&
+                     !e.RequiresResumeRequest &&
+                     e.Reason == "tuna_activation_negotiating");
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "suppress_reason=current_post_tuna_fallback_requires_coordinator_transition_pause",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("trigger=offer_send_prepare", logTail, StringComparison.Ordinal);
+            Assert.Contains("authority_effect=none", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;",
+                logTail,
+                StringComparison.Ordinal);
         }
         finally
         {

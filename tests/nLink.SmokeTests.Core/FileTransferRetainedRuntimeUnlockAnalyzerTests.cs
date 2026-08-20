@@ -7635,6 +7635,66 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_GenericActivationPausesCurrentPostFallbackWithRolledBackRetry_ClassifiesSeparationViolation(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_post_fallback_generic_pause";
+        const string transferId = "transfer_post_fallback_generic_pause";
+        const string writerId = "writer_post_fallback_generic_pause";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; log_writer_id={writerId}; log_writer_sequence=1"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; log_writer_id={writerId}; log_writer_sequence=2"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; transport_epoch=1; bridge_recovery_generation=1; data_session_generation=1; log_writer_id={writerId}; log_writer_sequence=3"),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_granted; authority_id=retry-a; authority_generation=1; direction=outbound; session_id={sessionId}; transfer_id={transferId}; source_publication_route=post_tuna_fallback_v6; source_publication_protocol_version=6; source_publication_live_route_epoch=2; source_publication_runtime_generation=3; source_publication_terminal_generation=0; source_publication_leg_generation=3; source_publication_generation=3; offer_generation=2; payer_decision_id=5; tuna_path_lease_generation=2; decision_reason=accepted; log_writer_id={writerId}; log_writer_sequence=4"),
+            LogLine($"event=filetransfer_route_transition_disposition_applied; authority_id=transition-a; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; direction=outbound; session_id={sessionId}; transfer_id={transferId}; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_route_publication_generation=3; source_data_session_generation=1; disposition=rolledback; apply_status=applied; log_writer_id={writerId}; log_writer_sequence=5"),
+            LogLine($"event=tuna_payer_decision_started; payer_decision_id=10; reason=remote_payer_intent; log_writer_id={writerId}; log_writer_sequence=6"),
+            LogLine($"event=tuna_acceleration_payer_intent_queued; intent=will_listen; role=helpee; trigger=remote_payer_intent; payer_decision_id=10; log_writer_id={writerId}; log_writer_sequence=7"),
+            LogLine($"event=filetransfer_tuna_activation_negotiation_regular_nkn_paused; session_id={sessionId}; reason=activation_negotiation_pending; trigger=offer_send_prepare; max_pause_ms=75000; log_writer_id={writerId}; log_writer_sequence=8"),
+            LogLine($"event=filetransfer_data_session_availability_observed; session_id={sessionId}; transfer_id={transferId}; is_available=0; reason=tuna_activation_negotiating; requires_resume_request=0; target_transport=regular_nkn; log_writer_id={writerId}; log_writer_sequence=9"),
+            LogLine($"event=filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed; direction=outbound; session_id={sessionId}; transfer_id={transferId}; reason=tuna_activation_negotiating; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; recovery_active=0; log_writer_id={writerId}; log_writer_sequence=10"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; direction=outbound; session_id={sessionId}; transfer_id={transferId}; source_kind=SenderTimeoutRetry; frontier_chunk_index=7912; repair_generation=137; log_writer_id={writerId}; log_writer_sequence=11"),
+            LogLine($"event=filetransfer_v4_repair_send_deferred_for_v6_regular_nkn_sparse_runtime; direction=outbound; session_id={sessionId}; transfer_id={transferId}; reason=tuna_activation_negotiating; log_writer_id={writerId}; log_writer_sequence=12"),
+            LogLine($"event=file_transfer_outbound_terminal; direction=outbound; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=timeout; log_writer_id={writerId}; log_writer_sequence=20")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("runtime_fallback_separation_violation", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_fallback_separation_violation", verdict["recovery_failure_class"]);
+        Assert.Equal("filetransfer_tuna_activation_negotiation_regular_nkn_paused", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("8", verdict["first_proof_chain_failure_writer_sequence"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+
+        if (!compact)
+        {
+            var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+            Assert.Equal("fail", route["runtime_fallback_separation_verdict"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, false, false)]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]

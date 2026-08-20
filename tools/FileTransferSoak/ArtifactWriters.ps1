@@ -14540,6 +14540,211 @@ function Test-FileTransferRuntimeUnlockFallbackUnavailableHasCoordinatorDenial {
     return $false
 }
 
+function Get-FileTransferPostTunaFallbackGenericActivationPauseCorrelation {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Events
+    )
+
+    [object[]]$pauses = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_tuna_activation_negotiation_regular_nkn_paused' -and
+        (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq
+            'offer_send_prepare'
+    })
+    [object[]]$availability = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_data_session_availability_observed'
+    })
+    [object[]]$suppressions = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+            'post_tuna_fallback_v6' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6 -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'recovery_active' -Default 0) -eq 0
+    })
+    [object[]]$payerStarts = @($Events | Where-Object {
+        $_.EventName -eq 'tuna_payer_decision_started' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+            'remote_payer_intent'
+    })
+    [object[]]$payerIntents = @($Events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_payer_intent_queued' -and
+        (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq
+            'remote_payer_intent'
+    })
+    [object[]]$retryGrants = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source_publication_route' -Default '') -eq
+            'post_tuna_fallback_v6'
+    })
+    [object[]]$transitionDispositions = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_disposition_applied' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq
+            'post_tuna_fallback_v6'
+    })
+    [object[]]$transitionPrepared = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+    })
+    [object[]]$terminals = @($Events | Where-Object {
+        $_.EventName -in @(
+            'filetransfer_runtime_terminalized',
+            'filetransfer_live_route_epoch_terminal',
+            'filetransfer_v6_epoch_terminal',
+            'file_transfer_outbound_terminal',
+            'transfer_terminal')
+    })
+    [object[]]$routeSelections = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_selected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+    })
+
+    $rawRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($pause in @($pauses | Sort-Object Sequence, LineNumber)) {
+        $writer = Get-FileTransferEventField -Event $pause -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $pause -Name 'session_id' -Default ''
+        $pauseWriterSequence = Get-FileTransferEventInt64Field `
+            -Event $pause -Name 'log_writer_sequence' -Default 0
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            $pauseWriterSequence -le 0) {
+            continue
+        }
+
+        [object[]]$observedUnavailable = @($availability | Where-Object {
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -eq
+                ($pauseWriterSequence + 1) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'is_available' -Default 1) -eq 0 -and
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                'tuna_activation_negotiating'
+        } | Select-Object -First 1)
+        [object[]]$coreSuppression = @($suppressions | Where-Object {
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -eq
+                ($pauseWriterSequence + 2)
+        } | Select-Object -First 1)
+        if ($observedUnavailable.Count -ne 1 -or $coreSuppression.Count -ne 1) {
+            continue
+        }
+
+        $transfer = Get-FileTransferEventField `
+            -Event $coreSuppression[0] -Name 'transfer_id' -Default ''
+        [object[]]$genericPayer = @($payerStarts | Where-Object {
+            [int64]$_.Sequence -lt [int64]$pause.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer
+        } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($genericPayer.Count -ne 1) {
+            continue
+        }
+        $payer = Get-FileTransferEventField `
+            -Event $genericPayer[0] -Name 'payer_decision_id' -Default ''
+        [object[]]$genericIntent = @($payerIntents | Where-Object {
+            [int64]$_.Sequence -ge [int64]$genericPayer[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pause.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '') -eq $payer
+        } | Select-Object -First 1)
+        if ($genericIntent.Count -ne 1) {
+            continue
+        }
+
+        [object[]]$rolledBack = @($transitionDispositions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$genericPayer[0].Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+            (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq 'rolledback' -and
+            (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '') -eq 'applied'
+        } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        [object[]]$retryGrant = @($retryGrants | Where-Object {
+            $rolledBack.Count -eq 1 -and
+            [int64]$_.Sequence -lt [int64]$rolledBack[0].Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'source_publication_live_route_epoch' -Default 0) -eq
+                (Get-FileTransferEventInt64Field -Event $coreSuppression[0] -Name 'live_route_epoch' -Default 2)
+        } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($rolledBack.Count -ne 1 -or $retryGrant.Count -ne 1) {
+            continue
+        }
+
+        [object[]]$currentTransition = @($transitionPrepared | Where-Object {
+            [int64]$_.Sequence -gt [int64]$rolledBack[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$pause.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer
+        } | Select-Object -First 1)
+        if ($currentTransition.Count -gt 0) {
+            continue
+        }
+
+        [object[]]$resumed = @($availability | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pause.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'is_available' -Default 0) -eq 1
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$terminalBeforeRecovery = @($terminals | Where-Object {
+            [int64]$_.Sequence -gt [int64]$pause.Sequence -and
+            ($resumed.Count -eq 0 -or [int64]$_.Sequence -lt [int64]$resumed[0].Sequence) -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -in @('', $transfer)
+        } | Select-Object -First 1)
+        [object[]]$outboundTuna = @($routeSelections | Where-Object {
+            $resumed.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$resumed[0].Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -ge 3
+        } | Select-Object -First 1)
+        $recovered = $resumed.Count -eq 1 -and
+            $terminalBeforeRecovery.Count -eq 0 -and
+            $outboundTuna.Count -eq 1
+
+        $rawRecords.Add([pscustomobject]@{
+            Event = $pause
+            Availability = $observedUnavailable[0]
+            Suppression = $coreSuppression[0]
+            RetryGrant = $retryGrant[0]
+            RolledBackTransition = $rolledBack[0]
+            Payer = $genericPayer[0]
+            Recovered = $recovered
+            Key = [string]::Join('|', @(
+                $writer, $session, $transfer, $payer,
+                (Get-FileTransferEventField -Event $retryGrant[0] -Name 'authority_id' -Default ''),
+                (Get-FileTransferEventField -Event $rolledBack[0] -Name 'authority_id' -Default ''),
+                (Get-FileTransferEventField -Event $retryGrant[0] -Name 'source_publication_generation' -Default ''),
+                (Get-FileTransferEventField -Event $retryGrant[0] -Name 'source_publication_runtime_generation' -Default ''),
+                (Get-FileTransferEventField -Event $retryGrant[0] -Name 'source_publication_terminal_generation' -Default ''),
+                (Get-FileTransferEventField -Event $retryGrant[0] -Name 'source_publication_leg_generation' -Default '')))
+        }) | Out-Null
+    }
+
+    $distinct = New-Object System.Collections.Generic.List[object]
+    foreach ($group in @($rawRecords.ToArray() | Group-Object Key)) {
+        $distinct.Add(@($group.Group | Sort-Object { $_.Event.Sequence } | Select-Object -First 1)[0]) |
+            Out-Null
+    }
+    [object[]]$distinctRecords = @($distinct.ToArray())
+    [object[]]$unresolvedRecords = @($distinctRecords | Where-Object { -not $_.Recovered })
+    [object[]]$recoveredRecords = @($distinctRecords | Where-Object { $_.Recovered })
+    return [pscustomobject]@{
+        RawCount = $rawRecords.Count
+        DistinctCount = $distinctRecords.Count
+        RecoveredCount = $recoveredRecords.Count
+        UnresolvedCount = $unresolvedRecords.Count
+        UnresolvedEvents = @($unresolvedRecords | ForEach-Object { $_.Event })
+        RecoveredEvents = @($recoveredRecords | ForEach-Object { $_.Event })
+    }
+}
+
 function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -14555,6 +14760,8 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
     }
 
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $genericPostFallbackPauseProof =
+        Get-FileTransferPostTunaFallbackGenericActivationPauseCorrelation -Events $events
     $waitingEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_waiting_for_fallback_survival' })
     $activationWindowGrantedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_activation_window_granted' })
     $fallbackResumedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_probe_failed_fallback_resumed' })
@@ -14614,6 +14821,13 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
     $failureEvents = New-Object System.Collections.Generic.List[object]
+    if ($genericPostFallbackPauseProof.UnresolvedCount -gt 0) {
+        $findings.Add(("post-fallback data session paused by generic activation using stale retry evidence count={0}" -f $genericPostFallbackPauseProof.UnresolvedCount)) | Out-Null
+        foreach ($event in @($genericPostFallbackPauseProof.UnresolvedEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+            $failureEvents.Add($event) | Out-Null
+        }
+    }
     if ($fallbackUnavailableWithoutCoordinatorDenialEvents.Count -gt 0) {
         $findings.Add(("runtime unlock fallback-unavailable outcome without coordinator denial count={0}" -f $fallbackUnavailableWithoutCoordinatorDenialEvents.Count)) | Out-Null
         foreach ($event in @($fallbackUnavailableWithoutCoordinatorDenialEvents | Select-Object -First 5)) {
@@ -14655,7 +14869,10 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
 
     [pscustomobject]@{
         Verdict = $verdict
-        FailureClass = if ($verdict -eq 'fail' -and $fallbackUnavailableWithoutCoordinatorDenialEvents.Count -gt 0) {
+        FailureClass = if ($verdict -eq 'fail' -and $genericPostFallbackPauseProof.UnresolvedCount -gt 0) {
+            'runtime_fallback_separation_violation'
+        }
+        elseif ($verdict -eq 'fail' -and $fallbackUnavailableWithoutCoordinatorDenialEvents.Count -gt 0) {
             'stale_rejected_action_effect'
         }
         elseif ($verdict -eq 'fail') {
@@ -14672,6 +14889,11 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         FallbackUnavailableMarkCount = $fallbackUnavailableMarkEvents.Count
         FallbackUnavailableSuppressedCount = $fallbackUnavailableSuppressedEvents.Count
         FallbackUnavailableWithoutCoordinatorDenialCount = $fallbackUnavailableWithoutCoordinatorDenialEvents.Count
+        GenericPostFallbackPauseRawCount = $genericPostFallbackPauseProof.RawCount
+        GenericPostFallbackPauseDistinctCount = $genericPostFallbackPauseProof.DistinctCount
+        GenericPostFallbackPauseRecoveredCount = $genericPostFallbackPauseProof.RecoveredCount
+        GenericPostFallbackPauseUnresolvedCount = $genericPostFallbackPauseProof.UnresolvedCount
+        GenericPostFallbackPauseUnresolvedEvents = @($genericPostFallbackPauseProof.UnresolvedEvents)
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray())
         FailureEvents = @($failureEvents.ToArray() | Sort-Object Sequence, LineNumber | Select-Object -First 20)
@@ -61017,7 +61239,16 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason $staleRejectedActionEffectProof.FailureClass `
             -UseDefaultReason
     }
-    if ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and $hasFallbackRouteOrOwnerEvidence) {
+    if ($fallbackRuntimeUnlockSeparationProof.GenericPostFallbackPauseUnresolvedCount -gt 0 -and
+        $hasFallbackRouteOrOwnerEvidence) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_fallback_separation_violation' `
+            -Events $fallbackRuntimeUnlockSeparationProof.GenericPostFallbackPauseUnresolvedEvents `
+            -DefaultReason 'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression' `
+            -UseDefaultReason
+    }
+    elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and $hasFallbackRouteOrOwnerEvidence) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
             -Class $fallbackRuntimeUnlockSeparationProof.FailureClass `
@@ -61128,6 +61359,20 @@ function Get-FileTransferRecoveryFailureClassification {
         $firstProofChainFailureCandidates = @(
             $firstProofChainFailureCandidates |
                 Where-Object { $_.Class -ne 'route_runtime' })
+    }
+    if ($fallbackRuntimeUnlockSeparationProof.GenericPostFallbackPauseUnresolvedCount -gt 0) {
+        # The invariant route-law summary can anchor an aggregate projection at
+        # the earlier route selection. The exact physical pause followed by the
+        # same-writer availability contradiction is the actionable boundary.
+        $firstProofChainFailureCandidates = @(
+            $firstProofChainFailureCandidates |
+                Where-Object {
+                    $_.Class -notin @(
+                        'route_runtime',
+                        'regular_v4_frontier_repair_send_deferred_or_stalled',
+                        'regular_v4_frontier_repair_stalled',
+                        'fallback_frontier_repair_stalled')
+                })
     }
     if ($fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount -gt 0) {
         # A transition-grace terminalization is the exact authority edge.  Raw
@@ -61334,6 +61579,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockPostTunaFallbackTransportProofHandoffProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing'
+    }
+    elseif ($fallbackRuntimeUnlockSeparationProof.GenericPostFallbackPauseUnresolvedCount -gt 0) {
+        $class = 'runtime_fallback_separation_violation'
     }
     elseif ($regularV4FrontierRepairSendDeferred) {
         $class = 'regular_v4_frontier_repair_send_deferred_or_stalled'
@@ -61748,6 +61996,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_held_after_authority_granted',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+                'runtime_fallback_separation_violation',
                 'file_tuna_data_path_mismatch',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
                 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
@@ -63536,7 +63785,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('runtime_fallback_separation_violation', 'file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {

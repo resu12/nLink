@@ -5298,6 +5298,17 @@ function Get-TunaGuiExplicitFailureClassification {
                     }
                 }
             }
+            'runtime_fallback_separation_violation' {
+                return [pscustomobject]@{
+                    Phase = 'route_runtime'
+                    Reason = if ($ErrorMessage.IndexOf(
+                            'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression'
+                    }
+                    else { $failureClass }
+                }
+            }
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved' {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_initial_activation'
@@ -13931,6 +13942,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_data_session_recreated', 'filetransfer_runtime_terminalized',
             'filetransfer_live_route_epoch_terminal', 'filetransfer_v6_epoch_terminal',
             'file_transfer_outbound_terminal', 'transfer_terminal')
+        PostFallbackPause = @(
+            'filetransfer_tuna_activation_negotiation_regular_nkn_paused',
+            'filetransfer_data_session_availability_observed',
+            'filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed',
+            'tuna_payer_decision_started', 'tuna_acceleration_payer_intent_queued',
+            'runtime_unlock_retry_dispatch_authority_granted',
+            'filetransfer_route_transition_disposition_applied',
+            'filetransfer_route_transition_prepared', 'filetransfer_route_selected',
+            'filetransfer_runtime_terminalized', 'filetransfer_live_route_epoch_terminal',
+            'filetransfer_v6_epoch_terminal', 'file_transfer_outbound_terminal',
+            'transfer_terminal')
         Responder = @(
             'runtime_unlock_retry_dispatch_observed', 'tuna_acceleration_offer_queued',
             'nkn_inbound_envelope_received', 'runtime_unlock_transaction_answer_received',
@@ -14151,6 +14173,156 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
         }
         return $false
+    }
+    function Get-TunaGuiPostFallbackGenericActivationPauseFailure {
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [AllowEmptyString()]
+            [string[]]$Lines
+        )
+
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        })
+        $lookupCount = 0L
+        foreach ($pause in @($records | Where-Object {
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_tuna_activation_negotiation_regular_nkn_paused' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq
+                        'offer_send_prepare'
+                })) {
+            $lookupCount++
+            $writer = Get-TunaGuiLogLineFieldValue -Line $pause.Line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $pause.Line -Name 'session_id'
+            $pauseWriterSequenceText = Get-TunaGuiLogLineFieldValue `
+                -Line $pause.Line -Name 'log_writer_sequence'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                $pauseWriterSequenceText -notmatch '^[1-9][0-9]*$') {
+                continue
+            }
+            $pauseWriterSequence = [long]$pauseWriterSequenceText
+            [object[]]$unavailable = @($records | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_data_session_availability_observed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_sequence') -eq
+                    [string]($pauseWriterSequence + 1) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'is_available') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'tuna_activation_negotiating'
+            } | Select-Object -First 1)
+            [object[]]$suppression = @($records | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_sequence') -eq
+                    [string]($pauseWriterSequence + 2) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq
+                    'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'protocol_version') -eq '6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'recovery_active') -eq '0'
+            } | Select-Object -First 1)
+            if ($unavailable.Count -ne 1 -or $suppression.Count -ne 1) { continue }
+
+            $transfer = Get-TunaGuiLogLineFieldValue `
+                -Line $suppression[0].Line -Name 'transfer_id'
+            [object[]]$payerStart = @($records | Where-Object {
+                $_.Index -lt $pause.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'tuna_payer_decision_started' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'reason') -eq
+                    'remote_payer_intent' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer
+            } | Select-Object -Last 1)
+            if ($payerStart.Count -ne 1) { continue }
+            $payer = Get-TunaGuiLogLineFieldValue `
+                -Line $payerStart[0].Line -Name 'payer_decision_id'
+            [object[]]$payerIntent = @($records | Where-Object {
+                $_.Index -ge $payerStart[0].Index -and $_.Index -lt $pause.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'tuna_acceleration_payer_intent_queued' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'trigger') -eq
+                    'remote_payer_intent' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq $payer
+            } | Select-Object -First 1)
+            [object[]]$rollback = @($records | Where-Object {
+                $_.Index -lt $payerStart[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_route_transition_disposition_applied' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_route') -eq
+                    'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'disposition') -eq 'rolledback' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'apply_status') -eq 'applied'
+            } | Select-Object -Last 1)
+            [object[]]$retryGrant = @($records | Where-Object {
+                $rollback.Count -eq 1 -and $_.Index -lt $rollback[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_dispatch_authority_granted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_publication_route') -eq
+                    'post_tuna_fallback_v6'
+            } | Select-Object -Last 1)
+            [object[]]$newPrepared = @($records | Where-Object {
+                $rollback.Count -eq 1 -and
+                $_.Index -gt $rollback[0].Index -and $_.Index -lt $pause.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_route_transition_prepared' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer
+            } | Select-Object -First 1)
+            if ($payerIntent.Count -ne 1 -or $rollback.Count -ne 1 -or
+                $retryGrant.Count -ne 1 -or $newPrepared.Count -gt 0) { continue }
+
+            [object[]]$resume = @($records | Where-Object {
+                $_.Index -gt $pause.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_data_session_availability_observed' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'is_available') -eq '1'
+            } | Select-Object -First 1)
+            [object[]]$tuna = @($records | Where-Object {
+                $resume.Count -eq 1 -and $_.Index -gt $resume[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_route_selected' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'file_tuna_v4' -and
+                [int](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'live_route_epoch') -ge 3
+            } | Select-Object -First 1)
+            if ($resume.Count -eq 1 -and $tuna.Count -eq 1) { continue }
+
+            $sequenceText = Get-TunaGuiLogLineFieldValue `
+                -Line $pause.Line -Name 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
+                    [long]$sequenceText
+                } else { [long]($pause.Index + 1) }
+                ParsedRecords = [long](($records | Measure-Object).Count)
+                LookupCount = $lookupCount
+            }
+        }
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long](($records | Measure-Object).Count)
+            LookupCount = $lookupCount
+        }
     }
     function Get-TunaGuiInstalledRetryRecoveryJoinFailure {
         param(
@@ -15068,6 +15240,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $postFallbackProbeLaunchTransitionFastPath =
         Get-TunaGuiPostFallbackProbeLaunchTransitionAuthorityFailure `
             -Lines ([string[]]$earlyPredicateLines.PrecommitTransition.ToArray())
+    $postFallbackGenericPauseFastPath =
+        Get-TunaGuiPostFallbackGenericActivationPauseFailure `
+            -Lines ([string[]]$earlyPredicateLines.PostFallbackPause.ToArray())
     $fallbackFrontierCheckpointAcceptanceRecheckFastPath =
         Get-TunaGuiFallbackFrontierCheckpointAcceptanceRecheckFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
@@ -15123,6 +15298,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{
                 Kind = 'PrecommitTransition'
                 Result = $postFallbackProbeLaunchTransitionFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'PostFallbackPause'
+                Result = $postFallbackGenericPauseFastPath
             },
             [pscustomobject]@{ Kind = 'Responder'; Result = $responderPeerProbeFastPath },
             [pscustomobject]@{ Kind = 'PairedRetryResponderBinding'; Result = $pairedRetryResponderBindingFastPath },
@@ -15205,6 +15384,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
             -EvidenceParsedRecordCount ([long]$postFallbackProbeLaunchTransitionFastPath.ParsedRecords) `
             -EvidenceLookupCount ([long]$postFallbackProbeLaunchTransitionFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'PostFallbackPause') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$postFallbackGenericPauseFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_post_fallback_generic_pause_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_post_fallback_generic_pause_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$postFallbackGenericPauseFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$postFallbackGenericPauseFastPath.LookupCount) `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 

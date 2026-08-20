@@ -1209,6 +1209,24 @@ public sealed partial class NknSignalingTransport
             string.IsNullOrWhiteSpace(MessageId);
     }
 
+    private readonly record struct PostTunaFallbackActivationPauseScope(
+        FileTransferRoutePublicationAuthority PublicationAuthority,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        string CheckpointRequestId,
+        long DataSessionGeneration)
+    {
+        public bool IsDefault =>
+            PublicationAuthority is null ||
+            PublicationAuthority.Direction != FileTransferDirection.Outbound ||
+            !string.Equals(
+                PublicationAuthority.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            PublicationAuthority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            DataSessionGeneration <= 0;
+    }
+
     internal bool IsAccelerationAvailableForTests => IsAccelerationNegotiatedAndHealthy();
 
     internal bool HasAccelerationLaneForTests => accelerationLane is not null;
@@ -4460,6 +4478,13 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        var capturedPostFallbackScope =
+            TryCaptureCurrentPostTunaFallbackActivationPauseScope(
+                normalizedSessionId,
+                out var initialPostFallbackScope)
+                ? initialPostFallbackScope
+                : (PostTunaFallbackActivationPauseScope?)null;
+
         lock (accelerationGate)
         {
             if (IsAccelerationNegotiatedAndHealthyUnsafe(normalizedSessionId))
@@ -4493,6 +4518,16 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed; session_id={SanitizeLogToken(normalizedSessionId)}; reason={SanitizeLogToken(reason)}; trigger={SanitizeLogToken(trigger)}; suppress_reason={SanitizeLogToken(suppressReason)}");
             return false;
         }
+        if (capturedPostFallbackScope is { } capturedScope &&
+            IsCurrentPostTunaFallbackActivationPauseScope(capturedScope))
+        {
+            LogPostTunaFallbackActivationPauseSuppressed(
+                capturedScope,
+                reason,
+                trigger,
+                "current_post_tuna_fallback_requires_coordinator_transition_pause");
+            return false;
+        }
 
         long generation;
         lock (accelerationGate)
@@ -4522,6 +4557,32 @@ public sealed partial class NknSignalingTransport
             generation = ++fileTransferTunaActivationPauseGeneration;
         }
 
+        if (TryCaptureCurrentPostTunaFallbackActivationPauseScope(
+                normalizedSessionId,
+                out var recapturedPostFallbackScope) &&
+            IsCurrentPostTunaFallbackActivationPauseScope(
+                recapturedPostFallbackScope))
+        {
+            lock (accelerationGate)
+            {
+                if (generation == fileTransferTunaActivationPauseGeneration &&
+                    string.Equals(
+                        fileTransferTunaActivationPauseSessionId,
+                        normalizedSessionId,
+                        StringComparison.Ordinal))
+                {
+                    fileTransferTunaActivationPauseSessionId = null;
+                }
+            }
+
+            LogPostTunaFallbackActivationPauseSuppressed(
+                recapturedPostFallbackScope,
+                reason,
+                trigger,
+                "post_tuna_fallback_became_current_before_pause_commit");
+            return false;
+        }
+
         var normalizedReason = SanitizeLogToken(reason);
         LocalOperationalLog.Info(
             "NKN.Tuna",
@@ -4534,6 +4595,89 @@ public sealed partial class NknSignalingTransport
             targetTransport: FileTransferTransportKind.RegularNkn);
         ScheduleFileTransferTunaActivationPauseExpiryObservation(normalizedSessionId, generation);
         return true;
+    }
+
+    private bool TryCaptureCurrentPostTunaFallbackActivationPauseScope(
+        string sessionId,
+        out PostTunaFallbackActivationPauseScope scope)
+    {
+        scope = default;
+        if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAndDataSession(
+                sessionId,
+                out var authority,
+                out var dataSessionGeneration,
+                out _) ||
+            authority.Direction != FileTransferDirection.Outbound ||
+            !string.Equals(
+                authority.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) ||
+            authority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            var key = CreateFileTransferRouteHintKey(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction);
+            if (!fileTransferRoutePublicationAuthorities.TryGetValue(
+                    key,
+                    out var currentAuthority) ||
+                currentAuthority != authority ||
+                !fileTransferRouteHints.TryGetValue(key, out var routeHint) ||
+                routeHint.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+                routeHint.LiveRouteEpoch != authority.LiveRouteEpoch ||
+                routeHint.RuntimeGeneration != authority.RuntimeGeneration ||
+                routeHint.TerminalGeneration != authority.TerminalGeneration ||
+                routeHint.PublicationLegGeneration != authority.LegGeneration ||
+                routeHint.RoutePublicationGeneration !=
+                    authority.RoutePublicationGeneration ||
+                routeHint.RouteCommitGeneration != authority.RouteCommitGeneration ||
+                !fileTransferDataSessions.TryGetValue(
+                    authority.TransferId,
+                    out var dataSession) ||
+                dataSession.IsDisposed ||
+                !string.Equals(
+                    dataSession.SessionId,
+                    authority.SessionId,
+                    StringComparison.Ordinal) ||
+                dataSession.Generation != dataSessionGeneration)
+            {
+                return false;
+            }
+
+            scope = new PostTunaFallbackActivationPauseScope(
+                authority,
+                routeHint.FallbackTransportEpoch,
+                routeHint.FallbackBridgeRecoveryGeneration,
+                routeHint.FallbackCheckpointRequestId ?? "(none)",
+                dataSessionGeneration);
+            return !scope.IsDefault;
+        }
+    }
+
+    private bool IsCurrentPostTunaFallbackActivationPauseScope(
+        PostTunaFallbackActivationPauseScope expected)
+        => !expected.IsDefault &&
+           TryCaptureCurrentPostTunaFallbackActivationPauseScope(
+               expected.PublicationAuthority.SessionId,
+               out var current) &&
+           current == expected;
+
+    private static void LogPostTunaFallbackActivationPauseSuppressed(
+        PostTunaFallbackActivationPauseScope scope,
+        string reason,
+        string trigger,
+        string decisionReason)
+    {
+        var authority = scope.PublicationAuthority;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; direction={authority.Direction.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}; trigger={SanitizeLogToken(trigger)}; suppress_reason={SanitizeLogToken(decisionReason)}; route={SanitizeLogToken(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration?.ToString() ?? "(none)"}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(scope.CheckpointRequestId)}; data_session_generation={scope.DataSessionGeneration}; authority_effect=none");
     }
 
     private bool ShouldKeepPostTunaFallbackDataSessionsAvailableDuringTunaActivation(

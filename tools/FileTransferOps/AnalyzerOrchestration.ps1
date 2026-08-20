@@ -2683,7 +2683,37 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Where-Object {
                 [int64]$_.Sequence -notin $fallbackTailTransportEpochCorroboratingMismatchSequences
             }).Count
+    [string[]]$postFallbackGenericPauseEventNames = @(
+        'filetransfer_tuna_activation_negotiation_regular_nkn_paused',
+        'filetransfer_data_session_availability_observed',
+        'filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed',
+        'tuna_payer_decision_started',
+        'tuna_acceleration_payer_intent_queued',
+        'runtime_unlock_retry_dispatch_authority_granted',
+        'filetransfer_route_transition_disposition_applied',
+        'filetransfer_route_transition_prepared',
+        'filetransfer_route_selected',
+        'filetransfer_runtime_terminalized',
+        'filetransfer_live_route_epoch_terminal',
+        'filetransfer_v6_epoch_terminal',
+        'file_transfer_outbound_terminal',
+        'transfer_terminal')
+    [object[]]$postFallbackGenericPauseEvents = @(
+        Get-FileTransferCompactIndexEventsByNamesOrdered `
+            -Index $Index `
+            -Names $postFallbackGenericPauseEventNames
+    )
+    $postFallbackGenericPauseProof =
+        Get-FileTransferPostTunaFallbackGenericActivationPauseCorrelation `
+            -Events $postFallbackGenericPauseEvents
     $compactProofChainCandidates = New-Object System.Collections.Generic.List[object]
+    foreach ($candidateEvent in @($postFallbackGenericPauseProof.UnresolvedEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_fallback_separation_violation'
+            Event = $candidateEvent
+            Reason = 'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
@@ -3534,6 +3564,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_retry_dispatch_held_after_authority_granted',
                 'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
                 'runtime_unlock_retry_dispatch_authority_tuple_mismatch',
+                'runtime_fallback_separation_violation',
                 'regular_v4_frontier_tail_repair_state_publication_missing',
                 'regular_v4_frontier_repair_missing_range_not_preserved',
                 'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
@@ -3647,6 +3678,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
             'runtime_unlock_retry_dispatch_held_after_authority_granted',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+            'runtime_fallback_separation_violation',
             'runtime_unlock_retry_dispatch_current_listener_adoption_missing',
             'runtime_unlock_precommit_probe_start_handoff_missing',
             'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing',

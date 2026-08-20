@@ -3102,6 +3102,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($postFallbackResponderDrain.Phase -ne 'route_transition' -or $postFallbackResponderDrain.Reason -ne 'filetransfer_route_transition_fallback_release_not_current') { throw 'post-fallback responder drain rejection lost precedence' }
             $postFallbackProbeTransition = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_precommit_probe_start_handoff_missing; first_proof_chain_failure_reason=post_fallback_initiator_probe_launch_accepted_without_route_transition_authority' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($postFallbackProbeTransition.Phase -ne 'route_runtime' -or $postFallbackProbeTransition.Reason -ne 'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') { throw 'post-fallback probe transition authority lost precedence' }
+            $postFallbackGenericPause = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_fallback_separation_violation; first_proof_chain_failure_reason=post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($postFallbackGenericPause.Phase -ne 'route_runtime' -or $postFallbackGenericPause.Reason -ne 'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression') { throw 'post-fallback generic pause lost precedence' }
             $initialResponderMissingDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_invalidated; first_proof_chain_failure_reason=initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($initialResponderMissingDrain.Phase -ne 'route_transition' -or $initialResponderMissingDrain.Reason -ne 'initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt') { throw 'initial responder missing drain lost precedence' }
             $initialRecoveryHold = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_offer_receive_recovery_hold_not_preserved; retained_event=tuna_acceleration_activation_offer_not_observed' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
@@ -5113,6 +5115,74 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
         Assert.True(result.ExitCode == 0, $"Bound responder peer-probe GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-bound-responder-peer-probe-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_PostFallbackGenericPauseUsesIndexedProofBeforeDeadline()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-post-fallback-generic-pause-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $writer = 'writer-a'
+                @(
+                    "event=runtime_unlock_retry_dispatch_authority_granted; authority_id=retry-a; session_id=sess; transfer_id=transfer; direction=outbound; source_publication_route=post_tuna_fallback_v6; source_publication_protocol_version=6; source_publication_live_route_epoch=2; source_publication_runtime_generation=3; source_publication_terminal_generation=0; source_publication_leg_generation=3; source_publication_generation=3; log_writer_id=$writer; log_writer_sequence=4",
+                    "event=filetransfer_route_transition_disposition_applied; authority_id=transition-a; transition_generation=3; direction=outbound; session_id=sess; transfer_id=transfer; source_route=post_tuna_fallback_v6; source_protocol_version=6; disposition=rolledback; apply_status=applied; log_writer_id=$writer; log_writer_sequence=5",
+                    "event=tuna_payer_decision_started; payer_decision_id=10; reason=remote_payer_intent; log_writer_id=$writer; log_writer_sequence=6",
+                    "event=tuna_acceleration_payer_intent_queued; intent=will_listen; trigger=remote_payer_intent; payer_decision_id=10; log_writer_id=$writer; log_writer_sequence=7",
+                    "event=filetransfer_tuna_activation_negotiation_regular_nkn_paused; session_id=sess; reason=activation_negotiation_pending; trigger=offer_send_prepare; log_writer_id=$writer; log_writer_sequence=8",
+                    "event=filetransfer_data_session_availability_observed; session_id=sess; transfer_id=transfer; is_available=0; reason=tuna_activation_negotiating; log_writer_id=$writer; log_writer_sequence=9",
+                    "event=filetransfer_post_tuna_fallback_tuna_activation_pause_suppressed; direction=outbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; recovery_active=0; log_writer_id=$writer; log_writer_sequence=10",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; session_id=sess; transfer_id=transfer; source_kind=SenderTimeoutRetry; log_writer_id=$writer; log_writer_sequence=11",
+                    'event=filetransfer_gui_progress_timeout; session_id=sess; transfer_id=transfer; reason=normal_to_tuna_live_epoch_missing'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'route_runtime' -or
+                    $result.Reason -ne 'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_post_fallback_generic_pause_index') {
+                    throw "post-fallback generic pause fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                @("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused; session_id=sess; trigger=offer_send_prepare; log_writer_id=$writer; log_writer_sequence=8") |
+                    Set-Content -LiteralPath $path
+                $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($singleton.Reason -eq 'post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression') {
+                    throw 'singleton pause was classified without authority and suppression evidence'
+                }
+                Write-Output 'gui-post-fallback-generic-pause-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Post-fallback generic-pause GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-post-fallback-generic-pause-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
