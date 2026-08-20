@@ -602,6 +602,63 @@ internal static class RuntimeUnlockTransaction
         RuntimeUnlockRouteCommitProof proof,
         FileTransferCoordinatorState coordinatorState,
         out string rejectionReason)
+        => CanCommitRouteCore(
+            proof,
+            coordinatorState,
+            requireConsumedFallbackTailPairedRelease: true,
+            out rejectionReason);
+
+    internal static bool CanCommitPostFallbackResponderRoute(
+        RuntimeUnlockRouteCommitProof proof,
+        FileTransferCoordinatorState coordinatorState,
+        FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority
+            responderAuthority,
+        out string rejectionReason)
+    {
+        rejectionReason = "none";
+        var fallbackTail = coordinatorState.PersistentState.FallbackTailYield;
+        var retryLifecycle =
+            coordinatorState.PersistentState.RuntimeUnlockRetryLifecycle;
+        if (coordinatorState.Direction != FileTransferDirection.Inbound ||
+            !coordinatorState.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            fallbackTail.CurrentReservation is not null ||
+            fallbackTail.LastConsumedReservation is not null ||
+            fallbackTail.LastConsumingInstallReceipt is not null ||
+            retryLifecycle.InstalledAttempt is not null ||
+            pairedRelease.IsDefault ||
+            responderAuthority.IsDefault ||
+            responderAuthority.PairedRelease != pairedRelease ||
+            !FileTransferCoordinator
+                .TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                    coordinatorState,
+                    responderAuthority,
+                    out rejectionReason))
+        {
+            if (string.Equals(
+                    rejectionReason,
+                    "none",
+                    StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "filetransfer_route_transition_responder_handoff_boundary_invalid";
+            }
+
+            return false;
+        }
+
+        return CanCommitRouteCore(
+            proof,
+            coordinatorState,
+            requireConsumedFallbackTailPairedRelease: false,
+            out rejectionReason);
+    }
+
+    private static bool CanCommitRouteCore(
+        RuntimeUnlockRouteCommitProof proof,
+        FileTransferCoordinatorState coordinatorState,
+        bool requireConsumedFallbackTailPairedRelease,
+        out string rejectionReason)
     {
         rejectionReason = "none";
         if (coordinatorState.IsTerminal)
@@ -723,6 +780,7 @@ internal static class RuntimeUnlockTransaction
         var survivalState = coordinatorState.RuntimeUnlockFallbackSurvivalState;
         if (coordinatorState.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
             !survivalState.FallbackTerminalized &&
+            requireConsumedFallbackTailPairedRelease &&
             !FileTransferCoordinator
                 .HasEffectiveFallbackTailPairedReleaseForRouteTransition(
                     coordinatorState))

@@ -8693,6 +8693,14 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_route_transition_transport_pause_decided',
         'filetransfer_route_transition_retained_frame_applied',
         'filetransfer_route_transition_retained_frame_rejected',
+        'filetransfer_fallback_tail_yield_issued',
+        'filetransfer_fallback_tail_local_proof_receipt_decided',
+        'filetransfer_fallback_tail_peer_proof_receipt_decided',
+        'filetransfer_fallback_tail_pairing_committed',
+        'filetransfer_fallback_tail_paired_yield_granted',
+        'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+        'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
+        'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided',
         'filetransfer_route_transition_physical_send_lease_registered',
         'filetransfer_route_transition_physical_send_lease_retired',
         'filetransfer_route_transition_physical_send_lease_rejected',
@@ -10062,6 +10070,9 @@ function Get-FileTransferRouteTransitionCorrelation {
     $bootstrapPeerFrameDecisionEventList = New-Object System.Collections.Generic.List[object]
     $bootstrapPeerBoundaryBoundEventList = New-Object System.Collections.Generic.List[object]
     $bootstrapPhysicalSendEventList = New-Object System.Collections.Generic.List[object]
+    $fallbackTailPairingEventList = New-Object System.Collections.Generic.List[object]
+    $fallbackTailPairedGrantEventList = New-Object System.Collections.Generic.List[object]
+    $responderRouteTransitionHandoffEventList = New-Object System.Collections.Generic.List[object]
     $routeTransitionIndexBuildVisitCount = 0L
     $routeTransitionLeaseIndexBuildVisitCount = 0L
     $routeTransitionRegisteredLeaseIndexBuildVisitCount = 0L
@@ -10211,6 +10222,15 @@ function Get-FileTransferRouteTransitionCorrelation {
                     $bootstrapPhysicalSendEventList.Add($event) | Out-Null
                 }
             }
+            'filetransfer_fallback_tail_pairing_committed' {
+                $fallbackTailPairingEventList.Add($event) | Out-Null
+            }
+            'filetransfer_fallback_tail_paired_yield_granted' {
+                $fallbackTailPairedGrantEventList.Add($event) | Out-Null
+            }
+            'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided' {
+                $responderRouteTransitionHandoffEventList.Add($event) | Out-Null
+            }
         }
     }
 
@@ -10279,6 +10299,156 @@ function Get-FileTransferRouteTransitionCorrelation {
     [object[]]$bootstrapPeerFrameDecisionEvents = @($bootstrapPeerFrameDecisionEventList.ToArray())
     [object[]]$bootstrapPeerBoundaryBoundEvents = @($bootstrapPeerBoundaryBoundEventList.ToArray())
     [object[]]$bootstrapPhysicalSendEvents = @($bootstrapPhysicalSendEventList.ToArray())
+    [object[]]$fallbackTailPairingEvents = @($fallbackTailPairingEventList.ToArray())
+    [object[]]$fallbackTailPairedGrantEvents = @($fallbackTailPairedGrantEventList.ToArray())
+    [object[]]$responderRouteTransitionHandoffEvents = @(
+        $responderRouteTransitionHandoffEventList.ToArray())
+
+    function Test-PostFallbackResponderPairedHandoffEvidence {
+        param([Parameter(Mandatory = $true)]$Prepared)
+
+        if ((Get-RouteTransitionField -Event $Prepared -Name 'direction') -ne 'inbound' -or
+            (Get-RouteTransitionField -Event $Prepared -Name 'transition_kind') -ne
+                'PostTunaFallbackV6ToTunaV4' -or
+            (Get-RouteTransitionField -Event $Prepared -Name 'retry_install_generation') -ne '0') {
+            return $false
+        }
+
+        $preparedSequence = [int64]$Prepared.Sequence
+        $preparedWriter = Get-RouteTransitionField -Event $Prepared -Name 'log_writer_id'
+        $commonFields = @(
+            'session_id',
+            'transfer_id',
+            'direction',
+            'responder_transition_mode',
+            'activation_authority_mode',
+            'admission_generation',
+            'pending_precommit_generation',
+            'transaction_generation',
+            'offer_generation',
+            'launch_generation',
+            'tuna_path_lease_generation',
+            'fallback_yield_authority_id',
+            'fallback_yield_generation',
+            'pairing_generation',
+            'pair_key',
+            'responder_handoff_authority_id',
+            'responder_handoff_generation',
+            'checkpoint_generation',
+            'data_session_identity',
+            'target_route',
+            'target_protocol_version',
+            'target_transport')
+        $sourceFieldMap = @{
+            source_route = 'route'
+            source_protocol_version = 'protocol_version'
+            source_live_route_epoch = 'live_route_epoch'
+            source_runtime_generation = 'runtime_generation'
+            source_route_publication_generation = 'route_publication_generation'
+            source_route_commit_generation = 'route_commit_generation'
+            source_terminal_generation = 'terminal_generation'
+            source_leg_generation = 'leg_generation'
+            source_transport_epoch = 'transport_epoch'
+            source_bridge_recovery_generation = 'bridge_recovery_generation'
+            source_data_session_generation = 'data_session_generation'
+        }
+
+        [object[]]$handoffs = @($responderRouteTransitionHandoffEvents | Where-Object {
+                [int64]$_.Sequence -lt $preparedSequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'log_writer_id') -eq
+                    $preparedWriter -and
+                (Test-RouteTransitionStatus -Event $_ -Allowed @('Accepted', 'Idempotent')) -and
+                (Get-RouteTransitionField -Event $_ -Name 'pair_state') -eq 'Paired' -and
+                (Get-RouteTransitionField -Event $_ -Name 'probe_state') -ieq 'acked' -and
+                (Get-RouteTransitionField -Event $_ -Name 'probe_transport') -ieq 'tuna' -and
+                (Get-RouteTransitionField -Event $_ -Name 'answer_acceptance_source') -eq
+                    'SemanticAnswerAck' -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'local_proof_identity')) -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'local_frame_fingerprint')) -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'peer_observation_identity')) -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'peer_frame_fingerprint'))
+            } | Where-Object {
+                $candidate = $_
+                $matches = $true
+                foreach ($fieldName in $commonFields) {
+                    if ((Get-RouteTransitionField -Event $Prepared -Name $fieldName) -ine
+                        (Get-RouteTransitionField -Event $candidate -Name $fieldName)) {
+                        $matches = $false
+                        break
+                    }
+                }
+                if ($matches) {
+                    foreach ($entry in $sourceFieldMap.GetEnumerator()) {
+                        if ((Get-RouteTransitionField -Event $Prepared -Name $entry.Key) -ine
+                            (Get-RouteTransitionField -Event $candidate -Name $entry.Value)) {
+                            $matches = $false
+                            break
+                        }
+                    }
+                }
+                $matches
+            } | Sort-Object Sequence, LineNumber)
+        if ($handoffs.Count -eq 0) {
+            return $false
+        }
+
+        $handoff = $handoffs[-1]
+        $preparedYieldAuthority =
+            Get-RouteTransitionField -Event $Prepared -Name 'fallback_yield_authority_id'
+        $preparedYieldAuthorityRedacted =
+            $preparedYieldAuthority -in @('[redacted]', 'redacted', '(redacted)')
+        [object[]]$pairings = @($fallbackTailPairingEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$handoff.Sequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'log_writer_id') -eq
+                    $preparedWriter -and
+                (Test-RouteTransitionStatus -Event $_ -Allowed @('Accepted', 'Idempotent')) -and
+                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'session_id') -and
+                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'transfer_id') -and
+                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq 'inbound' -and
+                ($preparedYieldAuthorityRedacted -or
+                    (Get-RouteTransitionField -Event $_ -Name 'authority_id') -eq
+                        $preparedYieldAuthority) -and
+                (Get-RouteTransitionField -Event $_ -Name 'yield_generation') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'fallback_yield_generation') -and
+                (Get-RouteTransitionField -Event $_ -Name 'pairing_generation') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'pairing_generation') -and
+                (Get-RouteTransitionField -Event $_ -Name 'pair_key') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'pair_key') -and
+                (Get-RouteTransitionField -Event $_ -Name 'pairing_state') -eq 'Paired' -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'local_proof_identity')) -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-RouteTransitionField -Event $_ -Name 'peer_observation_identity'))
+            } | Sort-Object Sequence, LineNumber)
+        if ($pairings.Count -eq 0) {
+            return $false
+        }
+
+        return @($fallbackTailPairedGrantEvents | Where-Object {
+                [int64]$_.Sequence -ge [int64]$pairings[-1].Sequence -and
+                [int64]$_.Sequence -lt [int64]$handoff.Sequence -and
+                (Get-RouteTransitionField -Event $_ -Name 'log_writer_id') -eq
+                    $preparedWriter -and
+                (Get-RouteTransitionField -Event $_ -Name 'session_id') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'session_id') -and
+                (Get-RouteTransitionField -Event $_ -Name 'transfer_id') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'transfer_id') -and
+                (Get-RouteTransitionField -Event $_ -Name 'direction') -eq 'inbound' -and
+                ($preparedYieldAuthorityRedacted -or
+                    (Get-RouteTransitionField -Event $_ -Name 'authority_id') -eq
+                        $preparedYieldAuthority) -and
+                (Get-RouteTransitionField -Event $_ -Name 'yield_generation') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'fallback_yield_generation') -and
+                (Get-RouteTransitionField -Event $_ -Name 'pair_key') -eq
+                    (Get-RouteTransitionField -Event $Prepared -Name 'pair_key')
+            }).Count -gt 0
+    }
 
     $rawRecords = New-Object System.Collections.Generic.List[object]
     $distinctRecords = New-Object System.Collections.Generic.List[object]
@@ -10421,11 +10591,13 @@ function Get-FileTransferRouteTransitionCorrelation {
                     'post_fallback_v6_paired' -and
                 (Get-RouteTransitionField -Event $prepared -Name 'activation_authority_mode') -eq
                     'responder'
-            $drainRejectionReason = if ($postFallbackResponder) {
-                'filetransfer_route_transition_fallback_release_not_current'
+            $allowedDrainRejectionReasons = if ($postFallbackResponder) {
+                @(
+                    'filetransfer_route_transition_fallback_release_not_current',
+                    'paired_fallback_tail_yield_missing')
             }
             else {
-                'filetransfer_route_transition_initial_responder_boundary_not_current'
+                @('filetransfer_route_transition_initial_responder_boundary_not_current')
             }
             [object[]]$rejectedDrainReceipts = @($receiptEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
@@ -10435,15 +10607,26 @@ function Get-FileTransferRouteTransitionCorrelation {
                     (Get-RouteTransitionField -Event $_ -Name 'status') -eq 'Rejected'
                 } | Sort-Object Sequence, LineNumber)
             if ($rejectedDrainReceipts.Count -gt 0) {
-                [object[]]$reasonMutations = @($rejectedDrainReceipts | Where-Object {
-                        (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -ne
-                            $drainRejectionReason
-                    })
+                [object[]]$observedDrainRejectionReasons = @(
+                    $rejectedDrainReceipts | ForEach-Object {
+                        Get-RouteTransitionField -Event $_ -Name 'decision_reason'
+                    } | Sort-Object -Unique)
+                $drainRejectionReason = if ($observedDrainRejectionReasons.Count -eq 1) {
+                    [string]$observedDrainRejectionReasons[0]
+                }
+                else {
+                    ''
+                }
                 [object[]]$exactRejectedDrainReceipts = @($rejectedDrainReceipts | Where-Object {
                         (Get-RouteTransitionField -Event $_ -Name 'decision_reason') -eq
                             $drainRejectionReason
                     })
-                if ($reasonMutations.Count -eq 0 -and
+                $exactResponderPairingEvidence =
+                    -not $postFallbackResponder -or
+                    $drainRejectionReason -ne 'paired_fallback_tail_yield_missing' -or
+                    (Test-PostFallbackResponderPairedHandoffEvidence -Prepared $prepared)
+                if ($drainRejectionReason -in $allowedDrainRejectionReasons -and
+                    $exactResponderPairingEvidence -and
                     $exactRejectedDrainReceipts.Count -gt 0) {
                     $lastRejectedSequence = [int64]$exactRejectedDrainReceipts[-1].Sequence
                     [object[]]$completedRecoveryReceipts = @($receiptEvents | Where-Object {
@@ -10481,18 +10664,31 @@ function Get-FileTransferRouteTransitionCorrelation {
                                             'committed')
                                 } | Sort-Object Sequence, LineNumber)
                             if ($recoveryDispositions.Count -gt 0) {
-                                $recoveryEnd = [int64]$recoveryDispositions[0].Sequence
-                                $recoveryBlocked = @(
-                                    @($invalidationEvents) + @($supersessionEvents) +
-                                    @($terminalEvents) + @($ownerBoundaryEvents) | Where-Object {
-                                        [int64]$_.Sequence -gt $lastRejectedSequence -and
-                                        [int64]$_.Sequence -lt $recoveryEnd -and
-                                        (Test-RouteTransitionTransferScopeMatch `
-                                            -Authority $prepared `
-                                            -Candidate $_)
-                                    }
-                                ).Count -gt 0
-                                $recovered = -not $recoveryBlocked
+                                [object[]]$recoveryPublications = @(
+                                    $ownerBoundaryEvents | Where-Object {
+                                        $_.EventName -eq 'filetransfer_route_selected' -and
+                                        [int64]$_.Sequence -gt
+                                            [int64]$recoveryCommit.Sequence -and
+                                        (Test-RouteTransitionTargetBoundary `
+                                            -Prepared $prepared `
+                                            -Boundary $_)
+                                    } | Sort-Object Sequence, LineNumber)
+                                if ($recoveryPublications.Count -gt 0) {
+                                    $recoveryEnd = [Math]::Max(
+                                        [int64]$recoveryDispositions[0].Sequence,
+                                        [int64]$recoveryPublications[0].Sequence)
+                                    $recoveryBlocked = @(
+                                        @($invalidationEvents) + @($supersessionEvents) +
+                                        @($terminalEvents) | Where-Object {
+                                            [int64]$_.Sequence -gt $lastRejectedSequence -and
+                                            [int64]$_.Sequence -lt $recoveryEnd -and
+                                            (Test-RouteTransitionTransferScopeMatch `
+                                                -Authority $prepared `
+                                                -Candidate $_)
+                                        }
+                                    ).Count -gt 0
+                                    $recovered = -not $recoveryBlocked
+                                }
                             }
                         }
                     }

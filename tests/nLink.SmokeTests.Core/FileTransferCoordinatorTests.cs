@@ -18503,6 +18503,11 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(fallbackTail.CurrentReservation);
         Assert.Null(fallbackTail.LastConsumedReservation);
         Assert.Null(fallbackTail.LastConsumingInstallReceipt);
+        Assert.False(paired.State.RuntimeUnlockFallbackSurvivalState.FallbackTerminalized);
+        Assert.False(
+            FileTransferCoordinator
+                .HasEffectiveFallbackTailPairedReleaseForRouteTransition(
+                    paired.State));
         var admitted = RequestRuntimeUnlockAdmission(
             paired.State,
             paired.State.CurrentRuntimeOwner);
@@ -18873,7 +18878,8 @@ public sealed class FileTransferCoordinatorTests
         var committed = CommitEmptyFileTransferRouteTransitionForTest(
             bound.State,
             request,
-            finalProof);
+            finalProof,
+            invalidateRuntimeUnlockRetryLifecycle: false);
         Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
         Assert.Null(
             FileTransferCoordinator.GetFallbackTailYieldSubstate(committed.State)
@@ -19793,7 +19799,8 @@ public sealed class FileTransferCoordinatorTests
         CommitEmptyFileTransferRouteTransitionForTest(
             FileTransferCoordinatorState state,
             FileTransferRouteTransitionPrepareRequest request,
-            RuntimeUnlockRouteCommitProof? finalProof)
+            RuntimeUnlockRouteCommitProof? finalProof,
+            bool invalidateRuntimeUnlockRetryLifecycle = true)
     {
         var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
             state,
@@ -19820,9 +19827,33 @@ public sealed class FileTransferCoordinatorTests
             FileTransferRouteTransitionDecisionStatus.Draining,
             draining.Status);
         var drain = draining.DrainCommand!.Value;
-        var commitState =
-            InvalidateRuntimeUnlockRetryLifecycleForRouteTransitionCommitForTest(
-                draining.State);
+        var commitState = draining.State;
+        if (invalidateRuntimeUnlockRetryLifecycle)
+        {
+            commitState =
+                InvalidateRuntimeUnlockRetryLifecycleForRouteTransitionCommitForTest(
+                    draining.State);
+        }
+        else
+        {
+            var proof = Assert.IsType<RuntimeUnlockRouteCommitProof>(finalProof);
+            Assert.False(
+                RuntimeUnlockTransaction.CanCommitRoute(
+                    proof,
+                    draining.State,
+                    out var directCommitReason));
+            Assert.Equal(
+                "paired_fallback_tail_yield_missing",
+                directCommitReason);
+            Assert.True(
+                FileTransferCoordinator
+                    .TryValidateFileTransferRouteTransitionCommitProof(
+                        draining.State,
+                        authority,
+                        proof,
+                        out var transitionCommitReason),
+                transitionCommitReason);
+        }
         var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
             commitState,
             authority,

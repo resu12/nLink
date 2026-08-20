@@ -27117,7 +27117,7 @@ internal static class FileTransferCoordinator
         return true;
     }
 
-    private static bool
+    internal static bool
         TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
             FileTransferCoordinatorState state,
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority authority,
@@ -28462,14 +28462,6 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (!RuntimeUnlockTransaction.CanCommitRoute(
-                proof,
-                state,
-                out rejectionReason))
-        {
-            return false;
-        }
-
         if (authority.Kind ==
             FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4)
         {
@@ -28507,16 +28499,23 @@ internal static class FileTransferCoordinator
                         activation.FallbackTailPairedReleaseReceipt!.Value,
                         activation,
                         out activationRejectionReason);
+                if (validBoundary)
+                {
+                    validBoundary = RuntimeUnlockTransaction.CanCommitRoute(
+                        proof,
+                        state,
+                        out activationRejectionReason);
+                }
             }
             else if (validBoundary)
             {
                 var responderAuthority =
                     activation.ResponderPeerProbeHandoffAuthority!.Value;
-                validBoundary =
-                    responderAuthority.PairedRelease ==
-                        activation.FallbackTailPairedReleaseReceipt!.Value &&
-                    TryValidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthorityCurrent(
+                validBoundary = RuntimeUnlockTransaction
+                    .CanCommitPostFallbackResponderRoute(
+                        proof,
                         state,
+                        activation.FallbackTailPairedReleaseReceipt!.Value,
                         responderAuthority,
                         out activationRejectionReason);
             }
@@ -28531,6 +28530,13 @@ internal static class FileTransferCoordinator
                     : activationRejectionReason;
                 return false;
             }
+        }
+        else if (!RuntimeUnlockTransaction.CanCommitRoute(
+                     proof,
+                     state,
+                     out rejectionReason))
+        {
+            return false;
         }
 
         if (authority.Kind ==

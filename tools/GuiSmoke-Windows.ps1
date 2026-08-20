@@ -5282,6 +5282,11 @@ function Get-TunaGuiExplicitFailureClassification {
                             [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                         'filetransfer_route_transition_fallback_release_not_current'
                     }
+                    elseif ($ErrorMessage.IndexOf(
+                            'paired_fallback_tail_yield_missing',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'paired_fallback_tail_yield_missing'
+                    }
                     else { $failureClass }
                 }
             }
@@ -13158,6 +13163,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         )
 
         $states = @{}
+        $pairingByScope = @{}
+        $pairedGrantByScope = @{}
+        $responderHandoffByScope = @{}
         $visits = 0L
         $parsed = 0L
         $tupleFields = @(
@@ -13189,6 +13197,109 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $values.Add($value.ToLowerInvariant()) | Out-Null
             }
             return [string]::Join('|', $values)
+        }
+
+        function Get-TunaGuiResponderDrainScopeKey {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            $values = New-Object System.Collections.Generic.List[string]
+            foreach ($field in @(
+                    'log_writer_id', 'session_id', 'transfer_id', 'direction')) {
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($value) -or
+                    $value -in @('(none)', 'none')) {
+                    return ''
+                }
+                $values.Add($value.ToLowerInvariant()) | Out-Null
+            }
+            return [string]::Join('|', $values)
+        }
+
+        function Test-TunaGuiPostFallbackResponderDrainEvidence {
+            param(
+                [Parameter(Mandatory = $true)][string]$Prepared,
+                [Parameter(Mandatory = $true)][string]$ScopeKey
+            )
+
+            if (-not $pairingByScope.ContainsKey($ScopeKey) -or
+                -not $pairedGrantByScope.ContainsKey($ScopeKey) -or
+                -not $responderHandoffByScope.ContainsKey($ScopeKey) -or
+                (Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'retry_install_generation') -ne '0') {
+                return $false
+            }
+
+            $pairing = [string]$pairingByScope[$ScopeKey]
+            $grant = [string]$pairedGrantByScope[$ScopeKey]
+            $handoff = [string]$responderHandoffByScope[$ScopeKey]
+            foreach ($comparison in @(
+                    @('fallback_yield_authority_id', 'authority_id'),
+                    @('fallback_yield_generation', 'yield_generation'),
+                    @('pair_key', 'pair_key'))) {
+                $expected = Get-TunaGuiLogLineFieldValue `
+                    -Line $Prepared `
+                    -Name $comparison[0]
+                $authorityRedacted =
+                    $comparison[0] -eq 'fallback_yield_authority_id' -and
+                    $expected -in @('[redacted]', 'redacted', '(redacted)')
+                if (-not $authorityRedacted -and
+                    ($expected -ne (Get-TunaGuiLogLineFieldValue `
+                        -Line $pairing `
+                        -Name $comparison[1]) -or
+                    $expected -ne (Get-TunaGuiLogLineFieldValue `
+                        -Line $grant `
+                        -Name $comparison[1]))) {
+                    return $false
+                }
+            }
+            if ((Get-TunaGuiLogLineFieldValue -Line $Prepared -Name 'pairing_generation') -ine
+                (Get-TunaGuiLogLineFieldValue -Line $pairing -Name 'pairing_generation')) {
+                return $false
+            }
+            if ((Get-TunaGuiLogLineFieldValue -Line $pairing -Name 'pairing_state') -ne 'Paired' -or
+                [string]::IsNullOrWhiteSpace(
+                    (Get-TunaGuiLogLineFieldValue -Line $pairing -Name 'local_proof_identity')) -or
+                [string]::IsNullOrWhiteSpace(
+                    (Get-TunaGuiLogLineFieldValue -Line $pairing -Name 'peer_observation_identity'))) {
+                return $false
+            }
+
+            foreach ($field in @(
+                    'session_id', 'transfer_id', 'direction',
+                    'responder_transition_mode', 'activation_authority_mode',
+                    'admission_generation', 'pending_precommit_generation',
+                    'transaction_generation', 'offer_generation', 'launch_generation',
+                    'tuna_path_lease_generation', 'fallback_yield_authority_id',
+                    'fallback_yield_generation', 'pairing_generation', 'pair_key',
+                    'responder_handoff_authority_id', 'responder_handoff_generation',
+                    'checkpoint_generation', 'data_session_identity',
+                    'target_route', 'target_protocol_version', 'target_transport')) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Prepared -Name $field) -ine
+                    (Get-TunaGuiLogLineFieldValue -Line $handoff -Name $field)) {
+                    return $false
+                }
+            }
+            foreach ($comparison in @(
+                    @('source_route', 'route'),
+                    @('source_protocol_version', 'protocol_version'),
+                    @('source_live_route_epoch', 'live_route_epoch'),
+                    @('source_runtime_generation', 'runtime_generation'),
+                    @('source_route_publication_generation', 'route_publication_generation'),
+                    @('source_terminal_generation', 'terminal_generation'),
+                    @('source_leg_generation', 'leg_generation'),
+                    @('source_transport_epoch', 'transport_epoch'),
+                    @('source_bridge_recovery_generation', 'bridge_recovery_generation'),
+                    @('source_data_session_generation', 'data_session_generation'))) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Prepared -Name $comparison[0]) -ine
+                    (Get-TunaGuiLogLineFieldValue -Line $handoff -Name $comparison[1])) {
+                    return $false
+                }
+            }
+            return (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'probe_state') -ieq
+                    'acked' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'probe_transport') -ieq
+                    'tuna' -and
+                (Get-TunaGuiLogLineFieldValue -Line $handoff -Name 'answer_acceptance_source') -eq
+                    'SemanticAnswerAck'
         }
 
         function Test-TunaGuiInitialResponderDrainTuple {
@@ -13234,6 +13345,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [long]$sequenceText
             }
             else { $visits }
+            $scopeKey = Get-TunaGuiResponderDrainScopeKey -Line $line
+            if (-not [string]::IsNullOrWhiteSpace($scopeKey)) {
+                if ($eventName -eq 'filetransfer_fallback_tail_pairing_committed' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -iin
+                        @('Accepted', 'Idempotent') -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_state') -eq
+                        'Paired') {
+                    $pairingByScope[$scopeKey] = $line
+                }
+                elseif ($eventName -eq 'filetransfer_fallback_tail_paired_yield_granted') {
+                    $pairedGrantByScope[$scopeKey] = $line
+                }
+                elseif ($eventName -eq
+                        'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -iin
+                        @('Accepted', 'Idempotent')) {
+                    $responderHandoffByScope[$scopeKey] = $line
+                }
+            }
             $key = Get-TunaGuiInitialResponderDrainKey -Line $line
 
             if ($eventName -eq 'filetransfer_route_transition_prepared') {
@@ -13278,17 +13408,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         Incident = $false
                         IncidentSequence = 0L
                         IncidentReason = ''
-                        ExpectedRejectionReason = if ($postFallbackResponder) {
-                            'filetransfer_route_transition_fallback_release_not_current'
+                        ScopeKey = $scopeKey
+                        AllowedRejectionReasons = if ($postFallbackResponder) {
+                            @(
+                                'filetransfer_route_transition_fallback_release_not_current',
+                                'paired_fallback_tail_yield_missing')
                         }
                         else {
-                            'filetransfer_route_transition_initial_responder_boundary_not_current'
+                            @('filetransfer_route_transition_initial_responder_boundary_not_current')
                         }
                         TerminalIncident = $false
                         PendingTerminalInvalidation = $false
                         PendingTerminalInvalidationSequence = 0L
                         RecoveryReceipt = $false
                         Commit = $false
+                        DispositionApplied = $false
+                        Publication = $false
                         Recovered = $false
                         RecoveryBlocked = $false
                         Invalid = $false
@@ -13328,13 +13463,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $reason = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
                         if ($status -ieq 'Rejected') {
                             if (-not $state.Pause -or -not $state.Draining -or
-                                $reason -ine $state.ExpectedRejectionReason) {
+                                $reason -notin $state.AllowedRejectionReasons -or
+                                ($reason -ieq 'paired_fallback_tail_yield_missing' -and
+                                    -not (Test-TunaGuiPostFallbackResponderDrainEvidence `
+                                        -Prepared $state.Prepared `
+                                        -ScopeKey $state.ScopeKey)) -or
+                                ($state.Incident -and $reason -ine $state.IncidentReason)) {
                                 $state.Invalid = $true
                             }
                             elseif (-not $state.Incident) {
                                 $state.Incident = $true
                                 $state.IncidentSequence = $sequence
-                                $state.IncidentReason = $state.ExpectedRejectionReason
+                                $state.IncidentReason = $reason
                             }
                         }
                         elseif ($status -iin @('Accepted', 'Applied', 'Idempotent') -and
@@ -13370,7 +13510,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                                     @('Applied', 'Idempotent') -or
                                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -iin
                                     @('Applied', 'Idempotent'))) {
-                            $state.Recovered = $true
+                            $state.DispositionApplied = $true
+                            $state.Recovered = $state.Publication
                         }
                     }
                     'filetransfer_route_transition_invalidated' {
@@ -13407,6 +13548,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $session = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
                 $transfer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
                 foreach ($state in $states.Values) {
+                    if ($eventName -eq 'filetransfer_route_selected' -and
+                        $state.Incident -and $state.Commit -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -ieq
+                            'file_tuna_v4' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $state.Prepared -Name 'log_writer_id') -eq $writer -and
+                        (Get-TunaGuiLogLineFieldValue -Line $state.Prepared -Name 'session_id') -eq $session -and
+                        (Get-TunaGuiLogLineFieldValue -Line $state.Prepared -Name 'transfer_id') -eq $transfer) {
+                        $state.Publication = $true
+                        $state.Recovered = $state.DispositionApplied
+                        continue
+                    }
                     if ($state.Recovered) { continue }
                     if ((Get-TunaGuiLogLineFieldValue -Line $state.Prepared -Name 'log_writer_id') -eq $writer -and
                         (Get-TunaGuiLogLineFieldValue -Line $state.Prepared -Name 'session_id') -eq $session -and
@@ -13433,14 +13585,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $unresolved = @($states.Values | Where-Object {
                 $_.Incident -and -not $_.Recovered -and -not $_.Invalid
             } | Sort-Object IncidentSequence)
+        $firstUnresolved = $unresolved | Select-Object -First 1
         return [pscustomobject]@{
-            Unresolved = $unresolved.Count -gt 0
-            FirstSequence = if ($unresolved.Count -gt 0) {
-                [long]$unresolved[0].IncidentSequence
+            Unresolved = $null -ne $firstUnresolved
+            FirstSequence = if ($null -ne $firstUnresolved) {
+                [long]$firstUnresolved.IncidentSequence
             }
             else { [long]::MaxValue }
-            Reason = if ($unresolved.Count -gt 0) {
-                [string]$unresolved[0].IncidentReason
+            Reason = if ($null -ne $firstUnresolved) {
+                [string]$firstUnresolved.IncidentReason
             }
             else { 'filetransfer_route_transition_initial_responder_boundary_not_current' }
             LineVisits = $visits
@@ -13932,6 +14085,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     $earlyPredicateEventNames = @{
         RouteDrain = @(
+            'filetransfer_fallback_tail_yield_issued',
+            'filetransfer_fallback_tail_local_proof_receipt_decided',
+            'filetransfer_fallback_tail_peer_proof_receipt_decided',
+            'filetransfer_fallback_tail_pairing_committed',
+            'filetransfer_fallback_tail_paired_yield_granted',
+            'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
+            'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
+            'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided',
             'filetransfer_route_transition_prepared',
             'filetransfer_route_transition_pause_bound',
             'filetransfer_route_transition_draining',

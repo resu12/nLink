@@ -3102,6 +3102,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialResponderDrain.Phase -ne 'route_transition' -or $initialResponderDrain.Reason -ne 'filetransfer_route_transition_initial_responder_boundary_not_current') { throw 'initial responder drain rejection lost precedence' }
             $postFallbackResponderDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=filetransfer_route_transition_fallback_release_not_current' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($postFallbackResponderDrain.Phase -ne 'route_transition' -or $postFallbackResponderDrain.Reason -ne 'filetransfer_route_transition_fallback_release_not_current') { throw 'post-fallback responder drain rejection lost precedence' }
+            $postFallbackResponderPairedDrain = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=filetransfer_route_transition_incomplete; retained_event=filetransfer_route_transition_drain_receipt_decided; first_proof_chain_failure_reason=paired_fallback_tail_yield_missing' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
+            if ($postFallbackResponderPairedDrain.Phase -ne 'route_transition' -or $postFallbackResponderPairedDrain.Reason -ne 'paired_fallback_tail_yield_missing') { throw 'post-fallback paired responder drain rejection lost precedence' }
             $postFallbackProbeTransition = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_precommit_probe_start_handoff_missing; first_proof_chain_failure_reason=post_fallback_initiator_probe_launch_accepted_without_route_transition_authority' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
             if ($postFallbackProbeTransition.Phase -ne 'route_runtime' -or $postFallbackProbeTransition.Reason -ne 'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') { throw 'post-fallback probe transition authority lost precedence' }
             $postFallbackGenericPause = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_fallback_separation_violation; first_proof_chain_failure_reason=post_tuna_fallback_regular_nkn_paused_by_stale_retry_receipt_despite_current_pause_suppression' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
@@ -3535,7 +3537,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 @(
                     "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Accepted; drain_outcome=Completed; $tuple",
                     "event=filetransfer_route_transition_committed; decision_status=Committed; $tuple",
-                    "event=filetransfer_route_transition_disposition_applied; decision_status=Applied; apply_status=Applied; $tuple"
+                    "event=filetransfer_route_transition_disposition_applied; decision_status=Applied; apply_status=Applied; $tuple",
+                    'event=filetransfer_route_selected; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; route=file_tuna_v4'
                 ) | Add-Content -LiteralPath $path
                 $recovered = Get-TunaGuiFileTransferSetupFailureClassification `
                     -Bookmark 0 `
@@ -3549,10 +3552,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
                 $postFallbackTuple = 'direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; authority_id=authority-post-fallback; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_route_publication_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; proof_boundary_kind=tuna_activation; responder_transition_mode=post_fallback_v6_paired; activation_authority_mode=responder; admission_generation=3; pending_precommit_generation=2; transaction_generation=1; offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; retry_install_generation=0; fallback_yield_authority_id=yield-1; fallback_yield_generation=1; pairing_generation=1; pair_key=pair-1; responder_handoff_authority_id=handoff-1; responder_handoff_generation=1; checkpoint_request_id=(none); data_session_identity=data-session:1; checkpoint_generation=1; checkpoint_state_epoch=1039; checkpoint_contiguous_frontier=2586; checkpoint_durable_highest=3094; checkpoint_chunk_count=12484'
                 @(
+                    'event=filetransfer_fallback_tail_pairing_committed; decision_status=Accepted; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; authority_id=yield-1; yield_generation=1; pairing_generation=1; pair_key=pair-1; pairing_state=Paired; local_proof_identity=local-proof; peer_observation_identity=peer-proof',
+                    'event=filetransfer_fallback_tail_paired_yield_granted; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; authority_id=yield-1; yield_generation=1; pair_key=pair-1',
+                    'event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; decision_status=Accepted; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; responder_transition_mode=post_fallback_v6_paired; activation_authority_mode=responder; admission_generation=3; pending_precommit_generation=2; transaction_generation=1; offer_generation=9; launch_generation=4; tuna_path_lease_generation=2; fallback_yield_authority_id=yield-1; fallback_yield_generation=1; pairing_generation=1; pair_key=pair-1; responder_handoff_authority_id=handoff-1; responder_handoff_generation=1; checkpoint_generation=1; data_session_identity=data-session:1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; pair_state=Paired; probe_state=acked; probe_transport=tuna; answer_acceptance_source=SemanticAnswerAck; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; route_publication_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; data_session_generation=1',
                     "event=filetransfer_route_transition_prepared; decision_status=Prepared; $postFallbackTuple",
                     "event=filetransfer_route_transition_pause_bound; decision_status=Installed; $postFallbackTuple",
                     "event=filetransfer_route_transition_draining; decision_status=Draining; $postFallbackTuple",
-                    "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Rejected; decision_reason=filetransfer_route_transition_fallback_release_not_current; $postFallbackTuple",
+                    "event=filetransfer_route_transition_drain_receipt_decided; decision_status=Rejected; decision_reason=paired_fallback_tail_yield_missing; $postFallbackTuple",
                     "event=filetransfer_route_transition_invalidated; decision_status=Invalidated; decision_reason=inbound_transfer_terminal; $postFallbackTuple"
                 ) | Set-Content -LiteralPath $path
                 $postFallback = Get-TunaGuiFileTransferSetupFailureClassification `
@@ -3561,7 +3567,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -RouteMode 'live-regular-activation-cycle' `
                     -ImmutableEvidencePaths @($path)
                 if ($postFallback.Phase -ne 'route_transition' -or
-                    $postFallback.Reason -ne 'filetransfer_route_transition_fallback_release_not_current') {
+                    $postFallback.Reason -ne 'paired_fallback_tail_yield_missing') {
                     throw "post-fallback responder drain mismatch: $($postFallback | ConvertTo-Json -Compress)"
                 }
 

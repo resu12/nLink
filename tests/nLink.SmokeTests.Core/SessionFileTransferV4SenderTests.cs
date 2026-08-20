@@ -25169,6 +25169,17 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         sparseWrite.ReleaseWrites();
         await sparseWriteTask.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Empty(pendingSparseWrites);
+        await WaitUntilAsync(
+            () => GetPrivateProperty<FileTransferRouteSelection>(
+                      context,
+                      "RouteSelection").Route == FileTransferRoute.FileTunaV4,
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                      context,
+                      "CoordinatorPersistentState")
+                  .FileTransferRouteTransition.CurrentOperation is null,
+            timeoutMs: 5000);
         var persistent = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
             context,
             "CoordinatorPersistentState");
@@ -25239,6 +25250,28 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             StringComparison.Ordinal);
         Assert.DoesNotContain(
             "event=filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided; direction=outbound;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_route_transition_drain_receipt_decided;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "decision_status=Accepted; decision_reason=filetransfer_route_transition_committed",
+            log,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_route_transition_committed;"));
+        Assert.Equal(
+            FileTransferRoute.FileTunaV4,
+            GetPrivateProperty<FileTransferRouteSelection>(
+                context,
+                "RouteSelection").Route);
+        Assert.DoesNotContain(
+            "decision_reason=paired_fallback_tail_yield_missing",
             log,
             StringComparison.Ordinal);
 
