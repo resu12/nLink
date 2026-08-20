@@ -20049,6 +20049,291 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "ReceiveRecoveryOperation")]
+    public async Task RuntimeUnlockInitialActivationOfferEnvelopeRefresh_RetiredAwaitingAnswerPromotesExactSuccessorAfterRecovery()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousDirectSendWait =
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests;
+        var previousBulkBypassWait =
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests;
+        var previousOfferReplayDelay =
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
+        var previousOfferPeerResponseTimeout =
+            NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests;
+        var previousOfferAnswerTimeout =
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+            TimeSpan.FromSeconds(30);
+        NknSignalingTransport
+                .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(100);
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+            TimeSpan.FromMilliseconds(800);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.tuna.initial-retired-refresh.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient(
+                "helper.tuna.initial-retired-refresh.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var allowOfferDelivery = false;
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    return Task.FromResult(allowOfferDelivery);
+                }
+
+                return Task.FromResult(true);
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-tuna-initial-retired-refresh-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: true,
+                    failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-tuna-initial-retired-refresh-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: false,
+                    failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_tuna_initial_retired_envelope_refresh";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(
+                host,
+                transferId,
+                releaseInitialActivationReceiveRecoveryHold: false);
+
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge>(
+                    host);
+            var answerTimeoutHold =
+                new TaskCompletionSource<(
+                    RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest
+                        Request,
+                    FileTransferReceiveRecoveryOperation Operation)>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshReceipt?
+                preparedRefreshReceipt = null;
+            bridge.RuntimeUnlockInitialActivationOfferEnvelopeRefreshPrepared +=
+                (_, args) =>
+                {
+                    preparedRefreshReceipt = args.Receipt;
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                            args.Receipt,
+                            RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus
+                                .Accepted,
+                            "test_retired_refresh_receipt_committed");
+                };
+            bridge.RuntimeUnlockInitialActivationReceiveRecoveryHoldRequested +=
+                (_, args) =>
+                {
+                    if (args.Request.Boundary !=
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                            .AnswerTimeout)
+                    {
+                        args.Decision =
+                            new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                                args.Request,
+                                RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                    .Released,
+                                "test_peer_timeout_retires_pending_answer",
+                                HoldGeneration: 0,
+                                ReceiveRecoveryOperation: null);
+                        return;
+                    }
+
+                    var operation =
+                        CreateInitialActivationReceiveRecoveryHoldOperationForTests(
+                            args.Request,
+                            operationGeneration: 1);
+                    args.Decision =
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            args.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Held,
+                            "test_answer_timeout_recovery_current",
+                            HoldGeneration: 1,
+                            operation);
+                    answerTimeoutHold.TrySetResult((args.Request, operation));
+                };
+
+            var logStart = GetOperationalLogLength();
+            await ((ITransportAccelerationControl)host)
+                .RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var held = await answerTimeoutHold.Task.WaitAsync(cts.Token);
+            Assert.Equal(
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary
+                    .AnswerTimeout,
+                held.Request.Boundary);
+
+            Assert.Null(
+                GetPrivateField(
+                    host,
+                    "runtimeUnlockInitialActivationEnvelopeState"));
+            Assert.Null(
+                GetPrivateField(
+                    host,
+                    "outboundRuntimeUnlockOfferAuthorityBoundary"));
+            var retiredBarrier =
+                GetPrivateField(host, "runtimeUnlockRetiredAnswerBarrier");
+            Assert.NotNull(retiredBarrier);
+            Assert.NotNull(
+                retiredBarrier!
+                    .GetType()
+                    .GetProperty(
+                        "RetainedInitialActivationEnvelopeState",
+                        BindingFlags.Instance |
+                        BindingFlags.NonPublic |
+                        BindingFlags.Public)!
+                    .GetValue(retiredBarrier));
+
+            var refreshSentAtUnixMs =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var envelopeLifetimeMs =
+                held.Request.EnvelopeExpiresAtUnixMs -
+                held.Request.EnvelopeSentAtUnixMs;
+            var refreshCommand =
+                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshCommand(
+                    held.Request,
+                    HoldGeneration: 1,
+                    ReceiveRecoveryAuthority: held.Operation.Authority,
+                    ClosureGeneration: 1,
+                    RefreshGeneration: 1,
+                    SuccessorEnvelopeGeneration:
+                        held.Request.EnvelopeGeneration + 1,
+                    SuccessorSentAtUnixMs: refreshSentAtUnixMs,
+                    SuccessorExpiresAtUnixMs:
+                        refreshSentAtUnixMs + envelopeLifetimeMs);
+            allowOfferDelivery = true;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                TimeSpan.FromSeconds(30);
+            Assert.True(
+                bridge
+                    .ObserveRuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                            held.Request,
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released,
+                            "test_answer_timeout_recovery_completed",
+                            HoldGeneration: 1,
+                            held.Operation)
+                        {
+                            EnvelopeRefreshCommand = refreshCommand,
+                        }));
+            await WaitUntilAsync(
+                () => preparedRefreshReceipt is not null,
+                TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(
+                () =>
+                    ReadOperationalLogTail(logStart).Contains(
+                        "event=runtime_unlock_initial_activation_offer_envelope_refresh_replay_completed;",
+                        StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_offer_envelope_refresh_committed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains("send_succeeded=1;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected;",
+                tail,
+                StringComparison.Ordinal);
+            var currentBarrier =
+                GetPrivateField(host, "runtimeUnlockRetiredAnswerBarrier");
+            if (currentBarrier is not null)
+            {
+                Assert.NotSame(retiredBarrier, currentBarrier);
+                Assert.Equal(
+                    "AwaitingHandoffDisposition",
+                    currentBarrier
+                        .GetType()
+                        .GetProperty(
+                            "Phase",
+                            BindingFlags.Instance |
+                            BindingFlags.NonPublic |
+                            BindingFlags.Public)!
+                        .GetValue(currentBarrier)!
+                        .ToString());
+                Assert.Null(
+                    currentBarrier
+                        .GetType()
+                        .GetProperty(
+                            "RetainedInitialActivationEnvelopeState",
+                            BindingFlags.Instance |
+                            BindingFlags.NonPublic |
+                            BindingFlags.Public)!
+                        .GetValue(currentBarrier));
+            }
+            Assert.Null(GetPrivateField(host, "retiredAccelerationOfferNonce"));
+            Assert.Contains(
+                "event=tuna_acceleration_offer_received_raw;",
+                tail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+                previousDirectSendWait;
+            NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests =
+                previousBulkBypassWait;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests =
+                previousOfferReplayDelay;
+            NknSignalingTransport
+                    .RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests =
+                previousOfferPeerResponseTimeout;
+            NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests =
+                previousOfferAnswerTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
     public void RuntimeUnlockAnswerHandoff_ResolvesMissingTransactionTransferFromExactLease()
     {

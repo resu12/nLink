@@ -3182,6 +3182,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($initialRecoveryHoldDirectReleaseEvent.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldDirectReleaseEvent.Reason -ne 'released_hold_directive_delivery_rejected') { throw 'direct initial activation hold release event lost precedence' }
             $initialRecoveryHoldDirectReleaseReason = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; first_reason=released_hold_directive_delivery_rejected' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialRecoveryHoldDirectReleaseReason.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldDirectReleaseReason.Reason -ne 'released_hold_directive_delivery_rejected') { throw 'direct initial activation hold release reason lost precedence' }
+            $initialRecoveryHoldRetiredRefresh = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing; retained_event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; first_reason=released_hold_refresh_predecessor_boundary_not_current' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
+            if ($initialRecoveryHoldRetiredRefresh.Phase -ne 'runtime_unlock_initial_activation' -or $initialRecoveryHoldRetiredRefresh.Reason -ne 'released_hold_refresh_predecessor_boundary_not_current') { throw 'retired initial activation refresh predecessor rejection lost precedence' }
             $initialAnswerPeerDelivery = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; retained_event=tuna_acceleration_answer_ack_timeout' -HistoricalPhase 'setup' -HistoricalReason 'offer_not_observed'
             if ($initialAnswerPeerDelivery.Phase -ne 'runtime_unlock_initial_activation' -or $initialAnswerPeerDelivery.Reason -ne 'validated_offer_answer_not_delivered_to_initiator') { throw 'initial activation answer peer delivery lost precedence' }
             $receivedAnswerAuthorityRejected = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_initial_activation_answer_peer_delivery_missing; first_reason=validated_offer_answer_received_but_authority_tuple_rejected' -HistoricalPhase 'progress_failure' -HistoricalReason 'gui_smoke_scenario_deadline_exceeded'
@@ -3235,6 +3237,72 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(result.ExitCode == 0, $"Failure classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-failure-classification-precedence-ok", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("Resolve-TunaGuiFailureClassification", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_RetiredRefreshPredecessorRejectedPrecedesAnswerAndDeadlineFallbacks()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-retired-refresh-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                Set-Content -LiteralPath $path -Value @()
+                $empty = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($empty.Reason -eq 'released_hold_refresh_predecessor_boundary_not_current') {
+                    throw 'empty retired refresh index produced an incident'
+                }
+                Set-Content -LiteralPath $path -Value 'event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; session_id=sess; transfer_id=transfer; direction=outbound; boundary=AnswerTimeout; offer_generation=1; refresh_generation=1; decision_reason=predecessor_boundary_not_current; log_writer_id=writer'
+                $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($singleton.Reason -eq 'released_hold_refresh_predecessor_boundary_not_current') {
+                    throw 'singleton retired refresh index produced an uncorroborated incident'
+                }
+                @(
+                    'event=runtime_unlock_initial_activation_receive_recovery_hold_decided; session_id=sess; transfer_id=transfer; direction=outbound; hold_boundary=AnswerTimeout; offer_generation=1; hold_generation=1; receive_recovery_operation_generation=1; decision_status=Held; log_writer_id=writer',
+                    'event=filetransfer_receive_recovery_operation_closure_adopted; session_id=sess; transfer_id=transfer; direction=outbound; recovery_operation_generation=1; closure_state=Adopted; log_writer_id=writer',
+                    'event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; session_id=sess; transfer_id=transfer; direction=outbound; boundary=AnswerTimeout; offer_generation=1; refresh_generation=1; decision_reason=predecessor_boundary_not_current; log_writer_id=writer',
+                    'event=runtime_unlock_initial_activation_receive_recovery_hold_decided; session_id=sess; transfer_id=transfer; direction=outbound; hold_boundary=AnswerTimeout; offer_generation=1; hold_generation=1; receive_recovery_operation_generation=1; refresh_generation=1; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_id=writer',
+                    'event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; session_id=sess; transfer_id=transfer; direction=outbound; hold_boundary=AnswerTimeout; offer_generation=1; hold_generation=1; receive_recovery_operation_generation=1; refresh_generation=1; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_id=writer',
+                    'event=tuna_acceleration_answer_ack_timeout; session_id=sess; transfer_id=transfer; direction=outbound; offer_generation=1; log_writer_id=writer',
+                    'event=file_transfer_outbound_terminal; session_id=sess; transfer_id=transfer; direction=outbound; state=Completed; log_writer_id=writer'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'Gui_Smoke_Scenario_Deadline_Exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'runtime_unlock_initial_activation' -or
+                    $result.Reason -ne 'released_hold_refresh_predecessor_boundary_not_current') {
+                    throw "retired refresh predecessor classification mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-retired-refresh-predecessor-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Retired refresh GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-retired-refresh-predecessor-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Theory]

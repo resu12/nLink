@@ -1526,6 +1526,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_prepared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_committed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_offer_envelope_refresh_physical_resume') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_path_lease_listener_ready') +
@@ -3237,6 +3238,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing'
             Event = $candidateEvent
             Reason = if ($candidateEvent.EventName -eq
+                'runtime_unlock_initial_activation_offer_envelope_refresh_rejected') {
+                'released_hold_refresh_predecessor_boundary_not_current'
+            }
+            elseif ($candidateEvent.EventName -eq
                 'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided') {
                 'released_hold_directive_delivery_rejected'
             }

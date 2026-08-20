@@ -27135,6 +27135,15 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
             'runtime_unlock_route_commit_precommit_admission_granted',
             'filetransfer_route_transition_prepared')
     })
+    [object[]]$refreshPredecessorRejections = @($events | Where-Object {
+        $_.EventName -eq
+            'runtime_unlock_initial_activation_offer_envelope_refresh_rejected' -and
+        (Get-HoldReleaseField -Event $_ -Names @('boundary')) -eq
+            'AnswerTimeout' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_reason')) -eq
+            'predecessor_boundary_not_current' -and
+        [int64](Get-HoldReleaseField -Event $_ -Names @('refresh_generation') -Default '0') -gt 0
+    })
     [object[]]$terminalEvents = @($events | Where-Object {
         $_.EventName -in @(
             'file_transfer_outbound_terminal',
@@ -27153,6 +27162,113 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
 
     $raw = New-Object System.Collections.Generic.List[object]
     $distinct = [ordered]@{}
+    foreach ($refreshRejection in $refreshPredecessorRejections) {
+        [object[]]$releaseDecisions = @($coreReleaseDecisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$refreshRejection.Sequence -and
+            (Test-HoldReleaseSemanticTuple -Left $refreshRejection -Right $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('hold_boundary')) -eq
+                'AnswerTimeout' -and
+            (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                (Get-HoldReleaseField -Event $refreshRejection -Names @('refresh_generation')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('decision_reason')) -eq
+                'hold_directive_delivery_rejected'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($releaseDecisions.Count -ne 1) {
+            continue
+        }
+        $releaseDecision = $releaseDecisions[0]
+
+        [object[]]$releaseDeliveries = @($rejectedReleaseDeliveries | Where-Object {
+            [int64]$_.Sequence -gt [int64]$releaseDecision.Sequence -and
+            (Test-DirectHoldReleaseTuple `
+                -Left $releaseDecision `
+                -Right $_ `
+                -IncludeRefresh)
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($releaseDeliveries.Count -ne 1) {
+            continue
+        }
+
+        # A Held decision legitimately starts at closure generation zero.  The
+        # exact coordinator operation may later evolve Retained -> Adopted at
+        # generation one before issuing this release; immutable offer/scope
+        # equality is required, but closure generation equality is not.
+        [object[]]$matchingHolds = @($heldDecisions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$refreshRejection.Sequence -and
+            (Test-HoldReleaseSemanticTuple -Left $refreshRejection -Right $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('hold_boundary')) -eq
+                'AnswerTimeout' -and
+            (Get-HoldReleaseField -Event $_ -Names @('hold_generation')) -eq
+                (Get-HoldReleaseField -Event $releaseDecision -Names @('hold_generation')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('receive_recovery_operation_generation')) -eq
+                (Get-HoldReleaseField -Event $releaseDecision -Names @('receive_recovery_operation_generation'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        [object[]]$matchingAdoptions = @($adoptions | Where-Object {
+            [int64]$_.Sequence -lt [int64]$refreshRejection.Sequence -and
+            (Test-HoldReleaseScope `
+                -Left $releaseDecision `
+                -Right $_ `
+                -AllowMissingRightDirection) -and
+            (Test-HoldReleaseOperationMatch `
+                -Operation $_ `
+                -Candidate $releaseDecision)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($matchingHolds.Count -ne 1 -or
+            $matchingAdoptions.Count -ne 1) {
+            continue
+        }
+
+        $candidatePoisoned = @($terminalEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$matchingHolds[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$refreshRejection.Sequence -and
+            (Test-HoldReleaseScope `
+                -Left $releaseDecision `
+                -Right $_ `
+                -AllowMissingRightDirection)
+        }).Count -gt 0
+        if (-not $candidatePoisoned) {
+            $candidatePoisoned = @($scopeReplacementEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$matchingHolds[0].Sequence -and
+                [int64]$_.Sequence -lt [int64]$refreshRejection.Sequence -and
+                (Test-HoldReleaseScope `
+                    -Left $releaseDecision `
+                    -Right $_ `
+                    -AllowMissingRightDirection)
+            }).Count -gt 0
+        }
+        if ($candidatePoisoned) {
+            continue
+        }
+
+        $raw.Add($refreshRejection) | Out-Null
+        $key = (@(
+            Get-HoldReleaseField -Event $releaseDecision -Names @('log_writer_id')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('session_id')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('transfer_id')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('direction')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('offer_nonce')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('payer_decision_id')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('offer_generation')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('transaction_generation')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('tuna_path_lease_generation')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('tuna_path_lease_listener_run_id')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('hold_generation')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('receive_recovery_operation_generation')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('refresh_generation')
+            Get-HoldReleaseField -Event $releaseDecision -Names @('successor_envelope_generation')
+        ) | ForEach-Object { ([string]$_).ToLowerInvariant() }) -join '|'
+        if (-not $distinct.Contains($key)) {
+            $distinct[$key] = [pscustomobject]@{
+                Event = $refreshRejection
+                Misrouted = $releaseDecision
+                Adoption = $matchingAdoptions[0]
+                Variant = 'retired_refresh_predecessor'
+                Refresh = $releaseDecision
+                Held = $matchingHolds[0]
+            }
+        }
+    }
+
     foreach ($rejection in $rejections) {
         [object[]]$misrouted = @($misroutedReleases | Where-Object {
             [int64]$_.Sequence -lt [int64]$rejection.Sequence -and
@@ -27493,6 +27609,77 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
     foreach ($record in @($distinct.Values)) {
+        if ($record.Variant -eq 'retired_refresh_predecessor') {
+            $eventSequence = [int64]$record.Event.Sequence
+            $refreshGeneration =
+                Get-HoldReleaseField -Event $record.Refresh -Names @('refresh_generation')
+            $successorGeneration =
+                Get-HoldReleaseField -Event $record.Refresh -Names @('successor_envelope_generation')
+            [object[]]$commit = @($refreshCommitted | Where-Object {
+                [int64]$_.Sequence -gt $eventSequence -and
+                (Test-HoldReleaseSemanticTuple -Left $_ -Right $record.Event) -and
+                (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                    $refreshGeneration -and
+                (Get-HoldReleaseField -Event $_ -Names @('successor_envelope_generation')) -eq
+                    $successorGeneration
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$acceptedDelivery = @($acceptedReleaseDeliveries | Where-Object {
+                $commit.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$commit[0].Sequence -and
+                (Test-HoldReleaseSemanticTuple -Left $_ -Right $record.Event) -and
+                (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                    $refreshGeneration
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$submission = @($postPrevalidationSubmissions | Where-Object {
+                $acceptedDelivery.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$acceptedDelivery[0].Sequence -and
+                (Test-HoldReleaseSemanticTuple -Left $_ -Right $record.Event) -and
+                (Get-HoldReleaseField -Event $_ -Names @('refresh_generation')) -eq
+                    $refreshGeneration -and
+                (Get-HoldReleaseField -Event $_ -Names @('envelope_generation')) -eq
+                    $successorGeneration
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$peerReceipt = @($rawPeerOffers | Where-Object {
+                $submission.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$submission[0].Sequence
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$answer = @($transactionAnswers | Where-Object {
+                $peerReceipt.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$peerReceipt[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('session_id')) -and
+                (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('transfer_id'))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$ack = @($answerAcks | Where-Object {
+                $answer.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$answer[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('log_writer_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('log_writer_id'))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            [object[]]$precommit = @($precommitOrPrepared | Where-Object {
+                $ack.Count -eq 1 -and
+                [int64]$_.Sequence -gt [int64]$ack[0].Sequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('session_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('session_id')) -and
+                (Get-HoldReleaseField -Event $_ -Names @('transfer_id')) -eq
+                    (Get-HoldReleaseField -Event $record.Event -Names @('transfer_id'))
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($commit.Count -eq 1 -and
+                $acceptedDelivery.Count -eq 1 -and
+                $submission.Count -eq 1 -and
+                $peerReceipt.Count -eq 1 -and
+                $answer.Count -eq 1 -and
+                $ack.Count -eq 1 -and
+                $precommit.Count -eq 1) {
+                $recovered.Add($record.Event) | Out-Null
+            }
+            else {
+                $unresolved.Add($record.Event) | Out-Null
+            }
+            continue
+        }
+
         if ($record.Variant -eq 'direct_delivery') {
             [object[]]$rejectedDeliveryLineage = @($rejectedReleaseDeliveries | Where-Object {
                 [int64]$_.Sequence -gt [int64]$record.Event.Sequence -and
@@ -61794,6 +61981,10 @@ function Get-FileTransferRecoveryFailureClassification {
             -Class 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing' `
             -Events @($candidateEvent) `
             -DefaultReason $(if ($candidateEvent.EventName -eq
+                    'runtime_unlock_initial_activation_offer_envelope_refresh_rejected') {
+                    'released_hold_refresh_predecessor_boundary_not_current'
+                }
+                elseif ($candidateEvent.EventName -eq
                     'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided') {
                     'released_hold_directive_delivery_rejected'
                 }
