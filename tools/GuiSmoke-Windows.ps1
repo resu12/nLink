@@ -25686,6 +25686,12 @@ function New-TunaGuiFaultAdmissionTracker {
         FallbackTransitionPayloads = @{}
         AuthoritativeFallbackDirections = @{}
         AuthoritativeFallbackProjection = $null
+        ActionWindowGeneration = 0L
+        ActionWindowMinimumBookmark = $Bookmark
+        TunaProjectionWindowGeneration = 0L
+        TunaProjectionMinimumBookmark = $Bookmark
+        FallbackProjectionWindowGeneration = 0L
+        FallbackProjectionMinimumBookmark = $Bookmark
         HeaderSwitchEvidence = $null
         LastSynchronizedEndBookmark = $Bookmark
         AdmissionState = 'Unclaimed'
@@ -25700,11 +25706,16 @@ function New-TunaGuiFaultAdmissionTracker {
 }
 
 function Reset-TunaGuiFaultAdmissionActionWindow {
-    param([Parameter(Mandatory = $true)]$Tracker)
+    param(
+        [Parameter(Mandatory = $true)]$Tracker,
+        [Parameter(Mandatory = $true)][int]$ActionBookmark
+    )
 
     if ($null -ne $Tracker.TerminalPair) {
         return $false
     }
+    $minimumBookmark = [Math]::Max(0, $ActionBookmark)
+    $rewindBookmark = [Math]::Min([int]$Tracker.Cursor, $minimumBookmark)
     $Tracker.HeaderSwitchEvidence = $null
     $Tracker.AdmissionState = 'Unclaimed'
     $Tracker.AdmissionWinner = '(none)'
@@ -25713,10 +25724,73 @@ function Reset-TunaGuiFaultAdmissionActionWindow {
     $Tracker.CachedSwitchOffControl = $null
     $Tracker.CachedSwitchOffClickPoint = $null
     $Tracker.LastFaultResult = $null
+    $Tracker.TransitionCommits = @{}
+    $Tracker.TransitionPublications = @{}
+    $Tracker.TransitionDispositions = @{}
+    $Tracker.TransitionPayloads = @{}
     $Tracker.AuthoritativeTunaProjection = $null
     $Tracker.AuthoritativeTunaDirections = @{}
+    $Tracker.FallbackTransitionCommits = @{}
+    $Tracker.FallbackTransitionPublications = @{}
+    $Tracker.FallbackTransitionDispositions = @{}
+    $Tracker.FallbackTransitionPayloads = @{}
     $Tracker.AuthoritativeFallbackProjection = $null
     $Tracker.AuthoritativeFallbackDirections = @{}
+    $Tracker.ActionWindowGeneration = [long]$Tracker.ActionWindowGeneration + 1L
+    $Tracker.ActionWindowMinimumBookmark = $minimumBookmark
+    $Tracker.TunaProjectionWindowGeneration = [long]$Tracker.TunaProjectionWindowGeneration + 1L
+    $Tracker.TunaProjectionMinimumBookmark = $minimumBookmark
+    $Tracker.FallbackProjectionWindowGeneration = [long]$Tracker.FallbackProjectionWindowGeneration + 1L
+    $Tracker.FallbackProjectionMinimumBookmark = $minimumBookmark
+    $Tracker.Cursor = $rewindBookmark
+    $Tracker.LastSynchronizedEndBookmark = $rewindBookmark
+    return $true
+}
+
+function Set-TunaGuiFaultAdmissionProjectionBoundary {
+    param(
+        [Parameter(Mandatory = $true)]$Tracker,
+        [Parameter(Mandatory = $true)][ValidateSet('Tuna', 'Fallback')][string]$RouteFamily,
+        [Parameter(Mandatory = $true)][int]$MinimumBookmark
+    )
+
+    if ($null -ne $Tracker.TerminalPair) {
+        return $false
+    }
+    $minimum = [Math]::Max(0, $MinimumBookmark)
+    $currentMinimum = if ($RouteFamily -eq 'Tuna') {
+        [int]$Tracker.TunaProjectionMinimumBookmark
+    }
+    else {
+        [int]$Tracker.FallbackProjectionMinimumBookmark
+    }
+    if ($currentMinimum -eq $minimum) {
+        return $true
+    }
+
+    if ($RouteFamily -eq 'Tuna') {
+        $Tracker.TransitionCommits = @{}
+        $Tracker.TransitionPublications = @{}
+        $Tracker.TransitionDispositions = @{}
+        $Tracker.TransitionPayloads = @{}
+        $Tracker.AuthoritativeTunaProjection = $null
+        $Tracker.AuthoritativeTunaDirections = @{}
+        $Tracker.TunaProjectionWindowGeneration = [long]$Tracker.TunaProjectionWindowGeneration + 1L
+        $Tracker.TunaProjectionMinimumBookmark = $minimum
+    }
+    else {
+        $Tracker.FallbackTransitionCommits = @{}
+        $Tracker.FallbackTransitionPublications = @{}
+        $Tracker.FallbackTransitionDispositions = @{}
+        $Tracker.FallbackTransitionPayloads = @{}
+        $Tracker.AuthoritativeFallbackProjection = $null
+        $Tracker.AuthoritativeFallbackDirections = @{}
+        $Tracker.FallbackProjectionWindowGeneration = [long]$Tracker.FallbackProjectionWindowGeneration + 1L
+        $Tracker.FallbackProjectionMinimumBookmark = $minimum
+    }
+    $rewindBookmark = [Math]::Min([int]$Tracker.Cursor, $minimum)
+    $Tracker.Cursor = $rewindBookmark
+    $Tracker.LastSynchronizedEndBookmark = $rewindBookmark
     return $true
 }
 
@@ -25744,6 +25818,7 @@ function Get-TunaGuiFaultAdmissionTargetKey {
         @(
             @('projected_target_route', 'target_route'),
             @('target_protocol_version'),
+            @('target_live_route_epoch'),
             @('target_runtime_generation'),
             @('target_terminal_generation'),
             @('target_leg_generation'),
@@ -25754,6 +25829,7 @@ function Get-TunaGuiFaultAdmissionTargetKey {
         @(
             @('route', 'target_route'),
             @('protocol_version', 'target_protocol_version'),
+            @('live_route_epoch', 'target_live_route_epoch'),
             @('runtime_generation'),
             @('terminal_generation'),
             @('leg_generation'),
@@ -25774,9 +25850,49 @@ function Get-TunaGuiFaultAdmissionTargetKey {
     return [string]::Join('|', $values)
 }
 
+function Get-TunaGuiFaultAdmissionProjectionKey {
+    param(
+        [Parameter(Mandatory = $true)]$Fields,
+        [switch]$CommitShape
+    )
+
+    $targetKey = Get-TunaGuiFaultAdmissionTargetKey -Fields $Fields -CommitShape:$CommitShape
+    if ([string]::IsNullOrWhiteSpace($targetKey)) { return '' }
+    $parts = @([string]$targetKey -split '\|')
+    if ($parts.Count -lt 4) { return '' }
+    $values = New-Object System.Collections.Generic.List[string]
+    $values.Add($parts[0]) | Out-Null
+    $values.Add($parts[1]) | Out-Null
+    for ($index = 3; $index -lt $parts.Count; $index++) {
+        $values.Add($parts[$index]) | Out-Null
+    }
+    if ($CommitShape) {
+        foreach ($aliases in @(
+                @('source_transport_epoch', 'fallback_transport_epoch', 'transport_epoch'),
+                @('source_bridge_recovery_generation', 'fallback_bridge_recovery_generation', 'bridge_recovery_generation'),
+                @('checkpoint_request_id'),
+                @('source_data_session_generation', 'data_session_generation'),
+                @('data_session_identity'))) {
+            $value = '(none)'
+            foreach ($alias in $aliases) {
+                $candidate = Get-GuiSmokeFieldValue -Fields $Fields -Name $alias -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                    $value = $candidate
+                    break
+                }
+            }
+            $values.Add($value.ToLowerInvariant()) | Out-Null
+        }
+    }
+    return [string]::Join('|', $values)
+}
+
 function Update-TunaGuiFaultAdmissionAuthority {
     param([Parameter(Mandatory = $true)]$Tracker)
 
+    $Tracker.AuthoritativeTunaDirections = @{}
+    $Tracker.AuthoritativeTunaProjection = $null
+    $tunaMinimumBookmark = [int]$Tracker.TunaProjectionMinimumBookmark
     foreach ($entry in $Tracker.TransitionCommits.GetEnumerator()) {
         $scopeKey = [string]$entry.Key
         $commit = $entry.Value
@@ -25791,13 +25907,25 @@ function Update-TunaGuiFaultAdmissionAuthority {
             -not $Tracker.TransitionPayloads.ContainsKey($targetKey)) {
             continue
         }
+        $publication = $Tracker.TransitionPublications[$targetKey]
+        $disposition = $Tracker.TransitionDispositions[$authorityKey]
+        $payload = $Tracker.TransitionPayloads[$targetKey]
+        if ([int]$commit.LineIndex -lt $tunaMinimumBookmark -or
+            [int]$publication.LineIndex -lt $tunaMinimumBookmark -or
+            [int]$disposition.LineIndex -lt $tunaMinimumBookmark -or
+            [int]$payload.LineIndex -lt $tunaMinimumBookmark) {
+            continue
+        }
+        $projectionKey = Get-TunaGuiFaultAdmissionProjectionKey -Fields $fields -CommitShape
+        if ([string]::IsNullOrWhiteSpace($projectionKey)) { continue }
         $direction = Get-GuiSmokeFieldValue -Fields $fields -Name 'direction' -Default ''
         $Tracker.AuthoritativeTunaDirections[$direction.ToLowerInvariant()] = [pscustomobject]@{
             ScopeKey = $scopeKey
+            ProjectionKey = $projectionKey
             Commit = $commit
-            Publication = $Tracker.TransitionPublications[$targetKey]
-            Disposition = $Tracker.TransitionDispositions[$authorityKey]
-            Payload = $Tracker.TransitionPayloads[$targetKey]
+            Publication = $publication
+            Disposition = $disposition
+            Payload = $payload
         }
     }
 
@@ -25807,15 +25935,22 @@ function Update-TunaGuiFaultAdmissionAuthority {
         $outbound = $Tracker.AuthoritativeTunaDirections['outbound']
         $inboundBase = ([string]$inbound.ScopeKey -split '\|')[0..1] -join '|'
         $outboundBase = ([string]$outbound.ScopeKey -split '\|')[0..1] -join '|'
-        if ($inboundBase -eq $outboundBase) {
+        if ($inboundBase -eq $outboundBase -and
+            [string]$inbound.ProjectionKey -eq [string]$outbound.ProjectionKey) {
             $Tracker.AuthoritativeTunaProjection = [pscustomobject]@{
                 ScopeKey = $inboundBase
                 Inbound = $inbound
                 Outbound = $outbound
+                ActionWindowGeneration = [long]$Tracker.ActionWindowGeneration
+                ProjectionWindowGeneration = [long]$Tracker.TunaProjectionWindowGeneration
+                MinimumBookmark = $tunaMinimumBookmark
             }
         }
     }
 
+    $Tracker.AuthoritativeFallbackDirections = @{}
+    $Tracker.AuthoritativeFallbackProjection = $null
+    $fallbackMinimumBookmark = [int]$Tracker.FallbackProjectionMinimumBookmark
     foreach ($entry in $Tracker.FallbackTransitionCommits.GetEnumerator()) {
         $scopeKey = [string]$entry.Key
         $commit = $entry.Value
@@ -25830,13 +25965,25 @@ function Update-TunaGuiFaultAdmissionAuthority {
             -not $Tracker.FallbackTransitionPayloads.ContainsKey($targetKey)) {
             continue
         }
+        $publication = $Tracker.FallbackTransitionPublications[$targetKey]
+        $disposition = $Tracker.FallbackTransitionDispositions[$authorityKey]
+        $payload = $Tracker.FallbackTransitionPayloads[$targetKey]
+        if ([int]$commit.LineIndex -lt $fallbackMinimumBookmark -or
+            [int]$publication.LineIndex -lt $fallbackMinimumBookmark -or
+            [int]$disposition.LineIndex -lt $fallbackMinimumBookmark -or
+            [int]$payload.LineIndex -lt $fallbackMinimumBookmark) {
+            continue
+        }
+        $projectionKey = Get-TunaGuiFaultAdmissionProjectionKey -Fields $fields -CommitShape
+        if ([string]::IsNullOrWhiteSpace($projectionKey)) { continue }
         $direction = Get-GuiSmokeFieldValue -Fields $fields -Name 'direction' -Default ''
         $Tracker.AuthoritativeFallbackDirections[$direction.ToLowerInvariant()] = [pscustomobject]@{
             ScopeKey = $scopeKey
+            ProjectionKey = $projectionKey
             Commit = $commit
-            Publication = $Tracker.FallbackTransitionPublications[$targetKey]
-            Disposition = $Tracker.FallbackTransitionDispositions[$authorityKey]
-            Payload = $Tracker.FallbackTransitionPayloads[$targetKey]
+            Publication = $publication
+            Disposition = $disposition
+            Payload = $payload
         }
     }
 
@@ -25846,11 +25993,15 @@ function Update-TunaGuiFaultAdmissionAuthority {
         $outbound = $Tracker.AuthoritativeFallbackDirections['outbound']
         $inboundBase = ([string]$inbound.ScopeKey -split '\|')[0..1] -join '|'
         $outboundBase = ([string]$outbound.ScopeKey -split '\|')[0..1] -join '|'
-        if ($inboundBase -eq $outboundBase) {
+        if ($inboundBase -eq $outboundBase -and
+            [string]$inbound.ProjectionKey -eq [string]$outbound.ProjectionKey) {
             $Tracker.AuthoritativeFallbackProjection = [pscustomobject]@{
                 ScopeKey = $inboundBase
                 Inbound = $inbound
                 Outbound = $outbound
+                ActionWindowGeneration = [long]$Tracker.ActionWindowGeneration
+                ProjectionWindowGeneration = [long]$Tracker.FallbackProjectionWindowGeneration
+                MinimumBookmark = $fallbackMinimumBookmark
             }
         }
     }
@@ -25891,9 +26042,15 @@ function Update-TunaGuiFaultAdmissionTracker {
                 $eventName = $line.Substring($eventStart, $eventEnd - $eventStart).Trim()
             }
             $dataPathEvent = $eventName -in @('filetransfer_data_path_send_result', 'filetransfer_data_path_receive_result', 'filetransfer_tuna_data_path_peer_visible')
+            $tunaProjectionCurrent = $null -ne $Tracker.AuthoritativeTunaProjection -and
+                [long]$Tracker.AuthoritativeTunaProjection.ProjectionWindowGeneration -eq [long]$Tracker.TunaProjectionWindowGeneration -and
+                [int]$Tracker.AuthoritativeTunaProjection.MinimumBookmark -eq [int]$Tracker.TunaProjectionMinimumBookmark
+            $fallbackProjectionCurrent = $null -ne $Tracker.AuthoritativeFallbackProjection -and
+                [long]$Tracker.AuthoritativeFallbackProjection.ProjectionWindowGeneration -eq [long]$Tracker.FallbackProjectionWindowGeneration -and
+                [int]$Tracker.AuthoritativeFallbackProjection.MinimumBookmark -eq [int]$Tracker.FallbackProjectionMinimumBookmark
             $parseDataPath = $dataPathEvent -and
-                ($null -eq $Tracker.AuthoritativeTunaProjection -or
-                    ($null -ne $Tracker.HeaderSwitchEvidence -and $null -eq $Tracker.AuthoritativeFallbackProjection))
+                (-not $tunaProjectionCurrent -or
+                    ($null -ne $Tracker.HeaderSwitchEvidence -and -not $fallbackProjectionCurrent))
             $parseFields = $eventName -in @(
                 'tuna_acceleration_reset',
                 'tuna_acceleration_timeline',
@@ -26018,6 +26175,9 @@ function Wait-TunaGuiAuthoritativeTunaFaultAdmission {
         [int]$PollIntervalMs = 100
     )
 
+    if ($AfterBookmark -ge 0) {
+        [void](Set-TunaGuiFaultAdmissionProjectionBoundary -Tracker $Tracker -RouteFamily Tuna -MinimumBookmark $AfterBookmark)
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         Assert-GuiSmokeScenarioDeadline
@@ -26038,7 +26198,7 @@ function Wait-TunaGuiAuthoritativeTunaFaultAdmission {
                 ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $projection.Outbound.Publication.Fields -Name 'live_route_epoch' -Default '0') -Default 0)
             $liveRouteEpoch = ($publicationEpochs | Measure-Object -Maximum).Maximum
             $scopeParts = [string]$projection.ScopeKey -split '\|'
-            return "event=filetransfer_live_route_epoch_recovered; session_id=$($scopeParts[0]); transfer_id=$($scopeParts[1]); route=file_tuna_v4; protocol_version=4; live_route_epoch=$liveRouteEpoch; handoff_kind=normal_to_tuna_activation; target_transport=tuna; gui_authoritative_projection=1; authoritative_direction_count=2; incremental_line_visit_count=$($Tracker.LineVisitCount); source_commit_sequence=$($projection.Outbound.Commit.LineIndex)"
+            return "event=filetransfer_live_route_epoch_recovered; session_id=$($scopeParts[0]); transfer_id=$($scopeParts[1]); route=file_tuna_v4; protocol_version=4; live_route_epoch=$liveRouteEpoch; handoff_kind=normal_to_tuna_activation; target_transport=tuna; gui_authoritative_projection=1; authoritative_direction_count=2; action_window_generation=$($projection.ActionWindowGeneration); action_window_bookmark=$($projection.MinimumBookmark); incremental_line_visit_count=$($Tracker.LineVisitCount); source_commit_sequence=$($projection.Outbound.Commit.LineIndex)"
         }
         Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
     }
@@ -26053,10 +26213,16 @@ function Wait-TunaGuiAuthoritativeFallbackFaultObservation {
         [int]$PollIntervalMs = 100
     )
 
+    if ($AfterBookmark -ge 0) {
+        [void](Set-TunaGuiFaultAdmissionProjectionBoundary -Tracker $Tracker -RouteFamily Fallback -MinimumBookmark $AfterBookmark)
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         Assert-GuiSmokeScenarioDeadline
         [void](Update-TunaGuiFaultAdmissionTracker -Tracker $Tracker)
+        if ($null -ne $Tracker.TerminalPair) {
+            throw 'live_toggle_window_missed_transfer_completed: terminal_pair_before_authoritative_fallback_projection'
+        }
         if ($null -ne $Tracker.AuthoritativeFallbackProjection) {
             $projection = $Tracker.AuthoritativeFallbackProjection
             if ($AfterBookmark -ge 0 -and
@@ -26070,7 +26236,7 @@ function Wait-TunaGuiAuthoritativeFallbackFaultObservation {
                 ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $projection.Outbound.Publication.Fields -Name 'live_route_epoch' -Default '0') -Default 0)
             $liveRouteEpoch = ($publicationEpochs | Measure-Object -Maximum).Maximum
             $scopeParts = [string]$projection.ScopeKey -split '\|'
-            $common = "session_id=$($scopeParts[0]); transfer_id=$($scopeParts[1]); route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=$liveRouteEpoch; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; gui_authoritative_projection=1; authoritative_direction_count=2; incremental_line_visit_count=$($Tracker.LineVisitCount); source_commit_sequence=$($projection.Outbound.Commit.LineIndex)"
+            $common = "session_id=$($scopeParts[0]); transfer_id=$($scopeParts[1]); route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=$liveRouteEpoch; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; gui_authoritative_projection=1; authoritative_direction_count=2; action_window_generation=$($projection.ActionWindowGeneration); action_window_bookmark=$($projection.MinimumBookmark); incremental_line_visit_count=$($Tracker.LineVisitCount); source_commit_sequence=$($projection.Outbound.Commit.LineIndex)"
             return [pscustomobject]@{
                 StartedLine = "event=filetransfer_live_route_epoch_started; $common"
                 RouteLine = "event=filetransfer_route_selected; $common"
@@ -26078,9 +26244,6 @@ function Wait-TunaGuiAuthoritativeFallbackFaultObservation {
                 LiveRouteEpoch = [int]$liveRouteEpoch
                 EndBookmark = [int]$Tracker.LastSynchronizedEndBookmark
             }
-        }
-        if ($null -ne $Tracker.TerminalPair) {
-            throw 'live_toggle_window_missed_transfer_completed: terminal_pair_before_authoritative_fallback_projection'
         }
         Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
     }
@@ -28612,7 +28775,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $lastActivationPayloadBookmark = $stepBookmark
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed=1; immediate_after_fallback_recovered=1" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
-                    [void](Reset-TunaGuiFaultAdmissionActionWindow -Tracker $faultAdmissionTracker)
+                    [void](Reset-TunaGuiFaultAdmissionActionWindow -Tracker $faultAdmissionTracker -ActionBookmark $stepBookmark)
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
@@ -28705,7 +28868,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_existing_prompt" -f $stepNumber))
                 }
                 if ($stepNumber -gt 1) {
-                    [void](Reset-TunaGuiFaultAdmissionActionWindow -Tracker $faultAdmissionTracker)
+                    [void](Reset-TunaGuiFaultAdmissionActionWindow -Tracker $faultAdmissionTracker -ActionBookmark $stepBookmark)
                 }
                 Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                 $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker

@@ -2749,8 +2749,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var trackerBody = ExtractPowerShellFunctionBody(guiText, "Add-TunaGuiCompletedTerminalToTracker", "New-TunaGuiLiveSwitchOffProgressGateResult");
         var admissionTrackerBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFaultAdmissionTracker", "Update-TunaGuiFaultAdmissionTracker");
         var resetAdmissionBody = ExtractPowerShellFunctionBody(guiText, "Reset-TunaGuiFaultAdmissionActionWindow", "Get-TunaGuiFaultAdmissionScopeKey");
+        var projectionBoundaryBody = ExtractPowerShellFunctionBody(guiText, "Set-TunaGuiFaultAdmissionProjectionBoundary", "Get-TunaGuiFaultAdmissionScopeKey");
         var scopeKeyBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFaultAdmissionScopeKey", "Get-TunaGuiFaultAdmissionTargetKey");
         var targetKeyBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFaultAdmissionTargetKey", "Update-TunaGuiFaultAdmissionAuthority");
+        var projectionKeyBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFaultAdmissionProjectionKey", "Update-TunaGuiFaultAdmissionAuthority");
         var authorityBody = ExtractPowerShellFunctionBody(guiText, "Update-TunaGuiFaultAdmissionAuthority", "Update-TunaGuiFaultAdmissionTracker");
         var updateBody = ExtractPowerShellFunctionBody(guiText, "Update-TunaGuiFaultAdmissionTracker", "Test-TunaGuiSwitchOffToggleReady");
         var waitBody = ExtractPowerShellFunctionBody(guiText, "Wait-TunaGuiAuthoritativeTunaFaultAdmission", "Test-TunaGuiSwitchOffToggleReady");
@@ -2760,8 +2762,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Add-TunaGuiCompletedTerminalToTracker { {{trackerBody}} }
             function New-TunaGuiFaultAdmissionTracker { {{admissionTrackerBody}} }
             function Reset-TunaGuiFaultAdmissionActionWindow { {{resetAdmissionBody}} }
+            function Set-TunaGuiFaultAdmissionProjectionBoundary { {{projectionBoundaryBody}} }
             function Get-TunaGuiFaultAdmissionScopeKey { {{scopeKeyBody}} }
             function Get-TunaGuiFaultAdmissionTargetKey { {{targetKeyBody}} }
+            function Get-TunaGuiFaultAdmissionProjectionKey { {{projectionKeyBody}} }
             function Update-TunaGuiFaultAdmissionAuthority { {{authorityBody}} }
             function Update-TunaGuiFaultAdmissionTracker { {{updateBody}} }
             function Wait-TunaGuiAuthoritativeTunaFaultAdmission { {{waitBody}} }
@@ -2798,12 +2802,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($direction in @('outbound', 'inbound')) {
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "authority-$direction"
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=1; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
                 $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; live_route_epoch=1")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=1; disposition=committed")
-                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1")
+                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1")
             }
             $tracker = New-TunaGuiFaultAdmissionTracker -Bookmark 0
+            [void](Update-TunaGuiFaultAdmissionTracker -Tracker $tracker)
+            if ($null -eq $tracker.AuthoritativeTunaProjection) {
+                throw "initial Tuna projection missing commits=$($tracker.TransitionCommits.Count) publications=$($tracker.TransitionPublications.Count) dispositions=$($tracker.TransitionDispositions.Count) payloads=$($tracker.TransitionPayloads.Count) directions=$($tracker.AuthoritativeTunaDirections.Count)"
+            }
             $projection = Wait-TunaGuiAuthoritativeTunaFaultAdmission -Tracker $tracker -AfterBookmark 0 -TimeoutMs 100
             if ($projection -notlike '*authoritative_direction_count=2*' -or $tracker.LineVisitCount -ne 8 -or $tracker.Cursor -ne 8) {
                 throw "two-direction projection mismatch: $projection visits=$($tracker.LineVisitCount) cursor=$($tracker.Cursor)"
@@ -2815,25 +2823,69 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($direction in @('outbound', 'inbound')) {
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "fallback-authority-$direction"
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=2; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_runtime_generation=3; target_terminal_generation=0; target_leg_generation=3; target_route_publication_generation=3; target_route_commit_generation=0; decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=2; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_live_route_epoch=2; target_runtime_generation=3; target_terminal_generation=0; target_leg_generation=3; target_route_publication_generation=3; target_route_commit_generation=0; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
                 $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=post_tuna_fallback_v6; protocol_version=6; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0; live_route_epoch=2")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=2; target_route=post_tuna_fallback_v6; disposition=committed")
-                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=post_tuna_fallback_v6; protocol_version=6; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0")
+                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0")
             }
             [void](Update-TunaGuiFaultAdmissionTracker -Tracker $tracker)
             $fallbackVisits = $tracker.LineVisitCount
             $fallback = Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $tracker -AfterBookmark 8 -TimeoutMs 100
             if ($fallback.StartedLine -notlike '*route=post_tuna_fallback_v6*' -or
                 $fallback.RecoveredLine -notlike '*authoritative_direction_count=2*' -or
-                $tracker.LineVisitCount -ne 117 -or $fallbackVisits -ne 117 -or $script:parseCount -ne 17) {
+                $tracker.LineVisitCount -ne 226 -or $fallbackVisits -ne 117 -or $script:parseCount -ne 26) {
                 throw "cached fallback projection mismatch: $($fallback.RecoveredLine) visits=$($tracker.LineVisitCount)"
             }
             [void](Update-TunaGuiFaultAdmissionTracker -Tracker $tracker)
-            if ($tracker.LineVisitCount -ne 117 -or $script:parseCount -ne 17) { throw 'settled authority tracker rescanned or reparsed lines' }
+            if ($tracker.LineVisitCount -ne 226 -or $script:parseCount -ne 26) { throw 'settled authority tracker rescanned or reparsed lines' }
+
+            $step3Bookmark = $script:lines.Count
+            foreach ($direction in @('inbound', 'outbound')) {
+                $scope = "session_id=s; transfer_id=t; direction=$direction"
+                $authority = "reactivation-authority-$direction"
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=3; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=3; target_runtime_generation=4; target_terminal_generation=0; target_leg_generation=4; target_route_publication_generation=4; target_route_commit_generation=2; source_transport_epoch=1; source_bridge_recovery_generation=1; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=4; terminal_generation=0; leg_generation=4; route_publication_generation=4; route_commit_generation=2")
+                $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=3; target_route=file_tuna_v4; disposition=committed")
+                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=4; terminal_generation=0; leg_generation=4; route_publication_generation=4; route_commit_generation=2")
+            }
+            [void](Update-TunaGuiFaultAdmissionTracker -Tracker $tracker)
+            if ($null -ne $tracker.AuthoritativeTunaProjection) { throw 'epoch-3 projection unexpectedly survived skipped payload indexing before reset' }
+            if (-not (Reset-TunaGuiFaultAdmissionActionWindow -Tracker $tracker -ActionBookmark $step3Bookmark)) { throw 'step-3 action window reset failed' }
+            if ($tracker.Cursor -ne $step3Bookmark -or $tracker.LastSynchronizedEndBookmark -ne $step3Bookmark) { throw 'step-3 action window did not rewind to its bookmark' }
+            $reactivation = Wait-TunaGuiAuthoritativeTunaFaultAdmission -Tracker $tracker -AfterBookmark $step3Bookmark -TimeoutMs 100
+            if ($reactivation -notlike '*live_route_epoch=3*' -or
+                $reactivation -notlike '*action_window_generation=1*' -or
+                $reactivation -notlike "*action_window_bookmark=$step3Bookmark*") {
+                throw "replayed epoch-3 projection mismatch: $reactivation"
+            }
+
+            $step4Bookmark = $script:lines.Count
+            $script:lines.Add('event=tuna_acceleration_timeline; status=header_switch_off')
+            foreach ($direction in @('outbound', 'inbound')) {
+                $scope = "session_id=s; transfer_id=t; direction=$direction"
+                $authority = "final-fallback-authority-$direction"
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=4; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_live_route_epoch=4; target_runtime_generation=5; target_terminal_generation=0; target_leg_generation=5; target_route_publication_generation=5; target_route_commit_generation=0; source_transport_epoch=1; source_bridge_recovery_generation=1; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=5; route_commit_generation=0")
+                $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=4; target_route=post_tuna_fallback_v6; disposition=committed")
+                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=5; route_commit_generation=0")
+            }
+            $finalFallback = Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $tracker -AfterBookmark $step4Bookmark -TimeoutMs 100
+            if ($finalFallback.LiveRouteEpoch -ne 4 -or
+                $finalFallback.RecoveredLine -notlike '*action_window_generation=1*' -or
+                $finalFallback.RecoveredLine -notlike "*action_window_bookmark=$step4Bookmark*") {
+                throw "final epoch-4 fallback projection mismatch: $($finalFallback.RecoveredLine)"
+            }
+
+            $originalInboundPublication = $script:lines[5]
+            $script:lines[5] = $originalInboundPublication.Replace('runtime_generation=2', 'runtime_generation=99')
+            $mutated = New-TunaGuiFaultAdmissionTracker -Bookmark 0
+            [void](Update-TunaGuiFaultAdmissionTracker -Tracker $mutated -EndBookmark 8 -SkipSynchronization)
+            if ($null -ne $mutated.AuthoritativeTunaProjection) { throw 'mutated cross-direction target tuple admitted fault action' }
+            $script:lines[5] = $originalInboundPublication
 
             $script:lines.RemoveAt(6)
             $incomplete = New-TunaGuiFaultAdmissionTracker -Bookmark 0
-            [void](Update-TunaGuiFaultAdmissionTracker -Tracker $incomplete)
+            [void](Update-TunaGuiFaultAdmissionTracker -Tracker $incomplete -EndBookmark 7 -SkipSynchronization)
             if ($null -ne $incomplete.AuthoritativeTunaProjection) { throw 'missing disposition admitted fault action' }
             Write-Output 'gui-live-route-two-direction-admission-ok'
             """;
@@ -2971,9 +3023,21 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if (-not $readyWinner.Injected -or $readyWinner.TerminalCompletedBeforeFault -or $script:clickCount -ne 1) { throw 'cached ready control did not win exactly once' }
             $duplicateWinner = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0 -PrearmedToggle $script:testToggle -AdmissionTracker $clickTracker
             if (-not $duplicateWinner.Injected -or $script:clickCount -ne 1) { throw 'duplicate invocation clicked again' }
-            if (-not (Reset-TunaGuiFaultAdmissionActionWindow -Tracker $clickTracker)) { throw 'nonterminal next action window was not reset' }
+            if (-not (Reset-TunaGuiFaultAdmissionActionWindow -Tracker $clickTracker -ActionBookmark 0)) { throw 'nonterminal next action window was not reset' }
             $nextWinner = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0 -PrearmedToggle $script:testToggle -AdmissionTracker $clickTracker
             if (-not $nextWinner.Injected -or $script:clickCount -ne 2) { throw 'next action window did not admit exactly one new click' }
+
+            $completedTracker = New-TunaGuiFaultAdmissionTracker -Bookmark 0
+            $completedTracker.FirstTerminal = [pscustomobject]@{ TransferId = 'tx-complete'; Direction = 'inbound'; Line = 'inbound'; LineIndex = 1 }
+            $completedTracker.TerminalPair = [pscustomobject]@{ TransferId = 'tx-complete'; Line = 'outbound'; LineIndex = 2 }
+            $completedTracker.InboundCompletedByTransfer['tx-complete'] = 'inbound'
+            $completedTracker.OutboundCompletedByTransfer['tx-complete'] = 'outbound'
+            if (Reset-TunaGuiFaultAdmissionActionWindow -Tracker $completedTracker -ActionBookmark 0) { throw 'terminal action window was reset' }
+            if ($completedTracker.TerminalPair.TransferId -ne 'tx-complete' -or
+                -not $completedTracker.InboundCompletedByTransfer.ContainsKey('tx-complete') -or
+                -not $completedTracker.OutboundCompletedByTransfer.ContainsKey('tx-complete')) {
+                throw 'terminal arbitration state was not preserved'
+            }
 
             Write-Output 'gui-switch-off-terminal-aware-ok'
             """;
