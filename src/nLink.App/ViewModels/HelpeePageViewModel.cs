@@ -34,7 +34,6 @@ namespace NLink.App.ViewModels;
 
 public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
-    private const string FileTunaV4RouteToken = "file_tuna_v4";
 
     private enum HelpeeConnectionViewState
     {
@@ -3653,43 +3652,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncTunaActiveFromRuntime()
     {
-        if (TryResolveActiveTransferTunaState(sessionRuntime.FileTransferSnapshot, out var activeTransferUsesTuna))
-        {
-            IsTunaActive = activeTransferUsesTuna;
-            TunaStatusReason = activeTransferUsesTuna
-                ? "file_transfer_route_file_tuna_v4"
-                : "file_transfer_route_not_file_tuna_v4";
-            return;
-        }
-
-        IsTunaActive = sessionRuntime.IsTransportAccelerationActive;
-        TunaStatusReason = sessionRuntime.TransportAccelerationStatusReason;
-    }
-
-    private static bool TryResolveActiveTransferTunaState(
-        SessionFileTransferSnapshot snapshot,
-        out bool activeTransferUsesTuna)
-    {
-        var hasActiveTransfer = false;
-        var usesTuna = false;
-
-        Inspect(snapshot.Outbound);
-        Inspect(snapshot.Inbound);
-        activeTransferUsesTuna = usesTuna;
-        return hasActiveTransfer;
-
-        void Inspect(FileTransferTransferSnapshot? transfer)
-        {
-            if (transfer is null || transfer.IsTerminal)
-            {
-                return;
-            }
-
-            hasActiveTransfer = true;
-            usesTuna |=
-                transfer.ProtocolVersion == 4 &&
-                string.Equals(transfer.RouteToken, FileTunaV4RouteToken, StringComparison.Ordinal);
-        }
+        var projection = TunaHeaderStateProjector.FromSnapshot(
+            sessionRuntime.FileTransferSnapshot,
+            sessionRuntime.IsTransportAccelerationActive,
+            sessionRuntime.TransportAccelerationStatusReason);
+        IsTunaActive = projection.IsActive;
+        TunaStatusReason = projection.StatusReason;
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)

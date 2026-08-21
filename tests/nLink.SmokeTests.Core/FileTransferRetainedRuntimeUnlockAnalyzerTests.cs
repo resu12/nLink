@@ -989,25 +989,26 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             completedBeforeTerminal ? "0" : "1",
             verdict["filetransfer_route_transition_incomplete_unresolved_count"]);
         Assert.Equal(
-            "1",
+            completedBeforeTerminal ? "1" : "0",
             verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_recovered_count"]);
         Assert.Equal(
-            "0",
+            completedBeforeTerminal ? "0" : "1",
             verdict["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
         if (!completedBeforeTerminal)
         {
             Assert.Equal(
-                "filetransfer_route_transition_incomplete",
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing",
                 verdict["first_proof_chain_failure_class"]);
             Assert.Equal(
-                "filetransfer_route_transition_invalidated",
+                "filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided",
                 verdict["first_proof_chain_failure_event"]);
             Assert.Equal(
-                "initial_responder_route_transition_terminal_invalidated_without_exact_drain_receipt",
+                "bound_responder_acked_peer_probe_route_transition_handoff_missing",
                 verdict["first_proof_chain_failure_reason"]);
-            Assert.Equal("14094", verdict["first_proof_chain_failure_writer_sequence"]);
             Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
-            Assert.Equal("(none)", verdict["failure_variant"]);
+            Assert.Equal(
+                "runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe",
+                verdict["failure_variant"]);
         }
     }
 
@@ -1031,6 +1032,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "activation_authority_mode=initial_responder; admission_generation=1; " +
             "pending_precommit_generation=1; retry_install_generation=0; " +
             "authority_id=fta2-initial-responder; transition_generation=1; " +
+            "checkpoint_generation=1; " +
             "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna";
         var lines = BuildResponderInitialActivationPeerAcceptanceScopeFixture(
                 "retry_drain_rejected")
@@ -1062,7 +1064,22 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             lines.Add(LogLine(
                 $"event=filetransfer_route_transition_disposition_applied; direction=inbound; " +
                 $"transfer_id={transferId}; session_id={sessionId}; {transitionTuple}; {sourceScope}; " +
-                $"decision_status=Applied; apply_status=Applied; disposition=committed; log_writer_id={writerId}",
+                "decision_status=Applied; apply_status=Applied; disposition=committed; " +
+                "resulting_live_route_epoch=1; resulting_runtime_generation=2; " +
+                "resulting_route_publication_generation=2; resulting_route_commit_generation=1; " +
+                "resulting_terminal_generation=0; resulting_leg_generation=2; " +
+                $"log_writer_id={writerId}",
+                secondsOffset: 33));
+            lines.Add(LogLine(
+                $"event=filetransfer_live_route_epoch_recovered; direction=inbound; transfer_id={transferId}; " +
+                $"session_id={sessionId}; route=file_tuna_v4; protocol_version=4; " +
+                "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+                "projection_source=coordinator_route_transition; route_publication_action_kind=RoutePublication; " +
+                "coordinator_decision_reason=filetransfer_route_transition_committed; " +
+                "transition_authority_id=fta2-initial-responder; transition_generation=1; " +
+                "live_route_epoch=1; runtime_generation=2; route_publication_generation=2; " +
+                "route_commit_generation=1; terminal_generation=0; leg_generation=2; " +
+                $"log_writer_id={writerId}",
                 secondsOffset: 33));
         }
 
@@ -1421,6 +1438,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includeBound)
             {
+                lines.Add(LogLine($"event=runtime_unlock_precommit_probe_acked; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; probe_state=Acked; received_transport=tuna; probe_acked_utc_ms=202; peer_probe_frame_fingerprint=probe-frame-initial; log_writer_id={writerId}", secondsOffset: 24));
                 var bound = LogLine($"event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; probe_id={probeId}; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=202; launch_role=ResponderAdoptingAckedPeerProbe; normalized_reason=exact_responder_peer_probe_adopted; answer_acceptance_source=SemanticAnswerAck; ack_message_id=answer-ack-initial; ack_source_fingerprint=ack-source-initial; peer_probe_frame_fingerprint=probe-frame-initial; responder_transition_mode=initial_regular_v4; {peerScope}; log_writer_id={writerId}", secondsOffset: 25);
                 lines.Add(bound);
                 if (string.Equals(mode, "recovered_exact_duplicates", StringComparison.Ordinal))
@@ -1430,7 +1448,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includeHandoff)
             {
-                lines.Add(LogLine($"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; {peerTuple}; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; lanes=file; answer_acceptance_source=SemanticAnswerAck; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=202; payer_decision_id=4; pending_answer_ack_generation=6; ack_message_id=answer-ack-initial; ack_source_fingerprint=ack-source-initial; peer_probe_frame_fingerprint=probe-frame-initial; pair_state=(none); pairing_generation=0; pair_key=(none); fallback_yield_generation=0; pending_precommit_generation=0; retry_install_generation=0; responder_handoff_authority_id=(none); responder_handoff_generation=0; transition_authority_id=(none); transition_generation=0; route=regular_nkn_v4_fast; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; {initialAdmissionScope}; log_writer_id={writerId}", secondsOffset: 27));
+                lines.Add(LogLine($"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; {peerTuple}; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; lanes=file; answer_acceptance_source=SemanticAnswerAck; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=202; payer_decision_id=4; pending_answer_ack_generation=6; ack_message_id=answer-ack-initial; ack_source_fingerprint=ack-source-initial; peer_probe_frame_fingerprint=probe-frame-initial; pair_state=(none); pairing_generation=0; pair_key=(none); fallback_yield_generation=0; pending_precommit_generation=1; retry_install_generation=0; responder_handoff_authority_id=(none); responder_handoff_generation=0; transition_authority_id=(none); transition_generation=0; route=regular_nkn_v4_fast; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; {initialAdmissionScope}; log_writer_id={writerId}", secondsOffset: 27));
             }
             var pairedConfirmation = LogLine($"event=runtime_unlock_paired_commit_confirmed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; probe_id={probeId}; log_writer_id={writerId}", secondsOffset: 25);
             lines.Add(pairedConfirmation);
@@ -1450,16 +1468,23 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includePrepare)
             {
-                lines.Add(LogLine($"event=filetransfer_route_transition_prepared; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Prepared; {sourceScope}; log_writer_id={writerId}", secondsOffset: 28));
+                lines.Add(LogLine($"event=filetransfer_route_transition_prepared; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; checkpoint_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Prepared; {sourceScope}; log_writer_id={writerId}", secondsOffset: 28));
             }
             if (includeDrain)
             {
-                lines.Add(LogLine($"event=filetransfer_route_transition_pause_bound; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Installed; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
-                lines.Add(LogLine($"event=filetransfer_route_transition_draining; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Draining; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
+                lines.Add(LogLine($"event=filetransfer_route_transition_pause_bound; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; checkpoint_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Installed; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
+                lines.Add(LogLine($"event=filetransfer_route_transition_draining; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; checkpoint_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Draining; {sourceScope}; log_writer_id={writerId}", secondsOffset: 29));
             }
             if (includeCommit)
             {
-                lines.Add(LogLine($"event=filetransfer_route_transition_committed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; {sourceScope}; log_writer_id={writerId}", secondsOffset: 30));
+                lines.Add(LogLine($"event=filetransfer_route_transition_drain_receipt_decided; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; transition_kind=RegularV4ToTunaV4; proof_boundary_kind=tuna_activation; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; admission_generation=1; pending_precommit_generation=1; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; checkpoint_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_status=Accepted; drain_outcome=Completed; {sourceScope}; log_writer_id={writerId}", secondsOffset: 30));
+            }
+            if (includeCommit)
+            {
+                lines.Add(LogLine($"event=filetransfer_route_transition_committed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; checkpoint_generation=1; {sourceScope}; log_writer_id={writerId}", secondsOffset: 30));
+                lines.Add(LogLine($"event=filetransfer_route_transitioned; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; transition_authority_id=fta2-initial-responder; transition_generation=1; log_writer_id={writerId}", secondsOffset: 30));
+                lines.Add(LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; transition_authority_id=fta2-initial-responder; transition_generation=1; log_writer_id={writerId}", secondsOffset: 31));
+                lines.Add(LogLine($"event=filetransfer_live_route_epoch_started; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; transition_authority_id=fta2-initial-responder; transition_generation=1; log_writer_id={writerId}", secondsOffset: 31));
             }
             if (mode is "retry_drain_rejected" or "retry_drain_recovered")
             {
@@ -1470,6 +1495,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     "activation_authority_mode=initial_responder; admission_generation=1; " +
                     "pending_precommit_generation=1; retry_install_generation=0; " +
                     "authority_id=fta2-initial-responder; transition_generation=1; " +
+                    "checkpoint_generation=1; " +
                     "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna";
                 var rejectedReceipt = LogLine(
                     $"event=filetransfer_route_transition_drain_receipt_decided; direction=inbound; " +
@@ -1524,7 +1550,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includeFullDisposition)
             {
-                lines.Add(LogLine($"event=filetransfer_route_transition_disposition_applied; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; decision_status=Applied; resulting_live_route_epoch=1; resulting_runtime_generation=2; resulting_route_publication_generation=2; resulting_route_commit_generation=1; resulting_terminal_generation=0; resulting_leg_generation=2; {sourceScope}; log_writer_id={writerId}", secondsOffset: 31));
+                lines.Add(LogLine($"event=filetransfer_route_transition_disposition_applied; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transition_kind=RegularV4ToTunaV4; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; retry_install_generation=0; authority_id=fta2-initial-responder; transition_generation=1; checkpoint_generation=1; decision_status=Applied; resulting_live_route_epoch=1; resulting_runtime_generation=2; resulting_route_publication_generation=2; resulting_route_commit_generation=1; resulting_terminal_generation=0; resulting_leg_generation=2; {sourceScope}; log_writer_id={writerId}", secondsOffset: 31));
             }
             if (string.Equals(mode, "recovered_then_replaced", StringComparison.Ordinal))
             {
@@ -1532,7 +1558,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             }
             if (includePublication)
             {
-                lines.Add(LogLine($"event=filetransfer_live_route_epoch_recovered; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; projection_source=coordinator_route_transition; route_publication_action_kind=RoutePublication; coordinator_decision_reason=filetransfer_route_transition_committed; transition_authority_id=fta2-initial-responder; transition_generation=1; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; route_commit_generation=1; terminal_generation=0; leg_generation=2; log_writer_id={writerId}", secondsOffset: 32));
+                lines.Add(LogLine($"event=filetransfer_live_route_epoch_recovered; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; projection_source=coordinator_route_transition; route_publication_action_kind=RouteCommitPublication; coordinator_decision_reason=filetransfer_route_transition_committed; transition_authority_id=fta2-initial-responder; transition_generation=1; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; route_commit_generation=1; terminal_generation=0; leg_generation=2; log_writer_id={writerId}", secondsOffset: 32));
             }
         }
 
@@ -8424,6 +8450,63 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_unsettled_authority_count"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryCoordinatorDeadlineSettlementWithoutReport_IsAccepted(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_direct_deadline_settlement";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_deadline_evaluation_requested",
+                    transferId,
+                    suffix: "; install_generation=1; observed_utc_ms=1010; subscriber_present=1",
+                    decisionReason: "runtime_unlock_retry_dispatch_deadline_elapsed"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_lifecycle_deadline_decided",
+                    transferId,
+                    suffix: "; install_generation=1; attempt_generation=1; missing_dispatch_generation=0; lifecycle_state=Settled; coordinator_deadline_utc_ms=1000; observed_utc_ms=1010; decision_status=Accepted",
+                    decisionReason: "retry_dispatch_settlement_accepted"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    transferId,
+                    suffix: "; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                    decisionReason: "retry_dispatch_deadline_elapsed"),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_settlement_decided",
+                    transferId,
+                    suffix: "; settlement_outcome=MissingDispatch; settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted",
+                    decisionReason: "retry_dispatch_settlement_accepted")),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (!compact)
+        {
+            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_settlement_acceptance_missing_count"]);
+        }
+        Assert.NotEqual(
+            "runtime_unlock_retry_dispatch_settlement_unaccepted",
+            verdict["first_proof_chain_failure_class"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetrySettlementAuthorityGenerationMismatch_IsIncomplete()
@@ -11996,7 +12079,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
             "route_publication_generation=3; runtime_generation=3; terminal_generation=0; " +
             "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
-            "bridge_decision_generation=2; data_session_generation=1";
+            "bridge_decision_generation=2; checkpoint_request_id=(none); data_session_generation=1";
         const string operation =
             $"receive_recovery_operation_authority_id={operationId}; receive_recovery_operation_generation=2";
         var lines = new List<string>
@@ -12008,8 +12091,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {operation}; {scope}; execution_state=Running; execution_start_status=Started; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
             LogLine($"event=nkn_bridge_recovery_submission_barrier_closed; {scope}; lease_generation=0; submission_epoch=3; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=5", secondsOffset: 5),
             LogLine($"event=nkn_bridge_recovery_execution_hard_restart_decided; {scope}; lease_generation=0; decision_status=Started; remaining_total_ms=44983; log_writer_id={writerId}; log_writer_sequence=6", secondsOffset: 6),
-            LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; submission_epoch=3; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7),
-            LogLine($"event=filetransfer_v4_sender_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; error_code=read_failed; log_writer_id={writerId}; log_writer_sequence=40811", secondsOffset: 8),
+            LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; expected_submission_epoch=0; submission_epoch=3; expected_process_epoch=0; ready_process_epoch=3; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_observed; {operation}; {scope}; physical_send_lease_generation=90; decision_status=Accepted; recovery_barrier_active=1; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; expected_submission_epoch=0; current_submission_epoch=3; expected_process_epoch=0; current_process_epoch=3; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8),
+            LogLine($"event=filetransfer_v4_sender_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; error_code=read_failed; log_writer_id={writerId}; log_writer_sequence=40811", secondsOffset: 9),
             LogLine($"event=filetransfer_receive_recovery_operation_invalidated; {operation}; {scope}; execution_state=Invalidated; decision_reason=terminal_state; log_writer_id={writerId}; log_writer_sequence=40817", secondsOffset: 9),
         };
 
@@ -12057,7 +12141,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
             "route_publication_generation=3; runtime_generation=3; terminal_generation=0; " +
             "leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; " +
-            "bridge_decision_generation=3; data_session_generation=1";
+            "bridge_decision_generation=3; checkpoint_request_id=(none); data_session_generation=1";
         const string operation =
             $"receive_recovery_operation_authority_id={operationId}; receive_recovery_operation_generation=3";
         var lines = new List<string>
@@ -12069,12 +12153,15 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=filetransfer_receive_recovery_operation_execution_start_decided; {operation}; {scope}; execution_state=Running; execution_start_status=Started; log_writer_id={writerId}; log_writer_sequence=4", secondsOffset: 4),
             LogLine($"event=nkn_bridge_recovery_submission_barrier_closed; {scope}; lease_generation=0; submission_epoch=4; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=5", secondsOffset: 5),
             LogLine($"event=nkn_bridge_recovery_execution_hard_restart_decided; {scope}; lease_generation=0; decision_status=Started; remaining_total_ms=44983; log_writer_id={writerId}; log_writer_sequence=6", secondsOffset: 6),
-            LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; submission_epoch=4; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7),
+            LogLine($"event=nkn_bridge_submission_rejected; stage=pre_wait; reason=bridge_submission_epoch_not_ready; channel=bulk; expected_submission_epoch=0; submission_epoch=4; expected_process_epoch=0; ready_process_epoch=4; recovery_barrier_active=1; log_writer_id={writerId}; log_writer_sequence=7", secondsOffset: 7),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_observed; {operation}; {scope}; physical_send_lease_generation=90; decision_status=Accepted; recovery_barrier_active=1; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; expected_submission_epoch=0; current_submission_epoch=4; expected_process_epoch=0; current_process_epoch=4; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8),
+            LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_finalized; {operation}; {scope}; physical_send_lease_generation=90; decision_status=Accepted; disposition=ActiveHold; log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9),
             LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred; {operation}; {scope}; physical_send_lease_generation=90; repair_request_key=(none); decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8),
             LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred; {operation}; {scope}; physical_send_lease_generation=91; repair_request_key=(none); decision_status=Accepted; typed_rejection_reason=SubmissionEpochNotReady; rejection_stage=pre_wait; rejection_channel=bulk; log_writer_id={writerId}; log_writer_sequence=8", secondsOffset: 8),
             LogLine($"event=filetransfer_outbound_physical_send_lease_retired; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; send_lease_generation=91; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_route_publication_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_data_session_generation=1; send_kind=PostTunaFallbackV6Payload; repair_send=0; repair_request_key=(none); log_writer_id={writerId}; log_writer_sequence=9", secondsOffset: 9),
             LogLine($"event=filetransfer_receive_recovery_operation_execution_receipt_applied; {operation}; {scope}; execution_state=Completed; execution_outcome=Completed; proof_identity=file_transfer_data_frame:bulk:3; closure_state=None; log_writer_id={writerId}; log_writer_sequence=10", secondsOffset: 10),
             LogLine($"event=filetransfer_post_tuna_fallback_recovery_submission_failure_resumed; {operation}; {scope}; decision_status=Accepted; log_writer_id={writerId}; log_writer_sequence=11", secondsOffset: 11),
+            LogLine($"event=filetransfer_outbound_physical_send_lease_registered; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_route_publication_generation=3; source_terminal_generation=0; source_leg_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_data_session_generation=1; send_kind=PostTunaFallbackV6Payload; log_writer_id={writerId}; log_writer_sequence=12", secondsOffset: 12),
             LogLine($"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; {operation}; {scope}; delivery_state=delivered; decision_status=accepted; log_writer_id={writerId}; log_writer_sequence=12", secondsOffset: 12),
             LogLine($"event=filetransfer_v4_sender_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; error_code=read_failed; log_writer_id={writerId}; log_writer_sequence=55765", secondsOffset: 13),
             LogLine($"event=filetransfer_receive_recovery_operation_invalidated; {operation}; {scope}; execution_state=Invalidated; decision_reason=terminal_state; log_writer_id={writerId}; log_writer_sequence=55768", secondsOffset: 14),

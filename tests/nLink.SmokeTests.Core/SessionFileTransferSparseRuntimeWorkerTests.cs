@@ -5360,6 +5360,17 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(FileTransferReceiveRecoveryExecutionState.Running, before.Value.ExecutionState);
         Assert.True(before.Value.LivenessDeferralDeadlineUtcMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         var graceBefore = GetPrivatePropertyValue(context, "PullTransportGraceDeadlineUtc");
+        SetPrivateProperty(context, "PullTransportPaused", true);
+        SetPrivateProperty(context, "PullTransportPauseReason", "post_tuna_fallback_bridge_restart");
+        SetPrivateProperty(context, "PullTransportResumeRequestPending", true);
+
+        var holdArguments = new object?[] { context, null, null };
+        Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryGetOutboundReceiveRecoveryPayloadSubmissionHoldLocked",
+                BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, holdArguments)));
+        Assert.Equal(before, Assert.IsType<FileTransferReceiveRecoveryOperation>(holdArguments[1]));
 
         var exception = new FileTransferDataSessionSubmissionUnavailableException(
             FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochChanged,
@@ -5395,6 +5406,32 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
         Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
         Assert.True(GetPrivateProperty<bool>(context, "PullTransportResumeRequestPending"));
+        Assert.Equal(
+            "post_tuna_fallback_receive_recovery_submission_epoch_transition",
+            GetPrivateProperty<string>(context, "PullTransportPauseReason"));
+        Assert.Equal(
+            1L,
+            GetPrivateProperty<long>(
+                context,
+                "LastPostTunaFallbackReceiveRecoveryPayloadHoldGeneration"));
+        Assert.NotNull(GetPrivatePropertyValue(
+            context,
+            "CurrentPostTunaFallbackReceiveRecoveryPayloadHold"));
+        Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryDeferCurrentPostTunaFallbackReceiveRecoveryPayloadHoldIfCurrent",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    "sender_pump",
+                    new InvalidOperationException(
+                        "File-transfer V4 sender transport send failed.",
+                        exception),
+                    install,
+                    dataSession,
+                ])));
         Assert.Equal(graceBefore, GetPrivatePropertyValue(context, "PullTransportGraceDeadlineUtc"));
         var after = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState")
             .FileTransferReceiveRecovery.CurrentOperation;

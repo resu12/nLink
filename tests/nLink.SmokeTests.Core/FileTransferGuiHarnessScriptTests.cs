@@ -3568,6 +3568,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     [InlineData("raw_only")]
     [InlineData("recovered")]
     [InlineData("late_hold")]
+    [InlineData("deadline")]
     public async Task GuiSmokeFailureClassification_RuntimeUnlockRetryPostGrantHoldUsesIndexedProofBeforeDeadline(
         string mode)
     {
@@ -3595,7 +3596,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             [void][IO.Directory]::CreateDirectory($tempRoot)
             try {
                 $path = Join-Path $tempRoot 'evidence.log'
-                $tuple = 'authority_id=retry-a; session_id=sess; transfer_id=transfer; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=2; missing_dispatch_successor_generation=1; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0; release_kind=FallbackPairedTailYield; release_authority_id=pair-a; release_generation=1; release_outcome=paired'
+                $tuple = 'authority_id=retry-a; authority_generation=1; session_id=sess; transfer_id=transfer; direction=outbound; contract_generation=1; retired_generation=0; dispatch_attempt_generation=2; missing_dispatch_successor_generation=1; install_generation=1; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0; release_kind=FallbackPairedTailYield; release_authority_id=pair-a; release_generation=1; release_outcome=paired'
                 $lines = @("event=runtime_unlock_retry_dispatch_authority_granted; $tuple; gui_evidence_sequence=10; log_writer_id=writer")
                 if ('{{mode}}' -eq 'late_hold') {
                     $lines += "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; gui_evidence_sequence=11; settlement_outcome=MissingDispatch; decision_reason=runtime_unlock_retry_dispatch_missing_before_completion; dispatch_observed=0; log_writer_id=writer"
@@ -3608,6 +3609,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $lines += "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; gui_evidence_sequence=13; offer_generation=3; offer_nonce=nonce; settlement_outcome=DispatchObserved; dispatch_observed=1; decision_reason=peer_visible_offer_send_observed; log_writer_id=writer"
                     $lines += "event=runtime_unlock_retry_dispatch_settlement_reported; $tuple; gui_evidence_sequence=14; offer_generation=3; offer_nonce=nonce; settlement_outcome=DispatchObserved; settlement_reason=peer_visible_offer_send_observed; log_writer_id=writer"
                     $lines += "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; gui_evidence_sequence=15; offer_generation=3; offer_nonce=nonce; settlement_outcome=DispatchObserved; settlement_reason=peer_visible_offer_send_observed; decision_status=Accepted; log_writer_id=writer"
+                }
+                if ('{{mode}}' -eq 'deadline') {
+                    $lines += "event=session_recovery_contract_listener_rearm_completed; $tuple; gui_evidence_sequence=13; listener_rearm_completed=1; log_writer_id=writer"
+                    $lines += "event=session_recovery_contract_retry_dispatched; $tuple; gui_evidence_sequence=14; retry_dispatched=1; log_writer_id=writer"
+                    $lines += "event=session_recovery_contract_retry_authority_offer_window_refreshed; $tuple; gui_evidence_sequence=15; offer_generation=3; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_dispatch_deadline_evaluation_requested; $tuple; gui_evidence_sequence=16; observed_utc_ms=1010; subscriber_present=1; decision_reason=runtime_unlock_retry_dispatch_deadline_elapsed; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_lifecycle_deadline_decided; $tuple; gui_evidence_sequence=17; lifecycle_state=Settled; coordinator_deadline_utc_ms=1000; observed_utc_ms=1010; decision_status=Accepted; decision_reason=retry_dispatch_settlement_accepted; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; gui_evidence_sequence=18; offer_generation=3; settlement_outcome=MissingDispatch; dispatch_observed=0; decision_reason=retry_dispatch_deadline_elapsed; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; gui_evidence_sequence=19; settlement_outcome=MissingDispatch; settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted; decision_reason=retry_dispatch_settlement_accepted; log_writer_id=writer"
+                    $lines += "event=runtime_unlock_retry_dispatch_chain_closed; $tuple; gui_evidence_sequence=20; decision_reason=retry_dispatch_missing_successor_limit_exhausted; log_writer_id=writer"
                 }
                 $lines | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification `
@@ -4404,7 +4415,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
 
                 $initialPeerScope = 'peer_runtime_owner_session_id=sess; peer_runtime_owner_transfer_id=transfer; peer_runtime_owner_direction=inbound; peer_runtime_owner_route=regularnknv4fast; peer_runtime_owner_route_token=regular_nkn_v4_fast; peer_runtime_owner_protocol_version=4; peer_runtime_owner_live_route_epoch=0; peer_runtime_generation=1; peer_runtime_owner_terminal_generation=0; peer_route_publication_session_id=sess; peer_route_publication_transfer_id=transfer; peer_route_publication_direction=inbound; peer_route_publication_route=regularnknv4fast; peer_route_publication_route_token=regular_nkn_v4_fast; peer_route_publication_protocol_version=4; peer_route_publication_live_route_epoch=0; peer_route_publication_runtime_generation=1; peer_route_publication_terminal_generation=0; peer_route_publication_leg_generation=1; peer_route_publication_commit_generation=0; peer_route_publication_generation=1; peer_terminal_generation=0; peer_leg_generation=1; peer_transport_epoch=0; peer_bridge_recovery_generation=0; peer_checkpoint_request_id=(none); peer_checkpoint_generation=0; peer_data_session_identity=data-session; peer_data_session_generation=1'
-                $initialTransitionScope = 'session_id=sess; transfer_id=transfer; direction=inbound; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; responder_transition_mode=initial_regular_v4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_transport=regular_nkn; source_live_route_epoch=0; source_runtime_generation=1; source_route_publication_generation=1; source_route_commit_generation=0; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; data_session_identity=data-session; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; activation_authority_mode=initial_responder; retry_install_generation=0; admission_generation=1; pending_precommit_generation=1; responder_handoff_generation=0; fallback_yield_generation=0; pairing_generation=0; checkpoint_generation=0; checkpoint_request_id=(none)'
+                $initialTransitionScope = 'session_id=sess; transfer_id=transfer; direction=inbound; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; responder_transition_mode=initial_regular_v4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_transport=regular_nkn; source_live_route_epoch=0; source_runtime_generation=1; source_route_publication_generation=1; source_route_commit_generation=0; source_terminal_generation=0; source_leg_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=1; data_session_identity=data-session; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; activation_authority_mode=initial_responder; retry_install_generation=0; admission_generation=1; pending_precommit_generation=1; responder_handoff_generation=0; fallback_yield_generation=0; pairing_generation=0; checkpoint_generation=1; checkpoint_request_id=(none)'
                 $exactRecovery = @(
                     "event=runtime_unlock_peer_precommit_answer_acceptance_decided; status=Held; decision_status=Held; session_id=sess; transfer_id=transfer; direction=inbound; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; local_transaction_generation=1; local_offer_generation=6; local_tuna_path_lease_generation=1; pending_answer_ack_generation=6; launch_generation=1; probe_id=peer-probe; probe_frame_fingerprint=probe-fingerprint; received_transport=tuna; received_utc_ms=1250; probe_ack_sent_utc_ms=1275; peer_admission_generation=1; $initialPeerScope; data_session_generation=1; responder_transition_mode=initial_regular_v4; decision_reason=runtime_unlock_peer_precommit_probe_ack_pending; log_writer_id=responder",
                     "event=runtime_unlock_responder_answer_probe_convergence_decided; status=Held; decision_status=Held; substate=AwaitingProbeAck; decision_reason=semantic_answer_ack_joined_waiting_for_probe_ack; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; pending_answer_ack_generation=6; payer_decision_id=4; lanes=file; authority_mode=InitialActivation; nonce=ack-correlation; answer_message_id=answer-message; answer_deadline_utc_ms=1200; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; responder_transition_mode=initial_regular_v4; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; ack_frame_fingerprint=ack-frame; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; probe_id=peer-probe; peer_probe_frame_fingerprint=probe-fingerprint; received_transport=tuna; received_utc_ms=1250; probe_ack_sent_utc_ms=1275; peer_admission_generation=1; $initialPeerScope; data_session_generation=1; probe_state=Started; probe_transport=tuna; probe_acked_utc_ms=0; launch_generation=1; log_writer_id=responder",
@@ -4416,10 +4427,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     "event=runtime_unlock_precommit_responder_peer_probe_handoff_bound; status=Accepted; decision_status=Accepted; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; probe_id=peer-probe; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1300; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; peer_probe_frame_fingerprint=probe-fingerprint; responder_transition_mode=initial_regular_v4; peer_transaction_generation=1; peer_offer_generation=1; peer_tuna_path_lease_generation=1; peer_admission_generation=1; $initialPeerScope; launch_role=ResponderAdoptingAckedPeerProbe; answer_acceptance_source=SemanticAnswerAck; normalized_reason=exact_responder_peer_probe_adopted; log_writer_id=responder",
                     'event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; status=Accepted; decision_status=Accepted; decision_reason=runtime_unlock_responder_peer_probe_route_transition_handoff_accepted; direction=inbound; session_id=sess; transfer_id=transfer; transaction_generation=1; offer_generation=6; launch_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=peer-offer-dialer-1; lanes=file; payer_decision_id=4; pending_answer_ack_generation=6; answer_acceptance_source=SemanticAnswerAck; ack_message_id=answer-ack; ack_source_fingerprint=ack-fingerprint; peer_probe_frame_fingerprint=probe-fingerprint; probe_id=peer-probe; probe_state=Acked; probe_transport=tuna; probe_acked_utc_ms=1300; transition_authority_id=(none); transition_generation=0; responder_transition_mode=initial_regular_v4; activation_authority_mode=initial_responder; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; route_publication_generation=1; route_commit_generation=0; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; checkpoint_request_id=(none); checkpoint_generation=0; data_session_identity=data-session; data_session_generation=1; admission_generation=1; pending_precommit_generation=1; fallback_yield_authority_id=(none); fallback_yield_generation=0; pairing_generation=0; pair_key=(none); responder_handoff_authority_id=(none); responder_handoff_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; log_writer_id=responder',
                     "event=filetransfer_route_transition_prepared; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; $initialTransitionScope; log_writer_id=responder",
+                    "event=filetransfer_route_transition_pause_bound; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; decision_status=Installed; $initialTransitionScope; log_writer_id=responder",
                     "event=filetransfer_route_transition_draining; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; $initialTransitionScope; log_writer_id=responder",
+                    "event=filetransfer_route_transition_drain_receipt_decided; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; decision_status=Accepted; drain_outcome=Completed; $initialTransitionScope; log_writer_id=responder",
                     "event=filetransfer_route_transition_committed; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; $initialTransitionScope; log_writer_id=responder",
                     "event=filetransfer_route_transition_disposition_applied; transition_kind=RegularV4ToTunaV4; authority_id=transition-1; transition_generation=1; apply_status=Applied; resulting_live_route_epoch=1; resulting_runtime_generation=2; resulting_route_publication_generation=2; resulting_route_commit_generation=1; resulting_terminal_generation=0; resulting_leg_generation=2; $initialTransitionScope; log_writer_id=responder",
-                    'event=filetransfer_live_route_epoch_recovered; session_id=sess; transfer_id=transfer; direction=inbound; transition_authority_id=transition-1; transition_generation=1; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; route_commit_generation=1; terminal_generation=0; leg_generation=2; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=filetransfer_route_transition_committed; projection_source=coordinator_route_transition; log_writer_id=responder'
+                    'event=filetransfer_live_route_epoch_recovered; session_id=sess; transfer_id=transfer; direction=inbound; transition_authority_id=transition-1; transition_generation=1; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; route_publication_generation=2; route_commit_generation=1; terminal_generation=0; leg_generation=2; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RouteCommitPublication; coordinator_decision_reason=filetransfer_route_transition_committed; projection_source=coordinator_route_transition; log_writer_id=responder'
                 )
                 $missingConvergenceChains = [ordered]@{
                     awaiting_peer_probe = @($prefix | Where-Object {
@@ -8447,6 +8460,99 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains(
             "gui-route-transition-grace-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PostTunaSubmissionEpochTerminalizationRequiresExactObservedFailureChain()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Test-TunaGuiLogLineHasEvent");
+        var hasEventBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineHasEvent",
+            "Test-TunaGuiLogLineFieldMatch");
+        var fieldMatchBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Test-TunaGuiLogLineFieldMatch",
+            "Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved");
+        var correlationBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure",
+            "Test-TunaGuiPostTunaSubmissionEpochTerminalizationFailure");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Test-TunaGuiLogLineHasEvent { {{hasEventBody}} }
+            function Test-TunaGuiLogLineFieldMatch { {{fieldMatchBody}} }
+            function Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure { {{correlationBody}} }
+
+            $writer = 'writer-post-tuna-hold'
+            $authority = 'fta2-filetransfer_receive_recovery_operation-post-tuna'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; route_publication_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); data_session_generation=1'
+            $lines = @(
+                "event=filetransfer_receive_recovery_operation_issued; $scope; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_execution_start_decided; $scope; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; execution_state=Running; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_submission_barrier_closed; bridge_recovery_generation=1; submission_epoch=4; recovery_barrier_active=1; log_writer_id=$writer",
+                "event=nkn_bridge_recovery_execution_hard_restart_decided; bridge_recovery_generation=1; decision_status=Started; remaining_total_ms=44980; log_writer_id=$writer",
+                "event=nkn_bridge_submission_rejected; reason=bridge_submission_epoch_changed; stage=pre_submit; channel=bulk; expected_submission_epoch=3; submission_epoch=4; expected_process_epoch=3; ready_process_epoch=0; recovery_barrier_active=1; log_writer_id=$writer",
+                "event=filetransfer_post_tuna_fallback_recovery_submission_failure_observed; $scope; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; decision_status=Accepted; typed_rejection_reason=SubmissionEpochChanged; rejection_stage=pre_submit; rejection_channel=bulk; expected_submission_epoch=3; current_submission_epoch=4; expected_process_epoch=3; current_process_epoch=0; recovery_barrier_active=1; log_writer_id=$writer",
+                "event=filetransfer_v4_sender_failed; session_id=session-a; transfer_id=transfer-a; log_writer_id=$writer",
+                "event=filetransfer_receive_recovery_operation_invalidated; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; decision_reason=terminal_state; log_writer_id=$writer"
+            )
+            if (-not (Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines $lines).Unresolved) {
+                throw 'exact post-Tuna submission-epoch terminalization was not classified'
+            }
+
+            $missingObservation = @($lines[0..4], $lines[6..7])
+            if ((Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines $missingObservation).Unresolved) {
+                throw 'raw barrier rejection without accepted Core observation was classified'
+            }
+
+            $wrongWriter = @($lines)
+            $wrongWriter[4] = $wrongWriter[4].Replace("log_writer_id=$writer", 'log_writer_id=writer-other')
+            if ((Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines $wrongWriter).Unresolved) {
+                throw 'cross-writer raw rejection was classified'
+            }
+
+            $wrongEpoch = @($lines)
+            $wrongEpoch[5] = $wrongEpoch[5].Replace('current_submission_epoch=4', 'current_submission_epoch=5')
+            if ((Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines $wrongEpoch).Unresolved) {
+                throw 'mutated submission epoch was classified'
+            }
+
+            $released = @($lines[0..5])
+            $released += "event=filetransfer_post_tuna_fallback_recovery_submission_failure_finalized; $scope; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; decision_status=Accepted; physical_send_lease_generation=2392; log_writer_id=$writer"
+            $released += "event=filetransfer_post_tuna_fallback_recovery_submission_failure_deferred; $scope; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; decision_status=Accepted; log_writer_id=$writer"
+            $released += "event=filetransfer_receive_recovery_operation_execution_receipt_applied; $scope; receive_recovery_operation_authority_id=$authority; receive_recovery_operation_generation=3; execution_state=Completed; proof_identity=proof-a; log_writer_id=$writer"
+            $released += "event=filetransfer_outbound_payload_resumed_after_receive_recovery; $scope; recovery_operation_authority_id=$authority; recovery_operation_generation=3; proof_identity=proof-a; log_writer_id=$writer"
+            if ((Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines $released).Unresolved) {
+                throw 'held and resumed recovery without sender failure was classified'
+            }
+
+            if ((Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines @()).Unresolved) {
+                throw 'empty evidence was classified'
+            }
+            if ((Get-TunaGuiPostTunaSubmissionEpochTerminalizationFailure -Lines @($lines[6])).Unresolved) {
+                throw 'singleton sender failure was classified'
+            }
+
+            Write-Output 'gui-post-tuna-submission-epoch-terminalization-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Post-Tuna submission-epoch GUI classification test failed.{Environment.NewLine}" +
+            $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-post-tuna-submission-epoch-terminalization-correlation-ok",
             result.Stdout,
             StringComparison.Ordinal);
     }

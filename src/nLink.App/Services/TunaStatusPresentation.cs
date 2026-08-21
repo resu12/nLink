@@ -73,6 +73,8 @@ internal static class TunaStatusPresentationMapper
                 => new TunaStatusPresentation("Waiting for the other side to connect to Tuna.", true, true),
             "waiting_for_answer" or "dialer_starting" or "dialer_ready" or "negotiated"
                 => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
+            "runtime_unlock_pending_route_commit"
+                => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
             "free_dialer_active"
                 => new TunaStatusPresentation("Tuna is active and the other computer is paying.", false),
             "paid_listener_active"
@@ -153,6 +155,21 @@ internal static class TunaStatusPresentationMapper
             return runtime;
         }
 
+        if (SuppressesPendingVisual(reason))
+        {
+            return reason;
+        }
+
+        if (IsConnectingStatus(reason))
+        {
+            return reason;
+        }
+
+        if (IsPassiveRouteProjection(reason) && IsConnectingStatus(runtime))
+        {
+            return runtime;
+        }
+
         if (IsMeaningfulTransportReason(reason))
         {
             return reason;
@@ -187,6 +204,7 @@ internal static class TunaStatusPresentationMapper
             "dialer_starting" or
             "dialer_ready" or
             "negotiated" or
+            "runtime_unlock_pending_route_commit" or
             "active";
     }
 
@@ -220,6 +238,36 @@ internal static class TunaStatusPresentationMapper
 
     private static bool IsMeaningfulTransportReason(string value)
         => value is not "unknown" and not "inactive" and not "transport_without_acceleration" and not "transport_unwired";
+
+    private static bool IsPassiveRouteProjection(string value)
+        => value is "post_tuna_fallback_route_active" or
+            "file_transfer_route_not_file_tuna_v4" or
+            "file_transfer_route_file_tuna_v4";
+
+    private static bool IsConnectingStatus(string value)
+        => value is "checking_payer_priority" or
+            "selected_payer_starting_listener" or
+            "listener_starting" or
+            "listener_paths_starting" or
+            "listener_retrying" or
+            "listener_start_timeout" or
+            "provider_paths_retrying" or
+            "provider_paths_ready" or
+            "provider_paths_degraded" or
+            "listener_ready" or
+            "waiting_for_peer_dial" or
+            "peer_connected" or
+            "waiting_for_answer" or
+            "dialer_starting" or
+            "dialer_ready" or
+            "negotiated" or
+            "suppressed_by_peer_payer" or
+            "payer_yield_to_helpee" or
+            "listener_stopped_payer_switch_to_dialer" or
+            "listener_stopped_payer_yield_to_helpee" or
+            "renegotiating_after_user_unlock" or
+            "runtime_unlock_pending_route_commit" ||
+            value.StartsWith("negotiation_scheduled_", StringComparison.Ordinal);
 
     private static bool IsFallbackOrFailure(string value)
         => value.Contains("fallback", StringComparison.Ordinal) ||

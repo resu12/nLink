@@ -627,6 +627,87 @@ public void TunaStatusPresentationMapper_UserStopReasonWinsOverReadyRuntime()
     Assert.True(TunaStatusPresentationMapper.SuppressesPendingVisual("remote_header_switch_off"));
 }
 
+[Theory]
+[InlineData("post_tuna_fallback_route_active", "listener_starting", "Starting Tuna listener. Regular NKN stays connected until ready.")]
+[InlineData("post_tuna_fallback_route_active", "dialer_starting", "Negotiating Tuna acceleration.")]
+[InlineData("file_transfer_route_not_file_tuna_v4", "runtime_unlock_pending_route_commit", "Negotiating Tuna acceleration.")]
+public void TunaStatusPresentationMapper_LiveRuntimeNegotiationOverridesOnlyPassiveRouteProjection(
+    string transportReason,
+    string runtimeStatus,
+    string expectedText)
+{
+    var presentation = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: transportReason,
+        runtimeStatus: runtimeStatus,
+        sessionUnlockOn: true);
+
+    Assert.Equal(expectedText, presentation.Text);
+    Assert.True(presentation.IsConnecting);
+}
+
+[Fact]
+public void TunaStatusPresentationMapper_PassiveRouteProjectionDoesNotPulseWithoutApprovedAttempt()
+{
+    var presentation = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: "post_tuna_fallback_route_active",
+        runtimeStatus: "waiting_for_approved_session",
+        sessionUnlockOn: true);
+
+    Assert.False(presentation.IsConnecting);
+}
+
+[Theory]
+[InlineData("regular_nkn_v4_fast", 4, false)]
+[InlineData("post_tuna_fallback_v6", 6, false)]
+[InlineData("file_tuna_v4", 4, true)]
+public void TunaHeaderStateProjector_UsesNonterminalTransferRouteAndPreservesTransportReason(
+    string route,
+    int protocolVersion,
+    bool expectedActive)
+{
+    var transfer = new FileTransferTransferSnapshot(
+        "session", "transfer", FileTransferDirection.Outbound,
+        FileTransferTransferState.Sending, "file.bin", 1024,
+        Sha256Base64: null, BytesTransferred: 0, ChunksTransferred: 0,
+        ChunkCount: 1, ChunkSizeBytes: 1024, ErrorCode: null,
+        StatusMessage: "Sending", RouteToken: route, ProtocolVersion: protocolVersion);
+
+    var projection = TunaHeaderStateProjector.FromSnapshot(
+        new SessionFileTransferSnapshot(transfer, Inbound: null),
+        transportActive: true,
+        transportReason: "listener_starting");
+
+    Assert.Equal(expectedActive, projection.IsActive);
+    Assert.Equal("listener_starting", projection.StatusReason);
+}
+
+[Fact]
+public void TunaHeaderStateProjector_TerminalOrMissingTransferUsesTransportState()
+{
+    var terminal = new FileTransferTransferSnapshot(
+        "session", "transfer", FileTransferDirection.Inbound,
+        FileTransferTransferState.Completed, "file.bin", 1024,
+        Sha256Base64: null, BytesTransferred: 1024, ChunksTransferred: 1,
+        ChunkCount: 1, ChunkSizeBytes: 1024, ErrorCode: null,
+        StatusMessage: "Completed", RouteToken: "file_tuna_v4", ProtocolVersion: 4);
+
+    var terminalProjection = TunaHeaderStateProjector.FromSnapshot(
+        new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal),
+        transportActive: false,
+        transportReason: "dialer_starting");
+    var emptyProjection = TunaHeaderStateProjector.FromSnapshot(
+        new SessionFileTransferSnapshot(Outbound: null, Inbound: null),
+        transportActive: true,
+        transportReason: "paid_listener_active");
+
+    Assert.False(terminalProjection.IsActive);
+    Assert.Equal("dialer_starting", terminalProjection.StatusReason);
+    Assert.True(emptyProjection.IsActive);
+    Assert.Equal("paid_listener_active", emptyProjection.StatusReason);
+}
+
 [Fact]
 public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSummary()
 {

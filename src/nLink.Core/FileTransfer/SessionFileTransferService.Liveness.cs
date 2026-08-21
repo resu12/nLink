@@ -1245,6 +1245,7 @@ public sealed partial class SessionFileTransferService
                     {
                         ExecutionState:
                             FileTransferReceiveRecoveryExecutionState.Completed,
+                        ReceiveProof: not null,
                     } exactCompletedOperation &&
                     request.ReceiveRecoveryOperationAuthority is { } requestAuthority &&
                     exactCompletedOperation.Authority == requestAuthority &&

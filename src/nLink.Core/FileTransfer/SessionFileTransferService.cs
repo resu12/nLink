@@ -7511,11 +7511,39 @@ public sealed partial class SessionFileTransferService :
                     current);
             }
         }
+        var payloadReleased = FileTransferCoordinator
+            .TryGetReceiveRecoveryPayloadSubmissionProofRelease(
+                state,
+                out var released);
+        if (payloadReleased &&
+            context.CurrentPostTunaFallbackReceiveRecoveryPayloadHold is
+                { } postTunaFallbackHold &&
+            released.Authority == postTunaFallbackHold.Authority &&
+            context.InstalledOutboundSparsePump == postTunaFallbackHold.PumpInstall &&
+            ReferenceEquals(context.DataSession, postTunaFallbackHold.DataSession) &&
+            IsPostTunaFallbackReceiveRecoveryPayloadScopeCurrentLocked(
+                context,
+                released,
+                postTunaFallbackHold.PumpInstall,
+                postTunaFallbackHold.DataSession))
+        {
+            _ = TryClearPostTunaFallbackReceiveRecoveryPayloadHoldLocked(
+                context,
+                postTunaFallbackHold);
+
+            context.SparseSenderPumpLastWakeReason =
+                "receive_recovery_proof_owned_payload_resumed";
+            context.V6SenderPumpLastWakeReason =
+                "post_tuna_fallback_recovery_submission_failure_resumed";
+            context.SignalSparseSenderPump();
+            var proof = released.ReceiveProof!.Value;
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_outbound_payload_resumed_after_receive_recovery; decision_status=Accepted; decision_reason=exact_receive_recovery_proof_adopted; authority_effect=payload_resumed; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; hold_generation={postTunaFallbackHold.HoldGeneration}; recovery_operation_generation={released.Authority.OperationGeneration}; recovery_operation_authority_id={FormatProtocolLogValue(released.Authority.AuthorityId.ToString())}; proof_identity={FormatProtocolLogValue(proof.ProofIdentity)}; proof_observed_utc_ms={proof.ObservedUtcMs}; pump_install_generation={postTunaFallbackHold.PumpInstall.InstallGeneration}; route={FormatProtocolLogValue(released.Authority.Observation.RouteToken)}; protocol_version={released.Authority.Observation.ProtocolVersion}; live_route_epoch={released.Authority.Observation.LiveRouteEpoch}; runtime_generation={released.Authority.Observation.RuntimeOwner.RuntimeGeneration}; route_publication_generation={released.Authority.Observation.RoutePublication.PublicationGeneration}; terminal_generation={released.Authority.Observation.TerminalGeneration}; leg_generation={released.Authority.Observation.LegGeneration}; transport_epoch={released.Authority.Observation.TransportEpoch}; bridge_recovery_generation={released.Authority.Observation.BridgeRecoveryGeneration}; data_session_generation={released.Authority.Observation.DataSessionGeneration}");
+        }
+
         if (payloadWasHeld &&
-            FileTransferCoordinator
-                .TryGetReceiveRecoveryPayloadSubmissionProofRelease(
-                    state,
-                    out var released) &&
+            payloadReleased &&
             IsSameReceiveRecoveryPayloadHoldLineage(
                 heldPayloadOperation,
                 released) &&
@@ -23015,6 +23043,25 @@ public sealed partial class SessionFileTransferService :
         string RepairRequestKey,
         Task? PhysicalCompletionTask = null);
 
+    private sealed class OutboundPostTunaFallbackReceiveRecoveryPayloadHold
+    {
+        public required long HoldGeneration { get; init; }
+
+        public required FileTransferReceiveRecoveryOperationAuthority Authority { get; init; }
+
+        public required DateTimeOffset ImmutableDeadlineUtc { get; init; }
+
+        public required OutboundSparsePumpInstall PumpInstall { get; init; }
+
+        public required IFileTransferDataSession DataSession { get; init; }
+
+        public required string DataSessionIdentity { get; init; }
+
+        public required bool OwnsTransportPause { get; init; }
+
+        public HashSet<long> PhysicalSendLeaseGenerations { get; } = [];
+    }
+
     private sealed record RuntimeUnlockPreCommitProbeLaunchDisposition(
         long LaunchGeneration,
         RuntimeUnlockRouteCommitSnapshot Snapshot,
@@ -23179,6 +23226,11 @@ public sealed partial class SessionFileTransferService :
 
         public Dictionary<long, FileTransferReceiveRecoverySubmissionFailureObservation>
             ReceiveRecoverySubmissionFailureObservations { get; } = [];
+
+        public long LastPostTunaFallbackReceiveRecoveryPayloadHoldGeneration { get; set; }
+
+        public OutboundPostTunaFallbackReceiveRecoveryPayloadHold?
+            CurrentPostTunaFallbackReceiveRecoveryPayloadHold { get; set; }
 
         public RuntimeUnlockPreCommitProbeLaunchDisposition?
             LastRuntimeUnlockPreCommitProbeLaunchDisposition { get; set; }

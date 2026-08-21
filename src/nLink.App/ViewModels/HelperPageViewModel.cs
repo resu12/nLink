@@ -38,7 +38,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan RemoteControlSnapshotKeepAliveInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
-    private const string FileTunaV4RouteToken = "file_tuna_v4";
     private const int FileTransferUiRefreshMinIntervalMs = 125;
     private const int FileTransferUiRefreshCoalescedLogThreshold = 8;
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -3119,43 +3118,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncTunaActiveFromRuntime()
     {
-        if (TryResolveActiveTransferTunaState(sessionRuntime.FileTransferSnapshot, out var activeTransferUsesTuna))
-        {
-            IsTunaActive = activeTransferUsesTuna;
-            TunaStatusReason = activeTransferUsesTuna
-                ? "file_transfer_route_file_tuna_v4"
-                : "file_transfer_route_not_file_tuna_v4";
-            return;
-        }
-
-        IsTunaActive = sessionRuntime.IsTransportAccelerationActive;
-        TunaStatusReason = sessionRuntime.TransportAccelerationStatusReason;
-    }
-
-    private static bool TryResolveActiveTransferTunaState(
-        SessionFileTransferSnapshot snapshot,
-        out bool activeTransferUsesTuna)
-    {
-        var hasActiveTransfer = false;
-        var usesTuna = false;
-
-        Inspect(snapshot.Outbound);
-        Inspect(snapshot.Inbound);
-        activeTransferUsesTuna = usesTuna;
-        return hasActiveTransfer;
-
-        void Inspect(FileTransferTransferSnapshot? transfer)
-        {
-            if (transfer is null || transfer.IsTerminal)
-            {
-                return;
-            }
-
-            hasActiveTransfer = true;
-            usesTuna |=
-                transfer.ProtocolVersion == 4 &&
-                string.Equals(transfer.RouteToken, FileTunaV4RouteToken, StringComparison.Ordinal);
-        }
+        var projection = TunaHeaderStateProjector.FromSnapshot(
+            sessionRuntime.FileTransferSnapshot,
+            sessionRuntime.IsTransportAccelerationActive,
+            sessionRuntime.TransportAccelerationStatusReason);
+        IsTunaActive = projection.IsActive;
+        TunaStatusReason = projection.StatusReason;
     }
 
     private void OnHelperListenerBootstrapSnapshotChanged(object? sender, EventArgs e)

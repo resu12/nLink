@@ -211,6 +211,43 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaNegotiationPulsesWithExactTooltip_AndWaitingApprovalIsSteady()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView
+            {
+                TunaActive = false,
+                TunaStatusReason = "post_tuna_fallback_route_active",
+            };
+
+            SetPrivateField(header, "tunaUnlockToggleOn", true);
+            SetPrivateField(header, "tunaRuntimeStatus", "listener_starting");
+            InvokePrivate(header, "UpdateTunaVisualState");
+
+            Assert.Equal(
+                "Starting Tuna listener. Regular NKN stays connected until ready. This computer is paying as the Tuna listener.",
+                header.TunaPictogramTip);
+            Assert.True(header.TunaGlowOpacity > 0d);
+            SetPrivateField(header, "tunaPulseStartedUtc", DateTime.UtcNow.AddMilliseconds(-350));
+            InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+            Assert.NotEqual(1d, header.TunaPulseScale);
+
+            SetPrivateField(header, "tunaRuntimeStatus", "waiting_for_approved_session");
+            InvokePrivate(header, "UpdateTunaVisualState");
+
+            Assert.Equal("Tuna is unavailable. Regular NKN is being used.", header.TunaPictogramTip);
+            Assert.Equal(0d, header.TunaGlowOpacity);
+            Assert.Equal(1d, header.TunaPulseScale);
+            InvokePrivate(header, "StopTunaPulse");
+            await FlushUiAsync();
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WhenConnected_ShowsVisibleChatImmediately()
     {
         await fixture.Session.Dispatch(async () =>
