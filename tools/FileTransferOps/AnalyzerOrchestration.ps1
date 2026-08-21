@@ -1904,6 +1904,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_peer_silence_safety_replay_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_pressure_install_retirement_retry_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminal_transition_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_settlement_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_retained') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_regular_v4_frontier_repair_projection_published') +
@@ -3318,11 +3320,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'accepted_settlement_disposition_evidence_missing'
         }) | Out-Null
     }
-    foreach ($candidateEvent in @($regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCandidateEvents)) {
+    foreach ($candidateRecord in @($regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_pressure_authority_lifecycle_split'
-            Event = $candidateEvent
-            Reason = 'coordinator_repair_authority_outlived_legacy_pressure_ttl'
+            Event = $candidateRecord.Event
+            Reason = [string]$candidateRecord.Reason
         }) | Out-Null
     }
     foreach ($candidateEvent in @($regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCandidateEvents)) {

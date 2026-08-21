@@ -2255,7 +2255,13 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryApplyFileTransferRouteTransitionPressureSettlement(
+        if (!TryCaptureOutboundFileTransferRouteTransitionPressureLocalAdoptionLocked(
+                context,
+                state,
+                authority,
+                out var pressureLocalAdoption,
+                out rejectionReason) ||
+            !TryApplyFileTransferRouteTransitionPressureSettlement(
                 state,
                 authority,
                 drainReceipt,
@@ -2289,6 +2295,16 @@ public sealed partial class SessionFileTransferService
             committed.RouteDecision is not { } routeDecision)
         {
             rejectionReason = committed.Reason;
+            return false;
+        }
+
+        if (!TryAdoptOutboundFileTransferRouteTransitionPressureSettlementLocked(
+                context,
+                authority,
+                pressureLocalAdoption,
+                pressureReceipt,
+                out rejectionReason))
+        {
             return false;
         }
 
@@ -2590,7 +2606,13 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryApplyFileTransferRouteTransitionPressureSettlement(
+        if (!TryCaptureInboundFileTransferRouteTransitionPressureLocalAdoptionLocked(
+                context,
+                state,
+                authority,
+                out var pressureLocalAdoption,
+                out rejectionReason) ||
+            !TryApplyFileTransferRouteTransitionPressureSettlement(
                 state,
                 authority,
                 drainReceipt,
@@ -2624,6 +2646,16 @@ public sealed partial class SessionFileTransferService
             committed.RouteDecision is not { } routeDecision)
         {
             rejectionReason = committed.Reason;
+            return false;
+        }
+
+        if (!TryAdoptInboundFileTransferRouteTransitionPressureSettlementLocked(
+                context,
+                authority,
+                pressureLocalAdoption,
+                pressureReceipt,
+                out rejectionReason))
+        {
             return false;
         }
 
@@ -3808,6 +3840,327 @@ public sealed partial class SessionFileTransferService
             authority.AuthorityId,
             authority.TransitionGeneration,
             evidenceOnly: true);
+    }
+
+    private sealed record FileTransferRouteTransitionPressureLocalAdoption(
+        RegularV4FrontierRepairContract Contract,
+        RegularV4FrontierRepairPressureBinding Binding,
+        FileTransferRegularV4FrontierRepairPressureInstallReceipt InstallReceipt,
+        long DataSessionGeneration);
+
+    private static bool TryCaptureOutboundFileTransferRouteTransitionPressureLocalAdoptionLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        out FileTransferRouteTransitionPressureLocalAdoption? adoption,
+        out string rejectionReason)
+        => TryCaptureFileTransferRouteTransitionPressureLocalAdoptionLocked(
+            context.CurrentRegularV4FrontierRepairContract,
+            context.DataSessionGeneration,
+            state,
+            transitionAuthority,
+            out adoption,
+            out rejectionReason);
+
+    private static bool TryCaptureInboundFileTransferRouteTransitionPressureLocalAdoptionLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        out FileTransferRouteTransitionPressureLocalAdoption? adoption,
+        out string rejectionReason)
+        => TryCaptureFileTransferRouteTransitionPressureLocalAdoptionLocked(
+            context.CurrentRegularV4FrontierRepairContract,
+            context.DataSessionGeneration,
+            state,
+            transitionAuthority,
+            out adoption,
+            out rejectionReason);
+
+    private static bool TryCaptureFileTransferRouteTransitionPressureLocalAdoptionLocked(
+        RegularV4FrontierRepairContract? contract,
+        long dataSessionGeneration,
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        out FileTransferRouteTransitionPressureLocalAdoption? adoption,
+        out string rejectionReason)
+    {
+        adoption = null;
+        rejectionReason = "none";
+        var pressure = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressure.PendingBinding is not null ||
+            pressure.RetainedPredecessorBinding is not null)
+        {
+            rejectionReason = "filetransfer_route_transition_pressure_lineage_pending";
+            return false;
+        }
+
+        if (pressure.InstalledBinding is not { } binding)
+        {
+            return true;
+        }
+
+        if (pressure.InstalledInstallReceipt is not { } installReceipt ||
+            binding.State != RegularV4FrontierRepairPressureBindingState.Installed ||
+            installReceipt.Status is not (
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed or
+                FileTransferRegularV4FrontierRepairPressureInstallStatus.Idempotent) ||
+            installReceipt.Authority != binding.Authority ||
+            installReceipt.InstallGeneration != binding.InstallGeneration ||
+            contract is null ||
+            contract.Authority != binding.Authority ||
+            contract.Lifecycle.IsSettled ||
+            dataSessionGeneration != transitionAuthority.DataSessionGeneration ||
+            !DoesRegularV4FrontierRepairAuthorityMatchRouteTransitionSource(
+                binding.Authority,
+                transitionAuthority))
+        {
+            rejectionReason =
+                "filetransfer_route_transition_pressure_local_repair_contract_mismatch";
+            return false;
+        }
+
+        adoption = new(
+            contract,
+            binding,
+            installReceipt,
+            dataSessionGeneration);
+        return true;
+    }
+
+    private static bool DoesRegularV4FrontierRepairAuthorityMatchRouteTransitionSource(
+        FileTransferRegularV4FrontierRepairAuthority authority,
+        FileTransferRouteTransitionAuthority transitionAuthority)
+        => string.Equals(
+                authority.SessionId,
+                transitionAuthority.SessionId,
+                StringComparison.Ordinal) &&
+            string.Equals(
+                authority.TransferId,
+                transitionAuthority.TransferId,
+                StringComparison.Ordinal) &&
+            authority.Direction == transitionAuthority.Direction &&
+            string.Equals(
+                authority.RouteToken,
+                FileTransferRouteResolver.Resolve(transitionAuthority.SourceRoute)
+                    .TelemetryToken,
+                StringComparison.Ordinal) &&
+            authority.ProtocolVersion == transitionAuthority.SourceProtocolVersion &&
+            authority.LiveRouteEpoch == transitionAuthority.SourceLiveRouteEpoch &&
+            authority.RuntimeGeneration ==
+                transitionAuthority.SourceRuntimeOwner.RuntimeGeneration &&
+            authority.TerminalGeneration ==
+                transitionAuthority.SourceTerminalGeneration &&
+            authority.LegGeneration == transitionAuthority.SourceLegGeneration &&
+            authority.TransportEpoch == transitionAuthority.SourceTransportEpoch &&
+            authority.BridgeRecoveryGeneration ==
+                transitionAuthority.SourceBridgeRecoveryGeneration &&
+            authority.RoutePublicationGeneration ==
+                transitionAuthority.SourceRoutePublication.PublicationGeneration &&
+            authority.RouteCommitGeneration ==
+                transitionAuthority.SourceRouteCommit?.CommitGeneration &&
+            authority.TargetTransport == transitionAuthority.SourceTransport;
+
+    private bool TryAdoptOutboundFileTransferRouteTransitionPressureSettlementLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        FileTransferRouteTransitionPressureLocalAdoption? adoption,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? receipt,
+        out string rejectionReason)
+    {
+        if (!TryAdoptFileTransferRouteTransitionPressureSettlementLocked(
+                context.CurrentRegularV4FrontierRepairContract,
+                context.DataSessionGeneration,
+                transitionAuthority,
+                adoption,
+                receipt,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (adoption is null)
+        {
+            return true;
+        }
+
+        var contract = adoption.Contract;
+        context.CurrentRegularV4FrontierRepairContract = null;
+        if (ReferenceEquals(
+                context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract,
+                contract))
+        {
+            context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract = null;
+        }
+        if (context.PendingRegularV4FrontierRepairPressureInstallRetry is
+                {
+                    AuthorityId: var pendingAuthorityId,
+                    InstallGeneration: var pendingInstallGeneration,
+                    DataSessionGeneration: var pendingDataSessionGeneration,
+                } &&
+            pendingAuthorityId == contract.Authority.AuthorityId &&
+            pendingInstallGeneration == adoption.Binding.InstallGeneration &&
+            pendingDataSessionGeneration == adoption.DataSessionGeneration)
+        {
+            context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
+        }
+        LogFileTransferRouteTransitionPressureLocalAdoption(
+            contract,
+            transitionAuthority,
+            adoption.Binding.InstallGeneration,
+            receipt!.Command.Settlement);
+        return true;
+    }
+
+    private bool TryAdoptInboundFileTransferRouteTransitionPressureSettlementLocked(
+        InboundTransferContext context,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        FileTransferRouteTransitionPressureLocalAdoption? adoption,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? receipt,
+        out string rejectionReason)
+    {
+        if (!TryAdoptFileTransferRouteTransitionPressureSettlementLocked(
+                context.CurrentRegularV4FrontierRepairContract,
+                context.DataSessionGeneration,
+                transitionAuthority,
+                adoption,
+                receipt,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (adoption is null)
+        {
+            return true;
+        }
+
+        var contract = adoption.Contract;
+        context.CurrentRegularV4FrontierRepairContract = null;
+        if (ReferenceEquals(
+                context.V4RegularFrontierRepairProjection?.SourceContract,
+                contract))
+        {
+            context.V4RegularFrontierRepairProjection = null;
+        }
+        if (ReferenceEquals(
+                context.V4RegularFrontierRepairProjectionRefreshSource?.Projection
+                    .SourceContract,
+                contract))
+        {
+            context.V4RegularFrontierRepairProjectionRefreshSource = null;
+        }
+        if (ReferenceEquals(
+                context.V4RegularFrontierRepairSettledStalledContract,
+                contract))
+        {
+            context.V4RegularFrontierRepairSettledStalledContract = null;
+            context.V4RegularFrontierRepairSettledStalledAuthorityId = null;
+        }
+        foreach (var repairState in context.V4ReceiverRepairRequests.Values)
+        {
+            if (ReferenceEquals(repairState.RegularV4RepairContract, contract))
+            {
+                repairState.RegularV4RepairContract = null;
+            }
+        }
+        LogFileTransferRouteTransitionPressureLocalAdoption(
+            contract,
+            transitionAuthority,
+            adoption.Binding.InstallGeneration,
+            receipt!.Command.Settlement);
+        return true;
+    }
+
+    private static bool TryAdoptFileTransferRouteTransitionPressureSettlementLocked(
+        RegularV4FrontierRepairContract? currentContract,
+        long dataSessionGeneration,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        FileTransferRouteTransitionPressureLocalAdoption? adoption,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? receipt,
+        out string rejectionReason)
+    {
+        rejectionReason = "none";
+        if (adoption is null)
+        {
+            if (receipt is null)
+            {
+                return true;
+            }
+
+            rejectionReason =
+                "filetransfer_route_transition_pressure_local_repair_contract_missing";
+            return false;
+        }
+
+        if (receipt is null ||
+            receipt.Status is not (
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied or
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Idempotent) ||
+            !receipt.CurrentAuthorityCleared ||
+            receipt.RetainedPredecessorCleared ||
+            receipt.Command.InstallGeneration != adoption.Binding.InstallGeneration ||
+            receipt.Command.InstallGeneration != adoption.InstallReceipt.InstallGeneration ||
+            receipt.Command.CurrentAuthorityId != adoption.Binding.Authority.AuthorityId ||
+            adoption.InstallReceipt.Authority != adoption.Binding.Authority ||
+            receipt.Command.RetainedPredecessorAuthorityId is not null ||
+            !DoesRegularV4FrontierRepairSettlementMatchAuthority(
+                receipt.Command.Settlement,
+                adoption.Binding.Authority) ||
+            !ReferenceEquals(currentContract, adoption.Contract) ||
+            dataSessionGeneration != adoption.DataSessionGeneration ||
+            !DoesRegularV4FrontierRepairAuthorityMatchRouteTransitionSource(
+                adoption.Contract.Authority,
+                transitionAuthority) ||
+            !adoption.Contract.Lifecycle.TrySettle(
+                receipt.Command.Settlement.Outcome,
+                receipt.Command.Settlement.DecisionReason,
+                receipt.Command.Settlement.SuccessorAuthorityId))
+        {
+            rejectionReason =
+                "filetransfer_route_transition_pressure_local_repair_contract_adoption_rejected";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool DoesRegularV4FrontierRepairSettlementMatchAuthority(
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        FileTransferRegularV4FrontierRepairAuthority authority)
+        => !settlement.AuthorityId.IsDefault &&
+           settlement.AuthorityId == authority.AuthorityId &&
+           string.Equals(settlement.SessionId, authority.SessionId, StringComparison.Ordinal) &&
+           string.Equals(settlement.TransferId, authority.TransferId, StringComparison.Ordinal) &&
+           settlement.Direction == authority.Direction &&
+           string.Equals(settlement.RouteToken, authority.RouteToken, StringComparison.Ordinal) &&
+           settlement.ProtocolVersion == authority.ProtocolVersion &&
+           settlement.LiveRouteEpoch == authority.LiveRouteEpoch &&
+           settlement.RuntimeGeneration == authority.RuntimeGeneration &&
+           settlement.TerminalGeneration == authority.TerminalGeneration &&
+           settlement.LegGeneration == authority.LegGeneration &&
+           settlement.TransportEpoch == authority.TransportEpoch &&
+           settlement.BridgeRecoveryGeneration == authority.BridgeRecoveryGeneration &&
+           settlement.BridgeDecisionGeneration == authority.BridgeDecisionGeneration &&
+           settlement.RoutePublicationGeneration == authority.RoutePublicationGeneration &&
+           settlement.RouteCommitGeneration == authority.RouteCommitGeneration &&
+           settlement.TargetTransport == authority.TargetTransport &&
+           string.Equals(settlement.RepairKey, authority.RepairKey, StringComparison.Ordinal) &&
+           settlement.FrontierChunkIndex == authority.FrontierChunkIndex &&
+           settlement.DurableReceivedHighestChunkIndex ==
+               authority.DurableReceivedHighestChunkIndex &&
+           settlement.RequestedChunkCount == authority.PendingRepairCount &&
+           settlement.DecisionGeneration == authority.DecisionGeneration;
+
+    private static void LogFileTransferRouteTransitionPressureLocalAdoption(
+        RegularV4FrontierRepairContract contract,
+        FileTransferRouteTransitionAuthority transitionAuthority,
+        long installGeneration,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var authority = contract.Authority;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; successor_authority_id={FormatProtocolLogValue(settlement.SuccessorAuthorityId?.ToString() ?? "(none)")}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; settlement_outcome={FormatProtocolLogValue(settlement.Outcome.ToString())}; dispatch_observed={(contract.Lifecycle.DispatchObserved ? 1 : 0)}; settlement_source=route_transition_pressure_commit; pressure_install_generation={installGeneration}; transition_authority_id={FormatProtocolLogValue(transitionAuthority.AuthorityId.ToString())}; transition_generation={transitionAuthority.TransitionGeneration}; transition_kind={FormatProtocolLogValue(transitionAuthority.Kind.ToString())}; source_data_session_generation={transitionAuthority.DataSessionGeneration}; decision_reason={FormatProtocolLogValue(settlement.DecisionReason)}");
     }
 
     private bool TryApplyFileTransferRouteTransitionPressureSettlement(

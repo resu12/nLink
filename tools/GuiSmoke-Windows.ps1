@@ -5345,6 +5345,17 @@ function Get-TunaGuiExplicitFailureClassification {
                     else { $failureClass }
                 }
             }
+            'regular_v4_frontier_repair_pressure_authority_lifecycle_split' {
+                return [pscustomobject]@{
+                    Phase = 'route_transition'
+                    Reason = if ($ErrorMessage.IndexOf(
+                            'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle',
+                            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle'
+                    }
+                    else { $failureClass }
+                }
+            }
             'runtime_unlock_precommit_probe_start_handoff_missing' {
                 return [pscustomobject]@{
                     Phase = 'route_runtime'
@@ -10929,6 +10940,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     InstallReceiptLine = ''
                     InstallCommittedLine = ''
                     EffectiveGrantLine = ''
+                    ConsumptionLine = ''
                     InstallGeneration = ''
                     Consumed = $false
                     OfferObserved = $false
@@ -11160,17 +11172,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         Get-TunaGuiLogLineFieldValue -Line $line -Name 'recheck_generation'
                     $requestedQueueGeneration =
                         Get-TunaGuiLogLineFieldValue -Line $line -Name 'queue_generation'
-                    $boundaryComplete = $true
+                    $boundaryFieldCount = 0
                     foreach ($field in @(
                             'recovered_transport_epoch', 'handoff_kind', 'boundary_source_transport',
                             'boundary_target_transport', 'fallback_epoch', 'boundary_reason',
                             'boundary_identity', 'original_hold_reason')) {
-                        if ([string]::IsNullOrWhiteSpace(
+                        if (-not [string]::IsNullOrWhiteSpace(
                                 (Get-TunaGuiFallbackTailRepairField -Line $line -Names @($field)))) {
-                            $boundaryComplete = $false
-                            break
+                            $boundaryFieldCount++
                         }
                     }
+                    $boundaryComplete = $boundaryFieldCount -in @(0, 8)
                     if ($state.FinalSettlementObserved -and $boundaryComplete -and
                         -not $state.AmbiguousBindingAuthorities.Contains($state.FinalRepairAuthority) -and
                         $state.BoundRepairAuthorities.Contains($state.FinalRepairAuthority) -and
@@ -11189,12 +11201,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided' {
                     $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
                     $recheckGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'recheck_generation'
+                    $decisionRepairAuthority =
+                        Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_authority_id'
                     if ($state.FinalSettlementObserved -and
                         $state.RecheckRequestedGeneration -match '^[1-9][0-9]*$' -and
                         $null -ne $bindingRelease -and
+                        -not $state.AmbiguousBindingAuthorities.Contains($state.FinalRepairAuthority) -and
+                        $state.BoundRepairAuthorities.Contains($state.FinalRepairAuthority) -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $bindingRelease.Authority -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_generation') -eq $bindingRelease.Generation -and
-                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_authority_id') -eq $state.FinalRepairAuthority -and
+                        ($decisionRepairAuthority -eq $state.FinalRepairAuthority -or
+                            $decisionRepairAuthority -ceq '[redacted]') -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_generation') -eq
                             (Get-TunaGuiFallbackTailRepairField -Line $state.FinalRepairLine -Names @('repair_generation')) -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'hold_generation') -eq $bindingRelease.HoldGeneration -and
@@ -11252,7 +11269,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4' -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_protocol_version') -eq '4' -and
-                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -eq $bindingRelease.DataSessionGeneration) {
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -in @(
+                            '0', $bindingRelease.DataSessionGeneration)) {
                         $state.InstallStageLine = $line
                     }
                     continue
@@ -11287,12 +11305,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             -RightLine $line `
                             -InstallGeneration)) {
                         $state.EffectiveGrantLine = $line
+                        if (-not [string]::IsNullOrWhiteSpace($state.ConsumptionLine)) {
+                            $state.Consumed = $true
+                        }
                     }
                     continue
                 }
                 'filetransfer_fallback_tail_paired_release_consumed' {
                     $bindingRelease = $state.BindingReleaseByRepairAuthority[$state.FinalRepairAuthority]
-                    if (-not [string]::IsNullOrWhiteSpace($state.EffectiveGrantLine) -and
+                    if (-not [string]::IsNullOrWhiteSpace($state.InstallCommittedLine) -and
                         $null -ne $bindingRelease -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $bindingRelease.Authority -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation') -eq $bindingRelease.Generation -and
@@ -11300,7 +11321,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'install_generation') -eq $state.InstallGeneration -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @(
                             'Accepted', 'Applied', 'Idempotent')) {
-                        $state.Consumed = $true
+                        $state.ConsumptionLine = $line
+                        if (-not [string]::IsNullOrWhiteSpace($state.EffectiveGrantLine)) {
+                            $state.Consumed = $true
+                        }
                     }
                     continue
                 }
@@ -14146,7 +14170,273 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return [pscustomobject]@{ Unresolved = $false; FirstSequence = [long]::MaxValue; ParsedRecords = [long]$records.Count; LookupCount = 0L }
     }
 
+    function Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure {
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [AllowEmptyString()]
+            [string[]]$Lines
+        )
+
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{
+                Index = $index
+                Event = Get-TunaGuiLogLineFieldValue -Line ([string]$Lines[$index]) -Name 'event'
+                Line = [string]$Lines[$index]
+            }
+        })
+        $lookupCount = 0L
+        $getField = {
+            param($Record, [string]$Name)
+            Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name $Name
+        }
+        $sameWriterTransfer = {
+            param($Left, $Right)
+            foreach ($field in @('log_writer_id', 'session_id', 'transfer_id', 'direction')) {
+                $leftValue = & $getField $Left $field
+                $rightValue = & $getField $Right $field
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    $leftValue -ne $rightValue) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $sourceMatches = {
+            param($Binding, $Transition)
+            if (-not (& $sameWriterTransfer $Binding $Transition)) { return $false }
+            foreach ($pair in @(
+                    @('route', 'source_route'),
+                    @('protocol_version', 'source_protocol_version'),
+                    @('live_route_epoch', 'source_live_route_epoch'),
+                    @('runtime_generation', 'source_runtime_generation'),
+                    @('terminal_generation', 'source_terminal_generation'),
+                    @('leg_generation', 'source_leg_generation'),
+                    @('transport_epoch', 'source_transport_epoch'),
+                    @('bridge_recovery_generation', 'source_bridge_recovery_generation'),
+                    @('route_publication_generation', 'source_route_publication_generation'),
+                    @('route_commit_generation', 'source_route_commit_generation'))) {
+                $leftValue = & $getField $Binding $pair[0]
+                $rightValue = & $getField $Transition $pair[1]
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    $leftValue -ne $rightValue) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        [object[]]$candidates = @($records | Where-Object {
+            $_.Event -eq 'filetransfer_regular_v4_frontier_repair_settlement_rejected' -and
+            (& $getField $_ 'attempted_outcome') -eq 'TransferTerminal'
+        })
+        foreach ($candidate in $candidates) {
+            $authority = & $getField $candidate 'authority_id'
+            $repairKey = & $getField $candidate 'repair_request_key'
+            $writer = & $getField $candidate 'log_writer_id'
+            if ([string]::IsNullOrWhiteSpace($authority) -or
+                $authority -in @('[redacted]', 'redacted', '(none)', 'none') -or
+                [string]::IsNullOrWhiteSpace($repairKey) -or
+                [string]::IsNullOrWhiteSpace($writer)) {
+                continue
+            }
+
+            [object[]]$bindings = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_committed' -and
+                (& $getField $_ 'log_writer_id') -eq $writer -and
+                (& $getField $_ 'authority_id') -eq $authority -and
+                (& $getField $_ 'repair_request_key') -eq $repairKey
+            })
+            if ($bindings.Count -ne 1) { continue }
+            $binding = $bindings[0]
+            $installGeneration = & $getField $binding 'install_generation'
+            if ($installGeneration -notmatch '^[1-9][0-9]*$') { continue }
+
+            [object[]]$accepted = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $binding.Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_regular_v4_frontier_repair_settlement_accepted' -and
+                (& $sameWriterTransfer $binding $_) -and
+                (& $getField $_ 'authority_id') -eq $authority -and
+                (& $getField $_ 'repair_request_key') -eq $repairKey -and
+                (& $getField $_ 'successor_install_generation') -eq $installGeneration -and
+                ((& $getField $_ 'outcome').Replace('_', '').ToLowerInvariant()) -eq 'stalerejected' -and
+                (& $getField $_ 'settlement_reason') -eq 'filetransfer_route_transition_pressure_handoff'
+            })
+            if ($accepted.Count -ne 1) { continue }
+
+            [object[]]$applies = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $accepted[0].Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided' -and
+                (& $sameWriterTransfer $binding $_) -and
+                (& $getField $_ 'install_generation') -eq $installGeneration -and
+                ((& $getField $_ 'settlement_outcome').Replace('_', '').ToLowerInvariant()) -eq 'stalerejected' -and
+                (& $getField $_ 'apply_status').ToLowerInvariant() -in @('applied', 'idempotent') -and
+                (& $getField $_ 'current_authority_cleared') -eq '1' -and
+                (& $getField $_ 'retained_predecessor_cleared') -eq '0' -and
+                ((& $getField $_ 'authority_id') -eq '[redacted]' -or
+                    (& $getField $_ 'authority_id') -eq $authority)
+            })
+            if ($applies.Count -eq 0) { continue }
+
+            [object[]]$prepared = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $binding.Index -and $_.Index -lt $accepted[0].Index -and
+                $_.Event -eq 'filetransfer_route_transition_prepared' -and
+                (& $sourceMatches $binding $_) -and
+                (& $getField $_ 'transition_kind') -eq 'TunaV4ToPostTunaFallbackV6' -and
+                (& $getField $_ 'decision_status') -eq 'Prepared'
+            })
+            if ($prepared.Count -ne 1) { continue }
+            $preparedAuthority = & $getField $prepared[0] 'authority_id'
+            $preparedGeneration = & $getField $prepared[0] 'transition_generation'
+            $preparedDataSession = & $getField $prepared[0] 'source_data_session_generation'
+            if ([string]::IsNullOrWhiteSpace($preparedDataSession)) { continue }
+            [object[]]$pauses = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $prepared[0].Index -and $_.Index -lt $accepted[0].Index -and
+                $_.Event -eq 'filetransfer_route_transition_pause_bound' -and
+                (& $sameWriterTransfer $binding $_) -and
+                (& $getField $_ 'authority_id') -eq $preparedAuthority -and
+                (& $getField $_ 'transition_generation') -eq $preparedGeneration
+            })
+            [object[]]$draining = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $prepared[0].Index -and $_.Index -lt $accepted[0].Index -and
+                $_.Event -eq 'filetransfer_route_transition_draining' -and
+                (& $sourceMatches $binding $_) -and
+                (& $getField $_ 'authority_id') -eq $preparedAuthority -and
+                (& $getField $_ 'transition_generation') -eq $preparedGeneration -and
+                (& $getField $_ 'source_data_session_generation') -eq $preparedDataSession -and
+                (& $getField $_ 'decision_status') -eq 'Draining'
+            })
+            if ($pauses.Count -eq 0 -or $draining.Count -ne 1) { continue }
+
+            [object[]]$drains = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $applies[0].Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_route_transition_drain_receipt_decided' -and
+                (& $sourceMatches $binding $_) -and
+                (& $getField $_ 'transition_kind') -eq 'TunaV4ToPostTunaFallbackV6' -and
+                (& $getField $_ 'authority_id') -eq $preparedAuthority -and
+                (& $getField $_ 'transition_generation') -eq $preparedGeneration -and
+                (& $getField $_ 'source_data_session_generation') -eq $preparedDataSession -and
+                (& $getField $_ 'drain_outcome') -eq 'Completed' -and
+                (& $getField $_ 'decision_status') -in @('Accepted', 'Idempotent')
+            })
+            if ($drains.Count -ne 1) { continue }
+            $transitionAuthority = & $getField $drains[0] 'authority_id'
+            $transitionGeneration = & $getField $drains[0] 'transition_generation'
+
+            [object[]]$commits = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $drains[0].Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_route_transition_committed' -and
+                (& $sourceMatches $binding $_) -and
+                (& $getField $_ 'authority_id') -eq $transitionAuthority -and
+                (& $getField $_ 'transition_generation') -eq $transitionGeneration -and
+                (& $getField $_ 'source_data_session_generation') -eq $preparedDataSession -and
+                (& $getField $_ 'decision_status') -in @('Committed', 'Idempotent')
+            })
+            if ($commits.Count -ne 1) { continue }
+
+            [object[]]$dispositions = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $commits[0].Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_route_transition_disposition_applied' -and
+                (& $sameWriterTransfer $binding $_) -and
+                (& $getField $_ 'authority_id') -eq $transitionAuthority -and
+                (& $getField $_ 'transition_generation') -eq $transitionGeneration -and
+                (& $getField $_ 'source_data_session_generation') -eq $preparedDataSession -and
+                ((& $getField $_ 'decision_status') -in @('Applied', 'Idempotent') -or
+                    (& $getField $_ 'apply_status') -in @('applied', 'idempotent'))
+            })
+            [object[]]$publications = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $commits[0].Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -in @('filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered') -and
+                (& $sameWriterTransfer $binding $_) -and
+                (& $getField $_ 'route') -eq 'post_tuna_fallback_v6' -and
+                (& $getField $_ 'protocol_version') -eq '6' -and
+                (& $getField $_ 'transition_generation') -eq $transitionGeneration
+            })
+            if ($dispositions.Count -eq 0 -or $publications.Count -eq 0) { continue }
+
+            [object[]]$settledBefore = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $accepted[0].Index -and $_.Index -lt $candidate.Index -and
+                $_.Event -eq 'filetransfer_regular_v4_frontier_repair_contract_settled' -and
+                (& $getField $_ 'log_writer_id') -eq $writer -and
+                (& $getField $_ 'authority_id') -eq $authority -and
+                (& $getField $_ 'repair_request_key') -eq $repairKey
+            })
+            if ($settledBefore.Count -gt 0) { continue }
+
+            [object[]]$settledAfter = @($records | Where-Object {
+                $lookupCount++
+                $_.Index -gt $candidate.Index -and
+                $_.Event -eq 'filetransfer_regular_v4_frontier_repair_contract_settled' -and
+                (& $getField $_ 'log_writer_id') -eq $writer -and
+                (& $getField $_ 'authority_id') -eq $authority -and
+                (& $getField $_ 'repair_request_key') -eq $repairKey -and
+                ((& $getField $_ 'settlement_outcome').Replace('_', '').ToLowerInvariant()) -eq
+                    'stalerejected'
+            } | Select-Object -First 1)
+            [object[]]$completed = @()
+            if ($settledAfter.Count -eq 1) {
+                $completed = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $settledAfter[0].Index -and
+                    $_.Event -in @('transfer_terminal', 'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal') -and
+                    (& $sameWriterTransfer $binding $_) -and
+                    ((& $getField $_ 'status') -eq 'Completed' -or
+                        (& $getField $_ 'outcome') -eq 'Completed')
+                } | Select-Object -First 1)
+            }
+            if ($completed.Count -eq 1) { continue }
+
+            $sequenceText = & $getField $candidate 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
+                    [long]$sequenceText
+                }
+                else { [long]($candidate.Index + 1) }
+                ParsedRecords = [long]$records.Count
+                LookupCount = $lookupCount
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
+    }
+
     $earlyPredicateEventNames = @{
+        LifecycleSplit = @(
+            'filetransfer_regular_v4_frontier_repair_pressure_binding_committed',
+            'filetransfer_regular_v4_frontier_repair_settlement_accepted',
+            'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided',
+            'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_pause_bound',
+            'filetransfer_route_transition_draining',
+            'filetransfer_route_transition_drain_receipt_decided',
+            'filetransfer_route_transition_committed',
+            'filetransfer_route_transition_disposition_applied',
+            'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered',
+            'filetransfer_regular_v4_frontier_repair_contract_settled',
+            'filetransfer_regular_v4_frontier_repair_pressure_install_retirement_retry_requested',
+            'filetransfer_regular_v4_frontier_repair_settlement_rejected',
+            'filetransfer_terminal_transition_rejected',
+            'transfer_terminal', 'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal')
         RouteDrain = @(
             'filetransfer_fallback_tail_yield_issued',
             'filetransfer_fallback_tail_local_proof_receipt_decided',
@@ -16097,6 +16387,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $initialActivationRetiredRefreshFastPath =
         Get-TunaGuiInitialActivationRetiredRefreshPredecessorFailure `
             -Lines ([string[]]$earlyPredicateLines.InitialActivationRefresh.ToArray())
+    $routeTransitionPressureLocalLifecycleFastPath =
+        Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure `
+            -Lines ([string[]]$earlyPredicateLines.LifecycleSplit.ToArray())
     $installedRetryPendingDialFirstSequence = [long]::MaxValue
     if ($installedRetryPendingDialFastPath) {
         $firstPendingDialCandidate = @($earlyPredicateLines.PendingDial | Where-Object {
@@ -16115,6 +16408,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     $earlyRouteRuntimeFailures = @()
     foreach ($candidate in @(
+            [pscustomobject]@{
+                Kind = 'LifecycleSplit'
+                Result = $routeTransitionPressureLocalLifecycleFastPath
+            },
             [pscustomobject]@{ Kind = 'RouteDrain'; Result = $initialResponderDrainFastPath },
             [pscustomobject]@{
                 Kind = 'PrecommitTransition'
@@ -16182,6 +16479,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [string]$firstEarlyRouteRuntimeFailure[0].Kind
     }
     else { 'none' }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'LifecycleSplit') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$routeTransitionPressureLocalLifecycleFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_route_transition_pressure_local_lifecycle_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_transition' `
+            -Reason 'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_route_transition_pressure_local_lifecycle_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$routeTransitionPressureLocalLifecycleFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$routeTransitionPressureLocalLifecycleFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
 
     if ($firstEarlyRouteRuntimeKind -eq 'RouteDrain') {
         if ($null -ne $TestMetrics) {
@@ -21932,6 +22248,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'file_transfer_inbound_terminal',
                     'file_transfer_outbound_terminal',
                     'filetransfer_regular_v4_frontier_repair_contract_settled',
+                    'filetransfer_regular_v4_frontier_repair_pressure_install_retirement_retry_requested',
+                    'filetransfer_regular_v4_frontier_repair_settlement_rejected',
+                    'filetransfer_terminal_transition_rejected',
                     'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_prepared',
                     'filetransfer_regular_v4_frontier_repair_pressure_recovery_handoff_committed',
                     'filetransfer_receive_recovery_operation_issued',

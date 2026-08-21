@@ -28058,6 +28058,26 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
         RawCandidateEvents = @($raw.ToArray())
         RecoveredCandidateEvents = @($recovered.ToArray())
         UnresolvedCandidateEvents = @($unresolved.ToArray())
+        UnresolvedCandidateRecords = @($unresolved.ToArray() | ForEach-Object {
+                [pscustomobject]@{
+                    Event = $_
+                    Reason = switch ($_.EventName) {
+                        'runtime_unlock_initial_activation_offer_envelope_refresh_rejected' {
+                            'released_hold_refresh_predecessor_boundary_not_current'
+                            break
+                        }
+                        'runtime_unlock_initial_activation_receive_recovery_hold_send_prevalidated' {
+                            'committed_refresh_successor_envelope_not_accepted_by_release_prevalidation'
+                            break
+                        }
+                        'runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided' {
+                            'released_hold_directive_delivery_rejected'
+                            break
+                        }
+                        default { 'released_hold_routed_through_exact_invalidation_boundary' }
+                    }
+                }
+            })
     }
 }
 
@@ -31169,7 +31189,18 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
                     @('request_predecessor_authority_id', 'predecessor_authority_id'),
                     @('request_active_predecessor_supersession', 'request_active_predecessor_supersession'))) {
                 $bindingValue = Get-FallbackTailRecheckExactField -Event $Binding -Names @($mapping[0])
-                $requestValue = Get-FallbackTailRecheckExactField -Event $Request -Names @($mapping[1])
+                $requestNames = switch ($mapping[1]) {
+                    'recovery_contract_generation' {
+                        @('recovery_contract_generation', 'contract_generation')
+                    }
+                    'retired_offer_generation' {
+                        @('retired_offer_generation', 'retired_generation')
+                    }
+                    default {
+                        @($mapping[1])
+                    }
+                }
+                $requestValue = Get-FallbackTailRecheckExactField -Event $Request -Names $requestNames
                 if ([string]::IsNullOrWhiteSpace($bindingValue) -or
                     [string]::IsNullOrWhiteSpace($requestValue) -or
                     $bindingValue -ne $requestValue) {
@@ -31364,6 +31395,37 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         return @()
     }
 
+    function Test-FallbackTailRecheckDecisionRepairAuthorityMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Decision,
+            [Parameter(Mandatory = $true)]$Binding,
+            [Parameter(Mandatory = $true)][string]$ExpectedRepairAuthority
+        )
+
+        $bindingAuthority = Get-FallbackTailRecheckExactField `
+            -Event $Binding `
+            -Names @('authority_id')
+        if ([string]::IsNullOrWhiteSpace($bindingAuthority) -or
+            -not [string]::Equals(
+                $bindingAuthority,
+                $ExpectedRepairAuthority,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $decisionAuthority = Get-FallbackTailRecheckExactField `
+            -Event $Decision `
+            -Names @('repair_authority_id')
+        if ([string]::Equals(
+                $decisionAuthority,
+                $ExpectedRepairAuthority,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+
+        return $decisionAuthority -ceq '[redacted]'
+    }
+
     function Test-FallbackTailRecheckRequestMatch {
         param(
             [Parameter(Mandatory = $true)]$Hold,
@@ -31462,8 +31524,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
                 [pscustomobject]@{ Hold = @('source_target_route'); Grant = @('source_publication_target_route') },
                 [pscustomobject]@{ Hold = @('source_target_protocol_version'); Grant = @('source_publication_target_protocol_version') },
                 [pscustomobject]@{ Hold = @('source_target_transport'); Grant = @('source_publication_target_transport') },
-                [pscustomobject]@{ Hold = @('source_route_publication_action_kind'); Grant = @('source_publication_action_kind') },
-                [pscustomobject]@{ Hold = @('source_coordinator_decision_reason'); Grant = @('source_publication_reason') })) {
+                [pscustomobject]@{ Hold = @('source_route_publication_action_kind'); Grant = @('source_publication_action_kind') })) {
             $holdValue = Get-FallbackTailRecheckExactField -Event $Hold -Names $aliases.Hold
             $grantValue = Get-FallbackTailRecheckExactField -Event $Grant -Names $aliases.Grant
             if ([string]::IsNullOrWhiteSpace($holdValue) -or
@@ -31490,6 +31551,21 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         }
         elseif ($holdRouteCommitPresent -ne '0' -or
             $grantRouteCommit -notin @('0', '(none)', 'none')) {
+            return $false
+        }
+
+        $holdSourceReason = Get-FallbackTailRecheckExactField `
+            -Event $Hold `
+            -Names @('source_coordinator_decision_reason')
+        $grantSourceReason = Get-FallbackTailRecheckExactField `
+            -Event $Grant `
+            -Names @('source_publication_reason')
+        if (-not [string]::Equals(
+                $holdSourceReason,
+                $grantSourceReason,
+                [System.StringComparison]::OrdinalIgnoreCase) -and
+            -not ($holdSourceReason -eq 'fallback_paired_tail_yield' -and
+                $grantSourceReason -eq 'peer_post_tuna_fallback_v6_proof')) {
             return $false
         }
 
@@ -32520,13 +32596,31 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             (Test-FallbackTailPairedRetryQueueMatchesHold -Queue $_ -Hold $hold[0])
         } | Sort-Object Sequence -Descending | Select-Object -First 1)
         if ($requestBeforeHold.Count -ne 1) { continue }
+        $publishedRequestBeforeHold = @($authorityPublishedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$requestBeforeHold[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$hold[0].Sequence -and
+            (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+            (Test-FallbackTailRecheckRequestMatch `
+                -Hold $hold[0] `
+                -Decision $_ `
+                -DecisionKind Hold)
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        $holdBindingRequest = if ($publishedRequestBeforeHold.Count -eq 1) {
+            $publishedRequestBeforeHold[0]
+        }
+        else {
+            # Legacy fixtures projected the complete immutable request tuple on
+            # the service queue itself. Prefer the transport publication when
+            # present, while retaining that exact compatibility shape.
+            $requestBeforeHold[0]
+        }
         $finalRepairGrant = @($scopeRepairGrants | Where-Object {
             (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $repairAuthority -and
             [int64]$_.Sequence -lt $settlementSequence
         } | Sort-Object Sequence -Descending | Select-Object -First 1)
         if ($finalRepairGrant.Count -ne 1) { continue }
         $bindingLowerBoundSequence = [Math]::Max(
-            [int64]$requestBeforeHold[0].Sequence,
+            [int64]$holdBindingRequest.Sequence,
             [int64]$finalRepairGrant[0].Sequence)
         $matchingHoldBindingCandidates = @($fallbackTailHoldBoundEvents | Where-Object {
             [int64]$_.Sequence -gt $bindingLowerBoundSequence -and
@@ -32537,7 +32631,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
                 -RepairGrant $finalRepairGrant[0] `
                 -Settlement $settlement `
                 -Hold $hold[0] `
-                -Request $requestBeforeHold[0] `
+                -Request $holdBindingRequest `
                 -PairAuthority $pairAuthority)
         } | Sort-Object Sequence)
         $matchingHoldBinding = @(Get-CanonicalFallbackRepairHoldBinding `
@@ -32563,7 +32657,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             $fallbackRepairHoldBindingDistinct.Add($candidate) | Out-Null
         }
 
-        $recheckCandidates = @($recheckRequestedEvents | Where-Object {
+        $eligibleRecheckCandidates = @($recheckRequestedEvents | Where-Object {
             # The coordinator emits the typed recheck synchronously from the
             # terminal repair settlement. It may therefore precede the later
             # ordinary Core queue that exposes the missing-edge symptom.
@@ -32577,6 +32671,31 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
                 -Hold $hold[0] `
                 -Requested $_)
         } | Sort-Object Sequence)
+        $preCandidateRechecks = @($eligibleRecheckCandidates | Where-Object {
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence
+        })
+        $firstRecheckCandidate = if ($preCandidateRechecks.Count -gt 0) {
+            $preCandidateRechecks[0]
+        }
+        elseif ($eligibleRecheckCandidates.Count -gt 0) {
+            $eligibleRecheckCandidates[0]
+        }
+        else {
+            $null
+        }
+        [object[]]$recheckCandidates = @()
+        if ($null -ne $firstRecheckCandidate) {
+            $recheckCandidates = @($recheckRequestedEvents | Where-Object {
+                [int64]$_.Sequence -gt $settlementSequence -and
+                (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
+                (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                (Get-FallbackTailRecheckField -Event $_ -Names @('recheck_generation')) -eq
+                    (Get-FallbackTailRecheckField -Event $firstRecheckCandidate -Names @('recheck_generation')) -and
+                (Get-FallbackTailRecheckField -Event $_ -Names @('queue_generation')) -eq
+                    (Get-FallbackTailRecheckField -Event $firstRecheckCandidate -Names @('queue_generation'))
+            } | Sort-Object Sequence)
+        }
         $recheck = @(Get-CanonicalFallbackTailEvidence `
             -Candidates $recheckCandidates `
             -IdentityFields @(
@@ -32624,7 +32743,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
                 -RepairGrant $finalRepairGrant[0] `
                 -Settlement $settlement `
                 -Hold $hold[0] `
-                -Request $requestBeforeHold[0] `
+                -Request $holdBindingRequest `
                 -PairAuthority $pairAuthority)
         } | Sort-Object `
             @{ Expression = {
@@ -32653,7 +32772,10 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
             (Get-FallbackTailRecheckField -Event $_ -Names @('direction')) -eq 'outbound' -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('authority_id')) -eq $releaseAuthority -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('release_generation')) -eq $releaseGeneration -and
-            (Get-FallbackTailRecheckField -Event $_ -Names @('repair_authority_id')) -eq $repairAuthority -and
+            (Test-FallbackTailRecheckDecisionRepairAuthorityMatch `
+                -Decision $_ `
+                -Binding $recoveryHoldBinding[0] `
+                -ExpectedRepairAuthority $repairAuthority) -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('repair_generation')) -eq
                 (Get-FallbackTailRecheckField -Event $finalRepairGrant[0] -Names @('repair_generation')) -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('hold_generation')) -eq
@@ -32771,7 +32893,7 @@ function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation
         $consumption = @($releaseReservationEvents | Where-Object {
             $reservation.Count -eq 1 -and $effectiveGrant.Count -eq 1 -and
             $_.EventName -eq 'filetransfer_fallback_tail_paired_release_consumed' -and
-            [int64]$_.Sequence -gt [int64]$effectiveGrant[0].Sequence -and
+            [int64]$_.Sequence -gt [int64]$reservation[0].Sequence -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('log_writer_id')) -eq $writerId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('session_id')) -eq $sessionId -and
             (Get-FallbackTailRecheckField -Event $_ -Names @('transfer_id')) -eq $transferId -and
@@ -46210,6 +46332,53 @@ function Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitP
         (Get-FileTransferEventField -Event $_ -Name 'pressure_reason' -Default '') -in @('', '(none)', 'none') -and
         (Get-FileTransferEventField -Event $_ -Name 'current_successor_authority_id' -Default '') -in @('', '(none)', 'none')
     })
+    [object[]]$bindingCommittedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_binding_committed'
+    })
+    [object[]]$settlementAcceptedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_settlement_accepted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'outcome' -Default '') -eq 'StaleRejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_reason' -Default '') -eq
+            'filetransfer_route_transition_pressure_handoff' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_disposition' -Default '') -eq 'accepted'
+    })
+    [object[]]$settlementApplyEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided'
+    })
+    [object[]]$transitionPreparedEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared'
+    })
+    [object[]]$transitionPauseEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_pause_bound'
+    })
+    [object[]]$transitionDrainingEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_draining'
+    })
+    [object[]]$transitionDrainEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_drain_receipt_decided'
+    })
+    [object[]]$transitionCommitEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_committed'
+    })
+    [object[]]$transitionDispositionEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_disposition_applied'
+    })
+    [object[]]$fallbackPublicationEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_route_selected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'projection_source' -Default '') -eq
+            'coordinator_route_transition'
+    })
+    [object[]]$contractSettledEvents = @($orderedEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_contract_settled'
+    })
+    [object[]]$completedTerminalEvents = @($orderedEvents | Where-Object {
+        $_.EventName -in @(
+            'transfer_terminal',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal') -and
+        (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -eq 'Completed'
+    })
 
     function Test-RegularV4PressureWriterMatch {
         param(
@@ -46275,10 +46444,74 @@ function Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitP
         return $true
     }
 
+    function Test-RegularV4PressureExactField {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)][string[]]$LeftNames,
+            [Parameter(Mandatory = $true)]$Right,
+            [Parameter(Mandatory = $true)][string[]]$RightNames
+        )
+
+        $leftValue = ''
+        foreach ($name in $LeftNames) {
+            $leftValue = Get-FileTransferEventField -Event $Left -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($leftValue)) {
+                break
+            }
+        }
+        $rightValue = ''
+        foreach ($name in $RightNames) {
+            $rightValue = Get-FileTransferEventField -Event $Right -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($rightValue)) {
+                break
+            }
+        }
+        return -not [string]::IsNullOrWhiteSpace($leftValue) -and
+            -not [string]::IsNullOrWhiteSpace($rightValue) -and
+            $leftValue -notin @('(none)', 'none', '(missing)', '__missing__') -and
+            $rightValue -notin @('(none)', 'none', '(missing)', '__missing__') -and
+            [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Test-RegularV4PressureTransitionSourceMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Binding,
+            [Parameter(Mandatory = $true)]$Transition
+        )
+
+        if (-not (Test-RegularV4PressureWriterMatch -Left $Binding -Right $Transition)) {
+            return $false
+        }
+        foreach ($pair in @(
+                [pscustomobject]@{ Binding = @('session_id'); Transition = @('session_id') },
+                [pscustomobject]@{ Binding = @('transfer_id'); Transition = @('transfer_id') },
+                [pscustomobject]@{ Binding = @('direction'); Transition = @('direction') },
+                [pscustomobject]@{ Binding = @('route'); Transition = @('source_route') },
+                [pscustomobject]@{ Binding = @('protocol_version'); Transition = @('source_protocol_version') },
+                [pscustomobject]@{ Binding = @('live_route_epoch'); Transition = @('source_live_route_epoch') },
+                [pscustomobject]@{ Binding = @('runtime_generation'); Transition = @('source_runtime_generation') },
+                [pscustomobject]@{ Binding = @('terminal_generation'); Transition = @('source_terminal_generation') },
+                [pscustomobject]@{ Binding = @('leg_generation'); Transition = @('source_leg_generation') },
+                [pscustomobject]@{ Binding = @('transport_epoch'); Transition = @('source_transport_epoch') },
+                [pscustomobject]@{ Binding = @('bridge_recovery_generation'); Transition = @('source_bridge_recovery_generation') },
+                [pscustomobject]@{ Binding = @('route_publication_generation'); Transition = @('source_route_publication_generation') },
+                [pscustomobject]@{ Binding = @('route_commit_generation'); Transition = @('source_route_commit_generation') })) {
+            if (-not (Test-RegularV4PressureExactField `
+                    -Left $Binding `
+                    -LeftNames $pair.Binding `
+                    -Right $Transition `
+                    -RightNames $pair.Transition)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
     $raw = New-Object System.Collections.Generic.List[object]
     $distinct = New-Object System.Collections.Generic.List[object]
     $recovered = New-Object System.Collections.Generic.List[object]
     $unresolved = New-Object System.Collections.Generic.List[object]
+    $unresolvedRecords = New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($install in $installEvents) {
         $installSequence = [int64]$install.Sequence
@@ -46368,6 +46601,251 @@ function Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitP
         }
         else {
             $unresolved.Add($candidate) | Out-Null
+            $unresolvedRecords.Add([pscustomobject]@{
+                    Event = $candidate
+                    Reason = 'coordinator_repair_authority_outlived_legacy_pressure_ttl'
+                }) | Out-Null
+        }
+    }
+
+    foreach ($candidate in @($settlementRejectedEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'attempted_outcome' -Default '') -eq
+                    'TransferTerminal'
+            })) {
+        $candidateAuthority = Get-FileTransferRegularV4FrontierRepairIdentityField `
+            -Event $candidate `
+            -Names @('authority_id')
+        $candidateRepairKey = Get-FileTransferRegularV4FrontierRepairIdentityField `
+            -Event $candidate `
+            -Names @('repair_request_key')
+        [object[]]$bindings = @($bindingCommittedEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $_ -Right $candidate) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $candidateAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                $candidateRepairKey
+        })
+        if ($bindings.Count -ne 1) {
+            continue
+        }
+        $binding = $bindings[0]
+        $installGeneration = Get-FileTransferEventField `
+            -Event $binding `
+            -Name 'install_generation' `
+            -Default ''
+        [object[]]$accepted = @($settlementAcceptedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$binding.Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Test-FileTransferRegularV4FrontierRepairLifecycleMatch -Source $binding -Candidate $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'successor_install_generation' -Default '') -eq
+                $installGeneration
+        })
+        if ($accepted.Count -ne 1) {
+            continue
+        }
+        [object[]]$applies = @($settlementApplyEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$accepted[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'install_generation' -Default '') -eq
+                $installGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
+                'StaleRejected' -and
+            (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '').ToLowerInvariant() -in
+                @('applied', 'idempotent') -and
+            (Get-FileTransferEventField -Event $_ -Name 'current_authority_cleared' -Default '0') -eq '1' -and
+            (Get-FileTransferEventField -Event $_ -Name 'retained_predecessor_cleared' -Default '1') -eq '0' -and
+            ((Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq '[redacted]' -or
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                    $candidateAuthority)
+        } | Sort-Object Sequence, LineNumber)
+        if ($applies.Count -eq 0) {
+            continue
+        }
+        [object[]]$prepared = @($transitionPreparedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$binding.Sequence -and
+            [int64]$_.Sequence -lt [int64]$accepted[0].Sequence -and
+            (Test-RegularV4PressureTransitionSourceMatch -Binding $binding -Transition $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq
+                'TunaV4ToPostTunaFallbackV6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Prepared'
+        })
+        if ($prepared.Count -ne 1) {
+            continue
+        }
+        $preparedAuthority = Get-FileTransferEventField -Event $prepared[0] -Name 'authority_id' -Default ''
+        $preparedGeneration = Get-FileTransferEventField -Event $prepared[0] -Name 'transition_generation' -Default ''
+        $preparedDataSession = Get-FileTransferEventField `
+            -Event $prepared[0] `
+            -Name 'source_data_session_generation' `
+            -Default ''
+        if ([string]::IsNullOrWhiteSpace($preparedDataSession)) {
+            continue
+        }
+        [object[]]$pauses = @($transitionPauseEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$prepared[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$accepted[0].Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $preparedAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                $preparedGeneration
+        })
+        [object[]]$draining = @($transitionDrainingEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$prepared[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$accepted[0].Sequence -and
+            (Test-RegularV4PressureTransitionSourceMatch -Binding $binding -Transition $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $preparedAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                $preparedGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'source_data_session_generation' -Default '') -eq
+                $preparedDataSession -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Draining'
+        })
+        if ($pauses.Count -eq 0 -or $draining.Count -ne 1) {
+            continue
+        }
+        [object[]]$drains = @($transitionDrainEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$applies[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureTransitionSourceMatch -Binding $binding -Transition $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq
+                'TunaV4ToPostTunaFallbackV6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $preparedAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                $preparedGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'source_data_session_generation' -Default '') -eq
+                $preparedDataSession -and
+            (Get-FileTransferEventField -Event $_ -Name 'drain_outcome' -Default '') -eq 'Completed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+                @('Accepted', 'Idempotent')
+        })
+        if ($drains.Count -ne 1) {
+            continue
+        }
+        $transitionAuthority = Get-FileTransferEventField `
+            -Event $drains[0] `
+            -Name 'authority_id' `
+            -Default ''
+        $transitionGeneration = Get-FileTransferEventField `
+            -Event $drains[0] `
+            -Name 'transition_generation' `
+            -Default ''
+        [object[]]$commits = @($transitionCommitEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$drains[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureTransitionSourceMatch -Binding $binding -Transition $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $transitionAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                $transitionGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'source_data_session_generation' -Default '') -eq
+                $preparedDataSession -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+                @('Committed', 'Idempotent')
+        })
+        if ($commits.Count -ne 1) {
+            continue
+        }
+        [object[]]$dispositions = @($transitionDispositionEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$commits[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $transitionAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                $transitionGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'source_data_session_generation' -Default '') -eq
+                $preparedDataSession -and
+            ((Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+                    @('Applied', 'Idempotent') -or
+                (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '') -in
+                    @('applied', 'idempotent'))
+        })
+        [object[]]$publications = @($fallbackPublicationEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$commits[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Test-RegularV4PressureExactField -Left $binding -LeftNames @('session_id') -Right $_ -RightNames @('session_id')) -and
+            (Test-RegularV4PressureExactField -Left $binding -LeftNames @('transfer_id') -Right $_ -RightNames @('transfer_id')) -and
+            (Test-RegularV4PressureExactField -Left $binding -LeftNames @('direction') -Right $_ -RightNames @('direction')) -and
+            (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                $transitionGeneration
+        })
+        if ($dispositions.Count -eq 0 -or $publications.Count -eq 0) {
+            continue
+        }
+        $settledBeforeCandidate = @($contractSettledEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$accepted[0].Sequence -and
+            [int64]$_.Sequence -lt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $candidateAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                $candidateRepairKey
+        })
+        if ($settledBeforeCandidate.Count -gt 0) {
+            continue
+        }
+
+        $raw.Add($candidate) | Out-Null
+        $identity = [string]::Join('|', @(
+                'route_transition_local_lifecycle',
+                (Get-FileTransferEventField -Event $binding -Name 'log_writer_id' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'session_id' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'transfer_id' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'direction' -Default ''),
+                $candidateAuthority,
+                $installGeneration,
+                $candidateRepairKey,
+                (Get-FileTransferEventField -Event $binding -Name 'repair_generation' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'route' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'runtime_generation' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'leg_generation' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'transport_epoch' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'bridge_recovery_generation' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'route_publication_generation' -Default ''),
+                (Get-FileTransferEventField -Event $binding -Name 'route_commit_generation' -Default ''),
+                $transitionAuthority,
+                $transitionGeneration))
+        if ($seen.ContainsKey($identity)) {
+            continue
+        }
+        $seen[$identity] = $true
+        $distinct.Add($candidate) | Out-Null
+        $settledAfterCandidate = @($contractSettledEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+            (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $candidateAuthority -and
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq
+                $candidateRepairKey -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
+                'StaleRejected'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$completed = @()
+        if ($settledAfterCandidate.Count -gt 0) {
+            $completed = @($completedTerminalEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$settledAfterCandidate[0].Sequence -and
+                (Test-RegularV4PressureWriterMatch -Left $binding -Right $_) -and
+                (Test-RegularV4PressureExactField -Left $binding -LeftNames @('session_id') -Right $_ -RightNames @('session_id')) -and
+                (Test-RegularV4PressureExactField -Left $binding -LeftNames @('transfer_id') -Right $_ -RightNames @('transfer_id')) -and
+                (Test-RegularV4PressureExactField -Left $binding -LeftNames @('direction') -Right $_ -RightNames @('direction'))
+            } | Select-Object -First 1)
+        }
+        if ($completed.Count -gt 0) {
+            $recovered.Add($candidate) | Out-Null
+        }
+        else {
+            $unresolved.Add($candidate) | Out-Null
+            $unresolvedRecords.Add([pscustomobject]@{
+                    Event = $candidate
+                    Reason = 'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle'
+                }) | Out-Null
         }
     }
 
@@ -46381,6 +46859,7 @@ function Get-FileTransferRegularV4FrontierRepairPressureAuthorityLifecycleSplitP
         DistinctCandidateEvents = @($distinct.ToArray())
         RecoveredCandidateEvents = @($recovered.ToArray())
         UnresolvedCandidateEvents = @($unresolved.ToArray())
+        UnresolvedCandidateRecords = @($unresolvedRecords.ToArray())
     }
 }
 
@@ -62442,12 +62921,13 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason 'accepted_settlement_disposition_evidence_missing' `
             -UseDefaultReason
     }
-    if ($regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount -gt 0) {
+    foreach ($candidateRecord in @(
+            $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCandidateRecords)) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
             -Class 'regular_v4_frontier_repair_pressure_authority_lifecycle_split' `
-            -Events $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCandidateEvents `
-            -DefaultReason 'coordinator_repair_authority_outlived_legacy_pressure_ttl' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
     }
     Add-FileTransferProofChainFailureCandidates `
@@ -65108,7 +65588,13 @@ function Write-FileTransferDiagnosticsArtifacts {
                 break
             }
             'regular_v4_frontier_repair_pressure_authority_lifecycle_split' {
-                'recovery: coordinator repair authority outlived the legacy adapter pressure TTL'
+                if ($recoveryClassification.Reason -eq
+                    'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle') {
+                    'recovery: route-transition pressure settlement was not adopted by the local repair lifecycle'
+                }
+                else {
+                    'recovery: coordinator repair authority outlived the legacy adapter pressure TTL'
+                }
                 break
             }
             'regular_v4_frontier_repair_pressure_recovery_handoff_missing' {

@@ -6192,6 +6192,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     [InlineData("settlement_generation_mutation")]
     [InlineData("settlement_range_mutation")]
     [InlineData("broken_lineage")]
+    [InlineData("redacted_recheck")]
+    [InlineData("production_redacted_recheck")]
+    [InlineData("wrong_recheck_authority")]
+    [InlineData("ambiguous_redacted_recheck")]
     public async Task GuiSmokeFailureClassification_FallbackRepairRecoveryRequiresExactOrderedLineage(
         string scenario)
     {
@@ -6202,12 +6206,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var publishedContract = scenario == "cross_request" ? "2" : "1";
         var expectMissing = scenario is not (
             "healthy" or
+            "redacted_recheck" or
+            "production_redacted_recheck" or
             "broken_lineage" or
             "mutated_initial_request" or
             "settlement_generation_mutation" or
             "settlement_range_mutation");
         var expectHoldBindingMissing = scenario is
             "conflicting_binding" or
+            "ambiguous_redacted_recheck" or
             "idempotent_only" or
             "hold_data_session_mutation" or
             "wrong_predecessor";
@@ -6309,6 +6316,42 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'broken_lineage' {
                         $lines[6] = $lines[6].Replace('successor_authority_id=repair-b', 'successor_authority_id=other-repair')
                     }
+                    'redacted_recheck' {
+                        $lines[9] = $lines[9].Replace('repair_authority_id=repair-b', 'repair_authority_id=[redacted]')
+                    }
+                    'production_redacted_recheck' {
+                        $lines[8] = $lines[8] `
+                            -replace 'recovered_transport_epoch=1; ', '' `
+                            -replace 'handoff_kind=regular_nkn_recovery_to_regular_nkn; ', '' `
+                            -replace 'boundary_source_transport=regular_nkn_recovery; ', '' `
+                            -replace 'boundary_target_transport=regular_nkn; ', '' `
+                            -replace 'fallback_epoch=1; ', '' `
+                            -replace 'boundary_reason=repair_settled; ', '' `
+                            -replace 'boundary_identity=boundary; ', '' `
+                            -replace 'original_hold_reason=fallback_paired_tail_yield_pending; ', ''
+                        $lines[9] = $lines[9].Replace('repair_authority_id=repair-b', 'repair_authority_id=[redacted]')
+                        foreach ($index in 12..15) {
+                            $lines[$index] = $lines[$index].Replace('data_session_generation=1', 'data_session_generation=0')
+                        }
+                        $consumed = $lines[16]
+                        $lines[16] = $lines[15]
+                        $lines[15] = $consumed
+                    }
+                    'wrong_recheck_authority' {
+                        $lines[9] = $lines[9].Replace('repair_authority_id=repair-b', 'repair_authority_id=other-repair')
+                    }
+                    'ambiguous_redacted_recheck' {
+                        $lines[9] = $lines[9].Replace('repair_authority_id=repair-b', 'repair_authority_id=[redacted]')
+                        $conflict = $lines[5].Replace('data_session_identity=data:1', 'data_session_identity=data:2').Replace('hold_data_session_identity=data:1', 'hold_data_session_identity=data:2')
+                        $lines = @($lines[0..5]) + @($conflict) + @($lines[6..($lines.Count - 1)])
+                    }
+                }
+                if ($scenario -in @('redacted_recheck', 'production_redacted_recheck')) {
+                    $paddingCount = 56563 - $lines.Count
+                    $padding = @(for ($index = 0; $index -lt $paddingCount; $index++) {
+                        "diagnostic=fallback_recheck_unrelated; sample_index=$index"
+                    })
+                    $lines = @($padding) + @($lines)
                 }
                 $lines | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
@@ -7142,6 +7185,79 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.True(result.ExitCode == 0, $"Worker-handoff classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-worker-handoff-correlation-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_DetectsRouteTransitionPressureLocalLifecycleSplit()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = Regex.Replace(guiText, @"(?m)^ {4}", string.Empty);
+        var fieldValueBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
+        var classifierMatch = Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*\$earlyPredicateEventNames\s*=\s*@\{");
+        Assert.True(classifierMatch.Success, "Could not extract the GUI local-lifecycle correlator.");
+        var classifierBody = classifierMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldValueBody}} }
+            function Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure { {{classifierBody}} }
+
+            $writer = 'writer-a'
+            $repair = 'fta2-repair-a'
+            $transition = 'fta2-transition-a'
+            $scope = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=4; terminal_generation=0; leg_generation=4; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=4; route_commit_generation=2; target_transport=tuna'
+            $source = 'session_id=session-a; transfer_id=transfer-a; direction=outbound; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_route_publication_generation=4; source_route_commit_generation=2; source_data_session_generation=1; transition_kind=TunaV4ToPostTunaFallbackV6; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn'
+            $lines = @(
+                "event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id=$repair; repair_request_key=40:2:40:2; install_generation=3; $scope; log_writer_id=$writer",
+                "event=filetransfer_route_transition_prepared; authority_id=$transition; transition_generation=4; decision_status=Prepared; $source; log_writer_id=$writer",
+                "event=filetransfer_route_transition_pause_bound; authority_id=$transition; transition_generation=4; $source; log_writer_id=$writer",
+                "event=filetransfer_route_transition_draining; authority_id=$transition; transition_generation=4; decision_status=Draining; $source; log_writer_id=$writer",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_accepted; authority_id=$repair; repair_request_key=40:2:40:2; successor_install_generation=3; outcome=StaleRejected; settlement_reason=filetransfer_route_transition_pressure_handoff; $scope; log_writer_id=$writer",
+                "event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; authority_id=[redacted]; install_generation=3; settlement_outcome=StaleRejected; apply_status=applied; current_authority_cleared=1; retained_predecessor_cleared=0; session_id=session-a; transfer_id=transfer-a; direction=outbound; log_writer_id=$writer",
+                "event=filetransfer_route_transition_drain_receipt_decided; authority_id=$transition; transition_generation=4; drain_outcome=Completed; decision_status=Accepted; $source; log_writer_id=$writer",
+                "event=filetransfer_route_transition_committed; authority_id=$transition; transition_generation=4; decision_status=Committed; $source; log_writer_id=$writer",
+                "event=filetransfer_route_selected; transition_generation=4; route=post_tuna_fallback_v6; protocol_version=6; session_id=session-a; transfer_id=transfer-a; direction=outbound; log_writer_id=$writer",
+                "event=filetransfer_route_transition_disposition_applied; authority_id=$transition; transition_generation=4; decision_status=Applied; $source; log_writer_id=$writer",
+                "event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_id=$repair; repair_request_key=40:2:40:2; attempted_outcome=TransferTerminal; gui_evidence_sequence=11; log_writer_id=$writer"
+            )
+            $failure = Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure -Lines $lines
+            if (-not $failure.Unresolved -or $failure.FirstSequence -ne 11) {
+                throw 'exact local lifecycle split was not classified'
+            }
+
+            $settled = "event=filetransfer_regular_v4_frontier_repair_contract_settled; authority_id=$repair; repair_request_key=40:2:40:2; settlement_outcome=StaleRejected; settlement_source=route_transition_pressure_commit; log_writer_id=$writer"
+            if ((Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure -Lines @($lines[0..9] + $settled + $lines[10])).Unresolved) {
+                throw 'commit-time local lifecycle adoption remained classified'
+            }
+
+            $wrongWriter = @($lines)
+            $wrongWriter[5] = $wrongWriter[5].Replace("log_writer_id=$writer", 'log_writer_id=writer-b')
+            if ((Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure -Lines $wrongWriter).Unresolved) {
+                throw 'cross-writer apply admitted the lifecycle incident'
+            }
+            $wrongDataSession = @($lines)
+            $wrongDataSession[6] = $wrongDataSession[6].Replace('source_data_session_generation=1', 'source_data_session_generation=2')
+            if ((Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure -Lines $wrongDataSession).Unresolved) {
+                throw 'mutated data-session lineage admitted the lifecycle incident'
+            }
+
+            Write-Output 'gui-route-transition-pressure-local-lifecycle-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI local-lifecycle classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-route-transition-pressure-local-lifecycle-ok", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(
+            "committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle",
+            guiText,
+            StringComparison.Ordinal);
     }
 
     [Fact]

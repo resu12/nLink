@@ -478,6 +478,60 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4Pressure_RouteCommitRejectsBeforeBridgeWhenLocalContractIsMissing()
+    {
+        const string transferId = "transfer_regular_v4_pressure_route_commit_missing_local";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        transport.SeedRuntimeUnlockRouteCommitProofForTests(
+            transferId,
+            "pressure_route_commit_missing_local");
+        service.AttachTransport(transport);
+        var context = CreateProjectionInboundContext(transferId);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 8);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        SeedInitialRegularV4RuntimeScopeForTest(
+            context,
+            "pressure_route_commit_missing_local");
+        SeedRuntimeUnlockAdmissionForTest(
+            context,
+            FileTransferDirection.Inbound,
+            "pressure_route_commit_missing_local");
+        _ = CreateInboundState(
+            service,
+            context,
+            "frontier_stall_repair_due",
+            forceMissingRange: true);
+        var installedBinding = GetPrivatePropertyValue(
+            context,
+            "InstalledRegularV4FrontierRepairPressureBinding");
+        Assert.NotNull(installedBinding);
+        Assert.True(PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
+            service,
+            context,
+            "pressure_route_commit_missing_local"));
+        SetPrivateProperty(context, "CurrentRegularV4FrontierRepairContract", null);
+
+        var committed = CommitInboundFileTransferRouteTransitionForPressureTest(
+            service,
+            context);
+
+        Assert.False(committed.Accepted);
+        Assert.Equal(
+            "filetransfer_route_transition_pressure_local_repair_contract_mismatch",
+            committed.Reason);
+        Assert.Equal(
+            installedBinding,
+            GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+        Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4Pressure_RouteCommitRetiresExactBindingBeforeTunaOwnerInstall()
     {
         const string transferId = "transfer_regular_v4_pressure_route_commit";
@@ -499,6 +553,14 @@ public sealed partial class SessionFileTransferV4SenderTests
         SeedRuntimeUnlockAdmissionForTest(context, FileTransferDirection.Inbound, "pressure_route_commit");
         _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
         Assert.NotNull(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        var localRepairContract =
+            GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(localRepairContract);
+        var localRepairLifecycle = Assert.IsType<
+            FileTransferAuthorityLifecycle<
+                FileTransferRegularV4FrontierRepairSettlementOutcome>>(
+            GetPrivatePropertyValue(localRepairContract!, "Lifecycle"));
+        Assert.False(localRepairLifecycle.IsSettled);
 
         var promoted = PrepareInboundRegularV4ToTunaRouteTransitionForPressureTest(
             service,
@@ -519,12 +581,27 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Null(GetPrivatePropertyValue(context, "PendingRegularV4FrontierRepairPressureBinding"));
         Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Null(GetPrivatePropertyValue(context, "RetainedRegularV4FrontierRepairPressurePredecessor"));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.True(localRepairLifecycle.IsSettled);
+        Assert.Equal(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+            localRepairLifecycle.SettlementOutcome);
         Assert.NotNull(GetPrivatePropertyValue(context, "RuntimeUnlockRouteCommitToken"));
         var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected, settlement.Outcome);
+        var completeLog = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                completeLog,
+                "event=filetransfer_regular_v4_frontier_repair_contract_settled;"));
+        Assert.Contains(
+            "settlement_source=route_transition_pressure_commit",
+            completeLog,
+            StringComparison.Ordinal);
         var transferLog = string.Join(
             Environment.NewLine,
-            ReadOperationalLogTail(logStart)
+            completeLog
                 .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
                 .Where(line =>
                     line.Contains(
@@ -550,7 +627,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 .ToArray();
             Assert.True(
                 projectionLines.Length == 1,
-                $"event={eventName}{Environment.NewLine}{ReadOperationalLogTail(logStart)}");
+                $"event={eventName}{Environment.NewLine}{completeLog}");
         }
     }
 

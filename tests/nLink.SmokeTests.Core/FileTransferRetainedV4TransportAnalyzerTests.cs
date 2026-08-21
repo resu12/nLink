@@ -4501,6 +4501,70 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("fail", fullVerdict["regular_v4_frontier_repair_pressure_authority_lifecycle_split_verdict"]);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteTransitionPressureSettlementWithoutLocalAdoption_FullCompactParity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_transition_pressure_local_lifecycle";
+        const string writerId = "writer_route_transition_pressure_local_lifecycle";
+        const string repairAuthority = "repair-final-tuna";
+        const string transitionAuthority = "transition-final-fallback";
+        const string repairKey = "4006:12:4006:12";
+        const string sourceScope = "route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=4; terminal_generation=0; leg_generation=4; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=4; route_commit_generation=2";
+        const string transitionScope = "source_route=file_tuna_v4; source_protocol_version=4; source_transport=tuna; source_live_route_epoch=3; source_runtime_generation=4; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_route_publication_generation=4; source_route_commit_generation=2; source_data_session_generation=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_binding_committed; authority_id={repairAuthority}; session_id=sess_a; transfer_id={transferId}; direction=inbound; {sourceScope}; target_transport=tuna; repair_request_key={repairKey}; frontier_chunk_index=4006; durable_received_highest_chunk_index=4005; pending_repair_count=12; repair_generation=10; install_generation=6; binding_state=Installed; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_transition_prepared; authority_id={transitionAuthority}; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; direction=inbound; session_id=sess_a; transfer_id={transferId}; {transitionScope}; decision_status=Prepared; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_transition_pause_bound; authority_id={transitionAuthority}; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; direction=inbound; session_id=sess_a; transfer_id={transferId}; {transitionScope}; decision_status=Installed; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_transition_draining; authority_id={transitionAuthority}; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; direction=inbound; session_id=sess_a; transfer_id={transferId}; {transitionScope}; decision_status=Draining; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; authority_id={repairAuthority}; current_successor_authority_id={repairAuthority}; successor_authority_id=(none); retained_predecessor_authority_id=(none); successor_install_generation=6; session_id=sess_a; transfer_id={transferId}; direction=inbound; {sourceScope}; target_transport=tuna; repair_request_key={repairKey}; frontier_chunk_index=4006; durable_received_highest_chunk_index=4005; requested_chunk_count=12; decision_generation=10; outcome=StaleRejected; settlement_reason=filetransfer_route_transition_pressure_handoff; settlement_disposition=accepted; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_pressure_settlement_apply_decided; authority_id=[redacted]; current_authority_id=[redacted]; install_generation=6; settlement_outcome=StaleRejected; apply_status=applied; current_authority_cleared=1; retained_predecessor_cleared=0; session_id=sess_a; transfer_id={transferId}; direction=inbound; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_transition_drain_receipt_decided; authority_id={transitionAuthority}; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; direction=inbound; session_id=sess_a; transfer_id={transferId}; {transitionScope}; drain_outcome=Completed; decision_status=Accepted; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_transition_committed; authority_id={transitionAuthority}; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; direction=inbound; session_id=sess_a; transfer_id={transferId}; {transitionScope}; decision_status=Committed; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_selected; transition_authority_id=[redacted]; transition_generation=4; direction=inbound; session_id=sess_a; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=5; route_commit_generation=0; projection_source=coordinator_route_transition; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_route_transition_disposition_applied; authority_id={transitionAuthority}; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; direction=inbound; session_id=sess_a; transfer_id={transferId}; {transitionScope}; decision_status=Applied; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_id={repairAuthority}; repair_request_key={repairKey}; attempted_outcome=TransferTerminal; log_writer_id={writerId}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_rejected; authority_id={repairAuthority}; repair_request_key={repairKey}; attempted_outcome=TransferTerminal; log_writer_id={writerId}")
+        };
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "regular_v4_frontier_repair_pressure_authority_lifecycle_split_raw_count",
+                     "regular_v4_frontier_repair_pressure_authority_lifecycle_split_distinct_count",
+                     "regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count",
+                     "regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+        Assert.Equal("2", fullVerdict["regular_v4_frontier_repair_pressure_authority_lifecycle_split_raw_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_pressure_authority_lifecycle_split_distinct_count"]);
+        Assert.Equal("0", fullVerdict["regular_v4_frontier_repair_pressure_authority_lifecycle_split_recovered_count"]);
+        Assert.Equal("1", fullVerdict["regular_v4_frontier_repair_pressure_authority_lifecycle_split_unresolved_count"]);
+        Assert.Contains(
+            "committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle",
+            File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferSoak", "ArtifactWriters.ps1")),
+            StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

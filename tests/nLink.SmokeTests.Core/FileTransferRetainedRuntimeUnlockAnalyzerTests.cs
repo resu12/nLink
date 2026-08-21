@@ -12817,6 +12817,14 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [InlineData(false, false, "retired")]
     [InlineData(false, false, "source_scope")]
     [InlineData(false, false, "source_reason")]
+    [InlineData(false, false, "redacted_recheck")]
+    [InlineData(true, false, "redacted_recheck")]
+    [InlineData(false, false, "production_redacted_recheck")]
+    [InlineData(true, false, "production_redacted_recheck")]
+    [InlineData(false, false, "wrong_recheck_authority")]
+    [InlineData(true, false, "wrong_recheck_authority")]
+    [InlineData(false, false, "ambiguous_redacted_recheck")]
+    [InlineData(true, false, "ambiguous_redacted_recheck")]
     public async Task AnalyzeRetained_FallbackTailRepairSettlementExactRecheckBeforeSymptomQueue_RecoversCandidate(
         bool compact,
         bool omitSuccessorBindingAndRecheck,
@@ -12933,7 +12941,11 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                 line.Contains("event=runtime_unlock_precommit_probe_launch_requested", StringComparison.Ordinal));
         }
 
-        if (!string.Equals(successorBindingMutation, "none", StringComparison.Ordinal))
+        var mutatesSuccessorBinding = successorBindingMutation is
+            "retired" or
+            "source_scope" or
+            "source_reason";
+        if (mutatesSuccessorBinding)
         {
             var successorBindingIndex = lines.FindIndex(line =>
                 line.Contains($"binding_transition_identity=successor:{repairAuthority}", StringComparison.Ordinal));
@@ -12956,6 +12968,121 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             };
         }
 
+        if (string.Equals(
+                successorBindingMutation,
+                "ambiguous_redacted_recheck",
+                StringComparison.Ordinal))
+        {
+            var successorBindingIndex = lines.FindIndex(line =>
+                line.Contains(
+                    $"binding_transition_identity=successor:{repairAuthority}:1:Accepted",
+                    StringComparison.Ordinal));
+            Assert.True(successorBindingIndex >= 0);
+            lines.Insert(
+                successorBindingIndex + 1,
+                lines[successorBindingIndex].Replace(
+                    "data_session_identity=data-session-1",
+                    "data_session_identity=data-session-2",
+                    StringComparison.Ordinal));
+        }
+
+        if (successorBindingMutation is
+            "redacted_recheck" or
+            "production_redacted_recheck" or
+            "ambiguous_redacted_recheck")
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                if (lines[index].Contains(
+                        "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided",
+                        StringComparison.Ordinal))
+                {
+                    lines[index] = lines[index].Replace(
+                        $"repair_authority_id={repairAuthority}",
+                        "repair_authority_id=[redacted]",
+                        StringComparison.Ordinal);
+                }
+            }
+        }
+        else if (string.Equals(
+                     successorBindingMutation,
+                     "wrong_recheck_authority",
+                     StringComparison.Ordinal))
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                if (lines[index].Contains(
+                        "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided",
+                        StringComparison.Ordinal))
+                {
+                    lines[index] = lines[index].Replace(
+                        $"repair_authority_id={repairAuthority}",
+                        "repair_authority_id=fta2-unrelated-repair",
+                        StringComparison.Ordinal);
+                }
+            }
+        }
+
+        if (string.Equals(
+                successorBindingMutation,
+                "production_redacted_recheck",
+                StringComparison.Ordinal))
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                lines[index] = lines[index]
+                    .Replace(
+                        "source_coordinator_decision_reason=accepted",
+                        "source_coordinator_decision_reason=fallback_paired_tail_yield",
+                        StringComparison.Ordinal)
+                    .Replace(
+                        "source_publication_reason=accepted",
+                        "source_publication_reason=fallback_paired_tail_yield",
+                        StringComparison.Ordinal);
+            }
+
+            var initialBindingIndex = lines.FindIndex(line =>
+                line.Contains("binding_transition_identity=initial:", StringComparison.Ordinal));
+            Assert.True(initialBindingIndex >= 0);
+            lines.Insert(
+                initialBindingIndex,
+                LogLine(
+                    $"event=runtime_unlock_retry_dispatch_authority_request_published; {requestTuple.Replace("source_coordinator_decision_reason=accepted", "source_coordinator_decision_reason=fallback_paired_tail_yield", StringComparison.Ordinal)}; queue_generation=1; decision_status=Published",
+                    4));
+
+            var grantIndex = lines.FindIndex(line =>
+                line.Contains("event=runtime_unlock_retry_dispatch_authority_granted", StringComparison.Ordinal));
+            var consumedIndex = lines.FindIndex(line =>
+                line.Contains("event=filetransfer_fallback_tail_paired_release_consumed", StringComparison.Ordinal));
+            Assert.True(grantIndex >= 0 && consumedIndex > grantIndex);
+            var consumedLine = lines[consumedIndex];
+            lines.RemoveAt(consumedIndex);
+            lines.Insert(grantIndex, consumedLine);
+            for (var index = 0; index < lines.Count; index++)
+            {
+                if (lines[index].Contains("event=runtime_unlock_retry_dispatch_", StringComparison.Ordinal) &&
+                    (lines[index].Contains("decision_staged", StringComparison.Ordinal) ||
+                        lines[index].Contains("install_receipt_issued", StringComparison.Ordinal) ||
+                        lines[index].Contains("install_committed", StringComparison.Ordinal) ||
+                        lines[index].Contains("authority_granted", StringComparison.Ordinal)))
+                {
+                    lines[index] = lines[index].Replace(
+                        "source_publication_reason=fallback_paired_tail_yield",
+                        "source_publication_reason=peer_post_tuna_fallback_v6_proof",
+                        StringComparison.Ordinal);
+                }
+            }
+
+            var candidateIndex = lines.FindLastIndex(line =>
+                line.Contains(
+                    "event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested",
+                    StringComparison.Ordinal));
+            Assert.True(candidateIndex >= 0);
+            lines.Insert(
+                candidateIndex + 1,
+                LogLine($"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested; {requestTuple}; recheck_generation=2; queue_generation=2; decision_status=Queued; decision_reason=exact_settled_fallback_frontier_repair_recheck_queued", 26));
+        }
+
         var result = await RunAnalyzeFixtureAsync(
             lines.ToArray(),
             ["-LiveRouteProofMode", "None"],
@@ -12969,14 +13096,24 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count"]);
-        if (omitSuccessorBindingAndRecheck ||
-            !string.Equals(successorBindingMutation, "none", StringComparison.Ordinal))
+        var bindingInvalid = omitSuccessorBindingAndRecheck ||
+            mutatesSuccessorBinding ||
+            string.Equals(
+                successorBindingMutation,
+                "ambiguous_redacted_recheck",
+                StringComparison.Ordinal);
+        var decisionInvalid = string.Equals(
+            successorBindingMutation,
+            "wrong_recheck_authority",
+            StringComparison.Ordinal);
+        if (bindingInvalid || decisionInvalid)
         {
             Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count"]);
             Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_unresolved_count"]);
-            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count"]);
-            Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
-            Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count"]);
+            Assert.Equal(bindingInvalid ? "1" : "0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_distinct_count"]);
+            Assert.Equal(bindingInvalid ? "1" : "0", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_hold_binding_missing_unresolved_count"]);
+            Assert.Equal(bindingInvalid ? "0" : "1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_distinct_count"]);
+            Assert.Equal(bindingInvalid ? "0" : "1", verdict["runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_after_bound_hold_unresolved_count"]);
             if (omitSuccessorBindingAndRecheck)
             {
                 Assert.Equal("unbound_held_fallback_tail_retry_could_not_recheck_after_blocking_repair_settlement", verdict["first_proof_chain_failure_reason"]);
