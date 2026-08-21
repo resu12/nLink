@@ -1692,6 +1692,7 @@ function New-FileTransferThroughputSummaryLines {
         'filetransfer_v6_frontier_request_sent',
         'filetransfer_v6_frontier_request_failed',
         'filetransfer_v6_frontier_request_deferred',
+        'filetransfer_v6_frontier_stall_grace_recheck_decided',
         'filetransfer_v6_frontier_request_received',
         'filetransfer_v6_frontier_request_coalesced',
         'filetransfer_v6_frontier_request_duplicate_ignored',
@@ -15679,6 +15680,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $RecoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRawCount)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict)) | Out-Null
     $lines.Add(("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $RecoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount)) | Out-Null
     $lines.Add(("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $RecoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $RecoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount)) | Out-Null
@@ -17825,6 +17831,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount),
         ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRawCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount),
@@ -56334,6 +56345,570 @@ function Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelatio
     }
 }
 
+function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
+    param([object[]]$Events = @())
+
+    [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+    [object[]]$deferredEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_frontier_request_deferred' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+            [int64](Get-FileTransferEventField -Event $_ -Name 'frontier_chunk_index' -Default '-1') -ge 0 -and
+            [int64](Get-FileTransferEventField -Event $_ -Name 'highest_received_chunk_index' -Default '-1') -ge
+                ([int64](Get-FileTransferEventField -Event $_ -Name 'frontier_chunk_index' -Default '-1') - 1) -and
+            [int64](Get-FileTransferEventField -Event $_ -Name 'elapsed_ms' -Default '-1') -eq 0 -and
+            [int64](Get-FileTransferEventField -Event $_ -Name 'stall_grace_ms' -Default '0') -gt 0
+        })
+    [object[]]$repairGrantedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted'
+        })
+    [object[]]$repairSettledEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled'
+        })
+    [object[]]$repairProgressEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed'
+        })
+    [object[]]$forcedStateEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_fallback_frontier_repair_progress_state_forced'
+        })
+    [object[]]$receiverStateEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_receiver_state_sent'
+        })
+    [object[]]$repairDispatchedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched'
+        })
+    [object[]]$requestSentEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_frontier_request_sent'
+        })
+    [object[]]$deliveryEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_control_plane_delivery_observed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'frontier_request'
+        })
+    [object[]]$terminalEvents = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'file_transfer_inbound_terminal',
+                'filetransfer_live_route_epoch_terminal',
+                'filetransfer_terminalized_by_session_end')
+        })
+    [object[]]$routePublicationEvents = @($ordered | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_route_selected',
+                'filetransfer_live_route_epoch_recovered',
+                'filetransfer_route_hint_authorized_publication_accepted') -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
+        })
+    [object[]]$dataSessionEvents = @($ordered | Where-Object {
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -notin @('', '(none)', 'none') -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'data_session_generation' -Default 0) -gt 0
+        })
+
+    $incidents = [ordered]@{}
+    foreach ($deferred in $deferredEvents) {
+        if ($null -eq $deferred.TimestampUtc) { continue }
+        $sequence = [int64]$deferred.Sequence
+        $writer = Get-FileTransferEventField -Event $deferred -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $deferred -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $deferred -Name 'transfer_id' -Default ''
+        $frontier = Get-FileTransferEventInt64Field -Event $deferred -Name 'frontier_chunk_index' -Default -1
+        $highest = Get-FileTransferEventInt64Field -Event $deferred -Name 'highest_received_chunk_index' -Default -1
+        $graceMs = Get-FileTransferEventInt64Field -Event $deferred -Name 'stall_grace_ms' -Default 0
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or
+            $frontier -lt 0 -or $highest -lt ($frontier - 1) -or $graceMs -le 0) {
+            continue
+        }
+
+        [object[]]$predecessorProgress = @($repairProgressEvents | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_kind' -Default '') -eq 'ReceiverRequest' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'current_frontier_chunk_index' -Default -1) -eq $frontier
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($predecessorProgress.Count -ne 1) {
+            [object[]]$currentPublications = @($routePublicationEvents | Where-Object {
+                    [int64]$_.Sequence -lt $sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer
+                } | Sort-Object Sequence, LineNumber)
+            if ($currentPublications.Count -eq 0) { continue }
+            $sourcePublication = $currentPublications[-1]
+            if ((Get-FileTransferEventField -Event $sourcePublication -Name 'route' -Default '') -ne
+                    'post_tuna_fallback_v6' -or
+                (Get-FileTransferEventField -Event $sourcePublication -Name 'protocol_version' -Default '0') -ne '6') {
+                continue
+            }
+            [object[]]$currentDataSession = @($dataSessionEvents | Where-Object {
+                    [int64]$_.Sequence -lt $sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer
+                } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+            [object[]]$publishedState = @($receiverStateEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$sourcePublication.Sequence -and
+                    [int64]$_.Sequence -lt $sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -eq $frontier
+                } | Select-Object -Last 1)
+            if ($currentDataSession.Count -ne 1 -or $publishedState.Count -ne 1) { continue }
+            $dataSessionIdentity = Get-FileTransferEventField -Event $currentDataSession[0] -Name 'data_session_identity' -Default ''
+            $dataSessionGeneration = Get-FileTransferEventField -Event $currentDataSession[0] -Name 'data_session_generation' -Default '0'
+            if ([string]::IsNullOrWhiteSpace($dataSessionIdentity) -or [int64]$dataSessionGeneration -le 0) {
+                continue
+            }
+            $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
+            if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+                $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
+            }
+            $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|none|0|none|none|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
+            if (-not $incidents.Contains($key)) {
+                $incidents[$key] = [pscustomobject]@{
+                    Key = $key
+                    Event = $deferred
+                    Progress = $sourcePublication
+                    ScopeFields = @(
+                        'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+                        'protocol_version', 'live_route_epoch', 'runtime_generation',
+                        'terminal_generation', 'leg_generation', 'route_publication_generation',
+                        'route_commit_generation')
+                    Authority = ''
+                    Writer = $writer
+                    Session = $session
+                    Transfer = $transfer
+                    Frontier = $frontier
+                    Highest = $highest
+                    GraceMs = $graceMs
+                    DataSessionIdentity = $dataSessionIdentity
+                    DataSessionGeneration = $dataSessionGeneration
+                    RawEvents = New-Object System.Collections.Generic.List[object]
+                }
+            }
+            $incidents[$key].RawEvents.Add($deferred) | Out-Null
+            continue
+        }
+
+        $progress = $predecessorProgress[0]
+        $authority = Get-FileTransferEventField -Event $progress -Name 'authority_id' -Default ''
+        $repairGeneration = Get-FileTransferEventField -Event $progress -Name 'repair_generation' -Default '0'
+        $repairKey = Get-FileTransferEventField -Event $progress -Name 'repair_request_key' -Default ''
+        $rangeFingerprint = Get-FileTransferEventField -Event $progress -Name 'range_fingerprint' -Default ''
+        $requestId = Get-FileTransferEventField -Event $progress -Name 'primary_protocol_repair_request_id' -Default ''
+        $requestCorrelationId = Get-FileTransferEventField -Event $progress -Name 'primary_request_correlation_id' -Default ''
+        $previousFrontier = Get-FileTransferEventField -Event $progress -Name 'previous_frontier_chunk_index' -Default '-1'
+        if ([string]::IsNullOrWhiteSpace($authority) -or
+            [int64]$repairGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace($repairKey) -or
+            [string]::IsNullOrWhiteSpace($rangeFingerprint) -or
+            [string]::IsNullOrWhiteSpace($requestId) -or
+            [string]::IsNullOrWhiteSpace($requestCorrelationId) -or
+            [int64]$previousFrontier -ne ($frontier - 1)) {
+            continue
+        }
+
+        $scopeFields = @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+            'protocol_version', 'live_route_epoch', 'runtime_generation',
+            'terminal_generation', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'bridge_decision_generation',
+            'checkpoint_request_id', 'route_publication_generation',
+            'route_commit_generation')
+        $sameScope = {
+            param($event)
+            foreach ($field in $scopeFields) {
+                if ((Get-FileTransferEventField -Event $event -Name $field -Default '__missing__') -ne
+                    (Get-FileTransferEventField -Event $progress -Name $field -Default '__missing__')) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $sameAuthority = {
+            param($event)
+            return (& $sameScope $event) -and
+                (Get-FileTransferEventField -Event $event -Name 'authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventField -Event $event -Name 'repair_generation' -Default '0') -eq $repairGeneration -and
+                (Get-FileTransferEventField -Event $event -Name 'repair_request_key' -Default '') -eq $repairKey -and
+                (Get-FileTransferEventField -Event $event -Name 'range_fingerprint' -Default '') -eq $rangeFingerprint
+        }
+
+        [object[]]$grant = @($repairGrantedEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$progress.Sequence -and
+                (& $sameAuthority $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_kind' -Default '') -eq 'ReceiverRequest' -and
+                (Get-FileTransferEventField -Event $_ -Name 'primary_protocol_repair_request_id' -Default '') -eq $requestId -and
+                (Get-FileTransferEventField -Event $_ -Name 'primary_request_correlation_id' -Default '') -eq $requestCorrelationId
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        [object[]]$settlement = @($repairSettledEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$progress.Sequence -and
+                (& $sameAuthority $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '').ToLowerInvariant() -eq 'progressobserved'
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        [object[]]$forcedState = @($forcedStateEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$progress.Sequence -and
+                [int64]$_.Sequence -lt $sequence -and
+                (& $sameAuthority $_) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'current_frontier_chunk_index' -Default -1) -eq $frontier -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '').ToLowerInvariant() -in @('accepted', 'idempotent')
+            } | Select-Object -First 1)
+        if ($grant.Count -ne 1 -or $settlement.Count -ne 1 -or $forcedState.Count -ne 1) { continue }
+
+        $dataSessionIdentity = Get-FileTransferEventField -Event $forcedState[0] -Name 'data_session_identity' -Default ''
+        $dataSessionGeneration = Get-FileTransferEventField -Event $forcedState[0] -Name 'data_session_generation' -Default '0'
+        $receiverStateEpoch = Get-FileTransferEventField -Event $forcedState[0] -Name 'receiver_state_epoch' -Default '0'
+        [object[]]$state = @($receiverStateEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$forcedState[0].Sequence -and
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'epoch' -Default '0') -eq $receiverStateEpoch -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -eq $frontier -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '0') -eq
+                    (Get-FileTransferEventField -Event $progress -Name 'transport_epoch' -Default '0')
+            } | Select-Object -First 1)
+        if ($state.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace($dataSessionIdentity) -or
+            [int64]$dataSessionGeneration -le 0) {
+            continue
+        }
+
+        $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
+        if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+            $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
+        }
+        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$authority|$repairGeneration|$repairKey|$rangeFingerprint|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
+        if (-not $incidents.Contains($key)) {
+            $incidents[$key] = [pscustomobject]@{
+                Key = $key
+                Event = $deferred
+                Progress = $progress
+                ScopeFields = $scopeFields
+                Authority = $authority
+                Writer = $writer
+                Session = $session
+                Transfer = $transfer
+                Frontier = $frontier
+                Highest = $highest
+                GraceMs = $graceMs
+                DataSessionIdentity = $dataSessionIdentity
+                DataSessionGeneration = $dataSessionGeneration
+                RawEvents = New-Object System.Collections.Generic.List[object]
+            }
+        }
+        $incidents[$key].RawEvents.Add($deferred) | Out-Null
+    }
+
+    $admittedDeferralSequences = [System.Collections.Generic.HashSet[int64]]::new()
+    foreach ($incident in $incidents.Values) {
+        foreach ($rawEvent in @($incident.RawEvents.ToArray())) {
+            [void]$admittedDeferralSequences.Add([int64]$rawEvent.Sequence)
+        }
+    }
+    foreach ($deferred in $deferredEvents) {
+        $sequence = [int64]$deferred.Sequence
+        if ($admittedDeferralSequences.Contains($sequence) -or $null -eq $deferred.TimestampUtc) { continue }
+        $writer = Get-FileTransferEventField -Event $deferred -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $deferred -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $deferred -Name 'transfer_id' -Default ''
+        $frontier = Get-FileTransferEventInt64Field -Event $deferred -Name 'frontier_chunk_index' -Default -1
+        $highest = Get-FileTransferEventInt64Field -Event $deferred -Name 'highest_received_chunk_index' -Default -1
+        $graceMs = Get-FileTransferEventInt64Field -Event $deferred -Name 'stall_grace_ms' -Default 0
+        [object[]]$currentPublications = @($routePublicationEvents | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer
+            } | Sort-Object Sequence, LineNumber)
+        if ($currentPublications.Count -eq 0) { continue }
+        $sourcePublication = $currentPublications[-1]
+        if ((Get-FileTransferEventField -Event $sourcePublication -Name 'route' -Default '') -ne
+                'post_tuna_fallback_v6' -or
+            (Get-FileTransferEventField -Event $sourcePublication -Name 'protocol_version' -Default '0') -ne '6') {
+            $directRoute = Get-FileTransferEventField -Event $deferred -Name 'route' -Default ''
+            $directProtocol = Get-FileTransferEventField -Event $deferred -Name 'protocol_version' -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($directRoute) -or
+                -not [string]::IsNullOrWhiteSpace($directProtocol)) {
+                continue
+            }
+            [object[]]$retainedPostFallbackPublications = @($currentPublications | Where-Object {
+                    (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6'
+                } | Select-Object -Last 1)
+            if ($retainedPostFallbackPublications.Count -ne 1) { continue }
+            $sourcePublication = $retainedPostFallbackPublications[0]
+        }
+        [object[]]$currentDataSession = @($dataSessionEvents | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($currentDataSession.Count -ne 1) { continue }
+        $dataSessionIdentity = Get-FileTransferEventField -Event $currentDataSession[0] -Name 'data_session_identity' -Default ''
+        $dataSessionGeneration = Get-FileTransferEventField -Event $currentDataSession[0] -Name 'data_session_generation' -Default '0'
+        $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
+        if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+            $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
+        }
+        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|source|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
+        $incident = [pscustomobject]@{
+            Key = $key
+            Event = $deferred
+            Progress = $sourcePublication
+            ScopeFields = @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+                'protocol_version', 'live_route_epoch', 'runtime_generation',
+                'terminal_generation', 'leg_generation', 'route_publication_generation',
+                'route_commit_generation')
+            Authority = ''
+            Writer = $writer
+            Session = $session
+            Transfer = $transfer
+            Frontier = $frontier
+            Highest = $highest
+            GraceMs = $graceMs
+            DataSessionIdentity = $dataSessionIdentity
+            DataSessionGeneration = $dataSessionGeneration
+            RawEvents = New-Object System.Collections.Generic.List[object]
+        }
+        $incident.RawEvents.Add($deferred) | Out-Null
+        $incidents[$key] = $incident
+    }
+    foreach ($deferred in $deferredEvents) {
+        $sequence = [int64]$deferred.Sequence
+        $alreadyAdmitted = @($incidents.Values | Where-Object {
+                @($_.RawEvents.ToArray() | Where-Object { [int64]$_.Sequence -eq $sequence }).Count -gt 0
+            })
+        if ($alreadyAdmitted.Count -gt 0 -or $null -eq $deferred.TimestampUtc) { continue }
+        $writer = Get-FileTransferEventField -Event $deferred -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $deferred -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $deferred -Name 'transfer_id' -Default ''
+        [object[]]$currentPublications = @($routePublicationEvents | Where-Object {
+                [int64]$_.Sequence -lt $sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer
+            } | Sort-Object Sequence, LineNumber)
+        if ($currentPublications.Count -eq 0) { continue }
+        $sourcePublication = $currentPublications[-1]
+        if ((Get-FileTransferEventField -Event $sourcePublication -Name 'route' -Default '') -ne
+                'post_tuna_fallback_v6' -or
+            (Get-FileTransferEventField -Event $sourcePublication -Name 'protocol_version' -Default '0') -ne '6') {
+            $directRoute = Get-FileTransferEventField -Event $deferred -Name 'route' -Default ''
+            $directProtocol = Get-FileTransferEventField -Event $deferred -Name 'protocol_version' -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($directRoute) -or
+                -not [string]::IsNullOrWhiteSpace($directProtocol)) {
+                continue
+            }
+            [object[]]$retainedPostFallbackPublications = @($currentPublications | Where-Object {
+                    (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6'
+                } | Select-Object -Last 1)
+            if ($retainedPostFallbackPublications.Count -ne 1) { continue }
+            $sourcePublication = $retainedPostFallbackPublications[0]
+        }
+        $frontier = Get-FileTransferEventInt64Field -Event $deferred -Name 'frontier_chunk_index' -Default -1
+        $highest = Get-FileTransferEventInt64Field -Event $deferred -Name 'highest_received_chunk_index' -Default -1
+        $graceMs = Get-FileTransferEventInt64Field -Event $deferred -Name 'stall_grace_ms' -Default 0
+        $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
+        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|retained-source".ToLowerInvariant()
+        $incident = [pscustomobject]@{
+            Key = $key; Event = $deferred; Progress = $sourcePublication
+            ScopeFields = @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+                'protocol_version', 'live_route_epoch', 'runtime_generation',
+                'terminal_generation', 'leg_generation', 'route_publication_generation',
+                'route_commit_generation')
+            Authority = ''; Writer = $writer; Session = $session; Transfer = $transfer
+            Frontier = $frontier; Highest = $highest; GraceMs = $graceMs
+            DataSessionIdentity = '(retained-unavailable)'; DataSessionGeneration = 0
+            RawEvents = New-Object System.Collections.Generic.List[object]
+        }
+        $incident.RawEvents.Add($deferred) | Out-Null
+        $incidents[$key] = $incident
+    }
+
+    $records = New-Object System.Collections.Generic.List[object]
+    $unresolvedRecords = New-Object System.Collections.Generic.List[object]
+    $rawCount = 0
+    foreach ($incident in $incidents.Values) {
+        [object[]]$rawEvents = @($incident.RawEvents.ToArray() | Sort-Object Sequence, LineNumber)
+        if ($rawEvents.Count -eq 0) { continue }
+        $rawCount += $rawEvents.Count
+        $candidate = $rawEvents[0]
+        $candidateUtc = [DateTimeOffset]$candidate.TimestampUtc
+        $deadlineUtc = $candidateUtc.AddMilliseconds([int64]$incident.GraceMs)
+        $candidateTicks = Get-FileTransferEventInt64Field -Event $candidate -Name 'log_writer_attempt_utc_ticks' -Default 0
+        $deadlineTicks = if ($candidateTicks -gt 0) {
+            $candidateTicks + ([int64]$incident.GraceMs * [TimeSpan]::TicksPerMillisecond)
+        }
+        else { 0 }
+        $progress = $incident.Progress
+        $scopeFields = @($incident.ScopeFields)
+        $sameScope = {
+            param($event)
+            foreach ($field in $scopeFields) {
+                if ((Get-FileTransferEventField -Event $event -Name $field -Default '__missing__') -ne
+                    (Get-FileTransferEventField -Event $progress -Name $field -Default '__missing__')) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        [object[]]$sourceEndedBeforeDeadline = @($terminalEvents | Where-Object {
+                $eventTicks = Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_attempt_utc_ticks' -Default 0
+                (($deadlineTicks -gt 0 -and $eventTicks -gt $candidateTicks -and $eventTicks -le $deadlineTicks) -or
+                    ($deadlineTicks -eq 0 -and $null -ne $_.TimestampUtc -and
+                        $_.TimestampUtc -gt $candidateUtc -and $_.TimestampUtc -le $deadlineUtc)) -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer
+            })
+        if ($sourceEndedBeforeDeadline.Count -gt 0) { continue }
+
+        [object[]]$naturalProgress = @($receiverStateEvents | Where-Object {
+                $eventTicks = Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_attempt_utc_ticks' -Default 0
+                (($deadlineTicks -gt 0 -and $eventTicks -gt $candidateTicks -and $eventTicks -le $deadlineTicks) -or
+                    ($deadlineTicks -eq 0 -and $null -ne $_.TimestampUtc -and
+                        $_.TimestampUtc -gt $candidateUtc -and $_.TimestampUtc -le $deadlineUtc)) -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -gt $incident.Frontier
+            } | Select-Object -First 1)
+
+        [object[]]$successorGrant = @()
+        [object[]]$successorDelivery = @()
+        [object[]]$successorDispatch = @()
+        [object[]]$successorSent = @()
+        [object[]]$successorProgress = @()
+        [object[]]$successorState = @()
+        if ($naturalProgress.Count -eq 0) {
+            [object[]]$successfulProgressCandidates = @($repairProgressEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'source_kind' -Default '') -eq 'ReceiverRequest' -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'previous_frontier_chunk_index' -Default -1) -eq $incident.Frontier -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'current_frontier_chunk_index' -Default -1) -gt $incident.Frontier
+                } | Sort-Object Sequence, LineNumber)
+            foreach ($progressCandidate in $successfulProgressCandidates) {
+                $successorAuthority = Get-FileTransferEventField -Event $progressCandidate -Name 'authority_id' -Default ''
+                [object[]]$successorGrant = @($repairGrantedEvents | Where-Object {
+                        [int64]$_.Sequence -lt [int64]$progressCandidate.Sequence -and
+                        [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $successorAuthority -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -eq $incident.Frontier
+                    } | Select-Object -Last 1)
+                if ($successorGrant.Count -ne 1) { continue }
+                $successorRequestId = Get-FileTransferEventField -Event $successorGrant[0] -Name 'primary_protocol_repair_request_id' -Default ''
+                $successorCorrelationId = Get-FileTransferEventField -Event $successorGrant[0] -Name 'primary_request_correlation_id' -Default ''
+                $afterGrant = {
+                    param($event)
+                    [int64]$event.Sequence -gt [int64]$successorGrant[0].Sequence -and
+                        [int64]$event.Sequence -lt [int64]$progressCandidate.Sequence
+                }
+                [object[]]$successorDelivery = @($deliveryEvents | Where-Object {
+                        (& $afterGrant $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default '') -eq $successorRequestId -and
+                        (Get-FileTransferEventField -Event $_ -Name 'request_correlation_id' -Default '') -eq $successorCorrelationId -and
+                        (Get-FileTransferEventField -Event $_ -Name 'peer_visible_any' -Default '0') -eq '1' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'accepted_any' -Default '0') -eq '1'
+                    } | Select-Object -First 1)
+                [object[]]$successorDispatch = @($repairDispatchedEvents | Where-Object {
+                        (& $afterGrant $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $successorAuthority -and
+                        (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '1'
+                    } | Select-Object -First 1)
+                [object[]]$successorSent = @($requestSentEvents | Where-Object {
+                        (& $afterGrant $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $successorAuthority -and
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default '') -eq $successorRequestId -and
+                        (Get-FileTransferEventField -Event $_ -Name 'request_correlation_id' -Default '') -eq $successorCorrelationId
+                    } | Select-Object -First 1)
+                [object[]]$successorProgress = @($repairProgressEvents | Where-Object {
+                        [object]::ReferenceEquals($_, $progressCandidate)
+                    })
+                if ($successorProgress.Count -eq 1) {
+                    [object[]]$successorState = @($receiverStateEvents | Where-Object {
+                            [int64]$_.Sequence -gt [int64]$successorProgress[0].Sequence -and
+                            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -gt $incident.Frontier
+                        } | Select-Object -First 1)
+                }
+                if ($successorDelivery.Count -eq 1 -and $successorDispatch.Count -eq 1 -and
+                    $successorSent.Count -eq 1 -and $successorState.Count -eq 1) {
+                    break
+                }
+            }
+        }
+
+        $recovered = $naturalProgress.Count -eq 1 -or
+            ($successorGrant.Count -eq 1 -and $successorDelivery.Count -eq 1 -and
+             $successorDispatch.Count -eq 1 -and $successorSent.Count -eq 1 -and
+             $successorProgress.Count -eq 1 -and $successorState.Count -eq 1)
+        if ($recovered) {
+            $recoveryEvent = if ($naturalProgress.Count -eq 1) { $naturalProgress[0] } else { $successorState[0] }
+            [object[]]$poison = @($terminalEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer
+                })
+            $recovered = $poison.Count -eq 0
+        }
+
+        $record = [pscustomobject]@{
+            Event = $candidate
+            Reason = 'post_tuna_fallback_frontier_stall_grace_expired_without_exact_receiver_request_recheck'
+            Variant = 'settled_frontier_progress_successor_not_rechecked_after_stall_grace'
+            Recovered = $recovered
+            RawEvents = $rawEvents
+        }
+        $records.Add($record) | Out-Null
+        if (-not $recovered) { $unresolvedRecords.Add($record) | Out-Null }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $rawCount
+        DistinctCount = $records.Count
+        RecoveredCount = $records.Count - $unresolvedRecords.Count
+        UnresolvedCount = $unresolvedRecords.Count
+        Verdict = if ($unresolvedRecords.Count -gt 0) { 'fail' } else { 'pass' }
+        CandidateRecords = @($records.ToArray())
+        UnresolvedCandidateRecords = @($unresolvedRecords.ToArray())
+    }
+}
+
 function Get-FileTransferFallbackFrontierCheckpointAcceptanceRecheckCorrelation {
     param([object[]]$Events = @())
 
@@ -60053,6 +60628,9 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof =
         Get-FileTransferFallbackFrontierCheckpointAcceptanceRecheckCorrelation `
+            -Events $events
+    $fileTransferFallbackFrontierStallGraceRecheckProof =
+        Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation `
             -Events $events
     $fallbackTailFailedYieldQuiescentSuccessorProof =
         Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
@@ -64027,6 +64605,14 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @($fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_fallback_frontier_stall_grace_recheck_missing' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
     foreach ($candidateRecord in @($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCandidateRecords)) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
@@ -64386,6 +64972,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing'
+    }
+    elseif ($fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount -gt 0) {
+        $class = 'filetransfer_fallback_frontier_stall_grace_recheck_missing'
     }
     elseif ($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0) {
         $class = 'paired_fallback_tail_yield_missing'
@@ -64854,6 +65443,22 @@ function Get-FileTransferRecoveryFailureClassification {
             $failureVariant = [string]$matchingVariantRecord[0].Variant
         }
     }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq
+            'filetransfer_fallback_frontier_stall_grace_recheck_missing') {
+        $matchingVariantRecord = @(
+            $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCandidateRecords |
+                Where-Object {
+                    [int64]$_.Event.Sequence -eq [int64]$firstProofChainFailure.Sequence -and
+                    [int]$_.Event.LineNumber -eq [int]$firstProofChainFailure.LineNumber -and
+                    [string]$_.Reason -eq [string]$firstProofChainFailure.Reason
+                } |
+                Select-Object -First 1
+        )
+        if ($matchingVariantRecord.Count -eq 1) {
+            $failureVariant = [string]$matchingVariantRecord[0].Variant
+        }
+    }
 
     $classification = [pscustomobject]@{
         Class = $class
@@ -64883,6 +65488,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed',
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
                 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
+                'filetransfer_fallback_frontier_stall_grace_recheck_missing',
                 'filetransfer_route_transition_draining_transport_grace_terminalization',
                 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
                 'filetransfer_route_transition_incomplete',
@@ -65113,6 +65719,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.RecoveredCount
         FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.UnresolvedCount
         FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.Verdict
+        FileTransferFallbackFrontierStallGraceRecheckMissingRawCount = $fileTransferFallbackFrontierStallGraceRecheckProof.RawCount
+        FileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = $fileTransferFallbackFrontierStallGraceRecheckProof.DistinctCount
+        FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount
+        FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount
+        FileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict
         FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount
         FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount
         FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount
@@ -66108,6 +66719,11 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count = [string]$recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount
         filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count = [string]$recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount
         filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict = [string]$recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRawCount
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count = [string]$recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count = [string]$recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count = [string]$recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount
@@ -66474,6 +67090,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
+            'filetransfer_fallback_frontier_stall_grace_recheck_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_missing_range_not_preserved',
             'regular_v4_frontier_repair_settlement_disposition_unverifiable',
@@ -66625,6 +67242,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: retained checkpoint-pending peer frontier demand was not rechecked after exact checkpoint acceptance'
                 break
             }
+            'filetransfer_fallback_frontier_stall_grace_recheck_missing' {
+                'recovery: post-fallback frontier stall grace expired without an exact receiver-request recheck'
+                break
+            }
             'regular_v4_frontier_tail_repair_state_publication_missing' {
                 'recovery: coordinator-authorized regular-V4 frontier-tail repair was not published to the peer'
                 break
@@ -66702,7 +67323,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('runtime_fallback_separation_violation', 'file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('runtime_fallback_separation_violation', 'file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'filetransfer_fallback_frontier_stall_grace_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -66821,6 +67442,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount),
         ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRawCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount),

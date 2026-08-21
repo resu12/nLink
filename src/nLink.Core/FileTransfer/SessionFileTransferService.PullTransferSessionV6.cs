@@ -6344,8 +6344,10 @@ public sealed partial class SessionFileTransferService
 
         if (useAuthorizedFallbackPath)
         {
-            return await SendInboundAuthorizedFallbackFrontierRequestAsync(context, reason, forceSend)
+            var sent = await SendInboundAuthorizedFallbackFrontierRequestAsync(context, reason, forceSend)
                 .ConfigureAwait(false);
+            SchedulePendingInboundV6FrontierStallGraceWake(context);
+            return sent;
         }
 
         if (fallbackRuntimeWithoutAuthority)
@@ -7528,15 +7530,19 @@ public sealed partial class SessionFileTransferService
         if (context.V6FrontierStallStartedUtc is null ||
             context.V6FrontierStallChunkIndex != context.NextChunkIndex)
         {
+            var initialStallGrace = ResolveInboundV6FrontierRequestStallGraceLocked(
+                context,
+                unresolvedFrontierProofRequest);
             context.V6FrontierStallStartedUtc = now;
             context.V6FrontierStallChunkIndex = context.NextChunkIndex;
             context.V6FrontierStallLastDeferredLogUtc = now;
+            ArmInboundV6FrontierStallGraceWakeLocked(context, now, initialStallGrace);
             LogInboundV6FrontierRequestDeferred(
                 context,
                 now,
                 0,
                 reason,
-                ResolveInboundV6FrontierRequestStallGraceLocked(context, unresolvedFrontierProofRequest));
+                initialStallGrace);
             return false;
         }
 
@@ -7562,6 +7568,269 @@ public sealed partial class SessionFileTransferService
         context.V6FrontierStallStartedUtc = null;
         context.V6FrontierStallChunkIndex = -1;
         context.V6FrontierStallLastDeferredLogUtc = null;
+        context.CurrentV6FrontierStallGraceWake = null;
+        context.V6FrontierStallGraceWakeScheduledGeneration = 0;
+    }
+
+    private static void ArmInboundV6FrontierStallGraceWakeLocked(
+        InboundTransferContext context,
+        DateTimeOffset now,
+        TimeSpan stallGrace)
+    {
+        if (!IsStrictFallbackFrontierRuntime(context) ||
+            context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            context.CurrentRuntimeOwner is not { IsDefault: false } runtimeOwner ||
+            context.CurrentTransferLeg is not { } leg ||
+            context.DataSession is not { } dataSession ||
+            context.DataSessionGeneration <= 0)
+        {
+            return;
+        }
+
+        var wakeGeneration = context.LastV6FrontierStallGraceWakeGeneration < long.MaxValue
+            ? context.LastV6FrontierStallGraceWakeGeneration + 1
+            : long.MaxValue;
+        context.LastV6FrontierStallGraceWakeGeneration = wakeGeneration;
+        context.V6FrontierStallGraceWakeScheduledGeneration = 0;
+        context.CurrentV6FrontierStallGraceWake = new InboundV6FrontierStallGraceWake(
+            wakeGeneration,
+            context.SessionId,
+            context.TransferId,
+            context.NextChunkIndex,
+            context.PullHighestReceivedChunkIndex,
+            now,
+            now + stallGrace,
+            context.RouteSelection.Route,
+            context.RouteSelection.TelemetryToken,
+            context.NegotiatedDataProtocolVersion,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.CurrentLiveRouteEpoch,
+            publication.PublicationGeneration,
+            publication.RouteCommitGeneration ?? 0,
+            publication,
+            runtimeOwner.RuntimeGeneration,
+            context.TerminalGeneration,
+            runtimeOwner,
+            leg.Generation,
+            leg,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0,
+            leg.CheckpointRequestId ?? "(none)",
+            leg.CheckpointGeneration,
+            dataSession,
+            CreateReceiveRecoveryDataSessionIdentity(
+                context.TransferId,
+                dataSession,
+                context.DataSessionGeneration),
+            context.DataSessionGeneration);
+    }
+
+    private void SchedulePendingInboundV6FrontierStallGraceWake(InboundTransferContext context)
+    {
+        InboundV6FrontierStallGraceWake? wake;
+        lock (gate)
+        {
+            wake = context.CurrentV6FrontierStallGraceWake;
+            if (wake is null ||
+                context.V6FrontierStallGraceWakeScheduledGeneration == wake.WakeGeneration)
+            {
+                return;
+            }
+
+            context.V6FrontierStallGraceWakeScheduledGeneration = wake.WakeGeneration;
+        }
+
+        _ = RunInboundV6FrontierStallGraceWakeAsync(context, wake);
+    }
+
+    private async Task RunInboundV6FrontierStallGraceWakeAsync(
+        InboundTransferContext context,
+        InboundV6FrontierStallGraceWake wake)
+    {
+        try
+        {
+            var delay = wake.DueUtc - DateTimeOffset.UtcNow;
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, context.LifetimeCts.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
+        {
+            return;
+        }
+
+        string decisionStatus;
+        string decisionReason;
+        lock (gate)
+        {
+            if (!IsInboundV6FrontierStallGraceWakeCurrentLocked(context, wake, out decisionReason))
+            {
+                decisionStatus = "stale";
+            }
+            else if (DateTimeOffset.UtcNow < wake.DueUtc)
+            {
+                context.V6FrontierStallGraceWakeScheduledGeneration = 0;
+                decisionStatus = "rearmed";
+                decisionReason = "stall_grace_deadline_pending";
+            }
+            else
+            {
+                decisionStatus = "scheduled";
+                decisionReason = "stall_grace_elapsed";
+            }
+        }
+
+        if (decisionStatus == "rearmed")
+        {
+            LogInboundV6FrontierStallGraceRecheckDecision(wake, decisionStatus, decisionReason);
+            SchedulePendingInboundV6FrontierStallGraceWake(context);
+            return;
+        }
+
+        if (decisionStatus != "scheduled")
+        {
+            LogInboundV6FrontierStallGraceRecheckDecision(wake, decisionStatus, decisionReason);
+            return;
+        }
+
+        var sent = await SendInboundV6FrontierRequestAsync(
+                context,
+                "frontier_stall_grace_elapsed",
+                forceSend: true)
+            .ConfigureAwait(false);
+        InboundV6FrontierStallGraceWake? rearmedWake = null;
+        lock (gate)
+        {
+            if (ReferenceEquals(context.CurrentV6FrontierStallGraceWake, wake))
+            {
+                if (!sent &&
+                    context.V6LastFrontierRequestSentUtc is { } lastSentUtc &&
+                    context.V6LastFrontierRequestChunkIndex == wake.FrontierChunkIndex)
+                {
+                    var retryDueUtc = lastSentUtc + ResolveInboundV6FrontierRequestRetryIntervalLocked(
+                        context,
+                        unresolvedFrontierProofRequest: false);
+                    if (retryDueUtc > DateTimeOffset.UtcNow)
+                    {
+                        var nextGeneration = context.LastV6FrontierStallGraceWakeGeneration < long.MaxValue
+                            ? context.LastV6FrontierStallGraceWakeGeneration + 1
+                            : long.MaxValue;
+                        context.LastV6FrontierStallGraceWakeGeneration = nextGeneration;
+                        rearmedWake = wake with
+                        {
+                            WakeGeneration = nextGeneration,
+                            DueUtc = retryDueUtc,
+                        };
+                        context.CurrentV6FrontierStallGraceWake = rearmedWake;
+                        context.V6FrontierStallGraceWakeScheduledGeneration = 0;
+                    }
+                }
+
+                if (rearmedWake is null)
+                {
+                    context.CurrentV6FrontierStallGraceWake = null;
+                    context.V6FrontierStallGraceWakeScheduledGeneration = 0;
+                }
+            }
+        }
+
+        if (rearmedWake is not null)
+        {
+            LogInboundV6FrontierStallGraceRecheckDecision(
+                rearmedWake,
+                "rearmed",
+                "same_frontier_retry_interval_pending");
+            SchedulePendingInboundV6FrontierStallGraceWake(context);
+            return;
+        }
+
+        LogInboundV6FrontierStallGraceRecheckDecision(
+            wake,
+            sent ? "dispatched" : "coalesced",
+            sent ? "exact_receiver_request_dispatched" : "exact_receiver_request_not_dispatched");
+    }
+
+    private bool IsInboundV6FrontierStallGraceWakeCurrentLocked(
+        InboundTransferContext context,
+        InboundV6FrontierStallGraceWake wake,
+        out string reason)
+    {
+        if (!ReferenceEquals(context.CurrentV6FrontierStallGraceWake, wake) ||
+            context.V6FrontierStallGraceWakeScheduledGeneration != wake.WakeGeneration)
+        {
+            reason = "wake_generation_replaced";
+            return false;
+        }
+
+        if (context.IsTerminal ||
+            context.UserPaused ||
+            context.PeerPaused ||
+            !ReferenceEquals(inboundTransfer, context) ||
+            !IsStrictFallbackFrontierRuntime(context) ||
+            !context.PullManifestReceived ||
+            context.NextChunkIndex >= context.ChunkCount)
+        {
+            reason = context.IsTerminal
+                ? "transfer_terminal"
+                : context.UserPaused || context.PeerPaused
+                    ? "transfer_paused"
+                    : "source_not_current";
+            return false;
+        }
+
+        if (!string.Equals(context.SessionId, wake.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(context.TransferId, wake.TransferId, StringComparison.Ordinal) ||
+            context.NextChunkIndex != wake.FrontierChunkIndex ||
+            context.PullHighestReceivedChunkIndex != wake.HighestReceivedChunkIndex ||
+            context.V6FrontierStallStartedUtc != wake.StallStartedUtc ||
+            context.V6FrontierStallChunkIndex != wake.FrontierChunkIndex ||
+            !IsInboundV6FrontierStalledLocked(context, DateTimeOffset.UtcNow))
+        {
+            reason = "frontier_scope_changed";
+            return false;
+        }
+
+        if (context.RouteSelection.Route != wake.Route ||
+            !string.Equals(context.RouteSelection.TelemetryToken, wake.RouteToken, StringComparison.Ordinal) ||
+            context.NegotiatedDataProtocolVersion != wake.ProtocolVersion ||
+            !ReferenceEquals(context.CurrentLiveRouteEpoch, wake.RouteEpoch) ||
+            (context.CurrentLiveRouteEpoch?.EpochId ?? 0) != wake.LiveRouteEpoch ||
+            context.CurrentRoutePublicationToken != wake.RoutePublication ||
+            context.CurrentRoutePublicationToken?.PublicationGeneration != wake.RoutePublicationGeneration ||
+            (context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0) != wake.RouteCommitGeneration ||
+            context.CurrentRuntimeOwner != wake.RuntimeOwner ||
+            context.CurrentRuntimeOwner?.RuntimeGeneration != wake.RuntimeGeneration ||
+            context.TerminalGeneration != wake.TerminalGeneration ||
+            !ReferenceEquals(context.CurrentTransferLeg, wake.TransferLeg) ||
+            context.CurrentTransferLeg?.Generation != wake.LegGeneration ||
+            context.CurrentTransferLeg?.TransportEpochId != wake.TransportEpoch ||
+            context.CurrentTransferLeg?.BridgeRecoveryGeneration != wake.BridgeRecoveryGeneration ||
+            (context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0) != wake.BridgeDecisionGeneration ||
+            !string.Equals(context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)", wake.CheckpointRequestId, StringComparison.Ordinal) ||
+            context.CurrentTransferLeg?.CheckpointGeneration != wake.CheckpointGeneration)
+        {
+            reason = "route_scope_changed";
+            return false;
+        }
+
+        if (!ReferenceEquals(context.DataSession, wake.DataSession) ||
+            context.DataSessionGeneration != wake.DataSessionGeneration ||
+            !string.Equals(
+                CreateReceiveRecoveryDataSessionIdentity(
+                    context.TransferId,
+                    context.DataSession,
+                    context.DataSessionGeneration),
+                wake.DataSessionIdentity,
+                StringComparison.Ordinal))
+        {
+            reason = "data_session_changed";
+            return false;
+        }
+
+        reason = "current";
+        return true;
     }
 
     private static bool IsInboundV6RegularNknFrontierControlBulkEscalatedLocked(
@@ -7588,10 +7857,13 @@ public sealed partial class SessionFileTransferService
     private static TimeSpan ResolveInboundV6FrontierRequestStallGraceLocked(
         InboundTransferContext context,
         bool unresolvedFrontierProofRequest)
-        => !unresolvedFrontierProofRequest &&
-           IsInboundV6RegularNknFrontierProgressGracePathLocked(context)
-            ? TimeSpan.FromMilliseconds(V6RegularNknFrontierRequestStallGraceMs)
-            : TimeSpan.FromMilliseconds(V6FrontierRequestStallGraceMs);
+        => !unresolvedFrontierProofRequest && IsStrictFallbackFrontierRuntime(context)
+            ? V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests ??
+              TimeSpan.FromMilliseconds(V6FrontierRequestStallGraceMs)
+            : !unresolvedFrontierProofRequest &&
+              IsInboundV6RegularNknFrontierProgressGracePathLocked(context)
+                ? TimeSpan.FromMilliseconds(V6RegularNknFrontierRequestStallGraceMs)
+                : TimeSpan.FromMilliseconds(V6FrontierRequestStallGraceMs);
 
     private static TimeSpan ResolveInboundV6RegularNknFrontierControlBulkEscalationLocked(InboundTransferContext context)
         => IsInboundV6RegularNknFrontierProgressGracePathLocked(context)
@@ -7604,9 +7876,20 @@ public sealed partial class SessionFileTransferService
         long elapsedMs,
         string reason,
         TimeSpan stallGrace)
+    {
+        var wake = context.CurrentV6FrontierStallGraceWake;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_frontier_request_deferred; authority_effect=none; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)")}; checkpoint_generation={context.CurrentTransferLeg?.CheckpointGeneration ?? 0}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_identity={FormatProtocolLogValue(CreateReceiveRecoveryDataSessionIdentity(context.TransferId, context.DataSession, context.DataSessionGeneration))}; data_session_generation={context.DataSessionGeneration}; frontier_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; stall_started_utc={FormatProtocolLogValue(context.V6FrontierStallStartedUtc?.ToString("O") ?? "(none)")}; wake_generation={wake?.WakeGeneration ?? 0}; wake_deadline_utc={FormatProtocolLogValue(wake?.DueUtc.ToString("O") ?? "(none)")}; elapsed_ms={elapsedMs}; stall_grace_ms={(long)stallGrace.TotalMilliseconds}; reason={FormatProtocolLogValue(reason)}; utc={FormatProtocolLogValue(now.ToString("O"))}");
+    }
+
+    private static void LogInboundV6FrontierStallGraceRecheckDecision(
+        InboundV6FrontierStallGraceWake wake,
+        string status,
+        string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_deferred; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frontier_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; elapsed_ms={elapsedMs}; stall_grace_ms={(long)stallGrace.TotalMilliseconds}; reason={FormatProtocolLogValue(reason)}; utc={FormatProtocolLogValue(now.ToString("O"))}");
+            $"event=filetransfer_v6_frontier_stall_grace_recheck_decided; authority_effect=none; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}; direction=inbound; transfer_id={FormatProtocolLogValue(wake.TransferId)}; session_id={FormatProtocolLogValue(wake.SessionId)}; route={FormatProtocolLogValue(wake.RouteToken)}; protocol_version={wake.ProtocolVersion}; live_route_epoch={wake.LiveRouteEpoch}; runtime_generation={wake.RuntimeGeneration}; terminal_generation={wake.TerminalGeneration}; leg_generation={wake.LegGeneration}; transport_epoch={wake.TransportEpoch}; bridge_recovery_generation={wake.BridgeRecoveryGeneration}; bridge_decision_generation={wake.BridgeDecisionGeneration}; checkpoint_request_id={FormatProtocolLogValue(wake.CheckpointRequestId)}; checkpoint_generation={wake.CheckpointGeneration}; route_publication_generation={wake.RoutePublicationGeneration}; route_commit_generation={wake.RouteCommitGeneration}; data_session_identity={FormatProtocolLogValue(wake.DataSessionIdentity)}; data_session_generation={wake.DataSessionGeneration}; frontier_chunk_index={wake.FrontierChunkIndex}; highest_received_chunk_index={wake.HighestReceivedChunkIndex}; stall_started_utc={FormatProtocolLogValue(wake.StallStartedUtc.ToString("O"))}; wake_generation={wake.WakeGeneration}; wake_deadline_utc={FormatProtocolLogValue(wake.DueUtc.ToString("O"))}");
 
     private async Task FlushInboundV6PausedProgressAsync(InboundTransferContext context, string reason)
     {

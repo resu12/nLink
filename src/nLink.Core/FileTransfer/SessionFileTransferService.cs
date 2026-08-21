@@ -515,6 +515,8 @@ public sealed partial class SessionFileTransferService :
     internal static TimeSpan? V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknNormalReceiverStateResendGateOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknFrontierRequestProgressGraceOverrideForTests { get; set; }
+
+    internal static TimeSpan? V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairStallOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairCooldownOverrideForTests { get; set; }
     internal static TimeSpan? OfferSendTimeoutOverrideForTests { get; set; }
@@ -24184,6 +24186,36 @@ public sealed partial class SessionFileTransferService :
         bool AllowNormalRefillBypass = false,
         FallbackFrontierRepairContract? FallbackFrontierRepairContract = null);
 
+    private sealed record InboundV6FrontierStallGraceWake(
+        long WakeGeneration,
+        string SessionId,
+        string TransferId,
+        int FrontierChunkIndex,
+        int HighestReceivedChunkIndex,
+        DateTimeOffset StallStartedUtc,
+        DateTimeOffset DueUtc,
+        FileTransferRoute Route,
+        string RouteToken,
+        int ProtocolVersion,
+        int LiveRouteEpoch,
+        LiveRouteEpoch? RouteEpoch,
+        int RoutePublicationGeneration,
+        int RouteCommitGeneration,
+        RoutePublicationToken RoutePublication,
+        int RuntimeGeneration,
+        int TerminalGeneration,
+        RuntimeOwnerToken RuntimeOwner,
+        int LegGeneration,
+        FileTransferLeg TransferLeg,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        int BridgeDecisionGeneration,
+        string CheckpointRequestId,
+        int CheckpointGeneration,
+        IFileTransferDataSession DataSession,
+        string DataSessionIdentity,
+        long DataSessionGeneration);
+
     private sealed class InboundTransferContext
     {
         public InboundTransferContext(FileTransferOfferV2 offer, FileTransferRouteSelection routeSelection)
@@ -24710,6 +24742,12 @@ public sealed partial class SessionFileTransferService :
         public int V6FrontierStallChunkIndex { get; set; } = -1;
 
         public DateTimeOffset? V6FrontierStallLastDeferredLogUtc { get; set; }
+
+        public long LastV6FrontierStallGraceWakeGeneration { get; set; }
+
+        public long V6FrontierStallGraceWakeScheduledGeneration { get; set; }
+
+        public InboundV6FrontierStallGraceWake? CurrentV6FrontierStallGraceWake { get; set; }
 
         public string? V6LastReceiverStateDeferredDiagnosticTuple { get; set; }
 

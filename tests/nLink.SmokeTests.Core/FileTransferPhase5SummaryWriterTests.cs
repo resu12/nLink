@@ -1239,6 +1239,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count"]);
             Assert.Equal("1", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
             Assert.Equal("fail", evidence["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict"]);
+            Assert.Equal("75", evidence["filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count"]);
+            Assert.Equal("75", evidence["filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count"]);
+            Assert.Equal("74", evidence["filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count"]);
+            Assert.Equal("1", evidence["filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", evidence["filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict"]);
             Assert.Equal("7", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count"]);
             Assert.Equal("1", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count"]);
             Assert.Equal("0", evidence["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count"]);
@@ -1256,6 +1261,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("7", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_raw_count"]);
             Assert.Equal("1", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
             Assert.Equal("fail", summary["filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict"]);
+            Assert.Equal("75", summary["filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count"]);
+            Assert.Equal("74", summary["filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count"]);
+            Assert.Equal("1", summary["filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict"]);
             Assert.Equal("7", summary["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count"]);
             Assert.Equal("1", summary["filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count"]);
             Assert.Equal("1", summary["filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing_recovered_count"]);
@@ -1268,6 +1277,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("incomplete_proof", summary[$"{scenario}.runtime_correctness_verdict"]);
             Assert.Equal("route_runtime", summary[$"{scenario}.semantic_failure_domain"]);
             Assert.Equal("1", summary[$"{scenario}.filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count"]);
+            Assert.Equal("1", summary[$"{scenario}.filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count"]);
             Assert.Equal("1", summary[$"{scenario}.filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_unresolved_count"]);
 
             using var summaryJson = JsonDocument.Parse(
@@ -1280,6 +1290,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(7, root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount").GetInt32());
             Assert.Equal(1, root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount").GetInt32());
             Assert.Equal("fail", root.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict").GetString());
+            Assert.Equal(75, root.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingRawCount").GetInt32());
+            Assert.Equal(74, root.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingVerdict").GetString());
             Assert.Equal(7, root.GetProperty("fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount").GetInt32());
             Assert.Equal(1, root.GetProperty("fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount").GetInt32());
             Assert.Equal(1, root.GetProperty("fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffMissingRecoveredCount").GetInt32());
@@ -1295,6 +1309,9 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("route_runtime", run.GetProperty("semanticFailureDomain").GetString());
             Assert.Equal(7, run.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRawCount").GetInt32());
             Assert.Equal(1, run.GetProperty("fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount").GetInt32());
+            Assert.Equal(75, run.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingRawCount").GetInt32());
+            Assert.Equal(74, run.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount").GetInt32());
             Assert.Equal(1, run.GetProperty("fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceUnresolvedCount").GetInt32());
         }
         finally
