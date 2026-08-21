@@ -56374,6 +56374,9 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
     [object[]]$receiverStateEvents = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_v6_receiver_state_sent'
         })
+    [object[]]$sparseWriteEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_sparse_write_committed'
+        })
     [object[]]$repairDispatchedEvents = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched'
         })
@@ -56776,7 +56779,7 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             })
         if ($sourceEndedBeforeDeadline.Count -gt 0) { continue }
 
-        [object[]]$naturalProgress = @($receiverStateEvents | Where-Object {
+        [object[]]$naturalProgress = @(@($receiverStateEvents + $sparseWriteEvents) | Where-Object {
                 $eventTicks = Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_attempt_utc_ticks' -Default 0
                 (($deadlineTicks -gt 0 -and $eventTicks -gt $candidateTicks -and $eventTicks -le $deadlineTicks) -or
                     ($deadlineTicks -eq 0 -and $null -ne $_.TimestampUtc -and
@@ -56784,8 +56787,13 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                 (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
                 (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
                 (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
-                (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -gt $incident.Frontier
-            } | Select-Object -First 1)
+                $(if ($_.EventName -eq 'filetransfer_v6_sparse_write_committed') {
+                        Get-FileTransferEventInt64Field -Event $_ -Name 'next_chunk_index' -Default -1
+                    }
+                    else {
+                        Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1
+                    }) -gt $incident.Frontier
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
 
         [object[]]$successorGrant = @()
         [object[]]$successorDelivery = @()

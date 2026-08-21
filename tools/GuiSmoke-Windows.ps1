@@ -12853,6 +12853,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [object[]]$progresses = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_progress_observed')
         [object[]]$forcedStates = @(Get-GuiStallLines 'filetransfer_v6_fallback_frontier_repair_progress_state_forced')
         [object[]]$receiverStates = @(Get-GuiStallLines 'filetransfer_v6_receiver_state_sent')
+        [object[]]$sparseWrites = @(Get-GuiStallLines 'filetransfer_v6_sparse_write_committed')
         [object[]]$dispatches = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_dispatched')
         [object[]]$requestSends = @(Get-GuiStallLines 'filetransfer_v6_frontier_request_sent')
         [object[]]$deliveries = @(Get-GuiStallLines 'filetransfer_control_plane_delivery_observed')
@@ -12952,15 +12953,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $unresolved = [System.Collections.Generic.List[object]]::new()
         foreach ($candidate in @($candidates.Values)) {
-            [object[]]$naturalProgress = @($receiverStates | Where-Object {
+            [object[]]$naturalProgress = @(@($receiverStates + $sparseWrites) | Where-Object {
                     $eventTicks = Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_attempt_utc_ticks'
                     $eventTicks -match '^[1-9][0-9]*$' -and [long]$eventTicks -le $candidate.DeadlineTicks -and
                     (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
                     (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
                     (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
                     (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
-                    [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'contiguous_committed_chunk_index') -gt $candidate.Frontier
-                } | Select-Object -First 1)
+                    [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name $(
+                            if ((Get-TunaGuiLogLineFieldValue -Line $_ -Name 'event') -eq 'filetransfer_v6_sparse_write_committed') {
+                                'next_chunk_index'
+                            }
+                            else {
+                                'contiguous_committed_chunk_index'
+                            })) -gt $candidate.Frontier
+                } | Sort-Object { Get-GuiStallSequence $_ } | Select-Object -First 1)
             $recovered = $naturalProgress.Count -eq 1
             if (-not $recovered) {
                 [object[]]$successorGrants = @($grants | Where-Object {
@@ -15374,6 +15381,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_v6_frontier_request_deferred',
             'filetransfer_v6_frontier_stall_grace_recheck_decided',
             'filetransfer_v6_fallback_frontier_repair_progress_state_forced',
+            'filetransfer_v6_sparse_write_committed',
             'filetransfer_v6_receiver_state_sent', 'filetransfer_v6_frontier_request_sent',
             'filetransfer_control_plane_delivery_observed', 'file_transfer_inbound_terminal')
         Adoption = @(

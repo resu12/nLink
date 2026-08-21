@@ -3397,7 +3397,7 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         };
         if (recovered)
         {
-            lines.Add(LogLine($"event=filetransfer_v6_receiver_state_sent; transfer_id={transferId}; {scope}; epoch=8; contiguous_committed_chunk_index=42; durable_received_highest_chunk_index=60; log_writer_attempt_utc_ticks=639000000002000000", secondsOffset: 1));
+            lines.Add(LogLine($"event=filetransfer_v6_sparse_write_committed; transfer_id={transferId}; session_id=sess_a; written_chunk_count=1; contiguous_chunks_committed=1; next_chunk_index=42; highest_received_chunk_index=60; log_writer_id=writer; log_writer_attempt_utc_ticks=639000000002000000", secondsOffset: 1));
         }
 
         var result = await RunAnalyzeFixtureAsync(

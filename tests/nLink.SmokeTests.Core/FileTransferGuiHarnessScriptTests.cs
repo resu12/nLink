@@ -6031,7 +6031,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'event=filetransfer_v6_frontier_request_deferred; direction=inbound; session_id=sess; transfer_id=transfer; frontier_chunk_index=41; highest_received_chunk_index=60; elapsed_ms=0; stall_grace_ms=750; stall_started_utc=2026-04-26T11:17:59Z; log_writer_id=writer; log_writer_attempt_utc_ticks=639000000001000000'
                 )
                 if (${{recovered.ToString().ToLowerInvariant()}}) {
-                    $lines += "event=filetransfer_v6_receiver_state_sent; $scope; epoch=8; contiguous_committed_chunk_index=42; durable_received_highest_chunk_index=60; log_writer_attempt_utc_ticks=639000000002000000"
+                    $lines += 'event=filetransfer_v6_sparse_write_committed; transfer_id=transfer; session_id=sess; written_chunk_count=1; contiguous_chunks_committed=1; next_chunk_index=42; highest_received_chunk_index=60; log_writer_id=writer; log_writer_attempt_utc_ticks=639000000002000000'
                 }
                 $lines | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
