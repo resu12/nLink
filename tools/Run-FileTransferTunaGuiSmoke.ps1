@@ -105,6 +105,37 @@ function Get-TunaGuiFinalizationGraceSeconds {
     return $overrideSeconds
 }
 
+function Complete-TunaGuiChildOutputCapture {
+    param(
+        [Parameter(Mandatory = $true)]$StdoutTask,
+        [Parameter(Mandatory = $true)]$StderrTask,
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [Parameter(Mandatory = $true)][string]$StderrPath
+    )
+
+    $result = [ordered]@{
+        Completed = $false
+        ExceptionType = ''
+        ExceptionMessage = ''
+        ExceptionHResult = 0
+    }
+    try {
+        $stdout = [string]$StdoutTask.GetAwaiter().GetResult()
+        $stderr = [string]$StderrTask.GetAwaiter().GetResult()
+        $encoding = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllText($StdoutPath, $stdout, $encoding)
+        [System.IO.File]::WriteAllText($StderrPath, $stderr, $encoding)
+        $result.Completed = $true
+    }
+    catch {
+        $result.ExceptionType = $_.Exception.GetType().FullName
+        $result.ExceptionMessage = $_.Exception.Message
+        $result.ExceptionHResult = $_.Exception.HResult
+    }
+
+    return [pscustomobject]$result
+}
+
 function Stop-TunaGuiSmokeProcessTree {
     param([Parameter(Mandatory = $true)]$Process)
 
@@ -372,6 +403,8 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
     $oldScenarioDeadlineRequestPath = $env:NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH
     $oldTerminalPhaseDeadlinePath = $env:NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH
     $process = $null
+    $stdoutTask = $null
+    $stderrTask = $null
     try {
         Remove-Item -LiteralPath $terminalPhaseDeadlinePath -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $terminalPhaseDeadlinePath -PathType Leaf) {
@@ -408,14 +441,21 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         }
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
 
-        $process = Start-Process `
-            -FilePath 'powershell' `
-            -ArgumentList $argumentLine `
-            -WorkingDirectory $RepoRoot `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath `
-            -WindowStyle Hidden `
-            -PassThru
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = 'powershell'
+        $startInfo.Arguments = $argumentLine
+        $startInfo.WorkingDirectory = $RepoRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.CreateNoWindow = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw 'Failed to start the Tuna GUI smoke child process.'
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
 
         $state.guiChildProcessId = $process.Id
         $state.lastCompletedStage = 'gui_child_started'
@@ -492,6 +532,28 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         }
 
         if ($timedOut) {
+            $processHasExited = $false
+            try {
+                $process.Refresh()
+                $processHasExited = [bool]$process.HasExited
+            }
+            catch {
+            }
+            $outputCapture = if ($processHasExited) {
+                Complete-TunaGuiChildOutputCapture `
+                    -StdoutTask $stdoutTask `
+                    -StderrTask $stderrTask `
+                    -StdoutPath $stdoutPath `
+                    -StderrPath $stderrPath
+            }
+            else {
+                [pscustomobject]@{
+                    Completed = $false
+                    ExceptionType = ''
+                    ExceptionMessage = 'child_process_did_not_exit_after_timeout_cleanup'
+                    ExceptionHResult = 0
+                }
+            }
             $lastCompletedStage = 'gui_child_started'
             $capturePath = ''
             $captureSha256 = ''
@@ -547,6 +609,12 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 captureLineCount = $captureLineCount
                 exitCode = 124
                 exitCodeAvailable = $true
+                exitCodeCaptureBranch = 'hard_timeout'
+                processHasExited = $processHasExited
+                outputCaptureCompleted = [bool]$outputCapture.Completed
+                outputCaptureExceptionType = [string]$outputCapture.ExceptionType
+                outputCaptureExceptionMessage = [string]$outputCapture.ExceptionMessage
+                outputCaptureExceptionHResult = [int]$outputCapture.ExceptionHResult
                 reason = 'gui_evidence_finalization_hard_deadline_exceeded'
             }
             Write-TunaGuiAtomicJson -Path $timeoutPath -Value $timeout
@@ -579,6 +647,12 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 timedOut = $true
                 exitCode = 124
                 exitCodeAvailable = $true
+                exitCodeCaptureBranch = 'hard_timeout'
+                processHasExited = $processHasExited
+                outputCaptureCompleted = [bool]$outputCapture.Completed
+                outputCaptureExceptionType = [string]$outputCapture.ExceptionType
+                outputCaptureExceptionMessage = [string]$outputCapture.ExceptionMessage
+                outputCaptureExceptionHResult = [int]$outputCapture.ExceptionHResult
                 updatedUtc = $endedUtc.ToString('O')
             }
             Write-TunaGuiAtomicJson -Path $statePath -Value $state
@@ -590,19 +664,37 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         }
 
         $process.WaitForExit()
-        $process.Refresh()
+        $outputCapture = Complete-TunaGuiChildOutputCapture `
+            -StdoutTask $stdoutTask `
+            -StderrTask $stderrTask `
+            -StdoutPath $stdoutPath `
+            -StderrPath $stderrPath
         $exitCode = -1
         $exitCodeAvailable = $false
+        $exitCodeCaptureBranch = 'owned_process_exit_code'
+        $exitCodeCaptureExceptionType = ''
+        $exitCodeCaptureExceptionMessage = ''
+        $exitCodeCaptureExceptionHResult = 0
+        $processHasExited = $false
         try {
-            $capturedExitCode = $process.ExitCode
-            if ($process.HasExited -and $null -ne $capturedExitCode) {
-                $exitCode = [int]$capturedExitCode
-                $exitCodeAvailable = $true
+            $processHasExited = [bool]$process.HasExited
+            if (-not $processHasExited) {
+                throw 'The Tuna GUI smoke child did not report an exited state.'
             }
+            $capturedExitCode = $process.ExitCode
+            if ($null -eq $capturedExitCode) {
+                throw 'The Tuna GUI smoke child exit code was unavailable.'
+            }
+            $exitCode = [int]$capturedExitCode
+            $exitCodeAvailable = $true
         }
         catch {
             $exitCode = -1
             $exitCodeAvailable = $false
+            $exitCodeCaptureBranch = 'owned_process_exit_code_failed'
+            $exitCodeCaptureExceptionType = $_.Exception.GetType().FullName
+            $exitCodeCaptureExceptionMessage = $_.Exception.Message
+            $exitCodeCaptureExceptionHResult = $_.Exception.HResult
         }
         $endedUtc = [DateTimeOffset]::UtcNow
         $capturePath = ''
@@ -657,6 +749,15 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             timedOut = $false
             exitCode = $exitCode
             exitCodeAvailable = $exitCodeAvailable
+            exitCodeCaptureBranch = $exitCodeCaptureBranch
+            processHasExited = $processHasExited
+            exitCodeCaptureExceptionType = $exitCodeCaptureExceptionType
+            exitCodeCaptureExceptionMessage = $exitCodeCaptureExceptionMessage
+            exitCodeCaptureExceptionHResult = $exitCodeCaptureExceptionHResult
+            outputCaptureCompleted = [bool]$outputCapture.Completed
+            outputCaptureExceptionType = [string]$outputCapture.ExceptionType
+            outputCaptureExceptionMessage = [string]$outputCapture.ExceptionMessage
+            outputCaptureExceptionHResult = [int]$outputCapture.ExceptionHResult
             updatedUtc = $endedUtc.ToString('O')
         }
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
@@ -1814,6 +1915,28 @@ function Write-TunaGuiFailureSummaryIfMissing {
     Write-TunaGuiAtomicJson -Path $summaryPath -Value $summary
 }
 
+function Test-TunaGuiCurrentSummary {
+    param(
+        $Summary,
+        [Parameter(Mandatory = $true)][string]$RouteMode
+    )
+
+    return $null -ne $Summary -and
+        $Summary.PSObject.Properties.Name -contains 'event' -and
+        [string]::Equals(
+            [string]$Summary.event,
+            'filetransfer_tuna_gui_handoff_fallback_summary',
+            [System.StringComparison]::Ordinal) -and
+        $Summary.PSObject.Properties.Name -contains 'routeMode' -and
+        [string]::Equals([string]$Summary.routeMode, $RouteMode, [System.StringComparison]::Ordinal) -and
+        $Summary.PSObject.Properties.Name -contains 'completed' -and
+        $Summary.completed -is [bool] -and
+        [bool]$Summary.completed -and
+        $Summary.PSObject.Properties.Name -contains 'integrityOk' -and
+        $Summary.integrityOk -is [bool] -and
+        [bool]$Summary.integrityOk
+}
+
 function Update-TunaGuiControlledRestartSummary {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -2200,12 +2323,7 @@ try {
     if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
         try {
             $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
-            $summaryCurrentValid = $null -ne $summary -and
-                $summary.PSObject.Properties.Name -contains 'event' -and
-                [string]::Equals(
-                    [string]$summary.event,
-                    'filetransfer_tuna_gui_handoff_summary',
-                    [System.StringComparison]::Ordinal)
+            $summaryCurrentValid = Test-TunaGuiCurrentSummary -Summary $summary -RouteMode $RouteMode
         }
         catch {
             $summary = $null

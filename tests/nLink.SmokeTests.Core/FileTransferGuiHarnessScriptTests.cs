@@ -873,6 +873,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var graceBody = ExtractPowerShellFunctionBody(
             wrapperText,
             "Get-TunaGuiFinalizationGraceSeconds",
+            "Complete-TunaGuiChildOutputCapture");
+        var childOutputBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Complete-TunaGuiChildOutputCapture",
             "Stop-TunaGuiSmokeProcessTree");
         var stopTreeBody = ExtractPowerShellFunctionBody(
             wrapperText,
@@ -899,6 +903,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function ConvertTo-TunaGuiProcessArgument { {{convertArgumentBody}} }
             function Write-TunaGuiAtomicJson { {{atomicJsonBody}} }
             function Get-TunaGuiFinalizationGraceSeconds { {{graceBody}} }
+            function Complete-TunaGuiChildOutputCapture { {{childOutputBody}} }
             function Stop-TunaGuiSmokeProcessTree { {{stopTreeBody}} }
             function Stop-TunaGuiSmokeApplicationDescendants { {{stopApplicationsBody}} }
             function Request-TunaGuiScenarioDeadline { {{requestDeadlineBody}} }
@@ -913,12 +918,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $terminalPhaseArtifact = Join-Path $tempRoot 'terminal-phase-artifact'
             $timeoutArtifact = Join-Path $tempRoot 'timeout-artifact'
             $successArtifact = Join-Path $tempRoot 'success-artifact'
+            $nonzeroArtifact = Join-Path $tempRoot 'nonzero-artifact'
             [void][IO.Directory]::CreateDirectory($toolsDir)
             [void][IO.Directory]::CreateDirectory($cooperativeArtifact)
             [void][IO.Directory]::CreateDirectory($routeWaitArtifact)
             [void][IO.Directory]::CreateDirectory($terminalPhaseArtifact)
             [void][IO.Directory]::CreateDirectory($timeoutArtifact)
             [void][IO.Directory]::CreateDirectory($successArtifact)
+            [void][IO.Directory]::CreateDirectory($nonzeroArtifact)
             try {
                 $deadlineProbePath = Join-Path $tempRoot 'scenario-deadline-request.json'
                 $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
@@ -1156,8 +1163,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -ExePath 'unused.exe' `
                     -TimeoutSeconds 1
                 if ($completed.TimedOut -or
-                    ($completed.ExitCodeAvailable -and [int]$completed.ExitCode -ne 0) -or
-                    (-not $completed.ExitCodeAvailable -and [int]$completed.ExitCode -ne -1)) {
+                    -not $completed.ExitCodeAvailable -or
+                    [int]$completed.ExitCode -ne 0) {
                     throw "natural child exit lost the timeout race: $($completed | ConvertTo-Json -Compress)"
                 }
                 if (Test-Path -LiteralPath (Join-Path $successArtifact 'filetransfer-gui-evidence-finalization-timeout.json')) {
@@ -1166,9 +1173,37 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $successState = Get-Content -LiteralPath (Join-Path $successArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
                 if ($successState.lastCompletedStage -ne 'gui_child_exited' -or
                     $successState.timedOut -or
-                    [bool]$successState.exitCodeAvailable -ne [bool]$completed.ExitCodeAvailable -or
-                    [int]$successState.exitCode -ne [int]$completed.ExitCode) {
+                    -not [bool]$successState.exitCodeAvailable -or
+                    [int]$successState.exitCode -ne 0 -or
+                    $successState.exitCodeCaptureBranch -ne 'owned_process_exit_code' -or
+                    -not [bool]$successState.processHasExited -or
+                    -not [bool]$successState.outputCaptureCompleted) {
                     throw "natural child state was invalid: $($successState | ConvertTo-Json -Compress)"
+                }
+
+                @'
+            param([string]$ExePath, [int]$TimeoutSeconds)
+            Write-Output 'child-stdout-marker'
+            [Console]::Error.WriteLine('child-stderr-marker')
+            exit 7
+            '@ | Set-Content -LiteralPath $stubPath -Encoding UTF8
+                $nonzero = Invoke-TunaGuiSmokeWithHardDeadline `
+                    -RepoRoot $tempRoot `
+                    -ArtifactDir $nonzeroArtifact `
+                    -ExePath 'unused.exe' `
+                    -TimeoutSeconds 1
+                $nonzeroState = Get-Content -LiteralPath (Join-Path $nonzeroArtifact 'filetransfer-gui-evidence-finalization-state.json') -Raw | ConvertFrom-Json
+                $nonzeroStdout = Get-Content -LiteralPath (Join-Path $nonzeroArtifact 'gui-smoke-stdout.log') -Raw
+                $nonzeroStderr = Get-Content -LiteralPath (Join-Path $nonzeroArtifact 'gui-smoke-stderr.log') -Raw
+                if ($nonzero.TimedOut -or
+                    -not $nonzero.ExitCodeAvailable -or
+                    [int]$nonzero.ExitCode -ne 7 -or
+                    -not [bool]$nonzeroState.exitCodeAvailable -or
+                    [int]$nonzeroState.exitCode -ne 7 -or
+                    $nonzeroState.exitCodeCaptureBranch -ne 'owned_process_exit_code' -or
+                    $nonzeroStdout -notmatch 'child-stdout-marker' -or
+                    $nonzeroStderr -notmatch 'child-stderr-marker') {
+                    throw "nonzero child exit/output was not preserved: result=$($nonzero | ConvertTo-Json -Compress); state=$($nonzeroState | ConvertTo-Json -Compress)"
                 }
 
                 Write-Output 'tuna-gui-watchdog-ok'
@@ -1188,6 +1223,77 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.True(result.ExitCode == 0, $"Tuna GUI watchdog test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("tuna-gui-watchdog-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TunaGuiWrapper_ValidatesCurrentFallbackSummaryContract()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var validatorBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Test-TunaGuiCurrentSummary",
+            "Update-TunaGuiControlledRestartSummary");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Test-TunaGuiCurrentSummary { {{validatorBody}} }
+
+            $valid = [pscustomobject]@{
+                event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+                routeMode = 'live-regular-activation-cycle'
+                completed = $true
+                integrityOk = $true
+            }
+            $legacy = [pscustomobject]@{
+                event = 'filetransfer_tuna_gui_handoff_summary'
+                routeMode = 'live-regular-activation-cycle'
+                completed = $true
+                integrityOk = $true
+            }
+            $wrongRoute = [pscustomobject]@{
+                event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+                routeMode = 'preactivated'
+                completed = $true
+                integrityOk = $true
+            }
+            $missingIntegrity = [pscustomobject]@{
+                event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+                routeMode = 'live-regular-activation-cycle'
+                completed = $true
+            }
+            $incomplete = [pscustomobject]@{
+                event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+                routeMode = 'live-regular-activation-cycle'
+                completed = $false
+                integrityOk = $true
+            }
+            $badIntegrity = [pscustomobject]@{
+                event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+                routeMode = 'live-regular-activation-cycle'
+                completed = $true
+                integrityOk = $false
+            }
+
+            if (-not (Test-TunaGuiCurrentSummary -Summary $valid -RouteMode 'live-regular-activation-cycle') -or
+                (Test-TunaGuiCurrentSummary -Summary $legacy -RouteMode 'live-regular-activation-cycle') -or
+                (Test-TunaGuiCurrentSummary -Summary $wrongRoute -RouteMode 'live-regular-activation-cycle') -or
+                (Test-TunaGuiCurrentSummary -Summary $missingIntegrity -RouteMode 'live-regular-activation-cycle') -or
+                (Test-TunaGuiCurrentSummary -Summary $incomplete -RouteMode 'live-regular-activation-cycle') -or
+                (Test-TunaGuiCurrentSummary -Summary $badIntegrity -RouteMode 'live-regular-activation-cycle')) {
+                throw 'Tuna GUI summary validation did not enforce the current producer contract'
+            }
+
+            Write-Output 'tuna-gui-summary-validator-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Tuna GUI summary validator test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("tuna-gui-summary-validator-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
