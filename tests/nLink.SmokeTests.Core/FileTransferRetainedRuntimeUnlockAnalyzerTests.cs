@@ -7665,6 +7665,110 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_NonzeroOfferMissingDispatchOperationCompletesWithoutRetirement_SelectsExactFirstEdge(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_missing_dispatch_completion";
+        const string writer = "; log_writer_id=writer-missing-dispatch-completion";
+        string InstallLine(string eventName, string suffix, string reason) =>
+            RuntimeUnlockRetryInstallLine(eventName, transferId, suffix, reason)
+                .Replace("offer_generation=12", "offer_generation=2", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=nonce-2", StringComparison.Ordinal) + writer;
+        string Line(string eventName, string suffix = "") =>
+            RuntimeUnlockRetrySchema2Line(
+                eventName,
+                transferId,
+                suffix: "; offer_generation=2; offer_nonce=nonce-2" + suffix) + writer;
+        var slot =
+            "event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Deferred; " +
+            "intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=0; " +
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; " +
+            "contract_generation=7; retired_generation=11; source_route=regular_nkn_v4_fast; " +
+            "source_publication_generation=6; source_transport_epoch=2; " +
+            "source_bridge_recovery_generation=3; source_checkpoint_request_id=(none); " +
+            "data_session_identity=session:1; data_session_generation=1; authority_effect=none; " +
+            "decision_reason=retry_dispatch_negotiation_slot_busy" + writer;
+        var result = await RunAnalyzeFixtureAsync(
+            [
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_decision_staged",
+                    "; stage_status=Staged; decision_status=Granted",
+                    "retry_dispatch_decision_staged"),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_install_receipt_issued",
+                    "; decision_status=Granted",
+                    "retry_dispatch_install_receipt_issued"),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_install_committed",
+                    "; install_status=Installed; decision_status=Granted",
+                    "retry_dispatch_install_committed"),
+                InstallLine(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    "; install_status=Installed; decision_status=Granted",
+                    "runtime_unlock_retry_dispatch_authority_granted"),
+                Line(
+                    "runtime_unlock_retry_dispatch_contract_settled",
+                    "; settlement_outcome=MissingDispatch; dispatch_observed=0; " +
+                    "decision_reason=retry_dispatch_deadline_elapsed"),
+                Line(
+                    "runtime_unlock_retry_dispatch_settlement_reported",
+                    "; settlement_outcome=MissingDispatch; " +
+                    "settlement_reason=retry_dispatch_deadline_elapsed; subscriber_present=1; " +
+                    "decision_reason=reported_to_core"),
+                Line(
+                    "runtime_unlock_retry_dispatch_settlement_decided",
+                    "; settlement_outcome=MissingDispatch; " +
+                    "settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted; " +
+                    "decision_reason=retry_dispatch_settlement_accepted"),
+                Line(
+                    "runtime_unlock_retry_missing_dispatch_successor_intent_created",
+                    "; predecessor_settlement_outcome=MissingDispatch; failed_offer_generation=2; " +
+                    "request_active_predecessor_supersession=0; intent_disposition=Created"),
+                slot,
+                Line(
+                    "runtime_unlock_post_tuna_fallback_activation_disposition",
+                    "; operation_generation=5; payer_decision_id=5; install_generation=1; " +
+                    "disposition=completed; decision_reason=committed_authority_bound_to_current_offer"),
+                Line(
+                    "tuna_acceleration_negotiation_scheduling_completed",
+                    "; operation_generation=5; payer_decision_id=5; install_generation=1; " +
+                    "decision_reason=committed_authority_bound_to_current_offer"),
+                $"event=file_transfer_outbound_terminal; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; state=Failed; error_code=peer_disconnected{writer}"
+            ],
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_post_tuna_fallback_activation_disposition",
+            verdict["first_proof_chain_failure_event"]);
+        Assert.Equal(
+            "settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorGranted_IsValidLifecycle(bool compact)
     {
         if (!OperatingSystem.IsWindows())

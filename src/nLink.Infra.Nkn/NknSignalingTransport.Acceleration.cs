@@ -892,6 +892,16 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryDispatchInstallReceipt? InstallReceipt,
         RuntimeUnlockRetryListenerPreparation? ListenerPreparation = null);
 
+    private sealed record
+        RuntimeUnlockMissingDispatchPredecessorCleanupCapture(
+            RuntimeUnlockRecoveryRetryState State,
+            RuntimeUnlockRetryDispatchContract Contract,
+            RuntimeUnlockRetryDispatchInstallReceipt InstallReceipt,
+            RuntimeUnlockRetryNegotiationIntent Intent,
+            RuntimeUnlockOfferAuthorityBoundary Boundary,
+            RuntimeUnlockOfferProofState Proof,
+            RuntimeUnlockRetryNegotiationSourceScope SourceScope);
+
     private sealed record RuntimeUnlockRetryListenerPreparation(
         long PreparationGeneration,
         long IntentGeneration,
@@ -13598,6 +13608,14 @@ public sealed partial class NknSignalingTransport
                             requireRuntimeUnlockRetryDispatchInstall,
                             runtimeUnlockActivation)
                         .ConfigureAwait(false);
+                    if (requireRuntimeUnlockRetryDispatchInstall)
+                    {
+                        _ = TryRetireSettledMissingDispatchPredecessorAfterOperationCompletion(
+                            expectedInstallReceipt,
+                            scheduledOperationGeneration,
+                            payerDecisionId,
+                            reason);
+                    }
                     (disposition, dispositionReason) =
                         requireRuntimeUnlockRetryDispatchInstall
                             ? ResolveRuntimeUnlockPostTunaFallbackActivationDispositionAfterOffer(
@@ -13699,6 +13717,203 @@ public sealed partial class NknSignalingTransport
 
             return ("held", state.DispatchDecisionReason ?? "committed_authority_produced_no_offer");
         }
+    }
+
+    private bool
+        TryRetireSettledMissingDispatchPredecessorAfterOperationCompletion(
+            RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
+            long operationGeneration,
+            long payerDecisionId,
+            string trigger)
+    {
+        RuntimeUnlockMissingDispatchPredecessorCleanupCapture? capture = null;
+        lock (accelerationGate)
+        {
+            if (expectedInstallReceipt is not { IsDefault: false } receipt ||
+                runtimeUnlockRecoveryRetryState is not { } state ||
+                state.DispatchContract is not { } contract ||
+                runtimeUnlockRetryDispatchInstallShadow.LastCommittedReceipt !=
+                    receipt ||
+                contract.Authority != receipt.Authority ||
+                contract.Lifecycle.SettlementOutcome !=
+                    RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch ||
+                state.LastAppliedDispatchSettlementReport is not
+                    {
+                        Outcome:
+                            RuntimeUnlockRetryDispatchSettlementOutcome
+                                .MissingDispatch,
+                        DispatchObserved: false,
+                    } settlement ||
+                settlement.Authority != contract.Authority ||
+                settlement.OfferGeneration != contract.OfferGeneration ||
+                !string.Equals(
+                    settlement.OfferNonce,
+                    contract.OfferNonce,
+                    StringComparison.Ordinal) ||
+                state.LastAppliedDispatchSettlementDecisionStatus is not (
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted or
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent) ||
+                pendingRuntimeUnlockRetryNegotiationIntent is not
+                    {
+                        Kind:
+                            RuntimeUnlockRetryNegotiationIntentKind
+                                .SuccessorEvaluation,
+                        SuccessorEvaluation: { } successor,
+                    } intent ||
+                !ReferenceEquals(intent.State, state) ||
+                successor.PredecessorAuthority != contract.Authority ||
+                successor.PredecessorDispatchObserved ||
+                successor.PredecessorOfferGeneration !=
+                    contract.OfferGeneration ||
+                !string.Equals(
+                    successor.PredecessorOfferNonce,
+                    contract.OfferNonce,
+                    StringComparison.Ordinal) ||
+                intent.SourceScope.IsDefault ||
+                intent.SourcePublicationAuthority !=
+                    state.SourcePublicationAuthority ||
+                intent.SourceDataSessionGeneration !=
+                    state.SourceDataSessionGeneration ||
+                outboundRuntimeUnlockOfferAuthorityBoundary is not
+                    {
+                        Mode: RuntimeUnlockOfferAuthorityMode.InstalledRetry,
+                        InstallReceipt: { } boundaryReceipt,
+                    } boundary ||
+                boundaryReceipt != receipt ||
+                boundary.OfferGeneration != contract.OfferGeneration ||
+                !string.Equals(
+                    boundary.Nonce,
+                    contract.OfferNonce,
+                    StringComparison.Ordinal) ||
+                boundary.PayerDecisionId != payerDecisionId ||
+                boundary.TransactionGeneration <= 0 ||
+                boundary.TunaPathLeaseGeneration <= 0 ||
+                string.IsNullOrWhiteSpace(
+                    boundary.TunaPathLeaseListenerRunId) ||
+                outboundAccelerationOfferGeneration !=
+                    boundary.OfferGeneration ||
+                outboundAccelerationOfferPayerDecisionId !=
+                    boundary.PayerDecisionId ||
+                !string.Equals(
+                    outboundAccelerationOfferNonce,
+                    boundary.Nonce,
+                    StringComparison.Ordinal) ||
+                outboundAccelerationOfferInstallReceipt != receipt ||
+                !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) ||
+                runtimeUnlockOfferProofState is not
+                    {
+                        AuthorityMode:
+                            RuntimeUnlockOfferAuthorityMode.InstalledRetry,
+                        Retired: false,
+                    } proof ||
+                proof.Generation != boundary.OfferGeneration ||
+                proof.PayerDecisionId != boundary.PayerDecisionId ||
+                !string.Equals(
+                    proof.Nonce,
+                    boundary.Nonce,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            capture =
+                new RuntimeUnlockMissingDispatchPredecessorCleanupCapture(
+                    state,
+                    contract,
+                    receipt,
+                    intent,
+                    boundary,
+                    proof,
+                    intent.SourceScope);
+        }
+
+        if (!TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+                capture.SourceScope.SourcePublicationAuthority,
+                out var currentSourceScope) ||
+            currentSourceScope != capture.SourceScope)
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (!ReferenceEquals(
+                    runtimeUnlockRecoveryRetryState,
+                    capture.State) ||
+                !ReferenceEquals(
+                    capture.State.DispatchContract,
+                    capture.Contract) ||
+                runtimeUnlockRetryDispatchInstallShadow.LastCommittedReceipt !=
+                    capture.InstallReceipt ||
+                capture.Contract.Lifecycle.SettlementOutcome !=
+                    RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch ||
+                capture.State.LastAppliedDispatchSettlementReport is not
+                    {
+                        Outcome:
+                            RuntimeUnlockRetryDispatchSettlementOutcome
+                                .MissingDispatch,
+                        DispatchObserved: false,
+                    } settlement ||
+                settlement.Authority != capture.Contract.Authority ||
+                settlement.OfferGeneration !=
+                    capture.Contract.OfferGeneration ||
+                !string.Equals(
+                    settlement.OfferNonce,
+                    capture.Contract.OfferNonce,
+                    StringComparison.Ordinal) ||
+                capture.State.LastAppliedDispatchSettlementDecisionStatus is not (
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted or
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent) ||
+                !ReferenceEquals(
+                    pendingRuntimeUnlockRetryNegotiationIntent,
+                    capture.Intent) ||
+                capture.Intent.SuccessorEvaluation is not { } successor ||
+                successor.PredecessorAuthority !=
+                    capture.Contract.Authority ||
+                successor.PredecessorOfferGeneration !=
+                    capture.Contract.OfferGeneration ||
+                successor.PredecessorDispatchObserved ||
+                !string.Equals(
+                    successor.PredecessorOfferNonce,
+                    capture.Contract.OfferNonce,
+                    StringComparison.Ordinal) ||
+                capture.Intent.SourceScope != currentSourceScope ||
+                !ReferenceEquals(
+                    outboundRuntimeUnlockOfferAuthorityBoundary,
+                    capture.Boundary) ||
+                outboundAccelerationOfferGeneration !=
+                    capture.Boundary.OfferGeneration ||
+                outboundAccelerationOfferPayerDecisionId !=
+                    capture.Boundary.PayerDecisionId ||
+                !string.Equals(
+                    outboundAccelerationOfferNonce,
+                    capture.Boundary.Nonce,
+                    StringComparison.Ordinal) ||
+                outboundAccelerationOfferInstallReceipt !=
+                    capture.InstallReceipt ||
+                !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) ||
+                !ReferenceEquals(runtimeUnlockOfferProofState, capture.Proof) ||
+                capture.Proof.Retired ||
+                disposed)
+            {
+                return false;
+            }
+
+            capture.Proof.Retired = true;
+            capture.Proof.RetiredReason =
+                "settled_missing_dispatch_predecessor_operation_completed";
+            capture.Proof.RetryReason =
+                "runtime_unlock_retry_missing_dispatch_successor_pending";
+            RetireOutboundAccelerationOfferLocked(
+                capture.Contract.Authority.SessionId,
+                "settled_missing_dispatch_predecessor_operation_completed");
+        }
+
+        var source = capture.SourceScope;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(capture.Contract.Authority)}; operation_generation={operationGeneration}; payer_decision_id={payerDecisionId}; install_generation={capture.InstallReceipt.InstallGeneration}; predecessor_offer_generation={capture.Contract.OfferGeneration}; predecessor_offer_nonce={SanitizeLogToken(capture.Contract.OfferNonce ?? "(none)")}; successor_intent_generation={capture.Intent.IntentGeneration}; source_transport_epoch={source.TransportEpoch}; source_bridge_recovery_generation={source.BridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(source.CheckpointRequestId ?? "(none)")}; data_session_identity={SanitizeLogToken(source.DataSessionIdentity)}; data_session_generation={source.DataSessionGeneration}; trigger={SanitizeLogToken(trigger)}; decision_status=Accepted; cleanup_effect=predecessor_offer_retired; authority_effect=none; decision_reason=settled_missing_dispatch_predecessor_operation_completed");
+        return true;
     }
 
     private static void LogRuntimeUnlockPostTunaFallbackActivationDisposition(

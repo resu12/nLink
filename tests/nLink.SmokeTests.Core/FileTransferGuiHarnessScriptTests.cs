@@ -3651,6 +3651,74 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-runtime-unlock-post-grant-hold-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_MissingDispatchPredecessorCompletionUsesIndexedProofBeforeDeadline()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-missing-dispatch-completion-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $tuple = 'log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=retry-a; authority_generation=1; contract_generation=7; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; release_kind=FallbackPairedTailYield; release_authority_id=pair-a; release_generation=1; release_outcome=paired; offer_generation=2; offer_nonce=nonce-2'
+                @(
+                    "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                    "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; settlement_outcome=MissingDispatch; decision_status=Accepted",
+                    "event=runtime_unlock_retry_missing_dispatch_successor_intent_created; $tuple; failed_offer_generation=2; intent_disposition=Created",
+                    'event=runtime_unlock_retry_negotiation_slot_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; contract_generation=7; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy',
+                    "event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer",
+                    "event=tuna_acceleration_negotiation_scheduling_completed; $tuple; operation_generation=5; decision_reason=committed_authority_bound_to_current_offer",
+                    'event=file_transfer_outbound_terminal; log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; state=Failed; error_code=peer_disconnected'
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'runtime_unlock_retry' -or
+                    $result.Reason -ne 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_missing_dispatch_completion_index') {
+                    throw "missing-dispatch completion fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                @("event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer") |
+                    Set-Content -LiteralPath $path
+                $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($singleton.Reason -eq 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor') {
+                    throw 'singleton completion was classified without settlement, intent, busy, and scheduler evidence'
+                }
+                Write-Output 'gui-missing-dispatch-completion-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"MissingDispatch completion GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-missing-dispatch-completion-index-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

@@ -17701,6 +17701,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_duplicate_settlement_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateSettlementCount),
         ("runtime_unlock_retry_dispatch_orphaned_supersession_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchOrphanedSupersessionCount),
         ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchRawCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchDistinctCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchRecoveredCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchVerdict),
         ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRawCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount),
@@ -28764,6 +28769,335 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
         }
         RawCandidateEvents = @($raw.ToArray())
         DistinctCandidateEvents = @($distinct.Values | ForEach-Object { $_.Event })
+        RecoveredCandidateEvents = @($recovered.ToArray())
+        UnresolvedCandidateEvents = @($unresolved.ToArray())
+    }
+}
+
+function Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrelation {
+    param([AllowEmptyCollection()][object[]]$Events = @())
+
+    function Test-MissingDispatchOfferScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        foreach ($field in @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'authority_id',
+                'authority_generation',
+                'contract_generation',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'bridge_decision_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'dispatch_attempt_generation',
+                'missing_dispatch_successor_generation',
+                'release_kind',
+                'release_authority_id',
+                'release_generation',
+                'release_outcome')) {
+            $leftValue = Get-FileTransferEventField -Event $Left -Name $field -Default ''
+            $rightValue = Get-FileTransferEventField -Event $Right -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals(
+                    $leftValue,
+                    $rightValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-MissingDispatchSlotScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Settlement,
+            [Parameter(Mandatory = $true)]$Slot
+        )
+
+        return (
+            (Get-FileTransferEventField -Event $Settlement -Name 'log_writer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'log_writer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $Settlement -Name 'session_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'session_id' -Default '') -and
+            (Get-FileTransferEventField -Event $Settlement -Name 'transfer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'transfer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $Settlement -Name 'contract_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'contract_generation' -Default '') -and
+            (Get-FileTransferEventField -Event $Settlement -Name 'route_publication_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'source_publication_generation' -Default '') -and
+            (Get-FileTransferEventField -Event $Settlement -Name 'transport_epoch' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'source_transport_epoch' -Default '') -and
+            (Get-FileTransferEventField -Event $Settlement -Name 'bridge_recovery_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $Slot -Name 'source_bridge_recovery_generation' -Default ''))
+    }
+
+    [object[]]$ordered = @($Events | Sort-Object Sequence, LineNumber)
+    [object[]]$settlements = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
+            'MissingDispatch' -and
+        (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '1') -eq '0' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'offer_generation' -Default 0) -gt 0
+    })
+    [object[]]$decisions = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
+            'MissingDispatch' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in
+            @('Accepted', 'Idempotent')
+    })
+    [object[]]$intents = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_missing_dispatch_successor_intent_created' -and
+        (Get-FileTransferEventField -Event $_ -Name 'predecessor_settlement_outcome' -Default '') -eq
+            'MissingDispatch' -and
+        (Get-FileTransferEventField -Event $_ -Name 'intent_disposition' -Default '') -eq 'Created' -and
+        (Get-FileTransferEventField -Event $_ -Name 'request_active_predecessor_supersession' -Default '1') -in
+            @('0', 'false', 'False')
+    })
+    [object[]]$busySlots = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'intent_kind' -Default '') -eq
+            'SuccessorEvaluation' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq
+            'Deferred' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'slot_generation' -Default -1) -eq 0 -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'retry_dispatch_negotiation_slot_busy'
+    })
+    [object[]]$completions = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_post_tuna_fallback_activation_disposition' -and
+        (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq 'completed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'committed_authority_bound_to_current_offer'
+    })
+    [object[]]$schedulingCompletions = @($ordered | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_negotiation_scheduling_completed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'committed_authority_bound_to_current_offer'
+    })
+    [object[]]$cleanupEvents = @($ordered | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided',
+            'tuna_acceleration_outbound_offer_retired')
+    })
+    [object[]]$reservedSlots = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'intent_kind' -Default '') -eq
+            'SuccessorEvaluation' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq
+            'Reserved' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'slot_generation' -Default 0) -gt 0
+    })
+    [object[]]$grants = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_granted'
+    })
+    [object[]]$dispatchObserved = @($ordered | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_retry_dispatch_observed',
+            'runtime_unlock_retry_dispatch_contract_settled') -and
+        ($_.EventName -ne 'runtime_unlock_retry_dispatch_contract_settled' -or
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
+                'DispatchObserved')
+    })
+    [object[]]$prepared = @($ordered | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+        (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq
+            'PostTunaFallbackV6ToTunaV4'
+    })
+    [object[]]$poisonEvents = @($ordered | Where-Object {
+        $_.EventName -in @(
+            'file_transfer_outbound_terminal',
+            'file_transfer_inbound_terminal',
+            'transfer_terminal',
+            'filetransfer_runtime_terminalized',
+            'filetransfer_manifest_replaced',
+            'filetransfer_session_replaced',
+            'filetransfer_data_session_recreated') -or
+        ($_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'intent_kind' -Default '') -eq
+                'SuccessorEvaluation' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq
+                'Rejected')
+    })
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = New-Object System.Collections.Generic.List[object]
+    $recovered = New-Object System.Collections.Generic.List[object]
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($completion in $completions) {
+        $matchingSettlement = @($settlements | Where-Object {
+            [int64]$_.Sequence -lt [int64]$completion.Sequence -and
+            (Test-MissingDispatchOfferScopeMatch -Left $_ -Right $completion)
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($matchingSettlement.Count -ne 1) {
+            continue
+        }
+        $settlement = $matchingSettlement[0]
+        $offerGeneration = Get-FileTransferEventInt64Field `
+            -Event $settlement -Name 'offer_generation' -Default 0
+        $authorityId = Get-FileTransferEventField `
+            -Event $settlement -Name 'authority_id' -Default ''
+        $matchingDecision = @($decisions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+            [int64]$_.Sequence -lt [int64]$completion.Sequence -and
+            (Test-MissingDispatchOfferScopeMatch -Left $settlement -Right $_)
+        } | Select-Object -First 1)
+        $matchingIntent = @($intents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+            [int64]$_.Sequence -lt [int64]$completion.Sequence -and
+            (Test-MissingDispatchOfferScopeMatch -Left $settlement -Right $_) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'failed_offer_generation' -Default -1) -eq
+                $offerGeneration
+        } | Select-Object -First 1)
+        if ($matchingDecision.Count -ne 1 -or $matchingIntent.Count -ne 1) {
+            continue
+        }
+        $intent = $matchingIntent[0]
+        $matchingBusy = @($busySlots | Where-Object {
+            [int64]$_.Sequence -gt [int64]$intent.Sequence -and
+            [int64]$_.Sequence -lt [int64]$completion.Sequence -and
+            (Test-MissingDispatchSlotScopeMatch -Settlement $settlement -Slot $_)
+        } | Select-Object -Last 1)
+        $matchingSchedulingCompletion = @($schedulingCompletions | Where-Object {
+            [int64]$_.Sequence -ge [int64]$completion.Sequence -and
+            [int64]$_.Sequence -le ([int64]$completion.Sequence + 2) -and
+            (Test-MissingDispatchOfferScopeMatch -Left $settlement -Right $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'operation_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $completion -Name 'operation_generation' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $completion -Name 'payer_decision_id' -Default '')
+        } | Select-Object -First 1)
+        if ($matchingBusy.Count -ne 1 -or $matchingSchedulingCompletion.Count -ne 1) {
+            continue
+        }
+
+        $raw.Add($completion) | Out-Null
+        $key = [string]::Join('|', @(
+                (Get-FileTransferEventField -Event $settlement -Name 'log_writer_id' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'session_id' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'transfer_id' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'direction' -Default ''),
+                $authorityId,
+                (Get-FileTransferEventField -Event $settlement -Name 'dispatch_attempt_generation' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'missing_dispatch_successor_generation' -Default ''),
+                $offerGeneration,
+                (Get-FileTransferEventField -Event $intent -Name 'failed_offer_generation' -Default ''),
+                (Get-FileTransferEventField -Event $completion -Name 'operation_generation' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'route_publication_generation' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'transport_epoch' -Default ''),
+                (Get-FileTransferEventField -Event $settlement -Name 'bridge_recovery_generation' -Default ''))).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $distinct.Add($completion) | Out-Null
+
+        $firstPoison = @($poisonEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$completion.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'log_writer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'session_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'transfer_id' -Default '')
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        $recoveryEnd = if ($firstPoison.Count -eq 1) {
+            [int64]$firstPoison[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+        $cleanup = @($cleanupEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$completion.Sequence -and
+            [int64]$_.Sequence -lt $recoveryEnd -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'log_writer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'session_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $authorityId
+        } | Select-Object -First 1)
+        $reserved = @($reservedSlots | Where-Object {
+            $cleanup.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$cleanup[0].Sequence -and
+            [int64]$_.Sequence -lt $recoveryEnd -and
+            (Test-MissingDispatchSlotScopeMatch -Settlement $settlement -Slot $_)
+        } | Select-Object -First 1)
+        $successorGrant = @($grants | Where-Object {
+            $reserved.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$reserved[0].Sequence -and
+            [int64]$_.Sequence -lt $recoveryEnd -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'log_writer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '') -eq
+                $authorityId -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'dispatch_attempt_generation' -Default 0) -eq
+                ((Get-FileTransferEventInt64Field -Event $settlement -Name 'dispatch_attempt_generation' -Default 0) + 1) -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'missing_dispatch_successor_generation' -Default -1) -eq
+                ((Get-FileTransferEventInt64Field -Event $settlement -Name 'missing_dispatch_successor_generation' -Default -1) + 1)
+        } | Select-Object -First 1)
+        $successorAuthority = if ($successorGrant.Count -eq 1) {
+            Get-FileTransferEventField -Event $successorGrant[0] -Name 'authority_id' -Default ''
+        }
+        else { '' }
+        $observed = @($dispatchObserved | Where-Object {
+            $successorGrant.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$successorGrant[0].Sequence -and
+            [int64]$_.Sequence -lt $recoveryEnd -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'log_writer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                $successorAuthority
+        } | Select-Object -First 1)
+        $preparedTransition = @($prepared | Where-Object {
+            $observed.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$observed[0].Sequence -and
+            [int64]$_.Sequence -lt $recoveryEnd -and
+            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'log_writer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'session_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'transfer_id' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq
+                (Get-FileTransferEventField -Event $settlement -Name 'direction' -Default '')
+        } | Select-Object -First 1)
+        if ($cleanup.Count -eq 1 -and
+            $reserved.Count -eq 1 -and
+            $successorGrant.Count -eq 1 -and
+            $observed.Count -eq 1 -and
+            $preparedTransition.Count -eq 1) {
+            $recovered.Add($completion) | Out-Null
+        }
+        else {
+            $unresolved.Add($completion) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recovered.Count
+        UnresolvedCount = $unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        RawCandidateEvents = @($raw.ToArray())
+        DistinctCandidateEvents = @($distinct.ToArray())
         RecoveredCandidateEvents = @($recovered.ToArray())
         UnresolvedCandidateEvents = @($unresolved.ToArray())
     }
@@ -59637,6 +59971,9 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferRuntimeUnlockRetryZeroOfferSuccessorCorrelation `
             -Events $events `
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockRetryMissingDispatchOfferCompletionProof =
+        Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrelation `
+            -Events $events
     $runtimeUnlockRetryCurrentListenerAdoptionProof =
         Get-FileTransferRuntimeUnlockRetryCurrentListenerAdoptionCorrelation `
             -Events $events
@@ -61366,7 +61703,7 @@ function Get-FileTransferRecoveryFailureClassification {
             $runtimeUnlockRetryDispatchInvalidFreshGrantEvents.Add($laterGrant[0]) | Out-Null
         }
     }
-    $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents = New-Object System.Collections.Generic.List[object]
+    $legacyRuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents = New-Object System.Collections.Generic.List[object]
     foreach ($settlement in $runtimeUnlockRetryDispatchContractSettledEvents) {
         if ((Get-FileTransferAuthoritySchema -Line ([string]$settlement.RawLine)) -lt 2 -or
             (Get-FileTransferEventField -Event $settlement -Name 'settlement_outcome' -Default '') -ne 'MissingDispatch') {
@@ -61449,10 +61786,15 @@ function Get-FileTransferRecoveryFailureClassification {
         if (($runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and $matchingTerminal.Count -eq 0) -or
             (-not $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
                 ($settledPredecessorReuse.Count -gt 0 -or $matchingTerminal.Count -eq 0))) {
-            $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Add($settlement) | Out-Null
+            $legacyRuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Add($settlement) | Out-Null
         }
     }
-    $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount = $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Count
+    [object[]]$runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents = @(
+        @($legacyRuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.ToArray()) +
+        @($runtimeUnlockRetryMissingDispatchOfferCompletionProof.UnresolvedCandidateEvents)
+    )
+    $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount =
+        $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Count
     [object[]]$runtimeUnlockRetryDispatchPostGrantHoldEvents = @(
         $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCandidateEvents
     )
@@ -63237,8 +63579,14 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' `
-        -Events @($runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.ToArray()) `
+        -Events @($legacyRuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.ToArray()) `
         -DefaultReason 'retry_dispatch_successor_missing_after_missing_dispatch' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' `
+        -Events @($runtimeUnlockRetryMissingDispatchOfferCompletionProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor' `
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
@@ -64259,6 +64607,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_held_after_authority_granted',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+                'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
                 'runtime_fallback_separation_violation',
                 'file_tuna_data_path_mismatch',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
@@ -64381,6 +64730,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchDuplicateSettlementCount = $runtimeUnlockRetryDispatchDuplicateSettlementCount
         RuntimeUnlockRetryDispatchOrphanedSupersessionCount = $runtimeUnlockRetryDispatchOrphanedSupersessionCount
         RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount = $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount
+        RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchRawCount = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.RawCount
+        RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchDistinctCount = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.DistinctCount
+        RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchRecoveredCount = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.RecoveredCount
+        RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchUnresolvedCount = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.UnresolvedCount
+        RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchVerdict = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.Verdict
         RuntimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldCount
         RuntimeUnlockRetryDispatchPostGrantHoldRawCount = $runtimeUnlockRetryDispatchPostGrantHoldProof.RawCount
         RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount = $runtimeUnlockRetryDispatchPostGrantHoldProof.DistinctCount
@@ -66474,6 +66828,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_duplicate_settlement_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateSettlementCount),
         ("runtime_unlock_retry_dispatch_orphaned_supersession_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchOrphanedSupersessionCount),
         ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchRawCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchDistinctCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchRecoveredCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchVerdict),
         ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_dispatch_missing_after_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount),
