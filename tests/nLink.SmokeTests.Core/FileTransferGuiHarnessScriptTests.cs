@@ -6609,6 +6609,68 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task GuiSmokeFailureClassification_FailedFallbackTailYieldAcceptsCarriedPeerProof(
+        bool redactNestedAuthorities)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = guiText
+            .Replace("\r\n    ", "\r\n", StringComparison.Ordinal)
+            .Replace("\n    ", "\n", StringComparison.Ordinal);
+        var fieldBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
+        var fastPathBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure",
+            "Get-TunaGuiFallbackTailPeerProofBeforeLocalYieldFailure");
+        var predecessorReference = redactNestedAuthorities ? "[redacted]" : "failed-authority";
+        var successorReference = redactNestedAuthorities ? "[redacted]" : "successor-authority";
+        var peerAuthorityReference = redactNestedAuthorities ? "[redacted]" : "peer-authority";
+        var scope = "session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; owner_key=owner; pair_key=pair; route_publication_generation=3; route_commit_generation=0; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; log_writer_id=writer";
+        var peerTuple = $"peer_observation_identity=peer-proof; peer_frame_fingerprint=peer-frame; peer_authority_id={peerAuthorityReference}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key=peer-owner; peer_pair_key=peer-pair; peer_live_route_epoch=2; peer_leg_generation=3; peer_transport_epoch=1; peer_bridge_recovery_generation=1; peer_checkpoint_request_id=(none)";
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue { {{fieldBody}} }
+            function Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure { {{fastPathBody}} }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-carried-tail-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                @(
+                    'event=filetransfer_fallback_tail_yield_issued; {{scope}}; authority_id=failed-authority; yield_generation=1; yield_kind=Failed; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_quiescence_timeout; {{scope}}',
+                    'event=filetransfer_v6_handoff_tail_unblocked; {{scope}}',
+                    'event=filetransfer_runtime_owner_stale_update_rejected; {{scope}}; attempted_action=fallback_tail_quiescent; reason=fallback_tail_yield_operation_conflict',
+                    'event=filetransfer_fallback_tail_peer_proof_receipt_decided; {{scope}}; authority_id=failed-authority; yield_generation=1; {{peerTuple.Replace(peerAuthorityReference, "peer-authority", StringComparison.Ordinal)}}; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_yield_issued; {{scope}}; authority_id=successor-authority; yield_generation=2; yield_kind=Quiescent; failed_predecessor_authority_id={{predecessorReference}}; failed_predecessor_yield_generation=1; failed_successor_authority_id={{successorReference}}; failed_successor_yield_generation=2; failed_supersession_carried_peer_proof=1; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_failed_yield_superseded; {{scope}}; authority_id=successor-authority; yield_generation=2; failed_predecessor_authority_id={{predecessorReference}}; failed_predecessor_yield_generation=1; failed_successor_authority_id={{successorReference}}; failed_successor_yield_generation=2; failed_supersession_carried_peer_proof=1; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_local_proof_receipt_decided; {{scope}}; authority_id=successor-authority; yield_generation=2; local_proof_identity=local-proof; local_frame_fingerprint=local-frame; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_pairing_committed; {{scope}}; authority_id=successor-authority; yield_generation=2; {{peerTuple}}; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_paired_release_reserved; {{scope}}; authority_id=successor-authority; yield_generation=2; decision_status=Accepted',
+                    'event=filetransfer_fallback_tail_paired_release_consumed; {{scope}}; authority_id=successor-authority; yield_generation=2; decision_status=Accepted',
+                    'event=filetransfer_route_transition_prepared; session_id=sess; transfer_id=transfer; direction=outbound; source_route=post_tuna_fallback_v6; target_route=file_tuna_v4; fallback_yield_authority_id=successor-authority; log_writer_id=writer'
+                ) | Set-Content -LiteralPath $path
+                [string[]]$lines = @(Get-Content -LiteralPath $path)
+                $result = Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure -Lines $lines
+                if ([bool]$result.Unresolved -or [long]$result.LineVisits -ne 12) {
+                    throw "carried peer proof was rejected: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-carried-fallback-tail-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Carried fallback-tail GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-carried-fallback-tail-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task GuiSmokeFailureClassification_PeerFirstFallbackTailProofUsesIndexedFastPath(
         bool asymmetricRecoveryScope)
     {
@@ -10235,6 +10297,213 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("filetransfer_live_terminal_ignored_unresolved_saved_path", functionBody, StringComparison.Ordinal);
         Assert.Contains("current_cycle_saved_path_unresolved", functionBody, StringComparison.Ordinal);
         Assert.Contains("continue", functionBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeWindows_TerminalEvidenceProjectionIsIncrementalAndReusedBySummary()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var trackerBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Update-TunaGuiTerminalEvidenceTracker",
+            "Get-TopLevelWindowElementsByProcessId");
+        var waitBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Wait-FileTransferTerminalPairAfterBookmark",
+            "Append-FileTransferLiveCycleArtifact");
+        var summaryBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Get-TunaGuiEvidenceSummary",
+            "Invoke-FileTransferTunaPostFallbackPrecondition");
+        var cycleBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Invoke-FileTransferTunaHandoffFallbackCycle",
+            "Wait-FileTransferTerminalOrProgressBeforeAction");
+
+        Assert.Contains("Invoke-GuiSmokeLogLedgerRangeVisitor", trackerBody, StringComparison.Ordinal);
+        Assert.Contains("MaximumBatchLineCount = 4096", trackerBody, StringComparison.Ordinal);
+        Assert.Contains("$Tracker.Cursor = $lineIndex + 1", trackerBody, StringComparison.Ordinal);
+        Assert.Contains("Assert-GuiSmokeScenarioDeadline", trackerBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-AppLogLinesAfterBookmark", waitBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-AppLogLinesAfterBookmark", summaryBody, StringComparison.Ordinal);
+        Assert.Contains("$EvidenceTracker.SummaryLines.ToArray()", summaryBody, StringComparison.Ordinal);
+        Assert.Contains("$terminalEvidenceTracker = New-TunaGuiTerminalEvidenceTracker", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("-EvidenceTracker $terminalEvidenceTracker", cycleBody, StringComparison.Ordinal);
+        Assert.Contains(
+            "filetransfer_tuna_gui_terminal_evidence_projection_completed",
+            waitBody,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeWindows_TerminalEvidenceProjectionVisitsProductionWidthLedgerOnlyOnce()
+    {
+        var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var relevantBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Test-TunaGuiEvidenceSummaryRelevantLine",
+            "New-TunaGuiTerminalEvidenceTracker");
+        var newTrackerBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "New-TunaGuiTerminalEvidenceTracker",
+            "Assert-TunaGuiTerminalEvidenceTrackerScope");
+        var updateBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Update-TunaGuiTerminalEvidenceTracker",
+            "Get-TopLevelWindowElementsByProcessId");
+        var powerShell = $$"""
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $script:GuiSmokeTerminalEvidenceGeneration = 0L
+            $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
+            $script:lines = [System.Collections.Generic.List[string]]::new(250002)
+            for ($i = 0; $i -lt 250000; $i++) { $script:lines.Add('event=noise; value=1') }
+            $script:lines.Add('event=file_transfer_inbound_terminal; transfer_id=t; direction=inbound; role=helper; state=Completed; error_code=(none); saved_path=(none)')
+            $script:lines.Add('event=file_transfer_outbound_terminal; transfer_id=t; direction=outbound; role=helpee; state=Completed; error_code=(none)')
+            function Assert-GuiSmokeScenarioDeadline {}
+            function Sync-GuiSmokeAppLogLedger {}
+            function Get-GuiSmokeLogLedgerBookmark { return $script:lines.Count }
+            function Invoke-GuiSmokeLogLedgerRangeVisitor {
+                param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
+                for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
+                    $result = & $Visitor $script:lines[$lineIndex] $lineIndex
+                    if ($null -ne $result) { return $result }
+                }
+            }
+            function ConvertFrom-GuiSmokeSemicolonFields {
+                param([string]$Message)
+                $fields = @{}
+                foreach ($part in @($Message -split ';')) {
+                    $pair = $part.Trim() -split '=', 2
+                    if ($pair.Count -eq 2) { $fields[$pair[0]] = $pair[1] }
+                }
+                return $fields
+            }
+            function Get-GuiSmokeFieldValue {
+                param($Fields, [string]$Name, [string]$Default = '')
+                if ($null -ne $Fields -and $Fields.ContainsKey($Name)) { return [string]$Fields[$Name] }
+                return $Default
+            }
+            function Get-GuiSmokeFileTransferTerminalDirection {
+                param([string]$EventName, $Fields)
+                if ($EventName -eq 'file_transfer_inbound_terminal') { return 'inbound' }
+                if ($EventName -eq 'file_transfer_outbound_terminal') { return 'outbound' }
+                return [string](Get-GuiSmokeFieldValue -Fields $Fields -Name 'direction')
+            }
+            function Set-GuiSmokeFileTransferTerminalDefaults { param($Fields) }
+            function Get-FileTransferLiveProgressScore { return 0L }
+            function Get-GuiSmokeInt64FieldValue { return 0L }
+            function Test-TunaGuiPeerVisibleFileTunaV4DataPathLine { return $false }
+            function Test-TunaGuiEvidenceSummaryRelevantLine { {{relevantBody}} }
+            function New-TunaGuiTerminalEvidenceTracker { {{newTrackerBody}} }
+            function Update-TunaGuiTerminalEvidenceTracker { {{updateBody}} }
+            $tracker = New-TunaGuiTerminalEvidenceTracker -Bookmark 0 -ExpectedInboundRole helper -ExpectedOutboundRole helpee
+            $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+            [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $tracker)
+            [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $tracker)
+            $stopwatch.Stop()
+            if ([long]$tracker.LineVisitCount -ne 250002L) { throw "line replay detected: $($tracker.LineVisitCount)" }
+            if ([int]$tracker.Cursor -ne 250002) { throw "cursor mismatch: $($tracker.Cursor)" }
+            if ([int]$tracker.MaxBatchLineCount -gt 4096) { throw "batch exceeded bound: $($tracker.MaxBatchLineCount)" }
+            if ($tracker.ByTransfer.Count -ne 1) { throw "terminal transfer missing: $($tracker.ByTransfer.Count)" }
+            if ($stopwatch.ElapsedMilliseconds -ge 30000) { throw "projection exceeded 30 seconds: $($stopwatch.ElapsedMilliseconds)" }
+            Write-Output "terminal-evidence-production-width-ok elapsed_ms=$($stopwatch.ElapsedMilliseconds)"
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(powerShell, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Production-width terminal evidence projection failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("terminal-evidence-production-width-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeWindows_TerminalEvidenceProjectionPreservesSummarySemanticsWithoutReplay()
+    {
+        var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var relevantBody = ExtractPowerShellFunctionBody(scriptText, "Test-TunaGuiEvidenceSummaryRelevantLine", "New-TunaGuiTerminalEvidenceTracker");
+        var newTrackerBody = ExtractPowerShellFunctionBody(scriptText, "New-TunaGuiTerminalEvidenceTracker", "Assert-TunaGuiTerminalEvidenceTrackerScope");
+        var updateBody = ExtractPowerShellFunctionBody(scriptText, "Update-TunaGuiTerminalEvidenceTracker", "Get-TopLevelWindowElementsByProcessId");
+        var summaryBody = ExtractPowerShellFunctionBody(scriptText, "Get-TunaGuiEvidenceSummary", "Invoke-FileTransferTunaPostFallbackPrecondition");
+        var powerShell = $$"""
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $script:GuiSmokeTerminalEvidenceGeneration = 0L
+            $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
+            $script:lines = @(
+                'event=tuna_acceleration_negotiated',
+                'event=runtime_unlock_transaction_answer_received; peer_visible_proof=1; answer_received=1; tuna_path_lease_current=1; tuna_path_lease_state=listenerready',
+                'event=filetransfer_route_selected; route=file_tuna_v4',
+                'event=filetransfer_binary_frame_sent; raw_chunk_bytes=10',
+                'event=filetransfer_binary_frame_received; raw_chunk_bytes=11',
+                'event=filetransfer_v6_sparse_write_committed; written_bytes=12',
+                'event=filetransfer_tuna_data_path_peer_visible; payload_bytes=13',
+                'event=filetransfer_v6_sender_started',
+                'event=file_transfer_inbound_terminal; transfer_id=t; direction=inbound; state=Completed; error_code=(none)',
+                'event=file_transfer_outbound_terminal; transfer_id=t; direction=outbound; state=Completed; error_code=(none)',
+                'event=peer_disconnected',
+                'event=transport_state_changed; to=Failed')
+            function Assert-GuiSmokeScenarioDeadline {}
+            function Sync-GuiSmokeAppLogLedger {}
+            function Get-GuiSmokeLogLedgerBookmark { return $script:lines.Count }
+            function Invoke-GuiSmokeLogLedgerRangeVisitor {
+                param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
+                for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
+                    $result = & $Visitor $script:lines[$lineIndex] $lineIndex
+                    if ($null -ne $result) { return $result }
+                }
+            }
+            function ConvertFrom-GuiSmokeSemicolonFields {
+                param([string]$Message)
+                $fields = @{}
+                foreach ($part in @($Message -split ';')) {
+                    $pair = $part.Trim() -split '=', 2
+                    if ($pair.Count -eq 2) { $fields[$pair[0]] = $pair[1] }
+                }
+                return $fields
+            }
+            function Get-GuiSmokeFieldValue {
+                param($Fields, [string]$Name, [string]$Default = '')
+                if ($null -ne $Fields -and $Fields.ContainsKey($Name)) { return [string]$Fields[$Name] }
+                return $Default
+            }
+            function Get-GuiSmokeInt64FieldValue {
+                param($Fields, [string]$Name)
+                $value = Get-GuiSmokeFieldValue -Fields $Fields -Name $Name -Default '0'
+                return [long]$value
+            }
+            function Get-GuiSmokeFileTransferTerminalDirection {
+                param([string]$EventName, $Fields)
+                if ($EventName -eq 'file_transfer_inbound_terminal') { return 'inbound' }
+                if ($EventName -eq 'file_transfer_outbound_terminal') { return 'outbound' }
+                return [string](Get-GuiSmokeFieldValue -Fields $Fields -Name 'direction')
+            }
+            function Set-GuiSmokeFileTransferTerminalDefaults { param($Fields) }
+            function Get-FileTransferLiveProgressScore { return 0L }
+            function Test-TunaGuiPeerVisibleFileTunaV4DataPathLine { return $true }
+            function Test-TunaGuiAuthorizedFileTunaV4PublicationLine { param([string]$Line) return $Line -like '*event=filetransfer_route_selected*' }
+            function Test-TunaGuiEvidenceSummaryRelevantLine { {{relevantBody}} }
+            function New-TunaGuiTerminalEvidenceTracker { {{newTrackerBody}} }
+            function Update-TunaGuiTerminalEvidenceTracker { {{updateBody}} }
+            function Get-TunaGuiEvidenceSummary { {{summaryBody}} }
+            $tracker = New-TunaGuiTerminalEvidenceTracker -Bookmark 0
+            [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $tracker)
+            $visits = [long]$tracker.LineVisitCount
+            $summary = Get-TunaGuiEvidenceSummary -Bookmark 0 -EvidenceTracker $tracker
+            if ([long]$tracker.LineVisitCount -ne $visits) { throw 'summary replayed consumed ledger lines' }
+            if (-not $summary.tunaNegotiated -or -not $summary.diagnosticTunaReadinessObserved -or -not $summary.fileTunaV4PublicationObserved) { throw 'route summary flags diverged' }
+            if (-not $summary.terminalPairCompleted -or [long]$summary.senderChunkBytes -ne 10L -or [long]$summary.receiverChunkBytes -ne 23L) { throw 'terminal or byte summary diverged' }
+            if (-not $summary.peerVisibleTunaPayloadObserved -or [int]$summary.tunaAcceleratedFileFrameCount -ne 1 -or [long]$summary.tunaAcceleratedFilePayloadBytes -ne 13L) { throw 'Tuna payload summary diverged' }
+            if ([int]$summary.peerDisconnectedAfterTerminalCount -ne 1 -or [int]$summary.transportFailedAfterTerminalCount -ne 1) { throw 'post-terminal summary ordering diverged' }
+            Write-Output 'terminal-evidence-summary-parity-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(powerShell, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Terminal evidence summary parity failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("terminal-evidence-summary-parity-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

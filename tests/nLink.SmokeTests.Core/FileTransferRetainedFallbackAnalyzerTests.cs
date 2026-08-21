@@ -5019,6 +5019,117 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("RetainedFallbackSuite", "FallbackTailCoordinatorAggregate")]
+    public async Task AnalyzeRetained_FallbackTailCoordinatorAggregate_AcceptsCarriedPredecessorPeerProof(
+        bool compact,
+        bool redactNestedAuthorities)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFallbackTailCoordinatorCarriedPeerProofFixture(redactNestedAuthorities),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.True(
+            verdict["fallback_tail_coordinator_aggregate_verdict"] == "pass",
+            string.Join(
+                Environment.NewLine,
+                verdict.Where(pair =>
+                    pair.Key.StartsWith("fallback_tail_coordinator_", StringComparison.Ordinal) ||
+                    pair.Key is "recovery_failure_class" or "first_proof_chain_failure_reason")
+                    .Select(pair => $"{pair.Key}={pair.Value}")));
+        Assert.Equal("1", verdict["fallback_tail_coordinator_valid_pairing_count"]);
+        Assert.Equal(
+            "1",
+            verdict["fallback_tail_coordinator_valid_paired_release_reserved_count"]);
+        Assert.Equal(
+            "1",
+            verdict["fallback_tail_coordinator_valid_paired_release_consumed_count"]);
+        Assert.Equal("0", verdict["fallback_tail_coordinator_invalid_raw_count"]);
+        Assert.Equal("0", verdict["fallback_tail_coordinator_invalid_distinct_count"]);
+        Assert.Equal("0", verdict["fallback_tail_coordinator_invalid_recovered_count"]);
+        Assert.Equal("0", verdict["fallback_tail_coordinator_invalid_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData("carry_false")]
+    [InlineData("visible_mismatch")]
+    [InlineData("ambiguous_redacted_predecessor")]
+    [Trait("RetainedFallbackSuite", "FallbackTailCoordinatorAggregate")]
+    public async Task AnalyzeRetained_FallbackTailCoordinatorAggregate_CarriedPeerProofFailsClosed(
+        string scenario)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var redact = scenario == "ambiguous_redacted_predecessor";
+        var lines = BuildFallbackTailCoordinatorCarriedPeerProofFixture(redact).ToList();
+        if (scenario == "carry_false")
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                lines[index] = lines[index].Replace(
+                    "failed_supersession_carried_peer_proof=1",
+                    "failed_supersession_carried_peer_proof=0",
+                    StringComparison.Ordinal);
+            }
+        }
+        else if (scenario == "visible_mismatch")
+        {
+            for (var index = 0; index < lines.Count; index++)
+            {
+                lines[index] = lines[index].Replace(
+                    "failed_predecessor_authority_id=fta2-fallback-tail-yield-aaaaaaaaaaaaaaaaaaaaaaaa",
+                    "failed_predecessor_authority_id=fta2-fallback-tail-yield-eeeeeeeeeeeeeeeeeeeeeeee",
+                    StringComparison.Ordinal);
+            }
+        }
+        else
+        {
+            var failedYieldIndex = lines.FindIndex(line =>
+                line.Contains("event=filetransfer_fallback_tail_yield_issued", StringComparison.Ordinal) &&
+                line.Contains("yield_kind=Failed", StringComparison.Ordinal));
+            Assert.True(failedYieldIndex >= 0);
+            lines.Insert(
+                failedYieldIndex + 1,
+                lines[failedYieldIndex].Replace(
+                    "authority_id=fta2-fallback-tail-yield-aaaaaaaaaaaaaaaaaaaaaaaa",
+                    "authority_id=fta2-fallback-tail-yield-eeeeeeeeeeeeeeeeeeeeeeee",
+                    StringComparison.Ordinal));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(lines.ToArray());
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(
+            result.ArtifactDir,
+            "filetransfer-operator-verdict.txt");
+        Assert.Equal("fail", verdict["fallback_tail_coordinator_aggregate_verdict"]);
+        Assert.Equal("3", verdict["fallback_tail_coordinator_invalid_raw_count"]);
+        Assert.Equal("3", verdict["fallback_tail_coordinator_invalid_distinct_count"]);
+        Assert.Equal("0", verdict["fallback_tail_coordinator_invalid_recovered_count"]);
+        Assert.Equal("3", verdict["fallback_tail_coordinator_invalid_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedFallbackSuite", "FallbackTailCoordinatorAggregate")]
@@ -6318,6 +6429,138 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         return lines.ToArray();
     }
 
+    private static string[] BuildFallbackTailCoordinatorCarriedPeerProofFixture(
+        bool redactNestedAuthorities)
+    {
+        const string sessionId = "sess_fallback_tail_carried_peer";
+        const string transferId = "transfer_fallback_tail_carried_peer";
+        const string failedAuthorityId =
+            "fta2-fallback-tail-yield-aaaaaaaaaaaaaaaaaaaaaaaa";
+        const string successorAuthorityId =
+            "fta2-fallback-tail-yield-bbbbbbbbbbbbbbbbbbbbbbbb";
+        const string peerAuthorityId =
+            "fta2-fallback-tail-yield-cccccccccccccccccccccccc";
+        const string retryAuthorityId =
+            "fta2-runtime-unlock-retry-dddddddddddddddddddddddd";
+        const string ownerKey =
+            "sess_fallback_tail_carried_peer|transfer_fallback_tail_carried_peer|post_tuna_fallback_v6|6|2|3|1|2|(none)";
+        const string pairKey =
+            "sess_fallback_tail_carried_peer|transfer_fallback_tail_carried_peer|post_tuna_fallback_v6|6|2|2|(none)";
+        var scope =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "route_publication_generation=5; route_commit_generation=0; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "transport_epoch=2; bridge_recovery_generation=1; " +
+            "checkpoint_generation=0; checkpoint_request_id=(none); " +
+            "data_session_identity=data-session-1; data_session_generation=1; " +
+            $"owner_key={ownerKey}; pair_key={pairKey}";
+        var failed =
+            $"{scope}; authority_id={failedAuthorityId}; predecessor_authority_id=(none); " +
+            "yield_generation=1; yield_kind=Failed; " +
+            "failed_predecessor_authority_id=(none); failed_predecessor_yield_generation=0; " +
+            "failed_successor_authority_id=(none); failed_successor_yield_generation=0; " +
+            "failed_supersession_carried_peer_proof=0";
+        var nestedFailedAuthorityId = redactNestedAuthorities
+            ? "[redacted]"
+            : failedAuthorityId;
+        var nestedSuccessorAuthorityId = redactNestedAuthorities
+            ? "[redacted]"
+            : successorAuthorityId;
+        var peerAuthority = redactNestedAuthorities ? "[redacted]" : peerAuthorityId;
+        var successor =
+            $"{scope}; authority_id={successorAuthorityId}; predecessor_authority_id=(none); " +
+            "yield_generation=2; yield_kind=Quiescent; " +
+            $"failed_predecessor_authority_id={nestedFailedAuthorityId}; " +
+            "failed_predecessor_yield_generation=1; " +
+            $"failed_successor_authority_id={nestedSuccessorAuthorityId}; " +
+            "failed_successor_yield_generation=2; failed_supersession_carried_peer_proof=1";
+        var peerTuple =
+            "peer_observation_identity=peer-proof-1; peer_frame_fingerprint=peer-frame-1; " +
+            $"peer_authority_id={peerAuthority}; peer_predecessor_authority_id=(none); " +
+            "peer_yield_generation=1; peer_direction=inbound; " +
+            $"peer_owner_key={ownerKey}; peer_pair_key={pairKey}; " +
+            "peer_live_route_epoch=2; peer_leg_generation=3; " +
+            "peer_bridge_recovery_generation=1; peer_transport_epoch=2; " +
+            "peer_checkpoint_request_id=(none)";
+        var peerReceipt = LogLine(
+            $"event=filetransfer_fallback_tail_peer_proof_receipt_decided; {failed}; " +
+            $"{peerTuple}; proof_identity=peer-proof-1; frame_fingerprint=peer-frame-1; " +
+            "decision_status=Accepted; decision_reason=fallback_tail_peer_proof_receipt_applied; " +
+            "log_writer_id=writer_a",
+            secondsOffset: 2);
+        var lines = new List<string>
+        {
+            LogLine(
+                $"event=filetransfer_route_selected; {scope}; " +
+                "target_route=post_tuna_fallback_v6; target_protocol_version=6; " +
+                "target_transport=regular_nkn; route_publication_action_kind=RoutePublication; " +
+                "coordinator_decision_reason=accepted; log_writer_id=writer_a",
+                secondsOffset: 0),
+            LogLine(
+                $"event=filetransfer_fallback_tail_yield_issued; {failed}; " +
+                "decision_status=Accepted; decision_reason=missing_frontier_state; " +
+                "log_writer_id=writer_a",
+                secondsOffset: 1),
+            peerReceipt,
+            peerReceipt.Replace(
+                "decision_status=Accepted; decision_reason=fallback_tail_peer_proof_receipt_applied",
+                "decision_status=Idempotent; decision_reason=fallback_tail_peer_proof_receipt_idempotent",
+                StringComparison.Ordinal),
+            LogLine(
+                $"event=filetransfer_fallback_tail_yield_issued; {successor}; " +
+                "decision_status=Accepted; decision_reason=receiver_state_sparse_runtime; " +
+                "log_writer_id=writer_a",
+                secondsOffset: 4),
+            LogLine(
+                $"event=filetransfer_fallback_tail_failed_yield_superseded; {successor}; " +
+                "decision_status=Accepted; decision_reason=receiver_state_sparse_runtime; " +
+                "log_writer_id=writer_a",
+                secondsOffset: 5),
+            LogLine(
+                $"event=filetransfer_fallback_tail_local_proof_receipt_decided; {successor}; " +
+                "local_proof_identity=local-proof-2; local_frame_fingerprint=local-frame-2; " +
+                "decision_status=Accepted; decision_reason=fallback_tail_local_proof_receipt_applied; " +
+                "log_writer_id=writer_a",
+                secondsOffset: 6),
+            LogLine(
+                $"event=filetransfer_fallback_tail_pairing_committed; {successor}; " +
+                "local_proof_identity=local-proof-2; local_frame_fingerprint=local-frame-2; " +
+                $"{peerTuple}; pairing_generation=1; pairing_state=Paired; " +
+                "release_kind=FallbackPairedTailYield; release_outcome=Quiescent; " +
+                "decision_status=Accepted; decision_reason=fallback_tail_yield_proof_delivered; " +
+                "log_writer_id=writer_a",
+                secondsOffset: 7),
+            LogLine(
+                $"event=filetransfer_fallback_tail_paired_release_reserved; {successor}; " +
+                "pairing_generation=1; release_kind=FallbackPairedTailYield; " +
+                "release_outcome=Quiescent; reservation_generation=1; " +
+                $"retry_authority_id={retryAuthorityId}; retry_attempt_generation=1; " +
+                "dispatch_attempt_generation=1; install_generation=0; " +
+                "decision_status=Accepted; decision_reason=runtime_unlock_retry_lifecycle_transition; " +
+                "log_writer_id=writer_a",
+                secondsOffset: 8)
+        };
+        lines.AddRange(BuildFallbackTailCoordinatorPhase2InstallLines(
+            sessionId,
+            transferId,
+            successorAuthorityId,
+            retryAuthorityId,
+            secondsOffsetBase: 9,
+            releaseGeneration: 2));
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_tail_paired_release_consumed; {successor}; " +
+            "pairing_generation=1; release_kind=FallbackPairedTailYield; " +
+            "release_outcome=Quiescent; reservation_generation=1; " +
+            $"retry_authority_id={retryAuthorityId}; retry_attempt_generation=1; " +
+            "dispatch_attempt_generation=1; install_generation=7; " +
+            "decision_status=Accepted; decision_reason=runtime_unlock_retry_lifecycle_transition; " +
+            "log_writer_id=writer_a",
+            secondsOffset: 13));
+        lines.AddRange(FallbackTailCoordinatorTerminalLines(sessionId, transferId));
+        return lines.ToArray();
+    }
+
     private static string[] BuildFallbackTailCoordinatorCarryForwardFixture()
     {
         const string sessionId = "sess_fallback_tail_carry_forward";
@@ -6440,7 +6683,8 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         string retryAuthorityId,
         int transportEpoch = 2,
         int bridgeRecoveryGeneration = 1,
-        int secondsOffsetBase = 7)
+        int secondsOffsetBase = 7,
+        int releaseGeneration = 1)
     {
         var authority =
             $"authority_schema=2; authority_id={retryAuthorityId}; authority_generation=1; " +
@@ -6454,7 +6698,7 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
             "missing_dispatch_successor_generation=0; missing_dispatch_successor_limit=1; " +
             "retry_reason=fallback_tail_paired_yield; recovery_reason=fallback_tail_paired_yield; " +
             $"release_kind=FallbackPairedTailYield; release_authority_id={releaseAuthorityId}; " +
-            "release_generation=1; release_outcome=Quiescent; target_route=file_tuna_v4; " +
+            $"release_generation={releaseGeneration}; release_outcome=Quiescent; target_route=file_tuna_v4; " +
             "target_route_kind=FileTunaV4; target_protocol_version=4; target_transport=tuna; " +
             $"runtime_owner_session_id={sessionId}; runtime_owner_transfer_id={transferId}; " +
             "runtime_owner_direction=outbound; runtime_owner_route=post_tuna_fallback_v6; " +

@@ -13,6 +13,7 @@ $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
 $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
 $script:GuiSmokeScenarioDeadlineName = ''
 $script:GuiSmokeTerminalPhaseGeneration = 0L
+$script:GuiSmokeTerminalEvidenceGeneration = 0L
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -162,6 +163,278 @@ function Wait-Until {
 
     throw $OnTimeoutMessage
 }
+
+function Test-TunaGuiEvidenceSummaryRelevantLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Line,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$EventName
+    )
+
+    if ($EventName -in @(
+            'transfer_terminal',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'tuna_acceleration_negotiated',
+            'runtime_unlock_transaction_answer_received',
+            'filetransfer_route_selected',
+            'filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied',
+            'filetransfer_tuna_gui_live_switch_off_completed_before_fault',
+            'filetransfer_tuna_gui_live_switch_off_fault_injected',
+            'filetransfer_tuna_gui_fault_window',
+            'filetransfer_v6_epoch_started',
+            'filetransfer_v6_epoch_recovered',
+            'filetransfer_v6_epoch_observed',
+            'filetransfer_v6_epoch_waiting',
+            'tuna_fallback_started',
+            'tuna_fallback_filetransfer_rebind_requested',
+            'tuna_acceleration_user_stop_filetransfer_fallback_forced',
+            'filetransfer_post_tuna_recovery_started',
+            'filetransfer_post_tuna_fallback_nkn_proved',
+            'filetransfer_live_v4_fallback_nkn_proved',
+            'filetransfer_post_tuna_fallback_cleanup_completed',
+            'filetransfer_live_v4_fallback_cleanup_completed',
+            'tuna_disable_handoff_completed',
+            'tuna_fallback_nkn_frame_sent',
+            'tuna_fallback_nkn_frame_received',
+            'filetransfer_v6_sender_started',
+            'filetransfer_lifecycle_priority_sent',
+            'filetransfer_lifecycle_priority_received',
+            'filetransfer_v6_heartbeat_timeout',
+            'filetransfer_tuna_data_path_peer_visible',
+            'filetransfer_binary_frame_sent',
+            'filetransfer_binary_frame_received',
+            'filetransfer_v6_sparse_write_committed',
+            'filetransfer_v6_contiguous_write_committed')) {
+        return $true
+    }
+
+    return $Line.IndexOf('peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        ($Line.IndexOf('transport_state_changed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $Line.IndexOf('to=Failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function New-TunaGuiTerminalEvidenceTracker {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [string]$ExpectedFileName = '',
+        [long]$ExpectedSizeBytes = 0,
+        [string]$ExpectedInboundRole = '',
+        [string]$ExpectedOutboundRole = '',
+        [datetime]$NotBeforeUtc = [datetime]::MinValue,
+        [string]$ArtifactDir = ''
+    )
+
+    $script:GuiSmokeTerminalEvidenceGeneration++
+    return [pscustomobject]@{
+        Generation = [long]$script:GuiSmokeTerminalEvidenceGeneration
+        Bookmark = $Bookmark
+        Cursor = $Bookmark
+        LastSynchronizedEndBookmark = $Bookmark
+        ExpectedFileName = $ExpectedFileName
+        ExpectedSizeBytes = $ExpectedSizeBytes
+        ExpectedInboundRole = $ExpectedInboundRole
+        ExpectedOutboundRole = $ExpectedOutboundRole
+        NotBeforeUtc = $NotBeforeUtc
+        ArtifactDir = $ArtifactDir
+        ByTransfer = @{}
+        SummaryLines = New-Object System.Collections.Generic.List[string]
+        MaxReceiverNextChunkIndex = [ref](-1L)
+        MaxReceiverHighestChunkIndex = [ref](-1L)
+        ProgressEventCount = 0L
+        SenderChunkBytes = 0L
+        ReceiverChunkBytes = 0L
+        TunaAcceleratedFileFrameCount = 0
+        TunaAcceleratedFilePayloadBytes = 0L
+        PeerVisibleTunaPayloadObserved = $false
+        LineVisitCount = 0L
+        ParsedEventCount = 0L
+        SynchronizationCount = 0L
+        MaxBatchLineCount = 0
+        CompletionDiagnosticEmitted = $false
+    }
+}
+
+function Assert-TunaGuiTerminalEvidenceTrackerScope {
+    param(
+        [Parameter(Mandatory = $true)]$Tracker,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [string]$ExpectedFileName = '',
+        [long]$ExpectedSizeBytes = 0,
+        [string]$ExpectedInboundRole = '',
+        [string]$ExpectedOutboundRole = '',
+        [datetime]$NotBeforeUtc = [datetime]::MinValue,
+        [string]$ArtifactDir = ''
+    )
+
+    if ([int]$Tracker.Bookmark -ne $Bookmark -or
+        -not [string]::Equals([string]$Tracker.ExpectedFileName, $ExpectedFileName, [System.StringComparison]::Ordinal) -or
+        [long]$Tracker.ExpectedSizeBytes -ne $ExpectedSizeBytes -or
+        -not [string]::Equals([string]$Tracker.ExpectedInboundRole, $ExpectedInboundRole, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$Tracker.ExpectedOutboundRole, $ExpectedOutboundRole, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [datetime]$Tracker.NotBeforeUtc -ne $NotBeforeUtc -or
+        -not [string]::Equals([string]$Tracker.ArtifactDir, $ArtifactDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'filetransfer_gui_terminal_evidence_tracker_scope_mismatch'
+    }
+}
+
+function Update-TunaGuiTerminalEvidenceTracker {
+    param(
+        [Parameter(Mandatory = $true)]$Tracker,
+        [int]$EndBookmark = -1,
+        [switch]$SkipSynchronization,
+        [int]$MaximumBatchLineCount = 4096
+    )
+
+    Assert-GuiSmokeScenarioDeadline
+    if (-not $SkipSynchronization) {
+        Sync-GuiSmokeAppLogLedger
+        $Tracker.SynchronizationCount++
+    }
+    Assert-GuiSmokeScenarioDeadline
+    $endIndex = if ($EndBookmark -ge 0) {
+        $EndBookmark
+    }
+    else {
+        Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
+    }
+    if ($endIndex -lt [int]$Tracker.Cursor) {
+        throw 'filetransfer_gui_terminal_evidence_cursor_regressed'
+    }
+    $Tracker.LastSynchronizedEndBookmark = $endIndex
+
+    while ([int]$Tracker.Cursor -lt $endIndex) {
+        Assert-GuiSmokeScenarioDeadline
+        $batchStart = [int]$Tracker.Cursor
+        $batchEnd = [Math]::Min($endIndex, $batchStart + [Math]::Max(1, $MaximumBatchLineCount))
+        $batchLineCount = $batchEnd - $batchStart
+        if ($batchLineCount -gt [int]$Tracker.MaxBatchLineCount) {
+            $Tracker.MaxBatchLineCount = $batchLineCount
+        }
+        [void](Invoke-GuiSmokeLogLedgerRangeVisitor `
+            -State $script:GuiSmokeAppLogLedger `
+            -StartIndex $batchStart `
+            -EndIndex $batchEnd `
+            -Visitor {
+                param([string]$line, [int]$lineIndex)
+
+                $eventName = ''
+                $eventStart = $line.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase)
+                if ($eventStart -ge 0) {
+                    $eventStart += 6
+                    $eventEnd = $line.IndexOf(';', $eventStart)
+                    if ($eventEnd -lt 0) { $eventEnd = $line.Length }
+                    $eventName = $line.Substring($eventStart, $eventEnd - $eventStart).Trim()
+                }
+
+                $progressEvent = $eventName -in @(
+                    'filetransfer_chunk_batch_sent_as_batch',
+                    'filetransfer_binary_frame_sent',
+                    'filetransfer_binary_frame_received',
+                    'filetransfer_v4_sender_throughput_summary',
+                    'filetransfer_v4_receiver_throughput_summary',
+                    'filetransfer_receiver_sparse_write_summary',
+                    'filetransfer_receiver_sparse_commit_summary',
+                    'filetransfer_receiver_write_batch_committed',
+                    'filetransfer_v4_chunk_batch_received',
+                    'filetransfer_v4_state_sent',
+                    'filetransfer_v4_state_received')
+                $terminalDirection = if ($eventName -in @('transfer_terminal', 'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal')) {
+                    $eventName
+                }
+                else {
+                    ''
+                }
+                $summaryRelevant = Test-TunaGuiEvidenceSummaryRelevantLine -Line $line -EventName $eventName
+                $aggregateEvidenceEvent = $eventName -in @(
+                    'filetransfer_tuna_data_path_peer_visible',
+                    'filetransfer_v6_sparse_write_committed',
+                    'filetransfer_v6_contiguous_write_committed')
+                $fields = if ($progressEvent -or $aggregateEvidenceEvent -or -not [string]::IsNullOrWhiteSpace($terminalDirection)) {
+                    $Tracker.ParsedEventCount++
+                    ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                }
+                else {
+                    $null
+                }
+
+                if ($progressEvent -and
+                    (Get-FileTransferLiveProgressScore `
+                        -Fields $fields `
+                        -MaxReceiverNextChunkIndex $Tracker.MaxReceiverNextChunkIndex `
+                        -MaxReceiverHighestChunkIndex $Tracker.MaxReceiverHighestChunkIndex) -gt 0) {
+                    $Tracker.ProgressEventCount++
+                }
+
+                if ($eventName -eq 'filetransfer_binary_frame_sent') {
+                    $Tracker.SenderChunkBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'raw_chunk_bytes'))
+                }
+                elseif ($eventName -eq 'filetransfer_binary_frame_received') {
+                    $Tracker.ReceiverChunkBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'raw_chunk_bytes'))
+                }
+                elseif ($eventName -eq 'filetransfer_v6_sparse_write_committed' -or
+                    $eventName -eq 'filetransfer_v6_contiguous_write_committed') {
+                    $Tracker.ReceiverChunkBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'written_bytes'))
+                }
+                elseif ($eventName -eq 'filetransfer_tuna_data_path_peer_visible' -and
+                    (Test-TunaGuiPeerVisibleFileTunaV4DataPathLine -Line $line)) {
+                    $Tracker.PeerVisibleTunaPayloadObserved = $true
+                    $Tracker.TunaAcceleratedFileFrameCount++
+                    $Tracker.TunaAcceleratedFilePayloadBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'payload_bytes'))
+                }
+
+                if ($summaryRelevant -and $eventName -notin @(
+                        'filetransfer_binary_frame_sent',
+                        'filetransfer_binary_frame_received',
+                        'filetransfer_v6_sparse_write_committed',
+                        'filetransfer_v6_contiguous_write_committed',
+                        'filetransfer_tuna_data_path_peer_visible')) {
+                    $Tracker.SummaryLines.Add($line) | Out-Null
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($terminalDirection)) {
+                    $direction = Get-GuiSmokeFileTransferTerminalDirection -EventName $eventName -Fields $fields
+                    Set-GuiSmokeFileTransferTerminalDefaults -Fields $fields
+                    $transferId = Get-GuiSmokeFieldValue -Fields $fields -Name 'transfer_id'
+                    $role = Get-GuiSmokeFieldValue -Fields $fields -Name 'role' -Default ''
+                    $roleMatches = ($direction -eq 'inbound' -and
+                            ([string]::IsNullOrWhiteSpace([string]$Tracker.ExpectedInboundRole) -or
+                                [string]::IsNullOrWhiteSpace($role) -or
+                                [string]::Equals($role, [string]$Tracker.ExpectedInboundRole, [System.StringComparison]::OrdinalIgnoreCase))) -or
+                        ($direction -eq 'outbound' -and
+                            ([string]::IsNullOrWhiteSpace([string]$Tracker.ExpectedOutboundRole) -or
+                                [string]::IsNullOrWhiteSpace($role) -or
+                                [string]::Equals($role, [string]$Tracker.ExpectedOutboundRole, [System.StringComparison]::OrdinalIgnoreCase)))
+                    if ($roleMatches -and -not [string]::IsNullOrWhiteSpace($transferId)) {
+                        if (-not $Tracker.ByTransfer.ContainsKey($transferId)) {
+                            $Tracker.ByTransfer[$transferId] = [ordered]@{
+                                TransferId = $transferId
+                                Inbound = $null
+                                Outbound = $null
+                                InboundLineIndex = -1
+                                OutboundLineIndex = -1
+                                ResolvedSavedPath = ''
+                            }
+                        }
+                        if ($direction -eq 'inbound') {
+                            $Tracker.ByTransfer[$transferId]['Inbound'] = $fields
+                            $Tracker.ByTransfer[$transferId]['InboundLineIndex'] = $lineIndex
+                        }
+                        elseif ($direction -eq 'outbound') {
+                            $Tracker.ByTransfer[$transferId]['Outbound'] = $fields
+                            $Tracker.ByTransfer[$transferId]['OutboundLineIndex'] = $lineIndex
+                        }
+                    }
+                }
+
+                $Tracker.Cursor = $lineIndex + 1
+                $Tracker.LineVisitCount++
+                return $null
+            })
+        Assert-GuiSmokeScenarioDeadline
+    }
+    return $Tracker
+}
+
 
 function Get-TopLevelWindowElementsByProcessId {
     param([int]$ProcessId)
@@ -2530,14 +2803,35 @@ function Wait-FileTransferTerminalPairAfterBookmark {
         [string]$ExpectedInboundRole = '',
         [string]$ExpectedOutboundRole = '',
         [datetime]$NotBeforeUtc = [datetime]::MinValue,
-        [string]$ArtifactDir = ''
+        [string]$ArtifactDir = '',
+        $EvidenceTracker = $null
     )
+
+    if ($null -eq $EvidenceTracker) {
+        $EvidenceTracker = New-TunaGuiTerminalEvidenceTracker `
+            -Bookmark $Bookmark `
+            -ExpectedFileName $ExpectedFileName `
+            -ExpectedSizeBytes $ExpectedSizeBytes `
+            -ExpectedInboundRole $ExpectedInboundRole `
+            -ExpectedOutboundRole $ExpectedOutboundRole `
+            -NotBeforeUtc $NotBeforeUtc `
+            -ArtifactDir $ArtifactDir
+    }
+    else {
+        Assert-TunaGuiTerminalEvidenceTrackerScope `
+            -Tracker $EvidenceTracker `
+            -Bookmark $Bookmark `
+            -ExpectedFileName $ExpectedFileName `
+            -ExpectedSizeBytes $ExpectedSizeBytes `
+            -ExpectedInboundRole $ExpectedInboundRole `
+            -ExpectedOutboundRole $ExpectedOutboundRole `
+            -NotBeforeUtc $NotBeforeUtc `
+            -ArtifactDir $ArtifactDir
+    }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $lastProgressMs = 0L
-    $lastProgressEventCount = 0
-    $maxReceiverNextChunkIndex = [ref](-1L)
-    $maxReceiverHighestChunkIndex = [ref](-1L)
+    $lastProgressEventCount = [long]$EvidenceTracker.ProgressEventCount
     $ignoredUnresolvedTerminalCandidates = @{}
     $terminalPathResolveStartedMs = -1L
     $terminalPathResolveTransferId = ''
@@ -2545,138 +2839,100 @@ function Wait-FileTransferTerminalPairAfterBookmark {
     $terminalTailGraceStartedMs = -1L
 
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-        $byTransfer = @{}
-        $progressEventCount = 0
-        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
-            if ($line.IndexOf('event=', [System.StringComparison]::Ordinal) -lt 0) {
+        Assert-GuiSmokeScenarioDeadline
+        [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $EvidenceTracker)
+        Assert-GuiSmokeScenarioDeadline
+        $progressEventCount = [long]$EvidenceTracker.ProgressEventCount
+        foreach ($transferState in @($EvidenceTracker.ByTransfer.Values)) {
+            if ($null -eq $transferState['Inbound'] -or $null -eq $transferState['Outbound']) {
                 continue
             }
 
-            $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
-            $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event'
-
-            if ((Get-FileTransferLiveProgressScore -Fields $fields -MaxReceiverNextChunkIndex $maxReceiverNextChunkIndex -MaxReceiverHighestChunkIndex $maxReceiverHighestChunkIndex) -gt 0) {
-                $progressEventCount++
-            }
-
-            $terminalDirection = Get-GuiSmokeFileTransferTerminalDirection -EventName $eventName -Fields $fields
-            if ([string]::IsNullOrWhiteSpace($terminalDirection)) {
-                continue
-            }
-
-            Set-GuiSmokeFileTransferTerminalDefaults -Fields $fields
-
-            $transferId = Get-GuiSmokeFieldValue -Fields $fields -Name 'transfer_id'
-            if ([string]::IsNullOrWhiteSpace($transferId)) {
-                continue
-            }
-
-            if (-not $byTransfer.ContainsKey($transferId)) {
-                $byTransfer[$transferId] = [ordered]@{
-                    TransferId = $transferId
-                    Inbound = $null
-                    Outbound = $null
-                    ResolvedSavedPath = ''
-                }
-            }
-
-            if ($terminalDirection -eq 'inbound') {
-                $role = Get-GuiSmokeFieldValue -Fields $fields -Name 'role' -Default ''
-                if (-not [string]::IsNullOrWhiteSpace($ExpectedInboundRole) -and
-                    -not [string]::IsNullOrWhiteSpace($role) -and
-                    -not [string]::Equals($role, $ExpectedInboundRole, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    continue
-                }
-
-                if (-not [string]::IsNullOrWhiteSpace($ExpectedFileName) -and $ExpectedSizeBytes -gt 0) {
-                    $savedPath = Get-GuiSmokeFieldValue -Fields $fields -Name 'saved_path' -Default '(none)'
-                    $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
-                        -LoggedPath $savedPath `
+            $transferId = [string]$transferState['TransferId']
+            $requiresResolvedInboundPath = -not [string]::IsNullOrWhiteSpace($ExpectedFileName) -and $ExpectedSizeBytes -gt 0
+            if ($requiresResolvedInboundPath) {
+                $inboundCandidate = $transferState['Inbound']
+                $inboundState = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'state' -Default '(unknown)'
+                $inboundError = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'error_code' -Default '(none)'
+                $resolvedCandidatePath = [string]$transferState['ResolvedSavedPath']
+                if ([string]::IsNullOrWhiteSpace($resolvedCandidatePath)) {
+                    $loggedSavedPath = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'saved_path' -Default '(none)'
+                    $resolvedCandidatePath = Resolve-FileTransferLiveReceivedFilePath `
+                        -LoggedPath $loggedSavedPath `
                         -ArtifactDir $ArtifactDir `
                         -ExpectedFileName $ExpectedFileName `
                         -ExpectedSizeBytes $ExpectedSizeBytes `
                         -NotBeforeUtc $NotBeforeUtc
-                    if (-not [string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
-                        $byTransfer[$transferId]['ResolvedSavedPath'] = $resolvedSavedPath
+                    if (-not [string]::IsNullOrWhiteSpace($resolvedCandidatePath)) {
+                        $transferState['ResolvedSavedPath'] = $resolvedCandidatePath
                     }
                 }
 
-                $byTransfer[$transferId]['Inbound'] = $fields
-            }
-            else {
-                $role = Get-GuiSmokeFieldValue -Fields $fields -Name 'role' -Default ''
-                if (-not [string]::IsNullOrWhiteSpace($ExpectedOutboundRole) -and
-                    -not [string]::IsNullOrWhiteSpace($role) -and
-                    -not [string]::Equals($role, $ExpectedOutboundRole, [System.StringComparison]::OrdinalIgnoreCase)) {
+                if ($inboundState -eq 'Completed' -and
+                    $inboundError -eq '(none)' -and
+                    [string]::IsNullOrWhiteSpace($resolvedCandidatePath)) {
+                    $loggedSavedPath = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'saved_path' -Default '(none)'
+                    if ($terminalPathResolveStartedMs -lt 0 -or
+                        -not [string]::Equals($terminalPathResolveTransferId, $transferId, [System.StringComparison]::Ordinal)) {
+                        $terminalPathResolveStartedMs = $sw.ElapsedMilliseconds
+                        $terminalPathResolveTransferId = $transferId
+                    }
+                    $ignoreKey = '{0}|{1}|{2}|{3}' -f $transferId, $loggedSavedPath, $inboundState, $inboundError
+                    if (-not $ignoredUnresolvedTerminalCandidates.ContainsKey($ignoreKey)) {
+                        $ignoredUnresolvedTerminalCandidates[$ignoreKey] = $true
+                        if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+                            Append-FileTransferLiveHarnessDiagnostic -ArtifactDir $ArtifactDir -Diagnostic ([ordered]@{
+                                    event = 'filetransfer_live_terminal_ignored_unresolved_saved_path'
+                                    reason = 'current_cycle_saved_path_unresolved'
+                                    transfer_id = $transferId
+                                    expected_file_name = $ExpectedFileName
+                                    expected_size_bytes = $ExpectedSizeBytes
+                                    logged_saved_path = $loggedSavedPath
+                                    inbound_state = $inboundState
+                                    inbound_error_code = $inboundError
+                                    expected_inbound_role = $ExpectedInboundRole
+                                    expected_outbound_role = $ExpectedOutboundRole
+                                    wait_elapsed_ms = $sw.ElapsedMilliseconds
+                                    not_before_utc = $NotBeforeUtc.ToUniversalTime().ToString('o')
+                                })
+                        }
+                    }
+                    $lastProgressMs = $sw.ElapsedMilliseconds
+                    $pathResolveGraceMs = [Math]::Min(60000, [Math]::Max(15000, $ProgressTimeoutMs))
+                    if (($sw.ElapsedMilliseconds - $terminalPathResolveStartedMs) -ge $pathResolveGraceMs) {
+                        throw ("Timed out waiting for completed file-transfer saved path resolution: transfer_id={0}; expected_file_name={1}; expected_size_bytes={2}; logged_saved_path={3}; grace_ms={4}; total_wait_s={5:N0}." -f `
+                            $transferId, $ExpectedFileName, $ExpectedSizeBytes, $loggedSavedPath, $pathResolveGraceMs, ($sw.ElapsedMilliseconds / 1000))
+                    }
                     continue
                 }
-
-                $byTransfer[$transferId]['Outbound'] = $fields
             }
 
-            if ($null -ne $byTransfer[$transferId]['Inbound'] -and $null -ne $byTransfer[$transferId]['Outbound']) {
-                $requiresResolvedInboundPath = -not [string]::IsNullOrWhiteSpace($ExpectedFileName) -and $ExpectedSizeBytes -gt 0
-                if ($requiresResolvedInboundPath) {
-                    $inboundCandidate = $byTransfer[$transferId]['Inbound']
-                    $inboundState = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'state' -Default '(unknown)'
-                    $inboundError = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'error_code' -Default '(none)'
-                    $resolvedCandidatePath = [string]$byTransfer[$transferId]['ResolvedSavedPath']
-
-                    if ($inboundState -eq 'Completed' -and
-                        $inboundError -eq '(none)' -and
-                        [string]::IsNullOrWhiteSpace($resolvedCandidatePath)) {
-                        $loggedSavedPath = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'saved_path' -Default '(none)'
-                        if ($terminalPathResolveStartedMs -lt 0 -or
-                            -not [string]::Equals($terminalPathResolveTransferId, $transferId, [System.StringComparison]::Ordinal)) {
-                            $terminalPathResolveStartedMs = $sw.ElapsedMilliseconds
-                            $terminalPathResolveTransferId = $transferId
-                        }
-
-                        $ignoreKey = '{0}|{1}|{2}|{3}' -f $transferId, $loggedSavedPath, $inboundState, $inboundError
-                        if (-not $ignoredUnresolvedTerminalCandidates.ContainsKey($ignoreKey)) {
-                            $ignoredUnresolvedTerminalCandidates[$ignoreKey] = $true
-                            if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
-                                Append-FileTransferLiveHarnessDiagnostic -ArtifactDir $ArtifactDir -Diagnostic ([ordered]@{
-                                        event = 'filetransfer_live_terminal_ignored_unresolved_saved_path'
-                                        reason = 'current_cycle_saved_path_unresolved'
-                                        transfer_id = $transferId
-                                        expected_file_name = $ExpectedFileName
-                                        expected_size_bytes = $ExpectedSizeBytes
-                                        logged_saved_path = $loggedSavedPath
-                                        inbound_state = $inboundState
-                                        inbound_error_code = $inboundError
-                                        expected_inbound_role = $ExpectedInboundRole
-                                        expected_outbound_role = $ExpectedOutboundRole
-                                        wait_elapsed_ms = $sw.ElapsedMilliseconds
-                                        not_before_utc = $NotBeforeUtc.ToUniversalTime().ToString('o')
-                                    })
-                            }
-                        }
-
-                        $lastProgressMs = $sw.ElapsedMilliseconds
-                        $pathResolveGraceMs = [Math]::Min(
-                            60000,
-                            [Math]::Max(15000, $ProgressTimeoutMs))
-                        if (($sw.ElapsedMilliseconds - $terminalPathResolveStartedMs) -ge $pathResolveGraceMs) {
-                            throw ("Timed out waiting for completed file-transfer saved path resolution: transfer_id={0}; expected_file_name={1}; expected_size_bytes={2}; logged_saved_path={3}; grace_ms={4}; total_wait_s={5:N0}." -f `
-                                $transferId,
-                                $ExpectedFileName,
-                                $ExpectedSizeBytes,
-                                $loggedSavedPath,
-                                $pathResolveGraceMs,
-                                ($sw.ElapsedMilliseconds / 1000))
-                        }
-
-                        continue
-                    }
-                }
-
-                return [pscustomobject]@{
-                    TransferId = $transferId
-                    Inbound = $byTransfer[$transferId]['Inbound']
-                    Outbound = $byTransfer[$transferId]['Outbound']
-                    ResolvedSavedPath = $byTransfer[$transferId]['ResolvedSavedPath']
-                }
+            Assert-GuiSmokeScenarioDeadline
+            if (-not [bool]$EvidenceTracker.CompletionDiagnosticEmitted -and
+                -not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+                $EvidenceTracker.CompletionDiagnosticEmitted = $true
+                Append-FileTransferLiveHarnessDiagnostic -ArtifactDir $ArtifactDir -Diagnostic ([ordered]@{
+                        event = 'filetransfer_tuna_gui_terminal_evidence_projection_completed'
+                        generation = [long]$EvidenceTracker.Generation
+                        start_bookmark = [int]$EvidenceTracker.Bookmark
+                        end_bookmark = [int]$EvidenceTracker.LastSynchronizedEndBookmark
+                        line_visit_count = [long]$EvidenceTracker.LineVisitCount
+                        parsed_event_count = [long]$EvidenceTracker.ParsedEventCount
+                        maximum_batch_line_count = [int]$EvidenceTracker.MaxBatchLineCount
+                        inbound_terminal_line_index = [int]$transferState['InboundLineIndex']
+                        outbound_terminal_line_index = [int]$transferState['OutboundLineIndex']
+                        elapsed_ms = [long]$sw.ElapsedMilliseconds
+                        deadline_remaining_ms = Get-GuiSmokeScenarioRemainingTimeoutMs -DefaultTimeoutMs $TimeoutMs
+                        authority_effect = 'none'
+                    })
+            }
+            Assert-GuiSmokeScenarioDeadline
+            return [pscustomobject]@{
+                TransferId = $transferId
+                Inbound = $transferState['Inbound']
+                Outbound = $transferState['Outbound']
+                ResolvedSavedPath = $transferState['ResolvedSavedPath']
+                EvidenceTracker = $EvidenceTracker
             }
         }
 
@@ -2700,8 +2956,8 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                             progress_timeout_ms = $ProgressTimeoutMs
                             terminal_quiet_grace_ms = $terminalQuietGraceMs
                             wait_elapsed_ms = $sw.ElapsedMilliseconds
-                            receiver_next_chunk = $maxReceiverNextChunkIndex.Value
-                            receiver_highest_chunk = $maxReceiverHighestChunkIndex.Value
+                            receiver_next_chunk = $EvidenceTracker.MaxReceiverNextChunkIndex.Value
+                            receiver_highest_chunk = $EvidenceTracker.MaxReceiverHighestChunkIndex.Value
                             progress_events = $lastProgressEventCount
                         })
                 }
@@ -2721,8 +2977,8 @@ function Wait-FileTransferTerminalPairAfterBookmark {
             else {
                 -1L
             }
-            $remainingTailChunks = if ($expectedChunkCount -gt 0 -and $maxReceiverHighestChunkIndex.Value -ge 0) {
-                [Math]::Max(0L, ($expectedChunkCount - 1L) - [long]$maxReceiverHighestChunkIndex.Value)
+            $remainingTailChunks = if ($expectedChunkCount -gt 0 -and $EvidenceTracker.MaxReceiverHighestChunkIndex.Value -ge 0) {
+                [Math]::Max(0L, ($expectedChunkCount - 1L) - [long]$EvidenceTracker.MaxReceiverHighestChunkIndex.Value)
             }
             else {
                 [long]::MaxValue
@@ -2742,8 +2998,8 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                                 terminal_tail_grace_ms = $terminalTailGraceMs
                                 wait_elapsed_ms = $sw.ElapsedMilliseconds
                                 expected_chunk_count = $expectedChunkCount
-                                receiver_next_chunk = $maxReceiverNextChunkIndex.Value
-                                receiver_highest_chunk = $maxReceiverHighestChunkIndex.Value
+                                receiver_next_chunk = $EvidenceTracker.MaxReceiverNextChunkIndex.Value
+                                receiver_highest_chunk = $EvidenceTracker.MaxReceiverHighestChunkIndex.Value
                                 remaining_tail_chunks = $remainingTailChunks
                                 progress_events = $lastProgressEventCount
                             })
@@ -2762,8 +3018,8 @@ function Wait-FileTransferTerminalPairAfterBookmark {
             throw ("Timed out waiting for live file-transfer progress: no useful data progress for {0:N0}s; total_wait_s={1:N0}; receiver_next_chunk={2}; receiver_highest_chunk={3}; progress_events={4}." -f `
                 ($ProgressTimeoutMs / 1000),
                 ($sw.ElapsedMilliseconds / 1000),
-                $maxReceiverNextChunkIndex.Value,
-                $maxReceiverHighestChunkIndex.Value,
+                $EvidenceTracker.MaxReceiverNextChunkIndex.Value,
+                $EvidenceTracker.MaxReceiverHighestChunkIndex.Value,
                 $lastProgressEventCount)
         }
 
@@ -9933,6 +10189,58 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
+        $scopeNames = @(
+            'route', 'protocol_version', 'owner_key', 'pair_key',
+            'route_publication_generation', 'route_commit_generation',
+            'live_route_epoch', 'runtime_generation', 'terminal_generation',
+            'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+            'checkpoint_generation', 'checkpoint_request_id',
+            'data_session_identity', 'data_session_generation')
+        function Get-FallbackTailScopeKey {
+            param([Parameter(Mandatory = $true)][string]$Line)
+
+            return (@($scopeNames | ForEach-Object {
+                        Get-TunaGuiLogLineFieldValue -Line $Line -Name $_
+                    }) -join '|').ToLowerInvariant()
+        }
+        function Test-FallbackTailAuthorityReference {
+            param(
+                [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Reference,
+                [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Visible
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Reference) -or
+                $Reference -in @('(none)', 'none')) {
+                return $false
+            }
+            if ($Reference -in @('[redacted]', 'redacted', '(redacted)')) {
+                return -not [string]::IsNullOrWhiteSpace($Visible)
+            }
+            return $Reference -eq $Visible
+        }
+        function Test-FallbackTailPeerTuple {
+            param(
+                [Parameter(Mandatory = $true)][string]$Receipt,
+                [Parameter(Mandatory = $true)][string]$Pairing
+            )
+
+            foreach ($name in @(
+                    'peer_observation_identity', 'peer_frame_fingerprint',
+                    'peer_predecessor_authority_id', 'peer_yield_generation',
+                    'peer_direction', 'peer_owner_key', 'peer_pair_key',
+                    'peer_live_route_epoch', 'peer_leg_generation',
+                    'peer_transport_epoch', 'peer_bridge_recovery_generation',
+                    'peer_checkpoint_request_id')) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Receipt -Name $name) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Pairing -Name $name)) {
+                    return $false
+                }
+            }
+            return Test-FallbackTailAuthorityReference `
+                -Reference (Get-TunaGuiLogLineFieldValue -Line $Pairing -Name 'peer_authority_id') `
+                -Visible (Get-TunaGuiLogLineFieldValue -Line $Receipt -Name 'peer_authority_id')
+        }
+
         $states = @{}
         $visits = 0L
         foreach ($line in $Lines) {
@@ -9954,31 +10262,51 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 if ($yieldKind -ieq 'Failed' -or $legacyFailed) {
                     $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
                     $yieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
-                    $scope = @(
-                        'owner_key', 'pair_key', 'route_publication_generation',
-                        'route_commit_generation', 'runtime_generation',
-                        'terminal_generation', 'leg_generation', 'transport_epoch',
-                        'bridge_recovery_generation', 'checkpoint_generation',
-                        'checkpoint_request_id', 'data_session_identity',
-                        'data_session_generation') | ForEach-Object {
-                            Get-TunaGuiLogLineFieldValue -Line $line -Name $_
-                        }
+                    $scopeKey = Get-FallbackTailScopeKey -Line $line
                     if (-not [string]::IsNullOrWhiteSpace($writer) -and
                         -not [string]::IsNullOrWhiteSpace($sessionId) -and
                         -not [string]::IsNullOrWhiteSpace($transferId) -and
                         -not [string]::IsNullOrWhiteSpace($authorityId) -and
                         [int64]$yieldGeneration -gt 0) {
-                        $key = (@($writer, $sessionId, $transferId, $authorityId, $yieldGeneration) + $scope -join '|').ToLowerInvariant()
+                        $key = (@($writer, $sessionId, $transferId, $direction, $authorityId, $yieldGeneration, $scopeKey) -join '|').ToLowerInvariant()
                         if (-not $states.ContainsKey($key)) {
                             $states[$key] = [pscustomobject]@{
                                 Writer = $writer; SessionId = $sessionId; TransferId = $transferId
+                                Direction = $direction; ScopeKey = $scopeKey
                                 FailedAuthorityId = $authorityId; FailedGeneration = $yieldGeneration
                                 Timeout = $yieldKind -ieq 'Failed'; FrontierRecovered = $false
                                 Candidate = $false; SuccessorAuthorityId = ''; SuccessorGeneration = '0'
+                                SuccessorYield = $false; Supersession = $false
+                                PredecessorPeerProofs = @{}
                                 LocalProof = $false; PeerProof = $false; Pairing = $false
                                 Reservation = $false; Consumption = $false; Prepared = $false
                             }
                         }
+                    }
+                }
+                elseif ($yieldKind -ieq 'Quiescent' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_supersession_carried_peer_proof') -eq '1') {
+                    $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                    $yieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                    $predecessorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_predecessor_yield_generation'
+                    $successorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_successor_yield_generation'
+                    $predecessorReference = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_predecessor_authority_id'
+                    $successorReference = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_successor_authority_id'
+                    $scopeKey = Get-FallbackTailScopeKey -Line $line
+                    $eligible = @($states.Values | Where-Object {
+                            $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
+                            $_.TransferId -eq $transferId -and $_.Direction -eq $direction -and
+                            $_.ScopeKey -eq $scopeKey -and
+                            $_.FailedGeneration -eq $predecessorGeneration -and
+                            $yieldGeneration -eq $successorGeneration -and
+                            [int64]$yieldGeneration -gt [int64]$predecessorGeneration -and
+                            (Test-FallbackTailAuthorityReference -Reference $predecessorReference -Visible $_.FailedAuthorityId) -and
+                            (Test-FallbackTailAuthorityReference -Reference $successorReference -Visible $authorityId)
+                        })
+                    if ($eligible.Count -eq 1) {
+                        $eligible[0].SuccessorAuthorityId = $authorityId
+                        $eligible[0].SuccessorGeneration = $yieldGeneration
+                        $eligible[0].SuccessorYield = $true
                     }
                 }
                 continue
@@ -9986,9 +10314,34 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
             $matching = @($states.Values | Where-Object {
                     $_.Writer -eq $writer -and $_.SessionId -eq $sessionId -and
-                    $_.TransferId -eq $transferId
+                    $_.TransferId -eq $transferId -and $_.Direction -eq $direction
                 })
             if ($matching.Count -eq 0) { continue }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_peer_proof_receipt_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'Applied')) {
+                $authorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                $yieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                $scopeKey = Get-FallbackTailScopeKey -Line $line
+                foreach ($state in @($matching | Where-Object {
+                            $_.FailedAuthorityId -eq $authorityId -and
+                            $_.FailedGeneration -eq $yieldGeneration -and
+                            $_.ScopeKey -eq $scopeKey
+                        })) {
+                    $proofKey = (@(
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_observation_identity'),
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_frame_fingerprint'),
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_authority_id'),
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_yield_generation'),
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_direction'),
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_owner_key'),
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_pair_key')) -join '|').ToLowerInvariant()
+                    if (-not $state.PredecessorPeerProofs.ContainsKey($proofKey)) {
+                        $state.PredecessorPeerProofs[$proofKey] = $line
+                    }
+                }
+                continue
+            }
 
             if ($eventName -eq 'filetransfer_fallback_tail_quiescence_timeout' -and
                 $direction -ieq 'outbound') {
@@ -10015,12 +10368,38 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
             if ($eventName -eq 'filetransfer_fallback_tail_failed_yield_superseded') {
                 $failedAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_predecessor_authority_id'
+                $successorAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_successor_authority_id'
+                $predecessorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_predecessor_yield_generation'
+                $successorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_successor_yield_generation'
+                $status = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status'
+                $carriedPeerProof = Get-TunaGuiLogLineFieldValue -Line $line -Name 'failed_supersession_carried_peer_proof'
+                if ($carriedPeerProof -ne '1') {
+                    $eligible = @($matching | Where-Object {
+                            $_.Candidate -and $_.FailedAuthorityId -eq $failedAuthority
+                        })
+                    if ($eligible.Count -eq 1 -and
+                        $status -in @('Accepted', 'Idempotent', 'Applied')) {
+                        $eligible[0].SuccessorAuthorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                        $eligible[0].SuccessorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                        $eligible[0].SuccessorYield = $true
+                        $eligible[0].Supersession = $true
+                    }
+                    continue
+                }
+                $scopeKey = Get-FallbackTailScopeKey -Line $line
                 $eligible = @($matching | Where-Object {
-                        $_.Candidate -and $_.FailedAuthorityId -eq $failedAuthority
+                        $_.SuccessorYield -and $_.ScopeKey -eq $scopeKey -and
+                        $_.FailedGeneration -eq $predecessorGeneration -and
+                        $_.SuccessorGeneration -eq $successorGeneration -and
+                        (Test-FallbackTailAuthorityReference -Reference $failedAuthority -Visible $_.FailedAuthorityId) -and
+                        (Test-FallbackTailAuthorityReference -Reference $successorAuthority -Visible $_.SuccessorAuthorityId)
                     })
-                if ($eligible.Count -eq 1) {
-                    $eligible[0].SuccessorAuthorityId = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
-                    $eligible[0].SuccessorGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                if ($eligible.Count -eq 1 -and
+                    $status -in @('Accepted', 'Idempotent', 'Applied') -and
+                    $carriedPeerProof -eq '1' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $eligible[0].SuccessorAuthorityId -and
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation') -eq $eligible[0].SuccessorGeneration) {
+                    $eligible[0].Supersession = $true
                 }
                 continue
             }
@@ -10034,11 +10413,30 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 })
             foreach ($state in $successors) {
                 switch ($eventName) {
-                    'filetransfer_fallback_tail_local_proof_receipt_decided' { $state.LocalProof = $true }
+                    'filetransfer_fallback_tail_local_proof_receipt_decided' {
+                        if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'Applied')) {
+                            $state.LocalProof = $true
+                        }
+                    }
                     'filetransfer_fallback_tail_yield_proof_sent' { $state.LocalProof = $true }
-                    'filetransfer_fallback_tail_peer_proof_receipt_decided' { $state.PeerProof = $true }
+                    'filetransfer_fallback_tail_peer_proof_receipt_decided' {
+                        if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'Applied')) {
+                            $state.PeerProof = $true
+                        }
+                    }
                     'filetransfer_fallback_tail_yield_proof_received' { $state.PeerProof = $true }
-                    'filetransfer_fallback_tail_pairing_committed' { $state.Pairing = $true }
+                    'filetransfer_fallback_tail_pairing_committed' {
+                        if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent', 'Applied')) {
+                            $carriedPeerProof = @($state.PredecessorPeerProofs.Values | Where-Object {
+                                    Test-FallbackTailPeerTuple -Receipt $_ -Pairing $line
+                                })
+                            if ($state.Supersession -and $state.PredecessorPeerProofs.Count -eq 1 -and
+                                $carriedPeerProof.Count -eq 1) {
+                                $state.PeerProof = $true
+                            }
+                            $state.Pairing = $true
+                        }
+                    }
                     'filetransfer_fallback_tail_paired_release_reserved' { $state.Reservation = $true }
                     'filetransfer_fallback_tail_paired_release_consumed' { $state.Consumption = $true }
                 }
@@ -10056,7 +10454,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         return [pscustomobject]@{
             Unresolved = @($states.Values | Where-Object {
-                    $_.Candidate -and -not ($_.LocalProof -and $_.PeerProof -and $_.Pairing -and
+                    $_.Candidate -and -not ($_.SuccessorYield -and $_.Supersession -and
+                        $_.LocalProof -and $_.PeerProof -and $_.Pairing -and
                         $_.Reservation -and $_.Consumption -and $_.Prepared)
                 }).Count -gt 0
             LineVisits = $visits
@@ -29343,7 +29742,10 @@ function Wait-TunaGuiResumeButtonOrTerminal {
 }
 
 function Get-TunaGuiEvidenceSummary {
-    param([Parameter(Mandatory = $true)][int]$Bookmark)
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        $EvidenceTracker = $null
+    )
 
     $summary = [ordered]@{
         tunaNegotiated = $false
@@ -29395,7 +29797,15 @@ function Get-TunaGuiEvidenceSummary {
         v6SenderStartedCount = 0
     }
 
-    foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+    if ($null -eq $EvidenceTracker) {
+        $EvidenceTracker = New-TunaGuiTerminalEvidenceTracker -Bookmark $Bookmark
+    }
+    elseif ([int]$EvidenceTracker.Bookmark -ne $Bookmark) {
+        throw 'filetransfer_gui_terminal_evidence_summary_bookmark_mismatch'
+    }
+    [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $EvidenceTracker)
+    Assert-GuiSmokeScenarioDeadline
+    foreach ($line in @($EvidenceTracker.SummaryLines.ToArray())) {
         $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
         $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event'
         if ($eventName -eq 'transfer_terminal' -or
@@ -29610,6 +30020,14 @@ function Get-TunaGuiEvidenceSummary {
         }
     }
 
+    $summary.senderChunkBytes = [long]$EvidenceTracker.SenderChunkBytes
+    $summary.receiverChunkBytes = [long]$EvidenceTracker.ReceiverChunkBytes
+    $summary.tunaAcceleratedFileFrameCount = [int]$EvidenceTracker.TunaAcceleratedFileFrameCount
+    $summary.tunaAcceleratedFilePayloadBytes = [long]$EvidenceTracker.TunaAcceleratedFilePayloadBytes
+    if ([bool]$EvidenceTracker.PeerVisibleTunaPayloadObserved) {
+        $summary.peerVisibleTunaPayloadObserved = $true
+    }
+    Assert-GuiSmokeScenarioDeadline
     return $summary
 }
 
@@ -30005,6 +30423,16 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $expectedHash = Get-FileSha256Hex -Path $AutopickPath
     $cycleStartedUtc = [datetime]::UtcNow
     $bookmark = Get-AppLogBookmark
+    $terminalExpectedInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
+    $terminalExpectedOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
+    $terminalEvidenceTracker = New-TunaGuiTerminalEvidenceTracker `
+        -Bookmark $bookmark `
+        -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+        -ExpectedSizeBytes $PayloadSizeBytes `
+        -ExpectedInboundRole $terminalExpectedInboundRole `
+        -ExpectedOutboundRole $terminalExpectedOutboundRole `
+        -NotBeforeUtc $cycleStartedUtc `
+        -ArtifactDir $ArtifactDir
     $faultAdmissionTracker = New-TunaGuiFaultAdmissionTracker -Bookmark $bookmark
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
@@ -30253,7 +30681,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 -ExpectedInboundRole $terminalProbeInboundRole `
                                 -ExpectedOutboundRole $terminalProbeOutboundRole `
                                 -NotBeforeUtc $cycleStartedUtc `
-                                -ArtifactDir $ArtifactDir
+                                -ArtifactDir $ArtifactDir `
+                                -EvidenceTracker $terminalEvidenceTracker
 
                             $terminalProbeInboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'state' -Default '(unknown)'
                             $terminalProbeOutboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'state' -Default '(unknown)'
@@ -30378,7 +30807,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 -ExpectedInboundRole $terminalProbeInboundRole `
                                 -ExpectedOutboundRole $terminalProbeOutboundRole `
                                 -NotBeforeUtc $cycleStartedUtc `
-                                -ArtifactDir $ArtifactDir
+                                -ArtifactDir $ArtifactDir `
+                                -EvidenceTracker $terminalEvidenceTracker
                             $terminalProbeInboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'state' -Default '(unknown)'
                             $terminalProbeOutboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'state' -Default '(unknown)'
                             $terminalProbeInboundError = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'error_code' -Default '(none)'
@@ -30479,7 +30909,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 -ExpectedInboundRole $terminalProbeInboundRole `
                                 -ExpectedOutboundRole $terminalProbeOutboundRole `
                                 -NotBeforeUtc $cycleStartedUtc `
-                                -ArtifactDir $ArtifactDir
+                                -ArtifactDir $ArtifactDir `
+                                -EvidenceTracker $terminalEvidenceTracker
                             $terminalProbeInboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'state' -Default '(unknown)'
                             $terminalProbeOutboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'state' -Default '(unknown)'
                             $terminalProbeInboundError = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'error_code' -Default '(none)'
@@ -30705,7 +31136,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         -ExpectedInboundRole $expectedInboundRole `
         -ExpectedOutboundRole $expectedOutboundRole `
         -NotBeforeUtc $cycleStartedUtc `
-        -ArtifactDir $ArtifactDir
+        -ArtifactDir $ArtifactDir `
+        -EvidenceTracker $terminalEvidenceTracker
     $sw.Stop()
 
     $inbound = $terminal.Inbound
@@ -30743,7 +31175,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $measuredRoute = Get-GuiSmokeFieldValue -Fields $outbound -Name 'route' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'route' -Default $expectedMeasuredRoute)
     $defaultMeasuredProtocol = if ($measuredRoute -eq 'post_tuna_fallback_v6') { 6 } elseif ($measuredRoute -eq 'file_tuna_v4') { 4 } else { 0 }
     $measuredProtocol = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $outbound -Name 'protocol_version' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'protocol_version' -Default ([string]$defaultMeasuredProtocol))) -Default $defaultMeasuredProtocol
-    $evidence = Get-TunaGuiEvidenceSummary -Bookmark $bookmark
+    $evidence = Get-TunaGuiEvidenceSummary -Bookmark $bookmark -EvidenceTracker $terminalEvidenceTracker
     if ($tunaNegotiatedObserved) { $evidence.tunaNegotiated = $true }
     if ($diagnosticTunaReadinessObserved) { $evidence.diagnosticTunaReadinessObserved = $true }
     if ($fileTunaV4PublicationObserved) {

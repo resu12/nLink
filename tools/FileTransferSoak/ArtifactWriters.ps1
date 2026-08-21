@@ -2954,6 +2954,9 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
     [object[]]$yieldEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_tail_yield_issued'
     })
+    [object[]]$failedYieldSupersessionEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_failed_yield_superseded'
+    })
     [object[]]$localReceiptEvents = @($events | Where-Object {
         $_.EventName -in @(
             'filetransfer_fallback_tail_local_proof_receipt_decided',
@@ -3166,6 +3169,63 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
         return $true
     }
 
+    function Test-FallbackTailAggregateLocalScope {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($field in @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'owner_key',
+                'pair_key',
+                'route',
+                'protocol_version',
+                'route_publication_generation',
+                'route_commit_generation',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'bridge_recovery_generation',
+                'transport_epoch',
+                'checkpoint_generation',
+                'checkpoint_request_id',
+                'data_session_identity',
+                'data_session_generation')) {
+            $left = Get-FileTransferEventField -Event $Anchor -Name $field -Default '__missing__'
+            $right = Get-FileTransferEventField -Event $Candidate -Name $field -Default '__missing__'
+            if ($left -eq '__missing__' -or
+                $right -eq '__missing__' -or
+                -not [string]::Equals($left, $right, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailAggregateAuthorityReference {
+        param(
+            [Parameter(Mandatory = $true)][string]$Reference,
+            [Parameter(Mandatory = $true)][string]$Expected
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Reference) -or
+            $Reference -in @('__missing__', '(none)', 'none')) {
+            return $false
+        }
+
+        if ($Reference -in @('[redacted]', 'redacted', '(redacted)')) {
+            return $true
+        }
+
+        return [string]::Equals($Reference, $Expected, [System.StringComparison]::Ordinal)
+    }
+
     function Test-FallbackTailAggregateProofIdentity {
         param(
             [Parameter(Mandatory = $true)]$Event,
@@ -3251,7 +3311,8 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
     function Test-FallbackTailAggregatePeerReceiptMatch {
         param(
             [Parameter(Mandatory = $true)]$Pairing,
-            [Parameter(Mandatory = $true)]$Receipt
+            [Parameter(Mandatory = $true)]$Receipt,
+            $LocalTupleAnchor = $Pairing
         )
 
         if (-not (Test-FallbackTailAggregateAccepted -Event $Receipt) -or
@@ -3260,7 +3321,7 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
                 -Pairing $Pairing `
                 -Receipt $Receipt `
                 -Peer) -or
-            -not (Test-FallbackTailAggregateLocalTuple -Anchor $Pairing -Candidate $Receipt)) {
+            -not (Test-FallbackTailAggregateLocalTuple -Anchor $LocalTupleAnchor -Candidate $Receipt)) {
             return $false
         }
 
@@ -3357,6 +3418,226 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
         return -not [string]::IsNullOrWhiteSpace($expectedPeerDirection) -and
             $receiptDirection -eq $pairingDirection -and
             $receiptPeerDirection -eq $expectedPeerDirection
+    }
+
+    function Get-FallbackTailAggregateDistinctGroups {
+        param(
+            [AllowEmptyCollection()][object[]]$InputEvents = @(),
+            [Parameter(Mandatory = $true)][string[]]$Fields,
+            [string[]]$IdentityNames = @(),
+            [string[]]$FingerprintNames = @()
+        )
+
+        return @($InputEvents | Group-Object {
+            $event = $_
+            $parts = @($Fields | ForEach-Object {
+                Get-FileTransferEventField -Event $event -Name $_ -Default '(missing)'
+            })
+            if ($IdentityNames.Count -gt 0) {
+                $parts += Get-FallbackTailAggregateField `
+                    -Event $event `
+                    -Names $IdentityNames `
+                    -Default '(missing)'
+            }
+            if ($FingerprintNames.Count -gt 0) {
+                $parts += Get-FallbackTailAggregateField `
+                    -Event $event `
+                    -Names $FingerprintNames `
+                    -Default '(missing)'
+            }
+            return $parts -join '|'
+        })
+    }
+
+    function Get-FallbackTailAggregateCarriedPeerReceiptEvidence {
+        param(
+            [Parameter(Mandatory = $true)]$Pairing,
+            [Parameter(Mandatory = $true)]$SuccessorYield,
+            [Parameter(Mandatory = $true)]$LocalReceipt
+        )
+
+        $successorAuthorityId = Get-FileTransferEventField `
+            -Event $Pairing `
+            -Name 'authority_id' `
+            -Default ''
+        $successorGeneration = Get-FileTransferEventInt64Field `
+            -Event $Pairing `
+            -Name 'yield_generation' `
+            -Default 0
+        $failedGeneration = Get-FileTransferEventInt64Field `
+            -Event $Pairing `
+            -Name 'failed_predecessor_yield_generation' `
+            -Default 0
+        if ([string]::IsNullOrWhiteSpace($successorAuthorityId) -or
+            $successorAuthorityId -in @('(none)', 'none') -or
+            $failedGeneration -le 0 -or
+            $successorGeneration -le $failedGeneration -or
+            (Get-FileTransferEventField -Event $Pairing -Name 'yield_kind' -Default '') -ne
+                'Quiescent' -or
+            (Get-FileTransferEventInt64Field `
+                -Event $Pairing `
+                -Name 'failed_successor_yield_generation' `
+                -Default 0) -ne $successorGeneration -or
+            (Get-FileTransferEventInt64Field `
+                -Event $Pairing `
+                -Name 'failed_supersession_carried_peer_proof' `
+                -Default 0) -ne 1 -or
+            -not (Test-FallbackTailAggregateLocalTuple `
+                -Anchor $Pairing `
+                -Candidate $SuccessorYield) -or
+            -not (Test-FallbackTailAggregateLocalTuple `
+                -Anchor $Pairing `
+                -Candidate $LocalReceipt)) {
+            return $null
+        }
+
+        [object[]]$failedYields = @($yieldEvents | Where-Object {
+            (Test-FallbackTailAggregateBefore -Earlier $_ -Later $SuccessorYield) -and
+            (Test-FallbackTailAggregateYieldShape -Event $_) -and
+            (Test-FallbackTailAggregateLocalScope -Anchor $Pairing -Candidate $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'yield_kind' -Default '') -eq 'Failed' -and
+            (Get-FileTransferEventInt64Field -Event $_ -Name 'yield_generation' -Default 0) -eq
+                $failedGeneration
+        })
+        [object[]]$failedYieldGroups = @(Get-FallbackTailAggregateDistinctGroups `
+            -InputEvents $failedYields `
+            -Fields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                'authority_id', 'yield_generation', 'owner_key', 'pair_key',
+                'route', 'protocol_version', 'route_publication_generation',
+                'route_commit_generation', 'runtime_generation',
+                'terminal_generation', 'leg_generation', 'transport_epoch',
+                'bridge_recovery_generation', 'checkpoint_generation',
+                'checkpoint_request_id', 'data_session_identity',
+                'data_session_generation'))
+        if ($failedYieldGroups.Count -ne 1) {
+            return $null
+        }
+        $failedYield = @($failedYieldGroups[0].Group | Sort-Object Sequence, LineNumber)[0]
+        $failedAuthorityId = Get-FileTransferEventField `
+            -Event $failedYield `
+            -Name 'authority_id' `
+            -Default ''
+        if ([string]::IsNullOrWhiteSpace($failedAuthorityId) -or
+            $failedAuthorityId -in @('(none)', 'none')) {
+            return $null
+        }
+
+        foreach ($candidate in @($SuccessorYield, $LocalReceipt, $Pairing)) {
+            if ((Get-FileTransferEventField -Event $candidate -Name 'yield_kind' -Default '') -ne
+                    'Quiescent' -or
+                (Get-FileTransferEventInt64Field `
+                    -Event $candidate `
+                    -Name 'failed_predecessor_yield_generation' `
+                    -Default 0) -ne $failedGeneration -or
+                (Get-FileTransferEventInt64Field `
+                    -Event $candidate `
+                    -Name 'failed_successor_yield_generation' `
+                    -Default 0) -ne $successorGeneration -or
+                (Get-FileTransferEventInt64Field `
+                    -Event $candidate `
+                    -Name 'failed_supersession_carried_peer_proof' `
+                    -Default 0) -ne 1 -or
+                -not (Test-FallbackTailAggregateAuthorityReference `
+                    -Reference (Get-FileTransferEventField `
+                        -Event $candidate `
+                        -Name 'failed_predecessor_authority_id' `
+                        -Default '__missing__') `
+                    -Expected $failedAuthorityId) -or
+                -not (Test-FallbackTailAggregateAuthorityReference `
+                    -Reference (Get-FileTransferEventField `
+                        -Event $candidate `
+                        -Name 'failed_successor_authority_id' `
+                        -Default '__missing__') `
+                    -Expected $successorAuthorityId)) {
+                return $null
+            }
+        }
+
+        [object[]]$supersessions = @($failedYieldSupersessionEvents | Where-Object {
+            (Test-FallbackTailAggregateBefore -Earlier $SuccessorYield -Later $_) -and
+            (Test-FallbackTailAggregateBefore -Earlier $_ -Later $LocalReceipt) -and
+            (Test-FallbackTailAggregateAccepted -Event $_) -and
+            (Test-FallbackTailAggregateLocalTuple -Anchor $Pairing -Candidate $_) -and
+            (Get-FileTransferEventField -Event $_ -Name 'yield_kind' -Default '') -eq
+                'Quiescent' -and
+            (Get-FileTransferEventInt64Field `
+                -Event $_ `
+                -Name 'failed_predecessor_yield_generation' `
+                -Default 0) -eq $failedGeneration -and
+            (Get-FileTransferEventInt64Field `
+                -Event $_ `
+                -Name 'failed_successor_yield_generation' `
+                -Default 0) -eq $successorGeneration -and
+            (Get-FileTransferEventInt64Field `
+                -Event $_ `
+                -Name 'failed_supersession_carried_peer_proof' `
+                -Default 0) -eq 1 -and
+            (Test-FallbackTailAggregateAuthorityReference `
+                -Reference (Get-FileTransferEventField `
+                    -Event $_ `
+                    -Name 'failed_predecessor_authority_id' `
+                    -Default '__missing__') `
+                -Expected $failedAuthorityId) -and
+            (Test-FallbackTailAggregateAuthorityReference `
+                -Reference (Get-FileTransferEventField `
+                    -Event $_ `
+                    -Name 'failed_successor_authority_id' `
+                    -Default '__missing__') `
+                -Expected $successorAuthorityId)
+        })
+        [object[]]$supersessionGroups = @(Get-FallbackTailAggregateDistinctGroups `
+            -InputEvents $supersessions `
+            -Fields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                'authority_id', 'yield_generation', 'failed_predecessor_authority_id',
+                'failed_predecessor_yield_generation', 'failed_successor_authority_id',
+                'failed_successor_yield_generation', 'owner_key', 'pair_key',
+                'route_publication_generation', 'runtime_generation',
+                'terminal_generation', 'transport_epoch',
+                'bridge_recovery_generation', 'data_session_identity',
+                'data_session_generation'))
+        if ($supersessionGroups.Count -ne 1) {
+            return $null
+        }
+
+        [object[]]$peerReceipts = @($peerReceiptEvents | Where-Object {
+            (Test-FallbackTailAggregateBefore -Earlier $failedYield -Later $_) -and
+            (Test-FallbackTailAggregateBefore -Earlier $_ -Later $SuccessorYield) -and
+            (Test-FallbackTailAggregatePeerReceiptMatch `
+                -Pairing $Pairing `
+                -Receipt $_ `
+                -LocalTupleAnchor $failedYield) -and
+            (Test-FallbackTailAggregatePendingPeerLineage `
+                -Pairing $Pairing `
+                -BoundReceipt $_)
+        })
+        [object[]]$peerReceiptGroups = @(Get-FallbackTailAggregateDistinctGroups `
+            -InputEvents $peerReceipts `
+            -Fields @(
+                'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                'authority_id', 'yield_generation', 'peer_authority_id',
+                'peer_predecessor_authority_id', 'peer_yield_generation',
+                'peer_direction', 'peer_owner_key', 'peer_pair_key',
+                'peer_live_route_epoch', 'peer_leg_generation',
+                'peer_bridge_recovery_generation', 'peer_transport_epoch',
+                'peer_checkpoint_request_id', 'data_session_identity',
+                'data_session_generation') `
+            -IdentityNames @(
+                'peer_observation_identity', 'peer_proof_identity',
+                'observation_identity', 'proof_identity') `
+            -FingerprintNames @(
+                'peer_frame_fingerprint', 'proof_frame_fingerprint',
+                'frame_fingerprint'))
+        if ($peerReceiptGroups.Count -ne 1) {
+            return $null
+        }
+
+        return [pscustomobject]@{
+            FailedYieldEvent = $failedYield
+            SupersessionEvent = @($supersessionGroups[0].Group | Sort-Object Sequence, LineNumber)[0]
+            PeerReceiptEvent = @($peerReceiptGroups[0].Group | Sort-Object Sequence, LineNumber)[0]
+        }
     }
 
     function Test-FallbackTailAggregatePendingPeerLineage {
@@ -3474,6 +3755,7 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
         [object[]]$matchingYields = @()
         [object[]]$matchingLocalReceipts = @()
         [object[]]$matchingPeerReceipts = @()
+        $carriedPeerEvidence = $null
         if ($valid) {
             $matchingYields = @($yieldEvents | Where-Object {
                 (Test-FallbackTailAggregateBefore -Earlier $_ -Later $pairing) -and
@@ -3494,6 +3776,17 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
                 (Test-FallbackTailAggregatePeerReceiptMatch -Pairing $pairing -Receipt $_) -and
                 (Test-FallbackTailAggregatePendingPeerLineage -Pairing $pairing -BoundReceipt $_)
             } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+            if ($matchingPeerReceipts.Count -eq 0 -and
+                $matchingYields.Count -eq 1 -and
+                $matchingLocalReceipts.Count -eq 1) {
+                $carriedPeerEvidence = Get-FallbackTailAggregateCarriedPeerReceiptEvidence `
+                    -Pairing $pairing `
+                    -SuccessorYield $matchingYields[0] `
+                    -LocalReceipt $matchingLocalReceipts[0]
+                if ($null -ne $carriedPeerEvidence) {
+                    $matchingPeerReceipts = @($carriedPeerEvidence.PeerReceiptEvent)
+                }
+            }
             $valid = $matchingYields.Count -eq 1 -and
                 $matchingLocalReceipts.Count -eq 1 -and
                 $matchingPeerReceipts.Count -eq 1 -and
@@ -3508,6 +3801,7 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
                     YieldEvent = $matchingYields[0]
                     LocalReceiptEvent = $matchingLocalReceipts[0]
                     PeerReceiptEvent = $matchingPeerReceipts[0]
+                    CarriedPeerEvidence = $carriedPeerEvidence
                 }) | Out-Null
             }
         }
