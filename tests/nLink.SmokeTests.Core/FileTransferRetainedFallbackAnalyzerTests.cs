@@ -141,7 +141,7 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     [Fact]
     [Trait("RetainedFallbackSuite", "Efficiency")]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_EfficiencySummary_PostYieldFallbackChurnIsTreadmill()
+    public async Task AnalyzeRetained_EfficiencySummary_UnpairedYieldFallbackChurnIsWarning()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -163,9 +163,19 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
 
         Assert.Equal(0, result.Script.ExitCode);
         var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
-        Assert.Equal("fail", efficiency["efficiency_verdict"]);
-        Assert.Equal("fallback_tail_efficiency_treadmill", efficiency["efficiency_failure_class"]);
         Assert.Equal("1", efficiency["post_yield_recovery_activity_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 0,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning");
     }
 
     [Fact]
@@ -271,6 +281,938 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("0", efficiency["post_yield_recovery_activity_count"]);
         Assert.Equal("0", efficiency["post_yield_liveness_activity_count"]);
         Assert.Equal("0", efficiency["repeated_unchanged_frontier_tuple_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_LaterRouteCycleDoesNotExtendExactPairedYieldWindow(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_exact_window_next_cycle";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_leg_transport_epoch_adopted; " +
+            $"{ExactYieldDirectScope(transferId, transportEpoch: 3)}; previous_transport_epoch=2; " +
+            "retired_checkpoint_request_id=(none); current_checkpoint_request_id=(none); " +
+            "state=recovery_active; can_send_data=1; reason=transport_recovered_unproven; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset: 8));
+        for (var operation = 0; operation < 26; operation++)
+        {
+            AppendMirroredEfficiencyDeliveryEffect(
+                lines,
+                transferId,
+                operation,
+                liveRouteEpoch: 4,
+                runtimeGeneration: 5,
+                legGeneration: 5,
+                routePublicationGeneration: 7,
+                transportEpoch: 4,
+                bridgeRecoveryGeneration: 2,
+                secondsOffset: 10 + operation);
+        }
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_receiver_state_coalesced; transfer_id={transferId}; session_id=sess_efficiency_exact; " +
+            "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; " +
+            "runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=7; " +
+            "transport_epoch=4; bridge_recovery_generation=2; checkpoint_request_id=(none); " +
+            "previous_committed_chunk_index=5970; current_committed_chunk_index=5971; committed_delta=1; " +
+            "last_sent_committed_chunk_index=5970; suppressed_repeat_count=0; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 40));
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 50);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Exact-window next-cycle analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("52", efficiency["post_yield_recovery_activity_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_MoreThanFiftyDistinctExactSourceEffectsAreTreadmill(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_exact_window_threshold";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        for (var operation = 0; operation < 51; operation++)
+        {
+            AppendMirroredEfficiencyDeliveryEffect(
+                lines,
+                transferId,
+                operation,
+                secondsOffset: 8 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 70);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Exact-window threshold analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("102", efficiency["post_yield_recovery_activity_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 51,
+            distinctOperationCount: 51,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 1,
+            distinctFailureCount: 1,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 1,
+            verdict: "fail",
+            failureClass: "fallback_tail_efficiency_treadmill");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_DeduplicatesMirroredDeliveryAndStateRefreshLifecycle(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_exact_window_dedupe";
+        const string requestId = "v6-regular-nkn-state-refresh:41";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId, requestId);
+        AppendMirroredEfficiencyDeliveryEffect(
+            lines,
+            transferId,
+            operation: 0,
+            checkpointRequestId: requestId,
+            secondsOffset: 8);
+        var directScope = ExactYieldDirectScope(transferId, requestId);
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_checkpoint_requested; {directScope}; checkpoint_generation=41; " +
+            "reason=state_refresh_recovery; decision_status=Accepted; authority_effect=positive; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset: 9));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_requested; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; request_sequence=41; " +
+            "reason=state_refresh_recovery; priority=state_refresh; transport_epoch=2; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset: 10));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_send_queued; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; generation=41; priority=state_refresh; " +
+            "source=post_tuna_fallback; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 11));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; generation=41; transport_epoch=2; " +
+            "reused_pending_checkpoint=0; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 12));
+        var received = LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_received; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; generation=41; transport_epoch=2; " +
+            "recovery_mode=state_refresh; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 13);
+        var resent = LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_state_resent; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; generation=41; sent=1; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset: 14);
+        lines.Add(received);
+        lines.Add(received);
+        lines.Add(resent);
+        lines.Add(resent);
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Exact-window dedupe analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("9", efficiency["post_yield_recovery_activity_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 2,
+            distinctOperationCount: 2,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning");
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_ProductionStateRefreshDeliveryBindsItsOwnGenerationDomain()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_state_refresh_production_binding";
+        const string requestId = "v6-regular-nkn-state-refresh:41";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId, requestId);
+        var directScope = ExactYieldDirectScope(transferId, requestId);
+        lines.Add(LogLine(
+            $"event=filetransfer_control_plane_delivery_result; {directScope}; kind=fallback_checkpoint_request; " +
+            "authority_id=fta2-control-plane-production-state-refresh; control_plane_generation=1; " +
+            "reason=post_tuna_fallback_state_refresh; recovery_mode=regular_nkn_state_refresh; " +
+            "accepted_any=1; peer_visible_any=1; local_only_rejected=0; authority_effect=positive; " +
+            "decision_status=Accepted; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 8));
+        AppendEfficiencyStateRefreshLifecycle(lines, transferId, requestId, generation: 41);
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Production state-refresh binding analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 1,
+            distinctOperationCount: 1,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning");
+    }
+
+    [Theory]
+    [InlineData(false, "one_sided")]
+    [InlineData(true, "one_sided")]
+    [InlineData(false, "stale")]
+    [InlineData(true, "stale")]
+    [InlineData(false, "wrong_scope")]
+    [InlineData(true, "wrong_scope")]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_ExcludesUnpairedStaleAndWrongScopeEvidence(
+        bool compact,
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_exact_window_negative";
+        var lines = mutation == "one_sided"
+            ? BuildOneSidedYieldEfficiencyPrefix(transferId)
+            : BuildExactPairedYieldEfficiencyPrefix(transferId);
+        if (mutation == "one_sided")
+        {
+            AppendMirroredEfficiencyDeliveryEffect(lines, transferId, operation: 0, secondsOffset: 4);
+        }
+        else if (mutation == "stale")
+        {
+            var directScope = ExactYieldDirectScope(transferId);
+            lines.Add(LogLine(
+                $"event=filetransfer_runtime_owner_stale_update_rejected; {directScope}; " +
+                "source=retired_fallback_owner; attempted_action=checkpoint_reissue; authority_effect=none; " +
+                "decision_status=Rejected; reason=runtime_generation_mismatch; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8));
+            lines.Add(LogLine(
+                $"event=filetransfer_fallback_tail_retired_owner_update_suppressed; {directScope}; " +
+                "source=retired_fallback_owner; attempted_action=checkpoint_reissue; authority_effect=none; " +
+                "decision_status=Rejected; reason=post_yield_replay; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 9));
+            lines.Add(LogLine(
+                $"event=filetransfer_control_plane_delivery_result; {directScope}; kind=receiver_state; " +
+                "authority_schema=2; authority_id=fta2-control-plane-stale; control_plane_generation=1; " +
+                "reason=state_refresh_recovery; frame_type=filetransfer.receiver_state.v6; accepted_any=0; " +
+                "peer_visible_any=0; local_only_rejected=1; authority_effect=none; decision_status=Rejected; " +
+                "log_writer_id=writer_efficiency_exact",
+                secondsOffset: 10));
+            lines.Add(LogLine(
+                $"event=filetransfer_fallback_checkpoint_reissue_requested; {directScope}; " +
+                "authority_effect=none; decision_status=Rejected; reason=stale_owner; " +
+                "log_writer_id=writer_efficiency_exact",
+                secondsOffset: 11));
+        }
+        else
+        {
+            AppendMirroredEfficiencyDeliveryEffect(
+                lines,
+                transferId,
+                operation: 0,
+                writerId: "writer_other",
+                secondsOffset: 8);
+            AppendMirroredEfficiencyDeliveryEffect(
+                lines,
+                transferId,
+                operation: 1,
+                sessionId: "sess_other",
+                secondsOffset: 9);
+            AppendMirroredEfficiencyDeliveryEffect(
+                lines,
+                transferId,
+                operation: 2,
+                liveRouteEpoch: 4,
+                runtimeGeneration: 5,
+                legGeneration: 5,
+                routePublicationGeneration: 7,
+                transportEpoch: 4,
+                bridgeRecoveryGeneration: 2,
+                secondsOffset: 10);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Exact-window negative analysis failed ({mutation}).{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: mutation == "one_sided" ? 0 : 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: mutation == "stale" ? "warning" : "pass",
+            failureClass: mutation == "stale" ? "efficiency_warning" : "none");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_ExactSourcePressureRemainsTreadmill(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_exact_window_pressure";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        lines.Add(LogLine(
+            $"event=filetransfer_post_tuna_fallback_control_plane_pressure_marked; {ExactYieldDirectScope(transferId)}; " +
+            "pressure_generation=1; kind=receiver_state; reason=frontier_stalled; authority_effect=positive; " +
+            "decision_status=Accepted; outcome=StaleRejected; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 8));
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Exact-window pressure analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("1", efficiency["post_yield_recovery_activity_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 1,
+            distinctOperationCount: 1,
+            exactWindowCount: 1,
+            pressureEffectCount: 1,
+            rawFailureCount: 1,
+            distinctFailureCount: 1,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 1,
+            verdict: "fail",
+            failureClass: "fallback_tail_efficiency_treadmill");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_DuplicateAndNonAuthoritativeFrontierRowsDoNotTripThreshold(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_frontier_duplicate_noise";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        AppendEfficiencyFrontierRequestEffect(lines, transferId, operation: 1);
+        var exactDuplicate = lines[^1];
+        for (var copy = 0; copy < 60; copy++)
+        {
+            lines.Add(exactDuplicate);
+        }
+        for (var operation = 2; operation < 62; operation++)
+        {
+            var decisionStatus = operation % 3 == 0 ? "Stale" : operation % 3 == 1 ? "Rejected" : "Accepted";
+            AppendEfficiencyFrontierRequestEffect(
+                lines,
+                transferId,
+                operation,
+                decisionStatus,
+                authorityEffect: "none",
+                secondsOffset: 9 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 80);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Frontier duplicate/no-authority analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("0", efficiency["post_yield_repeated_unchanged_frontier_tuple_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_DistinctSameSourceFrontierEffectsCanTripThreshold(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_frontier_distinct_effects";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        for (var operation = 0; operation < 52; operation++)
+        {
+            AppendEfficiencyFrontierRequestEffect(
+                lines,
+                transferId,
+                operation,
+                secondsOffset: 8 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 70);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Distinct frontier-effect analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("51", efficiency["post_yield_repeated_unchanged_frontier_tuple_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 1,
+            distinctFailureCount: 1,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 1,
+            verdict: "fail",
+            failureClass: "fallback_tail_efficiency_treadmill");
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_MutatedRepeatedOperationIdentityIsNotCounted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_frontier_identity_mutation";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        AppendEfficiencyFrontierRequestEffect(lines, transferId, operation: 1, secondsOffset: 8);
+        lines.Add(lines[^1].Replace(
+            "request_correlation_id=frontier-effect-1",
+            "request_correlation_id=frontier-effect-mutated",
+            StringComparison.Ordinal));
+        AppendEfficiencyFrontierRequestEffect(lines, transferId, operation: 2, secondsOffset: 9);
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Repeated-operation mutation analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("0", efficiency["post_yield_repeated_unchanged_frontier_tuple_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning");
+    }
+
+    [Theory]
+    [InlineData("wrong_writer")]
+    [InlineData("wrong_direction")]
+    [InlineData("wrong_scope")]
+    [InlineData("aba_generation")]
+    [InlineData("competing_binding")]
+    [InlineData("missing_generation")]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_AmbiguousStateRefreshLifecycleIsNotAttributed(
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_state_refresh_ambiguous";
+        const string requestId = "v6-regular-nkn-state-refresh:41";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId, requestId);
+        var binding = LogLine(
+            $"event=filetransfer_fallback_checkpoint_requested; {ExactYieldDirectScope(transferId, requestId)}; " +
+            "checkpoint_generation=41; reason=state_refresh_recovery; decision_status=Accepted; " +
+            "authority_effect=positive; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 8);
+        lines.Add(binding);
+        switch (mutation)
+        {
+            case "wrong_writer":
+                AppendEfficiencyStateRefreshLifecycle(
+                    lines,
+                    transferId,
+                    requestId,
+                    generation: 41,
+                    writerId: "writer_other");
+                break;
+            case "wrong_direction":
+                AppendEfficiencyStateRefreshLifecycle(
+                    lines,
+                    transferId,
+                    requestId,
+                    generation: 41,
+                    extraScope: "direction=inbound");
+                break;
+            case "wrong_scope":
+                AppendEfficiencyStateRefreshLifecycle(
+                    lines,
+                    transferId,
+                    requestId,
+                    generation: 41,
+                    extraScope: "direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=7; bridge_recovery_generation=2; data_session_identity=data-session-2; data_session_generation=2");
+                break;
+            case "aba_generation":
+                AppendEfficiencyStateRefreshLifecycle(lines, transferId, requestId, generation: 41);
+                AppendEfficiencyStateRefreshLifecycle(lines, transferId, requestId, generation: 42, secondsOffset: 12);
+                AppendEfficiencyStateRefreshLifecycle(lines, transferId, requestId, generation: 41, secondsOffset: 14);
+                break;
+            case "competing_binding":
+                lines.Add(binding.Replace("checkpoint_generation=41", "checkpoint_generation=42", StringComparison.Ordinal));
+                AppendEfficiencyStateRefreshLifecycle(lines, transferId, requestId, generation: 41);
+                break;
+            case "missing_generation":
+                var lifecycleStart = lines.Count;
+                AppendEfficiencyStateRefreshLifecycle(lines, transferId, requestId, generation: 41);
+                for (var index = lifecycleStart; index < lines.Count; index++)
+                {
+                    lines[index] = lines[index]
+                        .Replace("request_sequence=41", "request_sequence=(none)", StringComparison.Ordinal)
+                        .Replace("generation=41", "generation=(none)", StringComparison.Ordinal);
+                }
+                break;
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 30);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Ambiguous state-refresh analysis failed ({mutation}).{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "pass",
+            failureClass: "none");
+    }
+
+    [Theory]
+    [InlineData("unique", 1)]
+    [InlineData("competing_generation", 0)]
+    [InlineData("missing_generation", 0)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_BridgeLifecycleRequiresOneExactGeneration(
+        string mutation,
+        int expectedEffectCount)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_bridge_binding";
+        const string leaseAuthorityId = "fta2-recovery-liveness-lease-efficiency";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        var directScope = ExactYieldDirectScope(transferId);
+        lines.Add(LogLine(
+            $"event=filetransfer_bridge_recovery_authority_granted; {directScope}; " +
+            $"recovery_liveness_lease_authority_id={leaseAuthorityId}; recovery_liveness_lease_generation=41; " +
+            "decision_status=Accepted; authority_effect=positive; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 8));
+        if (mutation == "competing_generation")
+        {
+            lines.Add(LogLine(
+                $"event=filetransfer_bridge_recovery_authority_granted; {directScope}; " +
+                $"recovery_liveness_lease_authority_id={leaseAuthorityId}; recovery_liveness_lease_generation=42; " +
+                "decision_status=Accepted; authority_effect=positive; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 9));
+        }
+        var lifecycleGeneration = mutation == "missing_generation"
+            ? "(none)"
+            : "41";
+        lines.Add(LogLine(
+            $"event=filetransfer_bridge_recovery_execution_command_issued; {directScope}; " +
+            $"recovery_liveness_lease_authority_id={leaseAuthorityId}; " +
+            $"recovery_liveness_lease_generation={lifecycleGeneration}; decision_status=Accepted; " +
+            "authority_effect=positive; log_writer_id=writer_efficiency_exact",
+            secondsOffset: 10));
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Bridge binding analysis failed ({mutation}).{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: expectedEffectCount,
+            distinctOperationCount: expectedEffectCount,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: expectedEffectCount == 1 ? "warning" : "pass",
+            failureClass: expectedEffectCount == 1 ? "efficiency_warning" : "none");
+    }
+
+    [Theory]
+    [InlineData("identical")]
+    [InlineData("identical_data_session")]
+    [InlineData("rejected")]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_IdenticalOrRejectedBarrierDoesNotCloseWindow(
+        string barrierKind)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_non_closing_barrier";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        lines.Add(barrierKind switch
+        {
+            "identical" => LogLine(
+                $"event=filetransfer_runtime_started; {ExactYieldDirectScope(transferId)}; " +
+                "runtime_profile=default_v6; decision_status=Accepted; authority_effect=positive; " +
+                "log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8),
+            "identical_data_session" => LogLine(
+                $"event=filetransfer_data_session_recreated; {ExactYieldRouteScope(transferId)}; " +
+                "previous_data_session_identity=data-session-1; previous_data_session_generation=1; " +
+                "current_data_session_identity=data-session-1; current_data_session_generation=1; " +
+                "decision_status=Accepted; reason=idempotent_current_session; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8),
+            _ => LogLine(
+                $"event=filetransfer_route_selected; {ExactYieldDirectScope(transferId, liveRouteEpoch: 4, runtimeGeneration: 5, legGeneration: 5, routePublicationGeneration: 7, transportEpoch: 4, bridgeRecoveryGeneration: 2, dataSessionIdentity: "data-session-2", dataSessionGeneration: 2)}; " +
+                "target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; " +
+                "route_publication_action_kind=RoutePublication; coordinator_decision_reason=rejected; " +
+                "decision_status=Rejected; authority_effect=none; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8)
+        });
+        for (var operation = 0; operation < 51; operation++)
+        {
+            AppendMirroredEfficiencyDeliveryEffect(lines, transferId, operation, secondsOffset: 10 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 70);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Non-closing barrier analysis failed ({barrierKind}).{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 51,
+            distinctOperationCount: 51,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 1,
+            distinctFailureCount: 1,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 1,
+            verdict: "fail",
+            failureClass: "fallback_tail_efficiency_treadmill");
+    }
+
+    [Theory]
+    [InlineData("checkpoint")]
+    [InlineData("data_session")]
+    [InlineData("disposal")]
+    [InlineData("runtime_disposal")]
+    [InlineData("route_hint")]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_GenuineSourceBoundaryClosesWindow(
+        string barrierKind)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_closing_barrier";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        lines.Add(barrierKind switch
+        {
+            "checkpoint" => LogLine(
+                $"event=filetransfer_fallback_checkpoint_exchange_started; {ExactYieldRouteScope(transferId)}; " +
+                "transport_epoch=2; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:42; " +
+                "current_checkpoint_request_id=v6-regular-nkn-state-refresh:42; previous_checkpoint_request_id=(none); " +
+                "decision_status=Accepted; authority_effect=positive; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8),
+            "data_session" => LogLine(
+                $"event=filetransfer_data_session_recreated; {ExactYieldRouteScope(transferId)}; " +
+                "previous_data_session_identity=data-session-1; previous_data_session_generation=1; " +
+                "current_data_session_identity=data-session-2; current_data_session_generation=2; " +
+                "decision_status=Accepted; reason=replaced_current_session; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8),
+            "runtime_disposal" => LogLine(
+                $"event=filetransfer_runtime_disposed; {ExactYieldDirectScope(transferId)}; " +
+                "decision_status=Accepted; reason=disposed; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8),
+            "route_hint" => LogLine(
+                $"event=filetransfer_route_hint_authorized_publication_accepted; {ExactYieldDirectScope(transferId)}; " +
+                "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+                "route_publication_action_kind=RouteCommitPublication; coordinator_decision_reason=accepted; " +
+                "log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8),
+            _ => LogLine(
+                $"event=filetransfer_data_session_removed; {ExactYieldDirectScope(transferId)}; " +
+                "decision_status=Accepted; reason=disposed; log_writer_id=writer_efficiency_exact",
+                secondsOffset: 8)
+        });
+        for (var operation = 0; operation < 51; operation++)
+        {
+            AppendMirroredEfficiencyDeliveryEffect(lines, transferId, operation, secondsOffset: 10 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 70);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Closing barrier analysis failed ({barrierKind}).{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "pass",
+            failureClass: "none");
+    }
+
+    [Theory]
+    [InlineData("wrong_reason")]
+    [InlineData("ambiguous")]
+    [InlineData("negative_grant")]
+    [InlineData("negative_retirement")]
+    [InlineData("ambiguous_pairing")]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_RetirementMustBeUniqueAndQuiescent(
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_retirement_strict";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        var retirementIndex = lines.FindIndex(line =>
+            line.Contains("event=filetransfer_fallback_tail_recovery_owner_retired_after_yield", StringComparison.Ordinal));
+        Assert.True(retirementIndex >= 0);
+        if (mutation == "wrong_reason")
+        {
+            lines[retirementIndex] = lines[retirementIndex].Replace(
+                "reason=fallback_tail_quiescent",
+                "reason=cleanup_only",
+                StringComparison.Ordinal);
+        }
+        else if (mutation == "ambiguous")
+        {
+            lines.Insert(
+                retirementIndex + 1,
+                lines[retirementIndex].Replace(
+                    "previous_handoff_epoch=2",
+                    "previous_handoff_epoch=3",
+                    StringComparison.Ordinal));
+        }
+        else if (mutation == "negative_grant")
+        {
+            var grantIndex = lines.FindIndex(line =>
+                line.Contains("event=filetransfer_fallback_tail_paired_yield_granted", StringComparison.Ordinal));
+            Assert.True(grantIndex >= 0);
+            lines[grantIndex] = lines[grantIndex].Replace(
+                "decision_status=Accepted",
+                "decision_status=Rejected; authority_effect=none",
+                StringComparison.Ordinal);
+        }
+        else if (mutation == "negative_retirement")
+        {
+            lines[retirementIndex] = lines[retirementIndex].Replace(
+                "reason=fallback_tail_quiescent",
+                "decision_status=StaleRejected; authority_effect=none; reason=fallback_tail_quiescent",
+                StringComparison.Ordinal);
+        }
+        else
+        {
+            var pairingIndex = lines.FindIndex(line =>
+                line.Contains("event=filetransfer_fallback_tail_pairing_committed", StringComparison.Ordinal));
+            Assert.True(pairingIndex >= 0);
+            var competingPairing = lines[pairingIndex].Replace(
+                "peer_authority_id=fta2-fallback_tail_yield-89abcdef0123456701234567",
+                "peer_authority_id=fta2-fallback_tail_yield-fedcba9876543210fedcba98",
+                StringComparison.Ordinal);
+            Assert.NotEqual(lines[pairingIndex], competingPairing);
+            lines.Insert(pairingIndex + 1, competingPairing);
+        }
+        AppendMirroredEfficiencyDeliveryEffect(lines, transferId, operation: 1, secondsOffset: 10);
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 20);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Strict retirement analysis failed ({mutation}).{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 0,
+            distinctOperationCount: 0,
+            exactWindowCount: 0,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "pass",
+            failureClass: "none");
     }
 
     [Fact]
@@ -3406,7 +4348,9 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
                 ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
                 : null);
 
-        Assert.Equal(0, result.Script.ExitCode);
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Stall-grace analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count"]);
         Assert.Equal("1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count"]);
@@ -3418,6 +4362,90 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
             Assert.Equal("filetransfer_fallback_frontier_stall_grace_recheck_missing", verdict["recovery_failure_class"]);
             Assert.Equal("settled_frontier_progress_successor_not_rechecked_after_stall_grace", verdict["failure_variant"]);
         }
+    }
+
+    [Theory]
+    [InlineData(false, "complete", true)]
+    [InlineData(true, "complete", true)]
+    [InlineData(false, "missing_finalize", false)]
+    [InlineData(true, "missing_finalize", false)]
+    [InlineData(false, "wrong_frontier", false)]
+    [InlineData(true, "failed_terminal", false)]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    public async Task AnalyzeRetained_PostFallbackFrontierStallGraceTerminalFrontier_HasFullCompactParity(
+        bool compact,
+        string outcome,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_terminal";
+        const string sessionId = "sess_terminal";
+        const string writer = "writer_terminal";
+        const string predecessorAuthority = "fta2-repair_replay-terminal-predecessor";
+        const string successorAuthority = "fta2-repair_replay-terminal-successor";
+        const string successorRequest = "v6-frontier:41:2";
+        const string successorCorrelation = "frq-terminal-successor";
+        const string predecessorKey = "fallback-frontier:40:1:predecessor-range";
+        const string successorKey = "fallback-frontier:41:1:successor-range";
+        const string scope = "direction=inbound; session_id=sess_terminal; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; " +
+            "bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); " +
+            "route_publication_generation=5; route_commit_generation=0; log_writer_id=writer_terminal";
+        var predecessor = $"authority_schema=2; authority_id={predecessorAuthority}; predecessor_authority_id=(none); {scope}; " +
+            $"repair_generation=4; repair_request_key={predecessorKey}; range_fingerprint=predecessor-range; " +
+            "frontier_chunk_index=40; durable_received_highest_chunk_index=60; range_count=1; requested_chunk_count=1; " +
+            "source_kind=ReceiverRequest; primary_protocol_repair_request_id=v6-frontier:40:1; " +
+            "primary_request_correlation_id=frq-terminal-predecessor; target_transport=regular_nkn";
+        var successor = $"authority_schema=2; authority_id={successorAuthority}; predecessor_authority_id={predecessorAuthority}; {scope}; " +
+            $"repair_generation=5; repair_request_key={successorKey}; range_fingerprint=successor-range; " +
+            "frontier_chunk_index=41; durable_received_highest_chunk_index=60; range_count=1; requested_chunk_count=1; " +
+            $"source_kind=ReceiverRequest; primary_protocol_repair_request_id={successorRequest}; " +
+            $"primary_request_correlation_id={successorCorrelation}; target_transport=regular_nkn";
+        var terminalFrontier = outcome == "wrong_frontier" ? 60 : 61;
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; transfer_id={transferId}; {scope}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {predecessor}"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {predecessor}; settlement_outcome=ProgressObserved; dispatch_observed=1"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; transfer_id={transferId}; {predecessor}; previous_frontier_chunk_index=40; current_frontier_chunk_index=41"),
+            LogLine($"event=filetransfer_v6_fallback_frontier_repair_progress_state_forced; transfer_id={transferId}; {predecessor}; previous_frontier_chunk_index=40; current_frontier_chunk_index=41; receiver_state_epoch=7; data_session_identity=data-session-terminal; data_session_generation=1; decision_status=Accepted"),
+            LogLine($"event=filetransfer_v6_receiver_state_sent; transfer_id={transferId}; {scope}; epoch=7; contiguous_committed_chunk_index=41; durable_received_highest_chunk_index=60; log_writer_attempt_utc_ticks=639000000000000000"),
+            LogLine($"event=filetransfer_v6_frontier_request_deferred; transfer_id={transferId}; {scope}; data_session_identity=data-session-terminal; data_session_generation=1; frontier_chunk_index=41; highest_received_chunk_index=60; elapsed_ms=0; stall_grace_ms=750; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; reason=retry; log_writer_attempt_utc_ticks=639000000001000000", secondsOffset: 1),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {successor}", secondsOffset: 2),
+            LogLine($"event=filetransfer_control_plane_delivery_observed; transfer_id={transferId}; direction=inbound; session_id={sessionId}; log_writer_id={writer}; kind=frontier_request; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; bridge_recovery_generation=1; transport_epoch=1; checkpoint_request_id=(none); reason=frontier_stall_grace_elapsed; repair_request_id={successorRequest}; request_correlation_id={successorCorrelation}; repair_request_key={successorKey}; range_fingerprint=successor-range; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; transfer_id={transferId}; {successor}; protocol_repair_request_id={successorRequest}; request_correlation_id={successorCorrelation}; dispatch_observed=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_v6_frontier_request_sent; transfer_id={transferId}; {successor}; repair_request_id={successorRequest}; request_correlation_id={successorCorrelation}; reason=frontier_stall_grace_elapsed", secondsOffset: 2),
+            LogLine($"event=filetransfer_v6_frontier_stall_grace_recheck_decided; transfer_id={transferId}; {scope}; data_session_identity=data-session-terminal; data_session_generation=1; frontier_chunk_index=41; highest_received_chunk_index=60; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; decision_status=dispatched; decision_reason=exact_receiver_request_dispatched; authority_effect=none", secondsOffset: 2),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {successor}; settlement_outcome=ProgressObserved; dispatch_observed=1", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; transfer_id={transferId}; {successor}; previous_frontier_chunk_index=41; current_frontier_chunk_index={terminalFrontier}", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_tail_terminal_proof_consumed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; leg_id=leg:5; leg_generation=5; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; transport_epoch=1; committed_chunk=61; chunk_count=61; reason=chunk_batch_committed; log_writer_id={writer}", secondsOffset: 3),
+            LogLine($"event=integrity_verify_passed; direction=inbound; transfer_id={transferId}; session_id={sessionId}; file_size_bytes=268435456; log_writer_id={writer}", secondsOffset: 4)
+        };
+        if (outcome != "missing_finalize")
+        {
+            lines.Add(LogLine($"event=temp_finalize_succeeded; direction=inbound; transfer_id={transferId}; session_id={sessionId}; file_size_bytes=268435456; saved_path=C:\\received\\payload.bin; log_writer_id={writer}", secondsOffset: 5));
+        }
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state={(outcome == "failed_terminal" ? "Failed" : "Completed")}; error_code={(outcome == "failed_terminal" ? "integrity_failed" : "(none)")}; saved_path=C:\\received\\payload.bin; log_writer_id={writer}", secondsOffset: 6));
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Terminal-frontier analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count"]);
+        Assert.Equal(recovered ? "pass" : "fail", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict"]);
     }
 
     [Theory]
@@ -7276,6 +8304,247 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=route_cycle_missing; integrity_ok=0", secondsOffset: 7));
         lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=route_cycle_missing; saved_path=(none); integrity_ok=0", secondsOffset: 7));
         return lines.ToArray();
+    }
+
+    private static List<string> BuildExactPairedYieldEfficiencyPrefix(
+        string transferId,
+        string checkpointRequestId = "(none)")
+    {
+        const string sessionId = "sess_efficiency_exact";
+        const string writerId = "writer_efficiency_exact";
+        var pairKey =
+            $"{sessionId}|{transferId}|post_tuna_fallback_v6|6|2|2|{checkpointRequestId}";
+        var lines = BuildFallbackTailCoordinatorAggregateFixture(
+                peerFirst: false)
+            .Where(line => !line.Contains("event=file_transfer_", StringComparison.Ordinal))
+            .Select(line => line
+                .Replace("sess_fallback_tail_aggregate", sessionId, StringComparison.Ordinal)
+                .Replace("transfer_fallback_tail_aggregate", transferId, StringComparison.Ordinal)
+                .Replace(
+                    "checkpoint_request_id=(none)",
+                    $"checkpoint_request_id={checkpointRequestId}",
+                    StringComparison.Ordinal)
+                .Replace("|(none)", $"|{checkpointRequestId}", StringComparison.Ordinal) +
+                $"; log_writer_id={writerId}")
+            .ToList();
+        var pairingIndex = lines.FindIndex(line =>
+            line.Contains("event=filetransfer_fallback_tail_pairing_committed", StringComparison.Ordinal));
+        lines.Insert(pairingIndex, LogLine(
+            $"event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; {ExactYieldDirectScope(transferId, checkpointRequestId)}; " +
+            "leg_id=leg:3; previous_handoff_epoch=2; previous_handoff_state=backfill_repair; " +
+            "discarded_repair_frame_count=0; discarded_repair_chunk_count=0; reason=fallback_tail_quiescent; " +
+            $"log_writer_id={writerId}",
+            secondsOffset: 4));
+        pairingIndex++;
+        lines[pairingIndex] = lines[pairingIndex]
+            .Replace(
+                "release_kind=FallbackPairedTailYield",
+                "pairing_state=Paired; release_kind=FallbackPairedTailYield",
+                StringComparison.Ordinal)
+            .Replace(
+                "decision_status=Accepted; decision_reason=accepted",
+                $"peer_canonical_pair_key={pairKey}; decision_status=Accepted; decision_reason=accepted",
+                StringComparison.Ordinal);
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_tail_quiescent_yield_granted; session_id={sessionId}; " +
+            $"transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "leg_generation=3; transport_epoch=2; bridge_recovery_generation=1; " +
+            $"checkpoint_request_id={checkpointRequestId}; committed_chunk=5970; highest_observed_chunk=5970; " +
+            $"state=active; can_send_data=1; reason=fallback_tail_quiescent; log_writer_id={writerId}",
+            secondsOffset: 6));
+        lines.Add(lines[pairingIndex]
+            .Replace(
+                "event=filetransfer_fallback_tail_pairing_committed",
+                "event=filetransfer_fallback_tail_paired_yield_granted",
+                StringComparison.Ordinal)
+            .Replace(
+                "decision_status=Accepted; decision_reason=accepted",
+                "reason=fallback_tail_paired_yield; decision_status=Accepted; decision_reason=accepted",
+                StringComparison.Ordinal));
+        return lines;
+    }
+
+    private static List<string> BuildOneSidedYieldEfficiencyPrefix(string transferId)
+    {
+        const string writerId = "writer_efficiency_exact";
+        var directScope = ExactYieldDirectScope(transferId);
+        return
+        [
+            LogLine(
+                $"event=filetransfer_route_selected; {directScope}; target_route=post_tuna_fallback_v6; " +
+                "target_protocol_version=6; target_transport=regular_nkn; " +
+                "route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted; " +
+                $"log_writer_id={writerId}",
+                secondsOffset: 0),
+            LogLine(
+                $"event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; {directScope}; " +
+                "leg_id=leg:3; previous_handoff_epoch=2; previous_handoff_state=backfill_repair; " +
+                "discarded_repair_frame_count=0; discarded_repair_chunk_count=0; " +
+                $"reason=fallback_tail_quiescent; log_writer_id={writerId}",
+                secondsOffset: 1),
+            LogLine(
+                $"event=filetransfer_fallback_tail_quiescent_yield_granted; {directScope}; leg_id=leg:3; " +
+                "committed_chunk=5970; highest_observed_chunk=5970; state=active; can_send_data=1; " +
+                $"reason=fallback_tail_quiescent; log_writer_id={writerId}",
+                secondsOffset: 2)
+        ];
+    }
+
+    private static string ExactYieldRouteScope(
+        string transferId,
+        string route = "post_tuna_fallback_v6",
+        int protocolVersion = 6,
+        int liveRouteEpoch = 2,
+        int runtimeGeneration = 3,
+        int legGeneration = 3,
+        int routePublicationGeneration = 5,
+        string sessionId = "sess_efficiency_exact")
+        => $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; route={route}; " +
+           $"protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; " +
+           $"route_publication_generation={routePublicationGeneration}; route_commit_generation=0; " +
+           $"runtime_generation={runtimeGeneration}; terminal_generation=0; leg_generation={legGeneration}";
+
+    private static string ExactYieldDirectScope(
+        string transferId,
+        string checkpointRequestId = "(none)",
+        string route = "post_tuna_fallback_v6",
+        int protocolVersion = 6,
+        int liveRouteEpoch = 2,
+        int runtimeGeneration = 3,
+        int legGeneration = 3,
+        int routePublicationGeneration = 5,
+        int transportEpoch = 2,
+        int bridgeRecoveryGeneration = 1,
+        string dataSessionIdentity = "data-session-1",
+        int dataSessionGeneration = 1,
+        string sessionId = "sess_efficiency_exact")
+        => $"{ExactYieldRouteScope(transferId, route, protocolVersion, liveRouteEpoch, runtimeGeneration, legGeneration, routePublicationGeneration, sessionId)}; " +
+           $"transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; " +
+           $"checkpoint_request_id={checkpointRequestId}; data_session_identity={dataSessionIdentity}; " +
+           $"data_session_generation={dataSessionGeneration}";
+
+    private static void AppendMirroredEfficiencyDeliveryEffect(
+        List<string> lines,
+        string transferId,
+        int operation,
+        string checkpointRequestId = "(none)",
+        string writerId = "writer_efficiency_exact",
+        string sessionId = "sess_efficiency_exact",
+        int liveRouteEpoch = 2,
+        int runtimeGeneration = 3,
+        int legGeneration = 3,
+        int routePublicationGeneration = 5,
+        int transportEpoch = 2,
+        int bridgeRecoveryGeneration = 1,
+        int secondsOffset = 8)
+    {
+        var directScope = ExactYieldDirectScope(
+            transferId,
+            checkpointRequestId,
+            liveRouteEpoch: liveRouteEpoch,
+            runtimeGeneration: runtimeGeneration,
+            legGeneration: legGeneration,
+            routePublicationGeneration: routePublicationGeneration,
+            transportEpoch: transportEpoch,
+            bridgeRecoveryGeneration: bridgeRecoveryGeneration,
+            sessionId: sessionId);
+        var effect =
+            $"{directScope}; kind=receiver_state; authority_schema=2; " +
+            $"authority_id=fta2-control-plane-{operation:D24}; control_plane_generation={operation + 1}; " +
+            "reason=state_refresh_recovery; frame_type=filetransfer.receiver_state.v6; " +
+            "accepted_any=1; peer_visible_any=1; local_only_rejected=0; authority_effect=positive; " +
+            $"decision_status=Accepted; log_writer_id={writerId}";
+        lines.Add(LogLine(
+            $"event=filetransfer_control_plane_delivery_result; {effect}",
+            secondsOffset));
+        lines.Add(LogLine(
+            $"event=filetransfer_control_plane_delivery_observed; {effect}",
+            secondsOffset));
+    }
+
+    private static void AppendEfficiencyFrontierRequestEffect(
+        List<string> lines,
+        string transferId,
+        int operation,
+        string decisionStatus = "Accepted",
+        string authorityEffect = "positive",
+        int secondsOffset = 8)
+    {
+        var directScope = ExactYieldDirectScope(transferId);
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_frontier_request_sent; {directScope}; " +
+            $"authority_id=fta2-frontier-{operation:D24}; repair_generation={operation + 1}; " +
+            $"repair_request_id=v6-frontier:5970:{operation + 1}; request_correlation_id=frontier-effect-{operation}; " +
+            "frontier_chunk_index=5970; contiguous_committed_chunk_index=5970; " +
+            "durable_received_highest_chunk_index=6000; missing_range_count=1; " +
+            $"decision_status={decisionStatus}; authority_effect={authorityEffect}; " +
+            "reason=frontier_stall_grace_elapsed; log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+    }
+
+    private static void AppendEfficiencyStateRefreshLifecycle(
+        List<string> lines,
+        string transferId,
+        string requestId,
+        int generation,
+        string writerId = "writer_efficiency_exact",
+        string extraScope = "",
+        int secondsOffset = 10)
+    {
+        var suffix = string.IsNullOrWhiteSpace(extraScope) ? string.Empty : $"; {extraScope}";
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_requested; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; request_sequence={generation}; " +
+            $"reason=state_refresh_recovery; priority=state_refresh; transport_epoch=2{suffix}; " +
+            $"log_writer_id={writerId}",
+            secondsOffset));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={transferId}; " +
+            $"session_id=sess_efficiency_exact; request_id={requestId}; generation={generation}; " +
+            $"transport_epoch=2; reused_pending_checkpoint=0{suffix}; log_writer_id={writerId}",
+            secondsOffset + 1));
+    }
+
+    private static void AppendEfficiencyCompletedTerminalLines(
+        List<string> lines,
+        string transferId,
+        int secondsOffset)
+    {
+        lines.Add(LogLine(
+            $"event=file_transfer_inbound_terminal; role=helper; session_id=sess_efficiency_exact; " +
+            $"transfer_id={transferId}; state=Completed; error_code=(none); saved_path=C:\\received\\payload.bin; " +
+            "integrity_ok=1; log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+        lines.Add(LogLine(
+            $"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_efficiency_exact; " +
+            $"transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+    }
+
+    private static void AssertExactTreadmillSummary(
+        IReadOnlyDictionary<string, string> efficiency,
+        int scopedEffectCount,
+        int distinctOperationCount,
+        int exactWindowCount,
+        int pressureEffectCount,
+        int rawFailureCount,
+        int distinctFailureCount,
+        int recoveredFailureCount,
+        int unresolvedFailureCount,
+        string verdict,
+        string failureClass)
+    {
+        Assert.Equal(scopedEffectCount.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_scoped_recovery_effect_count"]);
+        Assert.Equal(distinctOperationCount.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_scoped_recovery_distinct_operation_count"]);
+        Assert.Equal(exactWindowCount.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_exact_window_count"]);
+        Assert.Equal(pressureEffectCount.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_scoped_pressure_effect_count"]);
+        Assert.Equal(rawFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_raw_count"]);
+        Assert.Equal(distinctFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_distinct_count"]);
+        Assert.Equal(recoveredFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_recovered_count"]);
+        Assert.Equal(unresolvedFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_unresolved_count"]);
+        Assert.Equal(verdict, efficiency["efficiency_verdict"]);
+        Assert.Equal(failureClass, efficiency["efficiency_failure_class"]);
     }
 
     private static void AppendCompleteCrossGenerationPair(

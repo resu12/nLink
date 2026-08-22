@@ -22,6 +22,9 @@ function Get-GuiSmokeSemanticEvidenceEventNames {
             [void]$names.Add([string]$match.Groups['name'].Value)
         }
     }
+    foreach ($name in @('integrity_verify_passed', 'temp_finalize_succeeded')) {
+        [void]$names.Add($name)
+    }
     foreach ($name in @(
             'filetransfer_route_transition_physical_send_lease_registered',
             'filetransfer_route_transition_physical_send_lease_retired',

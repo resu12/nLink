@@ -1575,6 +1575,22 @@ function New-RouteAcceptanceRunResult {
         baselineGoodputBytesPerSecond = 0D
         goodputRegressionFloorBytesPerSecond = 0D
         goodputRegressionPercent = 0D
+        efficiencySummaryValidationVerdict = 'not_evaluated'
+        efficiencyVerdict = 'not_evaluated'
+        efficiencyFailureClass = 'none'
+        efficiencyPostYieldBoundarySequence = 0L
+        efficiencyPostYieldRecoveryActivityCount = 0L
+        efficiencyPostYieldRepeatedUnchangedFrontierTupleCount = 0L
+        efficiencyPostYieldScopedRecoveryEffectCount = 0L
+        efficiencyPostYieldScopedRecoveryDistinctOperationCount = 0L
+        efficiencyPostYieldExactWindowCount = 0L
+        efficiencyPostYieldScopedPressureEffectCount = 0L
+        efficiencyDuplicateStateReplayAuthorityCount = 0L
+        fallbackTailEfficiencyTreadmillRawCount = 0L
+        fallbackTailEfficiencyTreadmillDistinctCount = 0L
+        fallbackTailEfficiencyTreadmillRecoveredCount = 0L
+        fallbackTailEfficiencyTreadmillUnresolvedCount = 0L
+        fallbackTailEfficiencyTreadmillVerdict = 'none'
         bridgeBulkSendFailureCount = 0
         operatorVerdict = '(missing)'
         operatorAcceptedWithWarnings = $false
@@ -4108,6 +4124,146 @@ function Get-RouteAcceptanceTunaGuiSetupBootstrapFailure {
     }
 }
 
+function Assert-Phase4EfficiencySummary {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $operatorPath = Join-Path $Result.artifactDir 'filetransfer-operator-verdict.txt'
+    if (-not (Test-Path -LiteralPath $operatorPath -PathType Leaf)) {
+        return
+    }
+
+    $operator = Read-RouteAcceptanceKeyValueArtifact -Path $operatorPath
+    if ((Get-RouteAcceptanceReportValue -Report $operator -Name 'retained_analysis_completed' -DefaultValue '1') -eq '0') {
+        return
+    }
+
+    $summaryPath = Join-Path $Result.artifactDir 'filetransfer-efficiency-summary.txt'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        $Result.efficiencySummaryValidationVerdict = 'missing'
+        Add-RouteAcceptanceFailure -Result $Result -Message 'efficiency summary missing after completed retained analysis'
+        return
+    }
+
+    $summary = Read-RouteAcceptanceKeyValueArtifact -Path $summaryPath
+    $verdict = Get-RouteAcceptanceReportValue -Report $summary -Name 'efficiency_verdict' -DefaultValue ''
+    $failureClass = Get-RouteAcceptanceReportValue -Report $summary -Name 'efficiency_failure_class' -DefaultValue ''
+    $boundaryText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_boundary_sequence' -DefaultValue ''
+    $recoveryActivityText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_recovery_activity_count' -DefaultValue ''
+    $unchangedFrontierText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_repeated_unchanged_frontier_tuple_count' -DefaultValue ''
+    $scopedRecoveryEffectText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_scoped_recovery_effect_count' -DefaultValue ''
+    $scopedRecoveryOperationText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_scoped_recovery_distinct_operation_count' -DefaultValue ''
+    $exactWindowText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_exact_window_count' -DefaultValue ''
+    $scopedPressureEffectText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_scoped_pressure_effect_count' -DefaultValue ''
+    $duplicateReplayText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_tuna_fallback_duplicate_state_replay_authority_count' -DefaultValue ''
+    $treadmillRawText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_raw_count' -DefaultValue ''
+    $treadmillDistinctText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_distinct_count' -DefaultValue ''
+    $treadmillRecoveredText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_recovered_count' -DefaultValue ''
+    $treadmillUnresolvedText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_unresolved_count' -DefaultValue ''
+    $treadmillVerdict = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_verdict' -DefaultValue ''
+
+    $validVerdicts = @('pass', 'warning', 'fail', 'not_evaluated_due_correctness_failure')
+    $numericFieldTexts = [ordered]@{
+        boundary = $boundaryText
+        recovery_activity = $recoveryActivityText
+        unchanged_frontier = $unchangedFrontierText
+        scoped_recovery_effect = $scopedRecoveryEffectText
+        scoped_recovery_operation = $scopedRecoveryOperationText
+        exact_window = $exactWindowText
+        scoped_pressure_effect = $scopedPressureEffectText
+        duplicate_replay = $duplicateReplayText
+        treadmill_raw = $treadmillRawText
+        treadmill_distinct = $treadmillDistinctText
+        treadmill_recovered = $treadmillRecoveredText
+        treadmill_unresolved = $treadmillUnresolvedText
+    }
+    $numericValues = @{}
+    $numericFieldsValid = $true
+    foreach ($fieldName in $numericFieldTexts.Keys) {
+        $parsedValue = 0L
+        if (-not [long]::TryParse(
+                [string]$numericFieldTexts[$fieldName],
+                [System.Globalization.NumberStyles]::None,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [ref]$parsedValue) -or
+            $parsedValue -lt 0) {
+            $numericFieldsValid = $false
+            break
+        }
+        $numericValues[$fieldName] = $parsedValue
+    }
+    $failureClassIsToken = $failureClass -match '^[a-z0-9_]+$'
+    $failureClassMatchesVerdict = if ($verdict -eq 'fail') {
+        $failureClassIsToken -and $failureClass -notin @('none', 'efficiency_warning')
+    }
+    elseif ($verdict -eq 'warning') {
+        $failureClass -eq 'efficiency_warning'
+    }
+    else {
+        $failureClass -eq 'none'
+    }
+    $treadmillQuartetValid = $false
+    $structuralVerdictValid = $false
+    if ($numericFieldsValid) {
+        $treadmillRaw = [long]$numericValues.treadmill_raw
+        $treadmillDistinct = [long]$numericValues.treadmill_distinct
+        $treadmillRecovered = [long]$numericValues.treadmill_recovered
+        $treadmillUnresolved = [long]$numericValues.treadmill_unresolved
+        $duplicateReplay = [long]$numericValues.duplicate_replay
+        $treadmillQuartetValid = $treadmillRaw -ge $treadmillDistinct -and
+            $treadmillDistinct -eq ($treadmillRecovered + $treadmillUnresolved) -and
+            $treadmillVerdict -in @('none', 'pass', 'fail') -and
+            (($treadmillUnresolved -gt 0 -and $treadmillVerdict -eq 'fail') -or
+                ($treadmillUnresolved -eq 0 -and $treadmillVerdict -ne 'fail')) -and
+            (($failureClass -ne 'fallback_tail_efficiency_treadmill') -or
+                ($treadmillUnresolved -gt 0 -and $treadmillVerdict -eq 'fail'))
+        $structuralVerdictValid = if ($duplicateReplay -gt 0) {
+            $verdict -eq 'fail' -and
+                $failureClass -eq 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification'
+        }
+        elseif ($treadmillUnresolved -gt 0) {
+            ($verdict -eq 'fail' -and $failureClass -eq 'fallback_tail_efficiency_treadmill') -or
+                $verdict -eq 'not_evaluated_due_correctness_failure'
+        }
+        else {
+            $failureClass -notin @(
+                'fallback_tail_efficiency_treadmill',
+                'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification')
+        }
+    }
+    $isMalformed = $verdict -notin $validVerdicts -or
+        -not $failureClassMatchesVerdict -or
+        -not $numericFieldsValid -or
+        -not $treadmillQuartetValid -or
+        -not $structuralVerdictValid
+    if ($isMalformed) {
+        $Result.efficiencySummaryValidationVerdict = 'malformed'
+        Add-RouteAcceptanceFailure -Result $Result -Message 'efficiency summary malformed after completed retained analysis'
+        return
+    }
+
+    $Result.efficiencySummaryValidationVerdict = 'pass'
+    $Result.efficiencyVerdict = $verdict
+    $Result.efficiencyFailureClass = $failureClass
+    $Result.efficiencyPostYieldBoundarySequence = [long]$numericValues.boundary
+    $Result.efficiencyPostYieldRecoveryActivityCount = [long]$numericValues.recovery_activity
+    $Result.efficiencyPostYieldRepeatedUnchangedFrontierTupleCount = [long]$numericValues.unchanged_frontier
+    $Result.efficiencyPostYieldScopedRecoveryEffectCount = [long]$numericValues.scoped_recovery_effect
+    $Result.efficiencyPostYieldScopedRecoveryDistinctOperationCount = [long]$numericValues.scoped_recovery_operation
+    $Result.efficiencyPostYieldExactWindowCount = [long]$numericValues.exact_window
+    $Result.efficiencyPostYieldScopedPressureEffectCount = [long]$numericValues.scoped_pressure_effect
+    $Result.efficiencyDuplicateStateReplayAuthorityCount = [long]$numericValues.duplicate_replay
+    $Result.fallbackTailEfficiencyTreadmillRawCount = [long]$numericValues.treadmill_raw
+    $Result.fallbackTailEfficiencyTreadmillDistinctCount = [long]$numericValues.treadmill_distinct
+    $Result.fallbackTailEfficiencyTreadmillRecoveredCount = [long]$numericValues.treadmill_recovered
+    $Result.fallbackTailEfficiencyTreadmillUnresolvedCount = [long]$numericValues.treadmill_unresolved
+    $Result.fallbackTailEfficiencyTreadmillVerdict = $treadmillVerdict
+
+    if ($verdict -eq 'fail') {
+        Add-RouteAcceptanceFailure -Result $Result -Message (
+            'efficiency_verdict=fail; efficiency_failure_class={0}' -f $failureClass)
+    }
+}
+
 function Test-RouteAcceptanceSemanticAnalysisUnavailableFailure {
     param(
         [AllowEmptyString()][string]$FailurePhase = '',
@@ -4180,6 +4336,7 @@ function Assert-Phase4ScenarioRun {
 
     Assert-RouteAcceptanceTerminalSummary -Result $result
     Assert-Phase4OperatorVerdict -Result $result -RequireWarningFree:($Scenario.Kind -eq 'regular')
+    Assert-Phase4EfficiencySummary -Result $result
 
     $retainedLogPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
     if (Test-Path -LiteralPath $retainedLogPath -PathType Leaf) {
@@ -8045,6 +8202,22 @@ function Write-Phase5PreflightFailureSummaryFiles {
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $preflightProofReasons)),
         'transfer_evidence_status=not_started',
         'runtime_correctness_verdict=incomplete_proof',
+        'efficiency_summary_validation_verdict=not_evaluated',
+        'efficiency_verdict=not_evaluated',
+        'efficiency_failure_class=none',
+        'post_yield_boundary_sequence=0',
+        'post_yield_recovery_activity_count=0',
+        'post_yield_repeated_unchanged_frontier_tuple_count=0',
+        'post_yield_scoped_recovery_effect_count=0',
+        'post_yield_scoped_recovery_distinct_operation_count=0',
+        'post_yield_exact_window_count=0',
+        'post_yield_scoped_pressure_effect_count=0',
+        'post_tuna_fallback_duplicate_state_replay_authority_count=0',
+        'fallback_tail_efficiency_treadmill_raw_count=0',
+        'fallback_tail_efficiency_treadmill_distinct_count=0',
+        'fallback_tail_efficiency_treadmill_recovered_count=0',
+        'fallback_tail_efficiency_treadmill_unresolved_count=0',
+        'fallback_tail_efficiency_treadmill_verdict=none',
         'fallback_tail_bridge_recovery_generation_pairing_verdict=none',
         'fallback_tail_bridge_recovery_generation_mismatch_raw_count=0',
         'fallback_tail_bridge_recovery_generation_mismatch_distinct_count=0',
@@ -8135,6 +8308,22 @@ function Write-Phase5PreflightFailureSummaryFiles {
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $preflightProofReasons -Limit 32)
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
+        efficiencySummaryValidationVerdict = 'not_evaluated'
+        efficiencyVerdict = 'not_evaluated'
+        efficiencyFailureClass = 'none'
+        postYieldBoundarySequence = 0
+        postYieldRecoveryActivityCount = 0
+        postYieldRepeatedUnchangedFrontierTupleCount = 0
+        postYieldScopedRecoveryEffectCount = 0
+        postYieldScopedRecoveryDistinctOperationCount = 0
+        postYieldExactWindowCount = 0
+        postYieldScopedPressureEffectCount = 0
+        postTunaFallbackDuplicateStateReplayAuthorityCount = 0
+        fallbackTailEfficiencyTreadmillRawCount = 0
+        fallbackTailEfficiencyTreadmillDistinctCount = 0
+        fallbackTailEfficiencyTreadmillRecoveredCount = 0
+        fallbackTailEfficiencyTreadmillUnresolvedCount = 0
+        fallbackTailEfficiencyTreadmillVerdict = 'none'
         fallbackTailBridgeRecoveryGenerationPairingVerdict = 'none'
         fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
         fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
@@ -8829,6 +9018,7 @@ function Test-Phase4PerformanceFailureLine {
 
     return $Line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Line.IndexOf('efficiency_verdict=fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Line.IndexOf(
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
             [System.StringComparison]::OrdinalIgnoreCase) -ge 0
@@ -9291,11 +9481,7 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
-        if ($line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf(
-                'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
-                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        if (Test-Phase4PerformanceFailureLine -Line $line) {
             return 'performance'
         }
     }
@@ -9937,9 +10123,20 @@ function New-RouteAcceptanceSummaryRunDto {
         [string]$AcceptancePhase = 'phase4'
     )
 
-    $resultFailureLines = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.failures -Limit 128)
-    $resultPerformanceFailureCount = @($resultFailureLines | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) }).Count
-    $resultCorrectnessFailureCount = @($resultFailureLines | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) }).Count
+    $allResultFailureLines = @($Result.failures | ForEach-Object { [string]$_ })
+    $resultFailureLines = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $allResultFailureLines -Limit 128)
+    $efficiencyFailureLine = @($allResultFailureLines | Where-Object {
+        $_.IndexOf('efficiency_verdict=fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    } | Select-Object -First 1)
+    if ($efficiencyFailureLine.Count -gt 0 -and
+        @($resultFailureLines | Where-Object {
+            $_.IndexOf('efficiency_verdict=fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        }).Count -eq 0) {
+        $preservedFailureLines = @($resultFailureLines | Select-Object -First 127)
+        $resultFailureLines = @($preservedFailureLines) + @([string]$efficiencyFailureLine[0])
+    }
+    $resultPerformanceFailureCount = @($allResultFailureLines | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) }).Count
+    $resultCorrectnessFailureCount = @($allResultFailureLines | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) }).Count
 
     return [pscustomobject]([ordered]@{
         name = [string]$Result.name
@@ -10304,6 +10501,22 @@ function New-RouteAcceptanceSummaryRunDto {
         baselineGoodputBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.baselineGoodputBytesPerSecond)
         goodputRegressionFloorBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputRegressionFloorBytesPerSecond)
         goodputRegressionPercent = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputRegressionPercent)
+        efficiencySummaryValidationVerdict = [string]$Result.efficiencySummaryValidationVerdict
+        efficiencyVerdict = [string]$Result.efficiencyVerdict
+        efficiencyFailureClass = [string]$Result.efficiencyFailureClass
+        postYieldBoundarySequence = [long]$Result.efficiencyPostYieldBoundarySequence
+        postYieldRecoveryActivityCount = [long]$Result.efficiencyPostYieldRecoveryActivityCount
+        postYieldRepeatedUnchangedFrontierTupleCount = [long]$Result.efficiencyPostYieldRepeatedUnchangedFrontierTupleCount
+        postYieldScopedRecoveryEffectCount = [long]$Result.efficiencyPostYieldScopedRecoveryEffectCount
+        postYieldScopedRecoveryDistinctOperationCount = [long]$Result.efficiencyPostYieldScopedRecoveryDistinctOperationCount
+        postYieldExactWindowCount = [long]$Result.efficiencyPostYieldExactWindowCount
+        postYieldScopedPressureEffectCount = [long]$Result.efficiencyPostYieldScopedPressureEffectCount
+        postTunaFallbackDuplicateStateReplayAuthorityCount = [long]$Result.efficiencyDuplicateStateReplayAuthorityCount
+        fallbackTailEfficiencyTreadmillRawCount = [long]$Result.fallbackTailEfficiencyTreadmillRawCount
+        fallbackTailEfficiencyTreadmillDistinctCount = [long]$Result.fallbackTailEfficiencyTreadmillDistinctCount
+        fallbackTailEfficiencyTreadmillRecoveredCount = [long]$Result.fallbackTailEfficiencyTreadmillRecoveredCount
+        fallbackTailEfficiencyTreadmillUnresolvedCount = [long]$Result.fallbackTailEfficiencyTreadmillUnresolvedCount
+        fallbackTailEfficiencyTreadmillVerdict = [string]$Result.fallbackTailEfficiencyTreadmillVerdict
         attemptCount = [int]$Result.attemptCount
         retryUsed = [bool]$Result.retryUsed
         selectedAttempt = [int]$Result.selectedAttempt
@@ -10377,6 +10590,78 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $faultActionInvoked = @($runDtos | Where-Object { [bool]$_.faultActionInvoked }).Count -gt 0
     $faultRuntimeEvidenceObserved = @($runDtos | Where-Object { [bool]$_.faultRuntimeEvidenceObserved }).Count -gt 0
     $faultInjectedBeforeTerminal = @($runDtos | Where-Object { [bool]$_.faultInjectedBeforeTerminal }).Count -gt 0
+    $evaluatedEfficiencyValidation = @($runDtos | Where-Object {
+        [string]$_.efficiencySummaryValidationVerdict -ne 'not_evaluated'
+    })
+    $efficiencySummaryValidationVerdict = if ($evaluatedEfficiencyValidation.Count -eq 0) {
+        'not_evaluated'
+    }
+    elseif (@($evaluatedEfficiencyValidation | Where-Object {
+                [string]$_.efficiencySummaryValidationVerdict -ne 'pass'
+            }).Count -gt 0) {
+        'fail'
+    }
+    else {
+        'pass'
+    }
+    $efficiencyVerdict = if (@($runDtos | Where-Object { [string]$_.efficiencyVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.efficiencyVerdict -eq 'warning' }).Count -gt 0) {
+        'warning'
+    }
+    elseif (@($runDtos | Where-Object {
+                [string]$_.efficiencyVerdict -eq 'not_evaluated_due_correctness_failure'
+            }).Count -gt 0) {
+        'not_evaluated_due_correctness_failure'
+    }
+    elseif ($runDtos.Count -gt 0 -and
+        @($runDtos | Where-Object { [string]$_.efficiencyVerdict -eq 'pass' }).Count -eq $runDtos.Count) {
+        'pass'
+    }
+    else {
+        'not_evaluated'
+    }
+    $efficiencyFailureClasses = @(
+        $runDtos |
+            ForEach-Object { [string]$_.efficiencyFailureClass } |
+            Where-Object { $_ -notin @('', 'none', '(none)') } |
+            Select-Object -Unique
+    )
+    $efficiencyFailureClass = if ($efficiencyFailureClasses.Count -gt 0) {
+        $efficiencyFailureClasses -join ','
+    }
+    else {
+        'none'
+    }
+    $efficiencyPostYieldBoundarySequence = if ($runDtos.Count -gt 0) {
+        [long](($runDtos | Measure-Object -Property postYieldBoundarySequence -Maximum).Maximum)
+    }
+    else {
+        0L
+    }
+    $efficiencyPostYieldRecoveryActivityCount = [long](($runDtos | Measure-Object -Property postYieldRecoveryActivityCount -Sum).Sum)
+    $efficiencyPostYieldRepeatedUnchangedFrontierTupleCount = [long](($runDtos | Measure-Object -Property postYieldRepeatedUnchangedFrontierTupleCount -Sum).Sum)
+    $efficiencyPostYieldScopedRecoveryEffectCount = [long](($runDtos | Measure-Object -Property postYieldScopedRecoveryEffectCount -Sum).Sum)
+    $efficiencyPostYieldScopedRecoveryDistinctOperationCount = [long](($runDtos | Measure-Object -Property postYieldScopedRecoveryDistinctOperationCount -Sum).Sum)
+    $efficiencyPostYieldExactWindowCount = [long](($runDtos | Measure-Object -Property postYieldExactWindowCount -Sum).Sum)
+    $efficiencyPostYieldScopedPressureEffectCount = [long](($runDtos | Measure-Object -Property postYieldScopedPressureEffectCount -Sum).Sum)
+    $efficiencyDuplicateStateReplayAuthorityCount = [long](($runDtos | Measure-Object -Property postTunaFallbackDuplicateStateReplayAuthorityCount -Sum).Sum)
+    $fallbackTailEfficiencyTreadmillRawCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillRawCount -Sum).Sum)
+    $fallbackTailEfficiencyTreadmillDistinctCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillDistinctCount -Sum).Sum)
+    $fallbackTailEfficiencyTreadmillRecoveredCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillRecoveredCount -Sum).Sum)
+    $fallbackTailEfficiencyTreadmillUnresolvedCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillUnresolvedCount -Sum).Sum)
+    $fallbackTailEfficiencyTreadmillVerdict = if ($fallbackTailEfficiencyTreadmillUnresolvedCount -gt 0) {
+        'fail'
+    }
+    elseif (@($runDtos | Where-Object {
+                [string]$_.fallbackTailEfficiencyTreadmillVerdict -eq 'pass'
+            }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
 
     $transferEvidenceStatus = if ($runDtos.Count -eq 0) {
         'not_started'
@@ -11385,6 +11670,22 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
         ("failure_variant={0}" -f $failureVariant),
         ("acceptance_failure_class={0}" -f $acceptanceFailureClass),
+        ("efficiency_summary_validation_verdict={0}" -f $efficiencySummaryValidationVerdict),
+        ("efficiency_verdict={0}" -f $efficiencyVerdict),
+        ("efficiency_failure_class={0}" -f $efficiencyFailureClass),
+        ("post_yield_boundary_sequence={0}" -f $efficiencyPostYieldBoundarySequence),
+        ("post_yield_recovery_activity_count={0}" -f $efficiencyPostYieldRecoveryActivityCount),
+        ("post_yield_repeated_unchanged_frontier_tuple_count={0}" -f $efficiencyPostYieldRepeatedUnchangedFrontierTupleCount),
+        ("post_yield_scoped_recovery_effect_count={0}" -f $efficiencyPostYieldScopedRecoveryEffectCount),
+        ("post_yield_scoped_recovery_distinct_operation_count={0}" -f $efficiencyPostYieldScopedRecoveryDistinctOperationCount),
+        ("post_yield_exact_window_count={0}" -f $efficiencyPostYieldExactWindowCount),
+        ("post_yield_scoped_pressure_effect_count={0}" -f $efficiencyPostYieldScopedPressureEffectCount),
+        ("post_tuna_fallback_duplicate_state_replay_authority_count={0}" -f $efficiencyDuplicateStateReplayAuthorityCount),
+        ("fallback_tail_efficiency_treadmill_raw_count={0}" -f $fallbackTailEfficiencyTreadmillRawCount),
+        ("fallback_tail_efficiency_treadmill_distinct_count={0}" -f $fallbackTailEfficiencyTreadmillDistinctCount),
+        ("fallback_tail_efficiency_treadmill_recovered_count={0}" -f $fallbackTailEfficiencyTreadmillRecoveredCount),
+        ("fallback_tail_efficiency_treadmill_unresolved_count={0}" -f $fallbackTailEfficiencyTreadmillUnresolvedCount),
+        ("fallback_tail_efficiency_treadmill_verdict={0}" -f $fallbackTailEfficiencyTreadmillVerdict),
         ("terminal_completed_before_fault={0}" -f ($(if ($terminalCompletedBeforeFault) { 1 } else { 0 }))),
         ("fault_injected={0}" -f ($(if ($faultInjectedBeforeTerminal) { 1 } else { 0 }))),
         ("fault_action_claimed={0}" -f ($(if ($faultActionClaimed) { 1 } else { 0 }))),
@@ -12068,6 +12369,22 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.baseline_goodput_bytes_per_second={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.baselineGoodputBytesPerSecond))
         $textLines += ("{0}.goodput_floor_bytes_per_second={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.goodputRegressionFloorBytesPerSecond))
         $textLines += ("{0}.goodput_regression_percent={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.goodputRegressionPercent))
+        $textLines += ("{0}.efficiency_summary_validation_verdict={1}" -f $prefix, $result.efficiencySummaryValidationVerdict)
+        $textLines += ("{0}.efficiency_verdict={1}" -f $prefix, $result.efficiencyVerdict)
+        $textLines += ("{0}.efficiency_failure_class={1}" -f $prefix, $result.efficiencyFailureClass)
+        $textLines += ("{0}.post_yield_boundary_sequence={1}" -f $prefix, $result.postYieldBoundarySequence)
+        $textLines += ("{0}.post_yield_recovery_activity_count={1}" -f $prefix, $result.postYieldRecoveryActivityCount)
+        $textLines += ("{0}.post_yield_repeated_unchanged_frontier_tuple_count={1}" -f $prefix, $result.postYieldRepeatedUnchangedFrontierTupleCount)
+        $textLines += ("{0}.post_yield_scoped_recovery_effect_count={1}" -f $prefix, $result.postYieldScopedRecoveryEffectCount)
+        $textLines += ("{0}.post_yield_scoped_recovery_distinct_operation_count={1}" -f $prefix, $result.postYieldScopedRecoveryDistinctOperationCount)
+        $textLines += ("{0}.post_yield_exact_window_count={1}" -f $prefix, $result.postYieldExactWindowCount)
+        $textLines += ("{0}.post_yield_scoped_pressure_effect_count={1}" -f $prefix, $result.postYieldScopedPressureEffectCount)
+        $textLines += ("{0}.post_tuna_fallback_duplicate_state_replay_authority_count={1}" -f $prefix, $result.postTunaFallbackDuplicateStateReplayAuthorityCount)
+        $textLines += ("{0}.fallback_tail_efficiency_treadmill_raw_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillRawCount)
+        $textLines += ("{0}.fallback_tail_efficiency_treadmill_distinct_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillDistinctCount)
+        $textLines += ("{0}.fallback_tail_efficiency_treadmill_recovered_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillRecoveredCount)
+        $textLines += ("{0}.fallback_tail_efficiency_treadmill_unresolved_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillUnresolvedCount)
+        $textLines += ("{0}.fallback_tail_efficiency_treadmill_verdict={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillVerdict)
         $textLines += ("{0}.fallback_receiver_state_deferred_count={1}" -f $prefix, $result.fallbackReceiverStateDeferredCount)
         $textLines += ("{0}.fallback_receiver_state_coalesced_count={1}" -f $prefix, $result.fallbackReceiverStateCoalescedCount)
         $textLines += ("{0}.fallback_receiver_state_churn_warning_count={1}" -f $prefix, $result.fallbackReceiverStateChurnWarningCount)
@@ -12207,6 +12524,22 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         runtimeFailureCandidate = $runtimeFailureCandidate
         failureVariant = $failureVariant
         acceptanceFailureClass = $acceptanceFailureClass
+        efficiencySummaryValidationVerdict = $efficiencySummaryValidationVerdict
+        efficiencyVerdict = $efficiencyVerdict
+        efficiencyFailureClass = $efficiencyFailureClass
+        postYieldBoundarySequence = $efficiencyPostYieldBoundarySequence
+        postYieldRecoveryActivityCount = $efficiencyPostYieldRecoveryActivityCount
+        postYieldRepeatedUnchangedFrontierTupleCount = $efficiencyPostYieldRepeatedUnchangedFrontierTupleCount
+        postYieldScopedRecoveryEffectCount = $efficiencyPostYieldScopedRecoveryEffectCount
+        postYieldScopedRecoveryDistinctOperationCount = $efficiencyPostYieldScopedRecoveryDistinctOperationCount
+        postYieldExactWindowCount = $efficiencyPostYieldExactWindowCount
+        postYieldScopedPressureEffectCount = $efficiencyPostYieldScopedPressureEffectCount
+        postTunaFallbackDuplicateStateReplayAuthorityCount = $efficiencyDuplicateStateReplayAuthorityCount
+        fallbackTailEfficiencyTreadmillRawCount = $fallbackTailEfficiencyTreadmillRawCount
+        fallbackTailEfficiencyTreadmillDistinctCount = $fallbackTailEfficiencyTreadmillDistinctCount
+        fallbackTailEfficiencyTreadmillRecoveredCount = $fallbackTailEfficiencyTreadmillRecoveredCount
+        fallbackTailEfficiencyTreadmillUnresolvedCount = $fallbackTailEfficiencyTreadmillUnresolvedCount
+        fallbackTailEfficiencyTreadmillVerdict = $fallbackTailEfficiencyTreadmillVerdict
         terminalCompletedBeforeFault = $terminalCompletedBeforeFault
         faultInjected = $faultInjectedBeforeTerminal
         faultActionClaimed = $faultActionClaimed

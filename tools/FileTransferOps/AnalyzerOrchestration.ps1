@@ -1483,6 +1483,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_regular_nkn_state_refresh_send_queued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_regular_nkn_state_refresh_sent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_regular_nkn_state_refresh_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_regular_nkn_state_refresh_state_resent') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v4_feedback_first_success') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_receiver_state_received') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_peer_frame_received') +
@@ -1493,8 +1494,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_recreated') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_removed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_disposed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_disposed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transfer_disposed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_service_disposed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owned_workers_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_control_plane_owner_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_recovery_generation_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_transport_epoch_adopted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_transport_epoch_adopted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_terminal') +
@@ -1510,7 +1520,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_rebind_safety_replay_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_sparse_write_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_control_plane_delivery_result') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_control_plane_delivery_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_control_plane_pressure_marked') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_control_plane_pressure_recovered') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_ignored_obsolete') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_advanced_remote_frontier') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_staged') +
@@ -1525,12 +1538,21 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_contract_settled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_fallback_frontier_repair_progress_state_forced') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_receiver_state_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_terminal_proof_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'integrity_verify_passed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'temp_finalize_succeeded') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_frontier_repair_cleared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_pairing_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_reserved') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_release_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_blocked_by_frontier_obligation') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_zero_credit_breaker') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_exchange_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_reissue_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_exchange_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_recovery_leg_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_accepted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_clean_fallback_checkpoint_accepted') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_checkpoint_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_clean_fallback_checkpoint_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_transaction_failed') +
@@ -6193,6 +6215,7 @@ function Get-FileTransferEfficiencySemanticEventsFromIndex {
         ([System.StringComparer]::Ordinal)
     foreach ($name in @(
             'filetransfer_route_selected',
+            'filetransfer_route_hint_authorized_publication_accepted',
             'filetransfer_route_transitioned',
             'filetransfer_live_route_epoch_started',
             'file_transfer_inbound_terminal',
@@ -6230,16 +6253,45 @@ function Get-FileTransferEfficiencySemanticEventsFromIndex {
             'filetransfer_fallback_tail_recovery_owner_retired_after_yield',
             'filetransfer_control_plane_send_retired_stale_generation',
             'filetransfer_fallback_tail_quiescent_yield_granted',
+            'filetransfer_fallback_tail_pairing_committed',
+            'filetransfer_fallback_tail_paired_yield_granted',
             'filetransfer_fallback_tail_terminal_proof_consumed',
             'filetransfer_post_tuna_fallback_control_plane_pressure_marked',
             'filetransfer_post_tuna_fallback_control_plane_pressure_recovered',
             'filetransfer_fallback_checkpoint_exchange_started',
             'filetransfer_fallback_checkpoint_reissue_requested',
             'filetransfer_fallback_checkpoint_exchange_retired',
+            'filetransfer_fallback_checkpoint_recovery_leg_started',
+            'filetransfer_fallback_checkpoint_accepted',
+            'filetransfer_clean_fallback_checkpoint_accepted',
+            'filetransfer_fallback_checkpoint_requested',
+            'filetransfer_clean_fallback_checkpoint_requested',
             'filetransfer_control_plane_delivery_result',
             'filetransfer_control_plane_delivery_observed',
+            'filetransfer_live_route_epoch_recovered',
+            'filetransfer_runtime_started',
+            'filetransfer_runtime_owner_changed',
+            'filetransfer_runtime_owner_workers_retired',
             'filetransfer_runtime_owned_workers_retired',
             'filetransfer_fallback_control_plane_owner_retired',
+            'filetransfer_fallback_leg_transport_epoch_adopted',
+            'filetransfer_fallback_transport_epoch_adopted',
+            'filetransfer_fallback_leg_recovery_generation_started',
+            'filetransfer_fallback_leg_authority_started',
+             'filetransfer_leg_started',
+             'filetransfer_data_session_recreated',
+             'filetransfer_data_session_removed',
+             'filetransfer_runtime_disposed',
+             'filetransfer_session_disposed',
+             'filetransfer_transfer_disposed',
+             'filetransfer_service_disposed',
+             'filetransfer_runtime_terminalized',
+            'filetransfer_terminalized_by_peer_down',
+            'filetransfer_terminalized_by_session_end',
+            'filetransfer_session_end_cancel_started',
+            'filetransfer_session_end_notice_started',
+            'filetransfer_live_route_epoch_terminal',
+            'filetransfer_v6_epoch_terminal',
             'filetransfer_fallback_tail_progress_coalesced',
             'session_liveness_timeout',
             'filetransfer_live_progress_timeout')) {
@@ -6955,6 +7007,1330 @@ function Get-FileTransferEfficiencyPostYieldBoundarySequence {
     return 0
 }
 
+function Test-FileTransferEfficiencyExactFieldValue {
+    param(
+        $Anchor,
+        $Candidate,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$CandidateNames = @()
+    )
+
+    $expected = Get-FileTransferEventField -Event $Anchor -Name $Name -Default ''
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        return $false
+    }
+
+    if ($CandidateNames.Count -eq 0) {
+        $CandidateNames = @($Name)
+    }
+    $actual = Get-FileTransferEfficiencyFirstNonEmptyField `
+        -Event $Candidate `
+        -Names $CandidateNames
+    return -not [string]::IsNullOrWhiteSpace($actual) -and
+        [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)
+}
+
+function Test-FileTransferEfficiencyLineageIdentifier {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    return $Value -notin @('(none)', 'none', 'unknown', '(unknown)', 'null')
+}
+
+function Test-FileTransferEfficiencyPairingAnchorComplete {
+    param($Event)
+
+    foreach ($name in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'route_publication_generation',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'transport_epoch',
+            'bridge_recovery_generation',
+            'checkpoint_request_id',
+            'data_session_identity',
+            'data_session_generation',
+            'authority_id',
+            'owner_key',
+            'pair_key',
+            'yield_generation',
+            'pairing_generation')) {
+        if ([string]::IsNullOrWhiteSpace((Get-FileTransferEventField -Event $Event -Name $name -Default ''))) {
+            return $false
+        }
+    }
+
+    foreach ($name in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'data_session_identity',
+            'authority_id',
+            'owner_key',
+            'pair_key')) {
+        if (-not (Test-FileTransferEfficiencyLineageIdentifier `
+                -Value (Get-FileTransferEventField -Event $Event -Name $name -Default ''))) {
+            return $false
+        }
+    }
+
+    $pairingState = Get-FileTransferEventField -Event $Event -Name 'pairing_state' -Default ''
+    $decisionStatus = Get-FileTransferEventField -Event $Event -Name 'decision_status' -Default ''
+    return $pairingState -eq 'Paired' -and
+        $decisionStatus -in @('Accepted', 'Idempotent') -and
+        (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event)
+}
+
+function Test-FileTransferEfficiencyPairingGrantMatch {
+    param(
+        $Pairing,
+        $Grant
+    )
+
+    if (-not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Grant)) {
+        return $false
+    }
+    $decisionStatus = Get-FileTransferEventField -Event $Grant -Name 'decision_status' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($decisionStatus) -and
+        $decisionStatus -notin @('Accepted', 'Idempotent')) {
+        return $false
+    }
+    $reason = Get-FileTransferEventField -Event $Grant -Name 'reason' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($reason) -and
+        $reason -notin @('fallback_tail_paired_yield', 'fallback_tail_peer_yield')) {
+        return $false
+    }
+
+    foreach ($name in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'transport_epoch',
+            'bridge_recovery_generation',
+            'checkpoint_request_id',
+            'authority_id',
+            'owner_key',
+            'yield_generation')) {
+        if (-not (Test-FileTransferEfficiencyExactFieldValue -Anchor $Pairing -Candidate $Grant -Name $name)) {
+            return $false
+        }
+    }
+
+    if (-not (Test-FileTransferEfficiencyExactFieldValue `
+            -Anchor $Pairing `
+            -Candidate $Grant `
+            -Name 'pair_key' `
+            -CandidateNames @('canonical_pair_key', 'pair_key', 'raw_pair_key'))) {
+        return $false
+    }
+
+    foreach ($name in @(
+            'route_publication_generation',
+            'data_session_identity',
+            'data_session_generation',
+            'pairing_generation')) {
+        $actual = Get-FileTransferEventField -Event $Grant -Name $name -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($actual) -and
+            -not (Test-FileTransferEfficiencyExactFieldValue -Anchor $Pairing -Candidate $Grant -Name $name)) {
+            return $false
+        }
+    }
+
+    foreach ($fieldPair in @(
+            @('live_route_epoch', 'peer_live_route_epoch'),
+            @('leg_generation', 'peer_leg_generation'),
+            @('transport_epoch', 'peer_transport_epoch'),
+            @('bridge_recovery_generation', 'peer_bridge_recovery_generation'),
+            @('checkpoint_request_id', 'peer_checkpoint_request_id'),
+            @('owner_key', 'peer_owner_key'),
+            @('pair_key', 'peer_canonical_pair_key'),
+            @('yield_generation', 'peer_yield_generation'))) {
+        if (-not (Test-FileTransferEfficiencyExactFieldValue `
+                -Anchor $Pairing `
+                -Candidate $Grant `
+                -Name $fieldPair[0] `
+                -CandidateNames @($fieldPair[1]))) {
+            return $false
+        }
+    }
+
+    return Test-FileTransferEfficiencyLineageIdentifier `
+        -Value (Get-FileTransferEventField -Event $Grant -Name 'peer_authority_id' -Default '')
+}
+
+function Get-FileTransferEfficiencyPairingIdentity {
+    param($Event)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'route_publication_generation',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'transport_epoch',
+            'bridge_recovery_generation',
+            'checkpoint_request_id',
+            'data_session_identity',
+            'data_session_generation',
+            'authority_id',
+            'owner_key',
+            'pair_key',
+            'yield_generation',
+            'pairing_generation',
+            'peer_authority_id',
+            'peer_owner_key',
+            'peer_canonical_pair_key',
+            'peer_yield_generation',
+            'peer_live_route_epoch',
+            'peer_leg_generation',
+            'peer_transport_epoch',
+            'peer_bridge_recovery_generation',
+            'peer_checkpoint_request_id')) {
+        $parts.Add((Get-FileTransferEventField -Event $Event -Name $name -Default '')) | Out-Null
+    }
+    return $parts.ToArray() -join '|'
+}
+
+function Test-FileTransferEfficiencyOwnerRetirementMatch {
+    param(
+        $Pairing,
+        $Retirement
+    )
+
+    if (-not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Retirement)) {
+        return $false
+    }
+
+    foreach ($name in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'leg_generation',
+            'transport_epoch')) {
+        if (-not (Test-FileTransferEfficiencyExactFieldValue -Anchor $Pairing -Candidate $Retirement -Name $name)) {
+            return $false
+        }
+    }
+
+    return (Get-FileTransferEventField `
+            -Event $Retirement `
+            -Name 'reason' `
+            -Default '') -eq 'fallback_tail_quiescent'
+}
+
+function Get-FileTransferEfficiencyOwnerRetirementIdentity {
+    param($Event)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'leg_generation',
+            'transport_epoch',
+            'previous_handoff_epoch',
+            'previous_handoff_state',
+            'discarded_repair_frame_count',
+            'discarded_repair_chunk_count',
+            'reason')) {
+        $parts.Add((Get-FileTransferEventField -Event $Event -Name $name -Default '')) | Out-Null
+    }
+    return $parts.ToArray() -join '|'
+}
+
+function Get-FileTransferEfficiencyExactWindowSourceKey {
+    param(
+        $Pairing,
+        [switch]$PairWide
+    )
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @(
+            'session_id',
+            'transfer_id',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'route_publication_generation',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'transport_epoch',
+            'bridge_recovery_generation',
+            'checkpoint_request_id',
+            'data_session_identity',
+            'data_session_generation',
+            'pair_key',
+            'pairing_generation')) {
+        $parts.Add((Get-FileTransferEventField -Event $Pairing -Name $name -Default '')) | Out-Null
+    }
+    if (-not $PairWide) {
+        $parts.Insert(0, (Get-FileTransferEventField -Event $Pairing -Name 'direction' -Default ''))
+        $parts.Insert(0, (Get-FileTransferEventField -Event $Pairing -Name 'log_writer_id' -Default ''))
+        $parts.Add((Get-FileTransferEventField -Event $Pairing -Name 'authority_id' -Default '')) | Out-Null
+        $parts.Add((Get-FileTransferEventField -Event $Pairing -Name 'owner_key' -Default '')) | Out-Null
+        $parts.Add((Get-FileTransferEventField -Event $Pairing -Name 'yield_generation' -Default '')) | Out-Null
+    }
+    return $parts.ToArray() -join '|'
+}
+
+function Test-FileTransferEfficiencyWindowRootMatch {
+    param(
+        $Window,
+        $Event,
+        [switch]$AllowMissingDirection
+    )
+
+    $anchor = $Window.PairingEvent
+    foreach ($name in @('log_writer_id', 'session_id', 'transfer_id')) {
+        if (-not (Test-FileTransferEfficiencyExactFieldValue -Anchor $anchor -Candidate $Event -Name $name)) {
+            return $false
+        }
+    }
+
+    $direction = Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''
+    if ([string]::IsNullOrWhiteSpace($direction) -or $direction -eq '(none)') {
+        $direction = Get-FileTransferTerminalDirection -Event $Event
+    }
+    if ([string]::IsNullOrWhiteSpace($direction)) {
+        return [bool]$AllowMissingDirection
+    }
+
+    return [string]::Equals(
+        (Get-FileTransferEventField -Event $anchor -Name 'direction' -Default ''),
+        $direction,
+        [System.StringComparison]::Ordinal)
+}
+
+function Test-FileTransferEfficiencyWindowDirectScopeMatch {
+    param(
+        $Window,
+        $Event
+    )
+
+    if (-not (Test-FileTransferEfficiencyWindowRootMatch -Window $Window -Event $Event)) {
+        return $false
+    }
+
+    $anchor = $Window.PairingEvent
+    foreach ($name in @(
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'leg_generation',
+            'transport_epoch',
+            'bridge_recovery_generation',
+            'checkpoint_request_id')) {
+        if (-not (Test-FileTransferEfficiencyExactFieldValue -Anchor $anchor -Candidate $Event -Name $name)) {
+            return $false
+        }
+    }
+
+    foreach ($name in @(
+            'route_publication_generation',
+            'runtime_generation',
+            'terminal_generation',
+            'data_session_identity',
+            'data_session_generation',
+            'owner_key',
+            'pair_key',
+            'yield_generation',
+            'pairing_generation')) {
+        $actual = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($actual) -and
+            -not (Test-FileTransferEfficiencyExactFieldValue -Anchor $anchor -Candidate $Event -Name $name)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferEfficiencyWindowSparseScopeCompatible {
+    param(
+        $Window,
+        $Event
+    )
+
+    if (-not (Test-FileTransferEfficiencyWindowRootMatch `
+            -Window $Window `
+            -Event $Event `
+            -AllowMissingDirection)) {
+        return $false
+    }
+
+    $anchor = $Window.PairingEvent
+    foreach ($fieldPair in @(
+            @('route', @('route', 'source_route', 'current_route')),
+            @('protocol_version', @('protocol_version', 'source_protocol_version', 'current_protocol_version')),
+            @('live_route_epoch', @('live_route_epoch', 'source_live_route_epoch', 'current_live_route_epoch')),
+            @('route_publication_generation', @('route_publication_generation', 'source_route_publication_generation', 'current_route_publication_generation')),
+            @('runtime_generation', @('runtime_generation', 'source_runtime_generation', 'current_runtime_generation')),
+            @('terminal_generation', @('terminal_generation', 'source_terminal_generation', 'current_terminal_generation')),
+            @('leg_generation', @('leg_generation', 'source_leg_generation', 'current_leg_generation')),
+            @('transport_epoch', @('transport_epoch', 'source_transport_epoch', 'current_transport_epoch')),
+            @('bridge_recovery_generation', @('bridge_recovery_generation', 'source_bridge_recovery_generation', 'current_bridge_recovery_generation')),
+            @('checkpoint_request_id', @('checkpoint_request_id', 'source_checkpoint_request_id', 'current_checkpoint_request_id')),
+            @('data_session_identity', @('data_session_identity', 'source_data_session_identity', 'current_data_session_identity')),
+            @('data_session_generation', @('data_session_generation', 'source_data_session_generation', 'current_data_session_generation')))) {
+        $actual = Get-FileTransferEfficiencyFirstNonEmptyField -Event $Event -Names $fieldPair[1]
+        if (-not [string]::IsNullOrWhiteSpace($actual) -and
+            -not [string]::Equals(
+                (Get-FileTransferEventField -Event $anchor -Name $fieldPair[0] -Default ''),
+                $actual,
+                [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferEfficiencyWindowSourceMutation {
+    param(
+        $Window,
+        $Event
+    )
+
+    $anchor = $Window.PairingEvent
+    foreach ($fieldPair in @(
+            @('route', @('target_route', 'current_route', 'route')),
+            @('protocol_version', @('target_protocol_version', 'current_protocol_version', 'protocol_version')),
+            @('live_route_epoch', @('target_live_route_epoch', 'current_live_route_epoch', 'live_route_epoch')),
+            @('route_publication_generation', @('target_route_publication_generation', 'current_route_publication_generation', 'route_publication_generation')),
+            @('runtime_generation', @('target_runtime_generation', 'current_runtime_generation', 'runtime_generation')),
+            @('terminal_generation', @('target_terminal_generation', 'current_terminal_generation', 'terminal_generation')),
+            @('leg_generation', @('target_leg_generation', 'current_leg_generation', 'leg_generation')),
+            @('transport_epoch', @('target_transport_epoch', 'current_transport_epoch', 'transport_epoch')),
+            @('bridge_recovery_generation', @('target_bridge_recovery_generation', 'current_bridge_recovery_generation', 'bridge_recovery_generation')),
+            @('checkpoint_request_id', @('target_checkpoint_request_id', 'current_checkpoint_request_id', 'checkpoint_request_id')),
+            @('data_session_identity', @('target_data_session_identity', 'current_data_session_identity', 'data_session_identity')),
+            @('data_session_generation', @('target_data_session_generation', 'current_data_session_generation', 'data_session_generation')))) {
+        $actual = Get-FileTransferEfficiencyFirstNonEmptyField -Event $Event -Names $fieldPair[1]
+        if (-not [string]::IsNullOrWhiteSpace($actual) -and
+            -not [string]::Equals(
+                (Get-FileTransferEventField -Event $anchor -Name $fieldPair[0] -Default ''),
+                $actual,
+                [System.StringComparison]::Ordinal)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-FileTransferEfficiencyExactWindowBarrier {
+    param(
+        $Window,
+        $Event
+    )
+
+    $name = [string]$Event.EventName
+    $routePublicationNames = @(
+        'filetransfer_route_selected',
+        'filetransfer_route_hint_authorized_publication_accepted',
+        'filetransfer_route_transitioned',
+        'filetransfer_live_route_epoch_started',
+        'filetransfer_live_route_epoch_recovered',
+        'filetransfer_runtime_started')
+    $ownerMutationNames = @(
+        'filetransfer_runtime_owner_changed',
+        'filetransfer_runtime_owner_workers_retired',
+        'filetransfer_runtime_owned_workers_retired',
+        'filetransfer_fallback_control_plane_owner_retired')
+    $sourceMutationNames = @(
+        'filetransfer_fallback_leg_transport_epoch_adopted',
+        'filetransfer_fallback_transport_epoch_adopted',
+        'filetransfer_fallback_leg_recovery_generation_started',
+        'filetransfer_fallback_leg_authority_started',
+        'filetransfer_leg_started')
+    $disposalNames = @(
+        'filetransfer_runtime_disposed',
+        'filetransfer_session_disposed',
+        'filetransfer_transfer_disposed',
+        'filetransfer_service_disposed')
+    $terminalNames = @(
+        'file_transfer_inbound_terminal',
+        'file_transfer_outbound_terminal',
+        'transfer_terminal',
+        'filetransfer_runtime_terminalized',
+        'filetransfer_terminalized_by_peer_down',
+        'filetransfer_terminalized_by_session_end',
+        'filetransfer_session_end_cancel_started',
+        'filetransfer_session_end_notice_started',
+        'filetransfer_live_route_epoch_terminal',
+        'filetransfer_v6_epoch_terminal')
+
+    if ($name -in $routePublicationNames) {
+        return (Test-FileTransferProductionRouteEvidenceEvent -Event $Event) -and
+            (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -and
+            (Test-FileTransferEfficiencyWindowRootMatch -Window $Window -Event $Event) -and
+            (Test-FileTransferEfficiencyWindowSourceMutation -Window $Window -Event $Event)
+    }
+    if ($name -in $ownerMutationNames) {
+        if (-not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -or
+            -not (Test-FileTransferEfficiencyWindowRootMatch `
+                -Window $Window `
+                -Event $Event `
+                -AllowMissingDirection)) {
+            return $false
+        }
+        if ($name -eq 'filetransfer_runtime_owner_changed') {
+            return Test-FileTransferEfficiencyWindowSourceMutation -Window $Window -Event $Event
+        }
+        return $true
+    }
+    if ($name -eq 'filetransfer_data_session_recreated') {
+        return (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -and
+            (Test-FileTransferEfficiencyWindowRootMatch `
+                -Window $Window `
+                -Event $Event `
+                -AllowMissingDirection) -and
+            (Test-FileTransferEfficiencyWindowSourceMutation -Window $Window -Event $Event)
+    }
+    if ($name -eq 'filetransfer_data_session_removed' -or $name -in $disposalNames) {
+        return (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -and
+            (Test-FileTransferEfficiencyWindowRootMatch `
+                -Window $Window `
+                -Event $Event `
+                -AllowMissingDirection)
+    }
+    if ($name -in $terminalNames) {
+        return (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -and
+            (Test-FileTransferEfficiencyWindowRootMatch -Window $Window -Event $Event)
+    }
+    if ($name -in $sourceMutationNames -and
+        (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -and
+        (Test-FileTransferEfficiencyWindowRootMatch -Window $Window -Event $Event)) {
+        $anchor = $Window.PairingEvent
+        foreach ($fieldPair in @(
+                @('runtime_generation', @('runtime_generation', 'current_runtime_generation')),
+                @('leg_generation', @('leg_generation', 'current_leg_generation')),
+                @('transport_epoch', @('transport_epoch', 'current_transport_epoch')),
+                @('bridge_recovery_generation', @('bridge_recovery_generation', 'current_bridge_recovery_generation')),
+                @('checkpoint_request_id', @('checkpoint_request_id', 'current_checkpoint_request_id')))) {
+            $actual = Get-FileTransferEfficiencyFirstNonEmptyField -Event $Event -Names $fieldPair[1]
+            if (-not [string]::IsNullOrWhiteSpace($actual) -and
+                -not [string]::Equals(
+                    (Get-FileTransferEventField -Event $anchor -Name $fieldPair[0] -Default ''),
+                    $actual,
+                    [System.StringComparison]::Ordinal)) {
+                return $true
+            }
+        }
+    }
+    if ($name -in @(
+            'filetransfer_fallback_checkpoint_exchange_started',
+            'filetransfer_fallback_checkpoint_reissue_requested',
+            'filetransfer_fallback_checkpoint_exchange_retired',
+            'filetransfer_fallback_checkpoint_recovery_leg_started',
+            'filetransfer_fallback_checkpoint_requested',
+            'filetransfer_clean_fallback_checkpoint_requested',
+            'filetransfer_fallback_checkpoint_accepted',
+            'filetransfer_clean_fallback_checkpoint_accepted') -and
+        (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $Event) -and
+        (Test-FileTransferEfficiencyWindowRootMatch -Window $Window -Event $Event)) {
+        $checkpointRequestId = Get-FileTransferEfficiencyFirstNonEmptyField `
+            -Event $Event `
+            -Names @('current_checkpoint_request_id', 'checkpoint_request_id')
+        return -not [string]::IsNullOrWhiteSpace($checkpointRequestId) -and
+            -not [string]::Equals(
+                (Get-FileTransferEventField -Event $Window.PairingEvent -Name 'checkpoint_request_id' -Default ''),
+                $checkpointRequestId,
+                [System.StringComparison]::Ordinal)
+    }
+
+    return $false
+}
+
+function Get-FileTransferEfficiencyExactPairedYieldWindows {
+    param([object[]]$Events)
+
+    [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    [object[]]$pairingEvents = @(
+        $orderedEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_fallback_tail_pairing_committed' -and
+                (Test-FileTransferEfficiencyPairingAnchorComplete -Event $_)
+            }
+    )
+    [object[]]$grantEvents = @(
+        $orderedEvents |
+            Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_paired_yield_granted' }
+    )
+    [object[]]$retirementEvents = @(
+        $orderedEvents |
+            Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_recovery_owner_retired_after_yield' }
+    )
+
+    $windowsByKey = @{}
+    foreach ($grant in $grantEvents) {
+        [object[]]$matchingPairings = @(
+            $pairingEvents |
+                Where-Object {
+                    [int]$_.Sequence -le [int]$grant.Sequence -and
+                    (Test-FileTransferEfficiencyPairingGrantMatch -Pairing $_ -Grant $grant)
+                }
+        )
+        $pairingsByIdentity = @{}
+        foreach ($candidatePairing in $matchingPairings) {
+            $pairingIdentity = Get-FileTransferEfficiencyPairingIdentity -Event $candidatePairing
+            if (-not $pairingsByIdentity.ContainsKey($pairingIdentity) -or
+                [int]$candidatePairing.Sequence -gt [int]$pairingsByIdentity[$pairingIdentity].Sequence) {
+                $pairingsByIdentity[$pairingIdentity] = $candidatePairing
+            }
+        }
+        if ($pairingsByIdentity.Count -ne 1) {
+            continue
+        }
+        $pairing = @($pairingsByIdentity.Values)[0]
+
+        [object[]]$matchingRetirements = @(
+            $retirementEvents |
+                Where-Object {
+                    [int]$_.Sequence -lt [int]$grant.Sequence -and
+                    (Test-FileTransferEfficiencyOwnerRetirementMatch -Pairing $pairing -Retirement $_)
+                }
+        )
+        $retirementByIdentity = @{}
+        foreach ($candidateRetirement in $matchingRetirements) {
+            $retirementIdentity = Get-FileTransferEfficiencyOwnerRetirementIdentity `
+                -Event $candidateRetirement
+            if (-not $retirementByIdentity.ContainsKey($retirementIdentity) -or
+                [int]$candidateRetirement.Sequence -gt
+                    [int]$retirementByIdentity[$retirementIdentity].Sequence) {
+                $retirementByIdentity[$retirementIdentity] = $candidateRetirement
+            }
+        }
+        if ($retirementByIdentity.Count -ne 1) {
+            continue
+        }
+        $retirement = @($retirementByIdentity.Values)[0]
+
+        $sourceKey = Get-FileTransferEfficiencyExactWindowSourceKey -Pairing $pairing
+        if ($windowsByKey.ContainsKey($sourceKey)) {
+            continue
+        }
+
+        $window = [pscustomobject]@{
+            SourceKey = $sourceKey
+            PairSourceKey = Get-FileTransferEfficiencyExactWindowSourceKey -Pairing $pairing -PairWide
+            StartSequence = [int]$grant.Sequence
+            EndSequence = [int]::MaxValue
+            PairingEvent = $pairing
+            GrantEvent = $grant
+            RetirementEvent = $retirement
+        }
+        foreach ($candidate in $orderedEvents) {
+            if ([int]$candidate.Sequence -le $window.StartSequence) {
+                continue
+            }
+            if (Test-FileTransferEfficiencyExactWindowBarrier -Window $window -Event $candidate) {
+                $window.EndSequence = [int]$candidate.Sequence
+                break
+            }
+        }
+        $windowsByKey[$sourceKey] = $window
+    }
+
+    return @($windowsByKey.Values | Sort-Object StartSequence, SourceKey)
+}
+
+function Test-FileTransferEfficiencyPositiveAuthorityEffect {
+    param($Event)
+
+    $name = [string]$Event.EventName
+    if ($name -eq 'filetransfer_runtime_owner_stale_update_rejected' -or
+        $name -eq 'filetransfer_control_plane_send_retired_stale_generation' -or
+        $name -eq 'filetransfer_fallback_tail_retired_owner_update_suppressed') {
+        return $false
+    }
+    if ((Get-FileTransferEventField -Event $Event -Name 'local_only_rejected' -Default '0') -eq '1') {
+        return $false
+    }
+
+    $authorityEffect = Get-FileTransferEventField -Event $Event -Name 'authority_effect' -Default ''
+    if ($authorityEffect -match '^(?i:none|no_effect|zero|0|rejected|stale|ambiguous|suppressed|ignored)$') {
+        return $false
+    }
+    foreach ($field in @('decision_status', 'status')) {
+        $value = Get-FileTransferEventField -Event $Event -Name $field -Default ''
+        if ($value -match '(?i)(stale|rejected|ambiguous|suppressed|ignored)') {
+            return $false
+        }
+    }
+    $outcome = Get-FileTransferEventField -Event $Event -Name 'outcome' -Default ''
+    if ($outcome -match '^(?i:none|no_effect|rejected|stale|ambiguous|suppressed|ignored)$') {
+        return $false
+    }
+    $acceptedAny = Get-FileTransferEventField -Event $Event -Name 'accepted_any' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($acceptedAny) -and $acceptedAny -ne '1') {
+        return $false
+    }
+    $peerVisibleAny = Get-FileTransferEventField -Event $Event -Name 'peer_visible_any' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($peerVisibleAny) -and $peerVisibleAny -ne '1') {
+        return $false
+    }
+    if ($name -like '*state_refresh_state_resent' -and
+        (Get-FileTransferEventField -Event $Event -Name 'sent' -Default '1') -ne '1') {
+        return $false
+    }
+
+    return $true
+}
+
+function Get-FileTransferEfficiencyCorrelationRequestId {
+    param($Event)
+
+    return Get-FileTransferEfficiencyFirstNonEmptyField `
+        -Event $Event `
+        -Names @(
+            'request_id',
+            'checkpoint_request_id',
+            'repair_request_id',
+            'frame_repair_request_id',
+            'recovery_request_id',
+            'bridge_recovery_request_id',
+            'recovery_operation_id')
+}
+
+function Get-FileTransferEfficiencyLifecycleGeneration {
+    param(
+        $Event,
+        [switch]$BridgeRecovery
+    )
+
+    if ($BridgeRecovery) {
+        return Get-FileTransferEfficiencyFirstNonEmptyField `
+            -Event $Event `
+            -Names @(
+                'recovery_operation_generation',
+                'receive_recovery_operation_generation',
+                'recovery_liveness_lease_generation',
+                'bridge_decision_generation',
+                'operation_generation',
+                'generation')
+    }
+
+    return Get-FileTransferEfficiencyFirstNonEmptyField `
+        -Event $Event `
+        -Names @(
+            'generation',
+            'request_sequence',
+            'request_generation',
+            'checkpoint_generation',
+            'control_plane_generation')
+}
+
+function Get-FileTransferEfficiencyStateRefreshGeneration {
+    param($Event)
+
+    $name = [string]$Event.EventName
+    if ($name -in @(
+            'filetransfer_fallback_checkpoint_requested',
+            'filetransfer_clean_fallback_checkpoint_requested')) {
+        return Get-FileTransferEfficiencyFirstNonEmptyField `
+            -Event $Event `
+            -Names @('checkpoint_generation', 'request_generation', 'request_sequence')
+    }
+    if ($name -like '*state_refresh*') {
+        return Get-FileTransferEfficiencyFirstNonEmptyField `
+            -Event $Event `
+            -Names @('request_sequence', 'request_generation', 'generation')
+    }
+
+    return ''
+}
+
+function Get-FileTransferEfficiencyBridgeRecoveryOperationId {
+    param($Event)
+
+    return Get-FileTransferEfficiencyFirstNonEmptyField `
+        -Event $Event `
+        -Names @(
+            'recovery_operation_authority_id',
+            'receive_recovery_operation_authority_id',
+            'recovery_liveness_lease_authority_id',
+            'recovery_operation_id',
+            'bridge_recovery_request_id',
+            'recovery_request_id',
+            'request_id',
+            'authority_id')
+}
+
+function Get-FileTransferEfficiencyLifecycleRootKey {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)][string]$OperationId
+    )
+
+    return '{0}|{1}|{2}' -f `
+        (Get-FileTransferEventField -Event $Event -Name 'session_id' -Default ''),
+        (Get-FileTransferEventField -Event $Event -Name 'transfer_id' -Default ''),
+        $OperationId
+}
+
+function Test-FileTransferEfficiencyPositiveGenerationValue {
+    param([string]$Value)
+
+    $parsed = 0
+    return [int]::TryParse(
+            $Value,
+            [System.Globalization.NumberStyles]::Integer,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed) -and
+        $parsed -gt 0
+}
+
+function Get-FileTransferEfficiencyRepeatedTupleEffectIdentity {
+    param(
+        $Window,
+        $Event
+    )
+
+    $identityFieldNames = @(
+        'authority_id',
+        'request_correlation_id',
+        'request_id',
+        'repair_request_id',
+        'checkpoint_request_id',
+        'repair_request_key',
+        'recovery_operation_authority_id',
+        'receive_recovery_operation_authority_id')
+    $generationFieldNames = @(
+        'control_plane_generation',
+        'repair_generation',
+        'checkpoint_generation',
+        'recovery_operation_generation',
+        'receive_recovery_operation_generation',
+        'generation')
+    $operationId = ''
+    foreach ($name in $identityFieldNames) {
+        $candidate = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+        if (Test-FileTransferEfficiencyLineageIdentifier -Value $candidate) {
+            $operationId = $candidate
+            break
+        }
+    }
+    $operationGeneration = ''
+    foreach ($name in $generationFieldNames) {
+        $candidate = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+        if (Test-FileTransferEfficiencyPositiveGenerationValue -Value $candidate) {
+            $operationGeneration = $candidate
+            break
+        }
+    }
+    $frontierParts = @(
+        (Get-FileTransferEfficiencyFirstNonEmptyField -Event $Event -Names @('contiguous_committed_chunk_index', 'current_committed_chunk_index', 'next_chunk_index', 'committed_chunk', 'previous_committed_chunk_index')),
+        (Get-FileTransferEfficiencyFirstNonEmptyField -Event $Event -Names @('durable_received_highest_chunk_index', 'highest_received_chunk_index', 'highest_observed_chunk')),
+        (Get-FileTransferEfficiencyFirstNonEmptyField -Event $Event -Names @('frontier_gap', 'frontier_gap_missing', 'missing_range_count', 'missing_range')))
+    if ([string]::IsNullOrWhiteSpace($operationId) -and
+        [string]::IsNullOrWhiteSpace($operationGeneration)) {
+        $rawLine = [string]$Event.RawLine
+        if ([string]::IsNullOrWhiteSpace($rawLine)) {
+            $rawLine = 'sequence:{0}' -f [int]$Event.Sequence
+        }
+        $literalKey = 'literal|{0}|{1}|{2}' -f $Window.SourceKey, $Event.EventName, $rawLine
+        return [pscustomobject]@{ PrimaryKey = $literalKey; FullKey = $literalKey }
+    }
+
+    $primaryKey = 'operation|{0}|{1}|{2}|{3}' -f `
+        $Window.SourceKey,
+        $Event.EventName,
+        $operationId,
+        $operationGeneration
+    $fullParts = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @($identityFieldNames + $generationFieldNames + @('kind', 'reason'))) {
+        $fullParts.Add(('{0}={1}' -f $name, (Get-FileTransferEventField -Event $Event -Name $name -Default ''))) | Out-Null
+    }
+    $fullParts.Add(('frontier={0}' -f ($frontierParts -join '|'))) | Out-Null
+    return [pscustomobject]@{
+        PrimaryKey = $primaryKey
+        FullKey = '{0}|{1}' -f $primaryKey, ($fullParts.ToArray() -join '|')
+    }
+}
+
+function Get-FileTransferEfficiencyExactWindowMetrics {
+    param(
+        [object[]]$Events,
+        [object[]]$Windows
+    )
+
+    $scopedEffectKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $scopedPressureEffectKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $distinctOperationKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $windowDistinctOperationKeys = @{}
+    $windowPressureCounts = @{}
+    $windowRepeatedTupleCounts = @{}
+    $windowRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($window in @($Windows)) {
+        $windowDistinctOperationKeys[$window.SourceKey] =
+            New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        $windowPressureCounts[$window.SourceKey] = 0
+        $windowRepeatedTupleCounts[$window.SourceKey] = 0
+        foreach ($event in @($Events)) {
+            if ([int]$event.Sequence -le $window.StartSequence -or
+                [int]$event.Sequence -ge $window.EndSequence) {
+                continue
+            }
+            $windowRecords.Add([pscustomobject]@{ Window = $window; Event = $event }) | Out-Null
+        }
+    }
+
+    $directWindowKeysBySequence = @{}
+    foreach ($record in $windowRecords.ToArray()) {
+        if (-not (Test-FileTransferEfficiencyWindowDirectScopeMatch `
+                -Window $record.Window `
+                -Event $record.Event)) {
+            continue
+        }
+        $sequence = [int]$record.Event.Sequence
+        if (-not $directWindowKeysBySequence.ContainsKey($sequence)) {
+            $directWindowKeysBySequence[$sequence] =
+                New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        }
+        $directWindowKeysBySequence[$sequence].Add($record.Window.SourceKey) | Out-Null
+    }
+
+    foreach ($window in @($Windows)) {
+        $tupleEffectsByIdentity = @{}
+        $tupleFullIdentitiesByPrimary = @{}
+        $ambiguousTuplePrimaries = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($record in $windowRecords.ToArray()) {
+            if ([string]$record.Event.EventName -notin @(
+                    'filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced',
+                    'filetransfer_v6_frontier_request_sent',
+                    'filetransfer_v6_receiver_state_deferred',
+                    'filetransfer_v6_receiver_state_coalesced',
+                    'filetransfer_fallback_tail_progress_coalesced',
+                    'filetransfer_frontier_stall_repair_due',
+                    'filetransfer_v4_frontier_stall_missing_range_due') -or
+                $record.Window.SourceKey -ne $window.SourceKey -or
+                -not $directWindowKeysBySequence.ContainsKey([int]$record.Event.Sequence) -or
+                $directWindowKeysBySequence[[int]$record.Event.Sequence].Count -ne 1 -or
+                -not $directWindowKeysBySequence[[int]$record.Event.Sequence].Contains($window.SourceKey) -or
+                -not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $record.Event)) {
+                continue
+            }
+            $tupleEffectIdentity = Get-FileTransferEfficiencyRepeatedTupleEffectIdentity `
+                -Window $window `
+                -Event $record.Event
+            if (-not $tupleFullIdentitiesByPrimary.ContainsKey($tupleEffectIdentity.PrimaryKey)) {
+                $tupleFullIdentitiesByPrimary[$tupleEffectIdentity.PrimaryKey] =
+                    New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+            }
+            $tupleFullIdentitiesByPrimary[$tupleEffectIdentity.PrimaryKey].Add($tupleEffectIdentity.FullKey) | Out-Null
+            if ($tupleFullIdentitiesByPrimary[$tupleEffectIdentity.PrimaryKey].Count -gt 1) {
+                $ambiguousTuplePrimaries.Add($tupleEffectIdentity.PrimaryKey) | Out-Null
+            }
+            if (-not $tupleEffectsByIdentity.ContainsKey($tupleEffectIdentity.FullKey)) {
+                $tupleEffectsByIdentity[$tupleEffectIdentity.FullKey] = [pscustomobject]@{
+                    PrimaryKey = $tupleEffectIdentity.PrimaryKey
+                    Event = $record.Event
+                }
+            }
+        }
+        [object[]]$tupleEvents = @(
+            $tupleEffectsByIdentity.Values |
+                Where-Object { -not $ambiguousTuplePrimaries.Contains($_.PrimaryKey) } |
+                ForEach-Object { $_.Event } |
+                Sort-Object Sequence, LineNumber
+        )
+        $windowRepeatedTupleCounts[$window.SourceKey] =
+            Get-FileTransferEfficiencyRepeatedFrontierTupleCount -Events $tupleEvents
+    }
+
+    foreach ($record in $windowRecords.ToArray()) {
+        $window = $record.Window
+        $event = $record.Event
+        $name = [string]$event.EventName
+        if ($name -like '*state_refresh*' -or
+            $name -like '*bridge_recovery*' -or
+            $name -like '*receive_stall_recovery*') {
+            continue
+        }
+        if (-not (Test-FileTransferEfficiencyPostYieldRecoveryEvent -Event $event) -or
+            -not $directWindowKeysBySequence.ContainsKey([int]$event.Sequence) -or
+            $directWindowKeysBySequence[[int]$event.Sequence].Count -ne 1 -or
+            -not $directWindowKeysBySequence[[int]$event.Sequence].Contains($window.SourceKey) -or
+            -not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $event)) {
+            continue
+        }
+
+        $operationKey = ''
+        if ($name -in @('filetransfer_control_plane_delivery_result', 'filetransfer_control_plane_delivery_observed')) {
+            $authorityId = Get-FileTransferEventField -Event $event -Name 'authority_id' -Default ''
+            $controlPlaneGeneration = Get-FileTransferEventField -Event $event -Name 'control_plane_generation' -Default ''
+            $kind = Get-FileTransferEventField -Event $event -Name 'kind' -Default ''
+            $reason = Get-FileTransferEventField -Event $event -Name 'reason' -Default ''
+            if ([string]::IsNullOrWhiteSpace($authorityId) -or
+                [string]::IsNullOrWhiteSpace($controlPlaneGeneration) -or
+                [string]::IsNullOrWhiteSpace($kind) -or
+                [string]::IsNullOrWhiteSpace($reason)) {
+                continue
+            }
+            $operationKey = 'delivery|{0}|{1}|{2}|{3}|{4}' -f `
+                $window.SourceKey, $authorityId, $controlPlaneGeneration, $kind, $reason
+        }
+        else {
+            $operationId = Get-FileTransferEfficiencyFirstNonEmptyField `
+                -Event $event `
+                -Names @(
+                    'authority_id',
+                    'request_correlation_id',
+                    'repair_request_id',
+                    'checkpoint_request_id',
+                    'repair_request_key',
+                    'recovery_generation') `
+                -Default ([string]$event.EventName)
+            $operationGeneration = Get-FileTransferEfficiencyFirstNonEmptyField `
+                -Event $event `
+                -Names @('control_plane_generation', 'repair_generation', 'checkpoint_generation', 'pressure_generation', 'generation') `
+                -Default '0'
+            $operationKey = 'recovery|{0}|{1}|{2}|{3}' -f `
+                $window.SourceKey, $event.EventName, $operationId, $operationGeneration
+        }
+
+        $scopedEffectKeys.Add($operationKey) | Out-Null
+        $distinctOperationKeys.Add($operationKey) | Out-Null
+        $windowDistinctOperationKeys[$window.SourceKey].Add($operationKey) | Out-Null
+        if ($name -eq 'filetransfer_post_tuna_fallback_control_plane_pressure_marked') {
+            if ($scopedPressureEffectKeys.Add($operationKey)) {
+                $windowPressureCounts[$window.SourceKey]++
+            }
+        }
+    }
+
+    # Build exact state-refresh source bindings once. Control-plane generation
+    # is delivery lineage and must never stand in for state-refresh generation.
+    $stateBindingsByRoot = @{}
+    foreach ($record in $windowRecords.ToArray()) {
+        $event = $record.Event
+        $name = [string]$event.EventName
+        $isCheckpointAnchor = $name -in @(
+            'filetransfer_fallback_checkpoint_requested',
+            'filetransfer_clean_fallback_checkpoint_requested')
+        $isDeliveryAnchor = $name -in @(
+            'filetransfer_control_plane_delivery_result',
+            'filetransfer_control_plane_delivery_observed')
+        if (-not $isCheckpointAnchor -and -not $isDeliveryAnchor) {
+            continue
+        }
+        if ($isDeliveryAnchor) {
+            $reason = Get-FileTransferEventField -Event $event -Name 'reason' -Default ''
+            $kind = Get-FileTransferEventField -Event $event -Name 'kind' -Default ''
+            $recoveryMode = Get-FileTransferEventField -Event $event -Name 'recovery_mode' -Default ''
+            $syntheticStateRefresh = $reason -eq 'state_refresh_recovery'
+            $productionStateRefresh = $kind -eq 'fallback_checkpoint_request' -and
+                $reason -eq 'post_tuna_fallback_state_refresh' -and
+                $recoveryMode -eq 'regular_nkn_state_refresh'
+            if (-not $syntheticStateRefresh -and -not $productionStateRefresh) {
+                continue
+            }
+            $deliveryAuthorityId = Get-FileTransferEventField -Event $event -Name 'authority_id' -Default ''
+            $controlPlaneGeneration = Get-FileTransferEventField -Event $event -Name 'control_plane_generation' -Default ''
+            if (-not (Test-FileTransferEfficiencyLineageIdentifier -Value $deliveryAuthorityId) -or
+                -not (Test-FileTransferEfficiencyPositiveGenerationValue -Value $controlPlaneGeneration)) {
+                continue
+            }
+        }
+        if (-not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $event) -or
+            -not $directWindowKeysBySequence.ContainsKey([int]$event.Sequence) -or
+            $directWindowKeysBySequence[[int]$event.Sequence].Count -ne 1 -or
+            -not $directWindowKeysBySequence[[int]$event.Sequence].Contains($record.Window.SourceKey)) {
+            continue
+        }
+        $requestId = Get-FileTransferEfficiencyCorrelationRequestId -Event $event
+        if (-not (Test-FileTransferEfficiencyLineageIdentifier -Value $requestId)) {
+            continue
+        }
+        $rootKey = Get-FileTransferEfficiencyLifecycleRootKey -Event $event -OperationId $requestId
+        if (-not $stateBindingsByRoot.ContainsKey($rootKey)) {
+            $stateBindingsByRoot[$rootKey] = @{}
+        }
+        $bindingKey = $record.Window.SourceKey
+        if (-not $stateBindingsByRoot[$rootKey].ContainsKey($bindingKey)) {
+            $stateBindingsByRoot[$rootKey][$bindingKey] = [pscustomobject]@{
+                RootKey = $rootKey
+                OperationId = $requestId
+                Window = $record.Window
+                ExpectedGenerations = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+            }
+        }
+        if ($isCheckpointAnchor) {
+            $generation = Get-FileTransferEfficiencyStateRefreshGeneration -Event $event
+            if (-not (Test-FileTransferEfficiencyPositiveGenerationValue -Value $generation)) {
+                $stateBindingsByRoot[$rootKey][$bindingKey].ExpectedGenerations.Add('(invalid)') | Out-Null
+            }
+            else {
+                $stateBindingsByRoot[$rootKey][$bindingKey].ExpectedGenerations.Add($generation) | Out-Null
+            }
+        }
+    }
+
+    $stateOperationStates = @{}
+    $stateGenerationsByRoot = @{}
+    $ambiguousStateRoots = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($rootKey in @($stateBindingsByRoot.Keys)) {
+        [object[]]$bindings = @($stateBindingsByRoot[$rootKey].Values)
+        [object[]]$pairKeys = @($bindings | ForEach-Object { $_.Window.PairSourceKey } | Select-Object -Unique)
+        $expectedGenerations = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($binding in $bindings) {
+            foreach ($generation in $binding.ExpectedGenerations) {
+                $expectedGenerations.Add($generation) | Out-Null
+            }
+        }
+        if ($pairKeys.Count -ne 1 -or $expectedGenerations.Count -gt 1 -or $expectedGenerations.Contains('(invalid)')) {
+            $ambiguousStateRoots.Add($rootKey) | Out-Null
+        }
+    }
+    foreach ($event in @($Events)) {
+        if ([string]$event.EventName -notlike '*state_refresh*' -or
+            -not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $event)) {
+            continue
+        }
+        $requestId = Get-FileTransferEfficiencyCorrelationRequestId -Event $event
+        if (-not (Test-FileTransferEfficiencyLineageIdentifier -Value $requestId)) {
+            continue
+        }
+        $rootKey = Get-FileTransferEfficiencyLifecycleRootKey -Event $event -OperationId $requestId
+        if (-not $stateBindingsByRoot.ContainsKey($rootKey)) {
+            continue
+        }
+        $eventGeneration = Get-FileTransferEfficiencyStateRefreshGeneration -Event $event
+        $candidateBindings = New-Object System.Collections.Generic.List[object]
+        $withinBindingWindow = $false
+        foreach ($binding in @($stateBindingsByRoot[$rootKey].Values)) {
+            $insideBindingWindow = [int]$event.Sequence -gt $binding.Window.StartSequence -and
+                [int]$event.Sequence -lt $binding.Window.EndSequence
+            if ($insideBindingWindow) {
+                $withinBindingWindow = $true
+            }
+            if (-not $insideBindingWindow -or
+                -not (Test-FileTransferEfficiencyPositiveGenerationValue -Value $eventGeneration) -or
+                ($binding.ExpectedGenerations.Count -gt 0 -and
+                    -not $binding.ExpectedGenerations.Contains($eventGeneration)) -or
+                -not (Test-FileTransferEfficiencyWindowSparseScopeCompatible -Window $binding.Window -Event $event)) {
+                continue
+            }
+            $candidateBindings.Add($binding) | Out-Null
+        }
+        if ($candidateBindings.Count -ne 1) {
+            if ($withinBindingWindow) {
+                $ambiguousStateRoots.Add($rootKey) | Out-Null
+            }
+            continue
+        }
+
+        if (-not $stateGenerationsByRoot.ContainsKey($rootKey)) {
+            $stateGenerationsByRoot[$rootKey] =
+                New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        }
+        $stateGenerationsByRoot[$rootKey].Add($eventGeneration) | Out-Null
+        if ($stateGenerationsByRoot[$rootKey].Count -gt 1) {
+            $ambiguousStateRoots.Add($rootKey) | Out-Null
+        }
+
+        $binding = $candidateBindings[0]
+        $stateOperationKey = 'state_refresh|{0}|{1}|{2}' -f `
+            $binding.Window.PairSourceKey,
+            $rootKey,
+            $eventGeneration
+        if (-not $stateOperationStates.ContainsKey($stateOperationKey)) {
+            $stateOperationStates[$stateOperationKey] = [pscustomobject]@{
+                RootKey = $rootKey
+                WindowKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+            }
+        }
+        $stateOperationStates[$stateOperationKey].WindowKeys.Add($binding.Window.SourceKey) | Out-Null
+    }
+    foreach ($stateOperationKey in @($stateOperationStates.Keys)) {
+        $state = $stateOperationStates[$stateOperationKey]
+        if ($ambiguousStateRoots.Contains($state.RootKey)) {
+            continue
+        }
+        $scopedEffectKeys.Add($stateOperationKey) | Out-Null
+        $distinctOperationKeys.Add($stateOperationKey) | Out-Null
+        foreach ($windowKey in $state.WindowKeys) {
+            $windowDistinctOperationKeys[$windowKey].Add($stateOperationKey) | Out-Null
+        }
+    }
+
+    # Bridge lifecycle records are intentionally scope-poor. Bind them only to
+    # one source-complete coordinator authority record and never scan the full
+    # window again for each operation.
+    $bridgeBindingsByRoot = @{}
+    foreach ($record in $windowRecords.ToArray()) {
+        $event = $record.Event
+        if ([string]$event.EventName -notin @(
+                'filetransfer_bridge_recovery_authority_granted',
+                'filetransfer_receive_stall_recovery_authority_granted') -or
+            -not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $event) -or
+            -not $directWindowKeysBySequence.ContainsKey([int]$event.Sequence) -or
+            $directWindowKeysBySequence[[int]$event.Sequence].Count -ne 1 -or
+            -not $directWindowKeysBySequence[[int]$event.Sequence].Contains($record.Window.SourceKey)) {
+            continue
+        }
+        $operationId = Get-FileTransferEfficiencyBridgeRecoveryOperationId -Event $event
+        $generation = Get-FileTransferEfficiencyLifecycleGeneration -Event $event -BridgeRecovery
+        if (-not (Test-FileTransferEfficiencyLineageIdentifier -Value $operationId) -or
+            -not (Test-FileTransferEfficiencyPositiveGenerationValue -Value $generation)) {
+            continue
+        }
+        $rootKey = Get-FileTransferEfficiencyLifecycleRootKey `
+            -Event $event `
+            -OperationId $operationId
+        if (-not $bridgeBindingsByRoot.ContainsKey($rootKey)) {
+            $bridgeBindingsByRoot[$rootKey] = @{}
+        }
+        $bindingKey = '{0}|{1}' -f $record.Window.SourceKey, $generation
+        if (-not $bridgeBindingsByRoot[$rootKey].ContainsKey($bindingKey)) {
+            $bridgeBindingsByRoot[$rootKey][$bindingKey] = [pscustomobject]@{
+                RootKey = $rootKey
+                OperationId = $operationId
+                Generation = $generation
+                Window = $record.Window
+            }
+        }
+    }
+
+    $bridgeOperationStates = @{}
+    $ambiguousBridgeRoots = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($rootKey in @($bridgeBindingsByRoot.Keys)) {
+        [object[]]$bindings = @($bridgeBindingsByRoot[$rootKey].Values)
+        [object[]]$generations = @($bindings | ForEach-Object { $_.Generation } | Select-Object -Unique)
+        [object[]]$sourceKeys = @($bindings | ForEach-Object { $_.Window.SourceKey } | Select-Object -Unique)
+        if ($generations.Count -ne 1 -or $sourceKeys.Count -ne 1) {
+            $ambiguousBridgeRoots.Add($rootKey) | Out-Null
+        }
+    }
+    foreach ($event in @($Events)) {
+        $name = [string]$event.EventName
+        if (($name -notlike '*bridge_recovery*' -and $name -notlike '*receive_stall_recovery*') -or
+            -not (Test-FileTransferEfficiencyPositiveAuthorityEffect -Event $event)) {
+            continue
+        }
+        $operationId = Get-FileTransferEfficiencyBridgeRecoveryOperationId -Event $event
+        if (-not (Test-FileTransferEfficiencyLineageIdentifier -Value $operationId)) {
+            continue
+        }
+        $rootKey = Get-FileTransferEfficiencyLifecycleRootKey `
+            -Event $event `
+            -OperationId $operationId
+        if (-not $bridgeBindingsByRoot.ContainsKey($rootKey)) {
+            continue
+        }
+        $eventGeneration = Get-FileTransferEfficiencyLifecycleGeneration -Event $event -BridgeRecovery
+        $candidateBindings = New-Object System.Collections.Generic.List[object]
+        $withinBindingWindow = $false
+        foreach ($binding in @($bridgeBindingsByRoot[$rootKey].Values)) {
+            $insideBindingWindow = [int]$event.Sequence -gt $binding.Window.StartSequence -and
+                [int]$event.Sequence -lt $binding.Window.EndSequence
+            if ($insideBindingWindow) {
+                $withinBindingWindow = $true
+            }
+            if (-not $insideBindingWindow -or
+                -not (Test-FileTransferEfficiencyPositiveGenerationValue -Value $eventGeneration) -or
+                $eventGeneration -ne $binding.Generation -or
+                -not (Test-FileTransferEfficiencyWindowSparseScopeCompatible `
+                    -Window $binding.Window `
+                    -Event $event)) {
+                continue
+            }
+            $candidateBindings.Add($binding) | Out-Null
+        }
+        if ($candidateBindings.Count -gt 1) {
+            $ambiguousBridgeRoots.Add($rootKey) | Out-Null
+            continue
+        }
+        if ($candidateBindings.Count -ne 1) {
+            if ($candidateBindings.Count -eq 0 -and $withinBindingWindow) {
+                $ambiguousBridgeRoots.Add($rootKey) | Out-Null
+            }
+            continue
+        }
+
+        $binding = $candidateBindings[0]
+        $bridgeOperationKey = 'bridge_recovery|{0}|{1}|{2}' -f `
+            $binding.Window.SourceKey,
+            $rootKey,
+            $binding.Generation
+        if (-not $bridgeOperationStates.ContainsKey($bridgeOperationKey)) {
+            $bridgeOperationStates[$bridgeOperationKey] = [pscustomobject]@{
+                RootKey = $rootKey
+                WindowKey = $binding.Window.SourceKey
+            }
+        }
+    }
+    foreach ($bridgeOperationKey in @($bridgeOperationStates.Keys)) {
+        $state = $bridgeOperationStates[$bridgeOperationKey]
+        if ($ambiguousBridgeRoots.Contains($state.RootKey)) {
+            continue
+        }
+        $scopedEffectKeys.Add($bridgeOperationKey) | Out-Null
+        $distinctOperationKeys.Add($bridgeOperationKey) | Out-Null
+        $windowDistinctOperationKeys[$state.WindowKey].Add($bridgeOperationKey) | Out-Null
+    }
+
+    $failingWindowKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $failingPairKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $postYieldRepeatedTupleCount = 0
+    foreach ($window in @($Windows)) {
+        $distinctCount = $windowDistinctOperationKeys[$window.SourceKey].Count
+        $pressureCount = [int]$windowPressureCounts[$window.SourceKey]
+        $repeatedTupleCount = [int]$windowRepeatedTupleCounts[$window.SourceKey]
+        $postYieldRepeatedTupleCount += $repeatedTupleCount
+        if ($distinctCount -gt 50 -or $pressureCount -gt 0 -or $repeatedTupleCount -gt 50) {
+            $failingWindowKeys.Add($window.SourceKey) | Out-Null
+            $failingPairKeys.Add($window.PairSourceKey) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        ScopedEffectCount = $scopedEffectKeys.Count
+        DistinctOperationCount = $distinctOperationKeys.Count
+        ExactWindowCount = @($Windows).Count
+        ScopedPressureEffectCount = $scopedPressureEffectKeys.Count
+        RepeatedUnchangedFrontierTupleCount = $postYieldRepeatedTupleCount
+        FailureRawCount = $failingWindowKeys.Count
+        FailureDistinctCount = $failingPairKeys.Count
+        FailureRecoveredCount = 0
+        FailureUnresolvedCount = $failingPairKeys.Count
+        Verdict = if ($failingPairKeys.Count -gt 0) { 'fail' } else { 'pass' }
+    }
+}
+
 function Test-FileTransferEfficiencyLivenessDeferralEvent {
     param($Event)
 
@@ -7282,12 +8658,14 @@ function Write-FileTransferEfficiencySummaryArtifacts {
     }
 
     $repeatedUnchangedFrontierTupleCount = Get-FileTransferEfficiencyRepeatedFrontierTupleCount -Events $Events
-    $postYieldRepeatedUnchangedFrontierTupleCount = if ($postYieldEvents.Count -gt 0) {
-        Get-FileTransferEfficiencyRepeatedFrontierTupleCount -Events $postYieldEvents
-    }
-    else {
-        0
-    }
+    [object[]]$exactPairedYieldWindows = @(
+        Get-FileTransferEfficiencyExactPairedYieldWindows -Events $Events
+    )
+    $exactWindowMetrics = Get-FileTransferEfficiencyExactWindowMetrics `
+        -Events $Events `
+        -Windows $exactPairedYieldWindows
+    $postYieldRepeatedUnchangedFrontierTupleCount =
+        [int]$exactWindowMetrics.RepeatedUnchangedFrontierTupleCount
     $correctnessBlockers = @(Get-FileTransferEfficiencyCorrectnessBlockers -Events $Events -GateResult $GateResult -ShaOk $shaOk -InboundTerminalState $inboundTerminalState -OutboundTerminalState $outboundTerminalState)
     $duplicateStateReplayProof =
         Get-FileTransferPostTunaFallbackDuplicateStateReplayAmplificationCorrelation `
@@ -7302,15 +8680,11 @@ function Write-FileTransferEfficiencySummaryArtifacts {
     elseif ($correctnessBlockers.Count -gt 0) {
         $efficiencyVerdict = 'not_evaluated_due_correctness_failure'
     }
-    elseif ($postYieldBoundarySequence -gt 0 -and ($postYieldPressureActivityCount -gt 0 -or $postYieldRecoveryActivityCount -gt 50)) {
+    elseif ([int]$exactWindowMetrics.FailureUnresolvedCount -gt 0) {
         $efficiencyVerdict = 'fail'
         $efficiencyFailureClass = 'fallback_tail_efficiency_treadmill'
     }
-    elseif ($postYieldBoundarySequence -gt 0 -and $postYieldRepeatedUnchangedFrontierTupleCount -gt 50) {
-        $efficiencyVerdict = 'fail'
-        $efficiencyFailureClass = 'fallback_tail_efficiency_treadmill'
-    }
-    elseif (($frontierStallRepairDueCount + $frontierProgressStateForcedCount + $v6ReceiverStateDeferredCount + $v6ReceiverStateCoalescedCount + $v6FrontierRequestCount + $livenessDeferralCount + $runtimeOwnerStaleRejectedCount) -gt 0) {
+    elseif (($frontierStallRepairDueCount + $frontierProgressStateForcedCount + $v6ReceiverStateDeferredCount + $v6ReceiverStateCoalescedCount + $v6FrontierRequestCount + $livenessDeferralCount + $runtimeOwnerStaleRejectedCount + [int]$exactWindowMetrics.DistinctOperationCount) -gt 0) {
         $efficiencyVerdict = 'warning'
         $efficiencyFailureClass = 'efficiency_warning'
     }
@@ -7340,9 +8714,18 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         recovery_owner_retired_after_yield = $recoveryOwnerRetiredAfterYield
         post_yield_boundary_sequence = $postYieldBoundarySequence
         post_yield_recovery_activity_count = $postYieldRecoveryActivityCount
+        post_yield_scoped_recovery_effect_count = $exactWindowMetrics.ScopedEffectCount
+        post_yield_scoped_recovery_distinct_operation_count = $exactWindowMetrics.DistinctOperationCount
+        post_yield_exact_window_count = $exactWindowMetrics.ExactWindowCount
+        post_yield_scoped_pressure_effect_count = $exactWindowMetrics.ScopedPressureEffectCount
         post_yield_liveness_activity_count = $postYieldLivenessActivityCount
         repeated_unchanged_frontier_tuple_count = $repeatedUnchangedFrontierTupleCount
         post_yield_repeated_unchanged_frontier_tuple_count = $postYieldRepeatedUnchangedFrontierTupleCount
+        fallback_tail_efficiency_treadmill_raw_count = $exactWindowMetrics.FailureRawCount
+        fallback_tail_efficiency_treadmill_distinct_count = $exactWindowMetrics.FailureDistinctCount
+        fallback_tail_efficiency_treadmill_recovered_count = $exactWindowMetrics.FailureRecoveredCount
+        fallback_tail_efficiency_treadmill_unresolved_count = $exactWindowMetrics.FailureUnresolvedCount
+        fallback_tail_efficiency_treadmill_verdict = $exactWindowMetrics.Verdict
         correctness_blockers = if ($correctnessBlockers.Count -gt 0) { $correctnessBlockers -join ',' } else { '(none)' }
         efficiency_verdict = $efficiencyVerdict
         efficiency_failure_class = $efficiencyFailureClass

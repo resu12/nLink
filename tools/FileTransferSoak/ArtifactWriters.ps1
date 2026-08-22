@@ -56394,9 +56394,21 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
     [object[]]$requestSentEvents = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_v6_frontier_request_sent'
         })
+    [object[]]$stallGraceRecheckEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_frontier_stall_grace_recheck_decided'
+        })
     [object[]]$deliveryEvents = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_control_plane_delivery_observed' -and
             (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'frontier_request'
+        })
+    [object[]]$terminalProofEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_terminal_proof_consumed'
+        })
+    [object[]]$integrityPassedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'integrity_verify_passed'
+        })
+    [object[]]$tempFinalizeEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'temp_finalize_succeeded'
         })
     [object[]]$terminalEvents = @($ordered | Where-Object {
             $_.EventName -in @(
@@ -56415,6 +56427,9 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
             (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -notin @('', '(none)', 'none') -and
             (Get-FileTransferEventInt64Field -Event $_ -Name 'data_session_generation' -Default 0) -gt 0
+        })
+    [object[]]$dataSessionMutationEvents = @($ordered | Where-Object {
+            $_.EventName -in @('filetransfer_data_session_recreated', 'filetransfer_data_session_removed')
         })
 
     $incidents = [ordered]@{}
@@ -56812,6 +56827,10 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         [object[]]$successorSent = @()
         [object[]]$successorProgress = @()
         [object[]]$successorState = @()
+        [object[]]$successorSettlement = @()
+        [object[]]$successorRecheck = @()
+        [object[]]$completedTerminal = @()
+        $recoveryEvent = $null
         if ($naturalProgress.Count -eq 0) {
             [object[]]$successfulProgressCandidates = @($repairProgressEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
@@ -56827,9 +56846,22 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                 } | Sort-Object Sequence, LineNumber)
             foreach ($progressCandidate in $successfulProgressCandidates) {
                 $successorAuthority = Get-FileTransferEventField -Event $progressCandidate -Name 'authority_id' -Default ''
+                $successorGeneration = Get-FileTransferEventField -Event $progressCandidate -Name 'repair_generation' -Default '0'
+                $successorRepairKey = Get-FileTransferEventField -Event $progressCandidate -Name 'repair_request_key' -Default ''
+                $successorFingerprint = Get-FileTransferEventField -Event $progressCandidate -Name 'range_fingerprint' -Default ''
+                $successorRequestId = Get-FileTransferEventField -Event $progressCandidate -Name 'primary_protocol_repair_request_id' -Default ''
+                $successorCorrelationId = Get-FileTransferEventField -Event $progressCandidate -Name 'primary_request_correlation_id' -Default ''
+                $sameSuccessor = {
+                    param($event)
+                    return (& $sameScope $event) -and
+                        (Get-FileTransferEventField -Event $event -Name 'authority_id' -Default '') -eq $successorAuthority -and
+                        (Get-FileTransferEventField -Event $event -Name 'repair_generation' -Default '0') -eq $successorGeneration -and
+                        (Get-FileTransferEventField -Event $event -Name 'repair_request_key' -Default '') -eq $successorRepairKey -and
+                        (Get-FileTransferEventField -Event $event -Name 'range_fingerprint' -Default '') -eq $successorFingerprint
+                }
                 [object[]]$successorGrant = @($repairGrantedEvents | Where-Object {
-                        [int64]$_.Sequence -lt [int64]$progressCandidate.Sequence -and
                         [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$progressCandidate.Sequence -and
                         (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
                         (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
                         (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
@@ -56871,31 +56903,129 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                         (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default '') -eq $successorRequestId -and
                         (Get-FileTransferEventField -Event $_ -Name 'request_correlation_id' -Default '') -eq $successorCorrelationId
                     } | Select-Object -First 1)
-                [object[]]$successorProgress = @($repairProgressEvents | Where-Object {
-                        [object]::ReferenceEquals($_, $progressCandidate)
-                    })
-                if ($successorProgress.Count -eq 1) {
-                    [object[]]$successorState = @($receiverStateEvents | Where-Object {
-                            [int64]$_.Sequence -gt [int64]$successorProgress[0].Sequence -and
-                            (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
-                            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
-                            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
-                            (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -gt $incident.Frontier
-                        } | Select-Object -First 1)
+                [object[]]$successorProgress = @($progressCandidate)
+                [object[]]$successorState = @($receiverStateEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$progressCandidate.Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -gt $incident.Frontier
+                    } | Select-Object -First 1)
+                $baseSuccessorRecovered = $successorDelivery.Count -eq 1 -and
+                    $successorDispatch.Count -eq 1 -and $successorSent.Count -eq 1
+                if ($baseSuccessorRecovered -and $successorState.Count -eq 1) {
+                    $recoveryEvent = $successorState[0]
+                    break
                 }
-                if ($successorDelivery.Count -eq 1 -and $successorDispatch.Count -eq 1 -and
-                    $successorSent.Count -eq 1 -and $successorState.Count -eq 1) {
+
+                $terminalFrontier = $incident.Highest + 1
+                if (-not $baseSuccessorRecovered -or
+                    (Get-FileTransferEventInt64Field -Event $progressCandidate -Name 'current_frontier_chunk_index' -Default -1) -ne
+                        $terminalFrontier -or
+                    [string]::IsNullOrWhiteSpace($successorAuthority) -or
+                    [int64]$successorGeneration -le 0 -or
+                    [string]::IsNullOrWhiteSpace($successorRepairKey) -or
+                    [string]::IsNullOrWhiteSpace($successorFingerprint) -or
+                    [string]::IsNullOrWhiteSpace($successorRequestId) -or
+                    [string]::IsNullOrWhiteSpace($successorCorrelationId) -or
+                    -not (& $sameScope $progressCandidate) -or
+                    -not (& $sameSuccessor $successorGrant[0]) -or
+                    -not (& $sameSuccessor $successorDispatch[0]) -or
+                    -not (& $sameSuccessor $successorSent[0]) -or
+                    (Get-FileTransferEventField -Event $successorGrant[0] -Name 'source_kind' -Default '') -ne 'ReceiverRequest' -or
+                    (Get-FileTransferEventInt64Field -Event $successorGrant[0] -Name 'durable_received_highest_chunk_index' -Default -1) -ne $incident.Highest -or
+                    (Get-FileTransferEventField -Event $successorGrant[0] -Name 'primary_protocol_repair_request_id' -Default '') -ne $successorRequestId -or
+                    (Get-FileTransferEventField -Event $successorGrant[0] -Name 'primary_request_correlation_id' -Default '') -ne $successorCorrelationId) {
+                    continue
+                }
+                [object[]]$successorSettlement = @($repairSettledEvents | Where-Object {
+                        (& $afterGrant $_) -and (& $sameSuccessor $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '').ToLowerInvariant() -eq 'progressobserved'
+                    } | Select-Object -First 1)
+                [object[]]$successorRecheck = @($stallGraceRecheckEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                        [int64]$_.Sequence -lt [int64]$progressCandidate.Sequence -and
+                        (& $sameScope $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -eq $incident.DataSessionIdentity -and
+                        (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '0') -eq $incident.DataSessionGeneration -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -eq $incident.Frontier -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'highest_received_chunk_index' -Default -1) -eq $incident.Highest -and
+                        (Get-FileTransferEventField -Event $_ -Name 'stall_started_utc' -Default '') -eq
+                            (Get-FileTransferEventField -Event $candidate -Name 'stall_started_utc' -Default '') -and
+                        (Get-FileTransferEventField -Event $_ -Name 'wake_generation' -Default '0') -eq
+                            (Get-FileTransferEventField -Event $candidate -Name 'wake_generation' -Default '0') -and
+                        (Get-FileTransferEventField -Event $_ -Name 'wake_deadline_utc' -Default '') -eq
+                            (Get-FileTransferEventField -Event $candidate -Name 'wake_deadline_utc' -Default '') -and
+                        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '').ToLowerInvariant() -eq 'dispatched' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'exact_receiver_request_dispatched' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'authority_effect' -Default '') -eq 'none'
+                    } | Select-Object -First 1)
+                if ($successorSettlement.Count -ne 1 -or $successorRecheck.Count -ne 1 -or
+                    (Get-FileTransferEventField -Event $successorSent[0] -Name 'reason' -Default '') -ne
+                        'frontier_stall_grace_elapsed' -or
+                    (Get-FileTransferEventField -Event $successorDelivery[0] -Name 'reason' -Default '') -ne
+                        'frontier_stall_grace_elapsed') {
+                    continue
+                }
+                [object[]]$terminalProof = @($terminalProofEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$progressCandidate.Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '0') -eq
+                            (Get-FileTransferEventField -Event $progressCandidate -Name 'live_route_epoch' -Default '0') -and
+                        (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '0') -eq
+                            (Get-FileTransferEventField -Event $progressCandidate -Name 'leg_generation' -Default '0') -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '0') -eq
+                            (Get-FileTransferEventField -Event $progressCandidate -Name 'transport_epoch' -Default '0') -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'committed_chunk' -Default -1) -eq $terminalFrontier -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'chunk_count' -Default -1) -eq $terminalFrontier
+                    } | Select-Object -First 1)
+                if ($terminalProof.Count -ne 1) { continue }
+                [object[]]$integrityPassed = @($integrityPassedEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$terminalProof[0].Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'file_size_bytes' -Default 0) -gt 0
+                    } | Select-Object -First 1)
+                if ($integrityPassed.Count -ne 1) { continue }
+                $fileSize = Get-FileTransferEventField -Event $integrityPassed[0] -Name 'file_size_bytes' -Default '0'
+                [object[]]$tempFinalized = @($tempFinalizeEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$integrityPassed[0].Sequence -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'file_size_bytes' -Default '0') -eq $fileSize -and
+                        (Get-FileTransferEventField -Event $_ -Name 'saved_path' -Default '') -notin @('', '(none)', 'none')
+                    } | Select-Object -First 1)
+                if ($tempFinalized.Count -ne 1) { continue }
+                $savedPath = Get-FileTransferEventField -Event $tempFinalized[0] -Name 'saved_path' -Default ''
+                [object[]]$completedTerminal = @($terminalEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$tempFinalized[0].Sequence -and
+                        $_.EventName -eq 'file_transfer_inbound_terminal' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                        (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                        (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -eq 'Completed' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -in @('', '(none)', 'none') -and
+                        (Get-FileTransferEventField -Event $_ -Name 'saved_path' -Default '') -eq $savedPath
+                    } | Select-Object -First 1)
+                if ($completedTerminal.Count -eq 1) {
+                    $recoveryEvent = $completedTerminal[0]
                     break
                 }
             }
         }
 
-        $recovered = $naturalProgress.Count -eq 1 -or
-            ($successorGrant.Count -eq 1 -and $successorDelivery.Count -eq 1 -and
-             $successorDispatch.Count -eq 1 -and $successorSent.Count -eq 1 -and
-             $successorProgress.Count -eq 1 -and $successorState.Count -eq 1)
+        $recovered = $naturalProgress.Count -eq 1 -or $null -ne $recoveryEvent
         if ($recovered) {
-            $recoveryEvent = if ($naturalProgress.Count -eq 1) { $naturalProgress[0] } else { $successorState[0] }
+            if ($naturalProgress.Count -eq 1) { $recoveryEvent = $naturalProgress[0] }
             [object[]]$poison = @($terminalEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
                     [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
@@ -56903,7 +57033,28 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                     (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
                     (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer
                 })
-            $recovered = $poison.Count -eq 0
+            [object[]]$routeMutation = @()
+            if ($completedTerminal.Count -eq 1) { $routeMutation = @($routePublicationEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                    -not (& $sameScope $_)
+                }) }
+            [object[]]$dataSessionMutation = @()
+            if ($completedTerminal.Count -eq 1) { $dataSessionMutation = @($dataSessionMutationEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
+                    ($_.EventName -eq 'filetransfer_data_session_removed' -or
+                        (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -ne $incident.DataSessionIdentity -or
+                        (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '0') -ne $incident.DataSessionGeneration)
+                }) }
+            $recovered = $poison.Count -eq 0 -and $routeMutation.Count -eq 0 -and
+                $dataSessionMutation.Count -eq 0
         }
 
         $record = [pscustomobject]@{

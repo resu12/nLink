@@ -16,6 +16,260 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptancePhase5TestBase
 {
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_EfficiencySummaryValidationSeparatesPerformanceFromCorrectness()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var script = await File.ReadAllTextAsync(
+            Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var assertionBody = ExtractPowerShellFunctionBody(
+            script,
+            "Assert-Phase4EfficiencySummary",
+            "Test-RouteAcceptanceSemanticAnalysisUnavailableFailure");
+        var performanceBody = ExtractPowerShellFunctionBody(
+            script,
+            "Test-Phase4PerformanceFailureLine",
+            "Get-Phase4FailureClass");
+        var summaryRunDtoBody = ExtractPowerShellFunctionBody(
+            script,
+            "New-RouteAcceptanceSummaryRunDto",
+            "Write-Phase4RouteAcceptanceSummaryFiles");
+        var summaryRunDtoSetupEnd = summaryRunDtoBody.IndexOf("return [pscustomobject]", StringComparison.Ordinal);
+        Assert.True(summaryRunDtoSetupEnd > 0, "Expected the summary DTO failure projection before its return value.");
+        var summaryRunDtoSetupBody = summaryRunDtoBody[..summaryRunDtoSetupEnd];
+
+        Assert.Contains("efficiencySummaryValidationVerdict = [string]$Result.efficiencySummaryValidationVerdict", script, StringComparison.Ordinal);
+        Assert.Contains("efficiencyVerdict = $efficiencyVerdict", script, StringComparison.Ordinal);
+        Assert.Contains("{0}.efficiency_failure_class={1}", script, StringComparison.Ordinal);
+        Assert.Contains("{0}.fallback_tail_efficiency_treadmill_unresolved_count={1}", script, StringComparison.Ordinal);
+
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Assert-Phase4EfficiencySummary { {{assertionBody}} }
+            function Test-Phase4PerformanceFailureLine { {{performanceBody}} }
+            function ConvertTo-RouteAcceptanceSummaryStringArray {
+                param($Values, [int]$Limit)
+                return @($Values | Select-Object -First $Limit)
+            }
+            function Get-TestSummaryFailureProjection {
+                {{summaryRunDtoSetupBody}}
+                return [pscustomobject]@{
+                    failures = @($resultFailureLines)
+                    performanceFailureCount = $resultPerformanceFailureCount
+                    correctnessFailureCount = $resultCorrectnessFailureCount
+                }
+            }
+            function Read-RouteAcceptanceKeyValueArtifact {
+                param([string]$Path)
+                $values = @{}
+                if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $values }
+                foreach ($line in Get-Content -LiteralPath $Path) {
+                    $separator = $line.IndexOf('=')
+                    if ($separator -gt 0) {
+                        $values[$line.Substring(0, $separator).Trim()] = $line.Substring($separator + 1).Trim()
+                    }
+                }
+                return $values
+            }
+            function Get-RouteAcceptanceReportValue {
+                param($Report, [string]$Name, [string]$DefaultValue = '')
+                if ($Report.ContainsKey($Name)) { return [string]$Report[$Name] }
+                return $DefaultValue
+            }
+            function Add-RouteAcceptanceFailure {
+                param($Result, [string]$Message)
+                [void]$Result.failures.Add($Message)
+            }
+            function New-TestResult {
+                param([string]$ArtifactDir)
+                return [pscustomobject]@{
+                    artifactDir = $ArtifactDir
+                    baselineGoodputBytesPerSecond = 0D
+                    efficiencySummaryValidationVerdict = 'not_evaluated'
+                    efficiencyVerdict = 'not_evaluated'
+                    efficiencyFailureClass = 'none'
+                    efficiencyPostYieldBoundarySequence = 0L
+                    efficiencyPostYieldRecoveryActivityCount = 0L
+                    efficiencyPostYieldRepeatedUnchangedFrontierTupleCount = 0L
+                    efficiencyPostYieldScopedRecoveryEffectCount = 0L
+                    efficiencyPostYieldScopedRecoveryDistinctOperationCount = 0L
+                    efficiencyPostYieldExactWindowCount = 0L
+                    efficiencyPostYieldScopedPressureEffectCount = 0L
+                    efficiencyDuplicateStateReplayAuthorityCount = 0L
+                    fallbackTailEfficiencyTreadmillRawCount = 0L
+                    fallbackTailEfficiencyTreadmillDistinctCount = 0L
+                    fallbackTailEfficiencyTreadmillRecoveredCount = 0L
+                    fallbackTailEfficiencyTreadmillUnresolvedCount = 0L
+                    fallbackTailEfficiencyTreadmillVerdict = 'none'
+                    failures = [System.Collections.Generic.List[string]]::new()
+                }
+            }
+            function Write-TestEfficiencySummary {
+                param(
+                    [string]$ArtifactDir,
+                    [string]$Verdict,
+                    [string]$FailureClass,
+                    [string]$RecoveryCount = '4',
+                    [string]$TreadmillEffect = '',
+                    [string]$DuplicateReplayCount = '0')
+                if ([string]::IsNullOrWhiteSpace($TreadmillEffect)) {
+                    $TreadmillEffect = if ($Verdict -eq 'fail' -and
+                        $FailureClass -eq 'fallback_tail_efficiency_treadmill') { '1' } else { '0' }
+                }
+                $treadmillVerdict = if ($TreadmillEffect -eq '1') { 'fail' } else { 'none' }
+                @(
+                    "efficiency_verdict=$Verdict",
+                    "efficiency_failure_class=$FailureClass",
+                    'post_yield_boundary_sequence=10529',
+                    "post_yield_recovery_activity_count=$RecoveryCount",
+                    'post_yield_repeated_unchanged_frontier_tuple_count=2',
+                    "post_yield_scoped_recovery_effect_count=$RecoveryCount",
+                    'post_yield_scoped_recovery_distinct_operation_count=2',
+                    'post_yield_exact_window_count=1',
+                    "post_yield_scoped_pressure_effect_count=$treadmillEffect",
+                    "post_tuna_fallback_duplicate_state_replay_authority_count=$DuplicateReplayCount",
+                    "fallback_tail_efficiency_treadmill_raw_count=$treadmillEffect",
+                    "fallback_tail_efficiency_treadmill_distinct_count=$treadmillEffect",
+                    'fallback_tail_efficiency_treadmill_recovered_count=0',
+                    "fallback_tail_efficiency_treadmill_unresolved_count=$treadmillEffect",
+                    "fallback_tail_efficiency_treadmill_verdict=$treadmillVerdict") |
+                    Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-efficiency-summary.txt')
+            }
+
+            $root = Join-Path ([IO.Path]::GetTempPath()) ('nlink-efficiency-propagation-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            try {
+                $cases = @(
+                    [pscustomobject]@{ Name = 'pass'; Verdict = 'pass'; Class = 'none'; Recovery = '4'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'warning'; Verdict = 'warning'; Class = 'efficiency_warning'; Recovery = '8'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'not_evaluated'; Verdict = 'not_evaluated_due_correctness_failure'; Class = 'none'; Recovery = '0'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'fail'; Verdict = 'fail'; Class = 'fallback_tail_efficiency_treadmill'; Recovery = '75'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'duplicate_fail'; Verdict = 'fail'; Class = 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification'; Recovery = '4'; Treadmill = '0'; Duplicate = '1'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'mixed'; Verdict = 'fail'; Class = 'fallback_tail_efficiency_treadmill'; Recovery = '75'; Treadmill = ''; Duplicate = '0'; Correctness = $true; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'contradictory_treadmill'; Verdict = 'warning'; Class = 'efficiency_warning'; Recovery = '8'; Treadmill = '1'; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'contradictory_duplicate'; Verdict = 'pass'; Class = 'none'; Recovery = '4'; Treadmill = '0'; Duplicate = '1'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'missing'; Verdict = ''; Class = ''; Recovery = '0'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $false },
+                    [pscustomobject]@{ Name = 'malformed'; Verdict = 'fail'; Class = 'fallback_tail_efficiency_treadmill'; Recovery = 'NaN'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'negative'; Verdict = 'warning'; Class = 'efficiency_warning'; Recovery = '-1'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true }
+                )
+                $output = foreach ($case in $cases) {
+                    $dir = Join-Path $root $case.Name
+                    [void][IO.Directory]::CreateDirectory($dir)
+                    Set-Content -LiteralPath (Join-Path $dir 'filetransfer-operator-verdict.txt') -Value 'verdict=PASS'
+                    if ($case.WriteSummary) {
+                        Write-TestEfficiencySummary -ArtifactDir $dir -Verdict $case.Verdict -FailureClass $case.Class -RecoveryCount $case.Recovery -TreadmillEffect $case.Treadmill -DuplicateReplayCount $case.Duplicate
+                    }
+                    $result = New-TestResult -ArtifactDir $dir
+                    Assert-Phase4EfficiencySummary -Result $result
+                    if ($case.Correctness) {
+                        Add-RouteAcceptanceFailure -Result $result -Message 'terminal evidence missing'
+                    }
+                    $performanceFailures = @($result.failures | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) })
+                    [pscustomobject]@{
+                        name = $case.Name
+                        validation = $result.efficiencySummaryValidationVerdict
+                        verdict = $result.efficiencyVerdict
+                        failureClass = $result.efficiencyFailureClass
+                        boundary = $result.efficiencyPostYieldBoundarySequence
+                        recovery = $result.efficiencyPostYieldRecoveryActivityCount
+                        scopedRecovery = $result.efficiencyPostYieldScopedRecoveryEffectCount
+                        exactWindowCount = $result.efficiencyPostYieldExactWindowCount
+                        treadmillUnresolved = $result.fallbackTailEfficiencyTreadmillUnresolvedCount
+                        treadmillVerdict = $result.fallbackTailEfficiencyTreadmillVerdict
+                        failureCount = $result.failures.Count
+                        performanceFailureCount = $performanceFailures.Count
+                        correctnessFailureCount = $result.failures.Count - $performanceFailures.Count
+                    }
+                }
+                $wideResult = [pscustomobject]@{
+                    failures = [System.Collections.Generic.List[string]]::new()
+                }
+                foreach ($index in 1..140) {
+                    [void]$wideResult.failures.Add("correctness-$index")
+                }
+                [void]$wideResult.failures.Add('efficiency_verdict=fail; efficiency_failure_class=fallback_tail_efficiency_treadmill')
+                $wideProjection = Get-TestSummaryFailureProjection -Result $wideResult -AcceptancePhase phase5
+                $output = @($output) + [pscustomobject]@{
+                    name = 'wide_mixed'
+                    validation = 'pass'
+                    verdict = 'fail'
+                    failureClass = 'fallback_tail_efficiency_treadmill'
+                    boundary = 0
+                    recovery = 0
+                    scopedRecovery = 0
+                    exactWindowCount = 0
+                    treadmillUnresolved = 1
+                    treadmillVerdict = 'fail'
+                    failureCount = $wideProjection.failures.Count
+                    performanceFailureCount = $wideProjection.performanceFailureCount
+                    correctnessFailureCount = $wideProjection.correctnessFailureCount
+                    retainedEfficiencyFailure = @($wideProjection.failures | Where-Object { $_ -like 'efficiency_verdict=fail*' }).Count
+                }
+                $output | ConvertTo-Json -Depth 4 -Compress
+            }
+            finally {
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """;
+
+        var execution = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            execution.ExitCode == 0,
+            $"Expected efficiency propagation contract to execute.{Environment.NewLine}STDOUT:{Environment.NewLine}{execution.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{execution.Stderr}");
+
+        using var document = JsonDocument.Parse(execution.Stdout.Trim());
+        var cases = document.RootElement.EnumerateArray().ToDictionary(
+            item => item.GetProperty("name").GetString()!,
+            item => item.Clone(),
+            StringComparer.Ordinal);
+
+        Assert.Equal("pass", cases["pass"].GetProperty("validation").GetString());
+        Assert.Equal(0, cases["pass"].GetProperty("failureCount").GetInt32());
+        Assert.Equal("warning", cases["warning"].GetProperty("verdict").GetString());
+        Assert.Equal(0, cases["warning"].GetProperty("failureCount").GetInt32());
+        Assert.Equal("not_evaluated_due_correctness_failure", cases["not_evaluated"].GetProperty("verdict").GetString());
+        Assert.Equal(0, cases["not_evaluated"].GetProperty("failureCount").GetInt32());
+
+        Assert.Equal("pass", cases["fail"].GetProperty("validation").GetString());
+        Assert.Equal("fallback_tail_efficiency_treadmill", cases["fail"].GetProperty("failureClass").GetString());
+        Assert.Equal(10529L, cases["fail"].GetProperty("boundary").GetInt64());
+        Assert.Equal(75L, cases["fail"].GetProperty("recovery").GetInt64());
+        Assert.Equal(75L, cases["fail"].GetProperty("scopedRecovery").GetInt64());
+        Assert.Equal(1L, cases["fail"].GetProperty("exactWindowCount").GetInt64());
+        Assert.Equal(1L, cases["fail"].GetProperty("treadmillUnresolved").GetInt64());
+        Assert.Equal("fail", cases["fail"].GetProperty("treadmillVerdict").GetString());
+        Assert.Equal(1, cases["fail"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(0, cases["fail"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal("pass", cases["duplicate_fail"].GetProperty("validation").GetString());
+        Assert.Equal(1, cases["duplicate_fail"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(0, cases["duplicate_fail"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal(1, cases["mixed"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(1, cases["mixed"].GetProperty("correctnessFailureCount").GetInt32());
+
+        Assert.Equal("malformed", cases["contradictory_treadmill"].GetProperty("validation").GetString());
+        Assert.Equal(1, cases["contradictory_treadmill"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal("malformed", cases["contradictory_duplicate"].GetProperty("validation").GetString());
+        Assert.Equal(1, cases["contradictory_duplicate"].GetProperty("correctnessFailureCount").GetInt32());
+
+        Assert.Equal("missing", cases["missing"].GetProperty("validation").GetString());
+        Assert.Equal(0, cases["missing"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(1, cases["missing"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal("malformed", cases["malformed"].GetProperty("validation").GetString());
+        Assert.Equal(0, cases["malformed"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(1, cases["malformed"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal("malformed", cases["negative"].GetProperty("validation").GetString());
+        Assert.Equal(0, cases["negative"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(1, cases["negative"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal(1, cases["wide_mixed"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(140, cases["wide_mixed"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal(128, cases["wide_mixed"].GetProperty("failureCount").GetInt32());
+        Assert.Equal(1, cases["wide_mixed"].GetProperty("retainedEfficiencyFailure").GetInt32());
+    }
+
+    [Fact]
     public async Task RunFileTransferRouteAcceptance_ProofStatePublicationCountersExistOnFatalRunResults()
     {
         var repoRoot = FindRepoRoot();
@@ -291,6 +545,32 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("regular-v4-live-activation-off-on-off-256mb", summary["requested_scenarios"]);
             Assert.Equal("0", summary["summary_json_failed"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            const string scenarioPrefix = "regular-v4-live-activation-off-on-off-256mb.";
+            string[] efficiencyTextFields =
+            [
+                "efficiency_summary_validation_verdict",
+                "efficiency_verdict",
+                "efficiency_failure_class",
+                "post_yield_boundary_sequence",
+                "post_yield_recovery_activity_count",
+                "post_yield_repeated_unchanged_frontier_tuple_count",
+                "post_yield_scoped_recovery_effect_count",
+                "post_yield_scoped_recovery_distinct_operation_count",
+                "post_yield_exact_window_count",
+                "post_yield_scoped_pressure_effect_count",
+                "post_tuna_fallback_duplicate_state_replay_authority_count",
+                "fallback_tail_efficiency_treadmill_raw_count",
+                "fallback_tail_efficiency_treadmill_distinct_count",
+                "fallback_tail_efficiency_treadmill_recovered_count",
+                "fallback_tail_efficiency_treadmill_unresolved_count",
+                "fallback_tail_efficiency_treadmill_verdict"
+            ];
+            foreach (var field in efficiencyTextFields)
+            {
+                Assert.True(summary.ContainsKey(field), $"Expected aggregate TXT efficiency field '{field}'.");
+                Assert.True(summary.ContainsKey(scenarioPrefix + field), $"Expected per-run TXT efficiency field '{field}'.");
+                Assert.Equal(summary[field], summary[scenarioPrefix + field]);
+            }
             Assert.Equal("1", summary["manifest_present"]);
             Assert.Matches("^[0-9a-f]{64}$", summary["manifest_sha256"]);
             Assert.Equal("0", summary["current_runtime_proof"]);
@@ -510,6 +790,31 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal("none", root.GetProperty("regularV4PeerSilenceReplayMissingDispatchRangePreservationVerdict").GetString());
 
                 var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+                string[] efficiencyJsonProperties =
+                [
+                    "efficiencySummaryValidationVerdict",
+                    "efficiencyVerdict",
+                    "efficiencyFailureClass",
+                    "postYieldBoundarySequence",
+                    "postYieldRecoveryActivityCount",
+                    "postYieldRepeatedUnchangedFrontierTupleCount",
+                    "postYieldScopedRecoveryEffectCount",
+                    "postYieldScopedRecoveryDistinctOperationCount",
+                    "postYieldExactWindowCount",
+                    "postYieldScopedPressureEffectCount",
+                    "postTunaFallbackDuplicateStateReplayAuthorityCount",
+                    "fallbackTailEfficiencyTreadmillRawCount",
+                    "fallbackTailEfficiencyTreadmillDistinctCount",
+                    "fallbackTailEfficiencyTreadmillRecoveredCount",
+                    "fallbackTailEfficiencyTreadmillUnresolvedCount",
+                    "fallbackTailEfficiencyTreadmillVerdict"
+                ];
+                foreach (var property in efficiencyJsonProperties)
+                {
+                    Assert.Equal(
+                        root.GetProperty(property).GetRawText(),
+                        run.GetProperty(property).GetRawText());
+                }
                 Assert.Equal("none", run.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
                 Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
