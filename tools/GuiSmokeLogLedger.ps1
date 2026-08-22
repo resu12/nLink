@@ -1157,7 +1157,9 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)][int]$StartIndex,
         [Parameter(Mandatory = $true)][int]$EndIndex,
-        [Parameter(Mandatory = $true)][scriptblock]$Visitor
+        [Parameter(Mandatory = $true)][scriptblock]$Visitor,
+        [AllowEmptyCollection()][string[]]$EventNames = @(),
+        [switch]$CoalesceDataPathProjectionEvents
     )
 
     Assert-GuiSmokeLogLedgerHealthy -State $State
@@ -1174,6 +1176,22 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
 
     if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
         if ($StartIndex -eq $EndIndex) {
+            return $null
+        }
+        if ($EventNames.Count -gt 0) {
+            $selected = [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::SelectEvents(
+                [string]$State.AppendOnlyPath,
+                [long]$State.AppendOnlyLineStartOffsets[$StartIndex],
+                [long]$StartIndex,
+                [long]$EndIndex,
+                [string[]]$EventNames,
+                [bool]$CoalesceDataPathProjectionEvents)
+            foreach ($record in @($selected.Lines)) {
+                $result = & $Visitor ([string]$record.Line) ([int]$record.LineIndex)
+                if ($null -ne $result) {
+                    return $result
+                }
+            }
             return $null
         }
         $stream = $null
@@ -1202,7 +1220,38 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
         }
     }
 
+    $selectedDataPathKeys = @{}
     for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
+        if ($EventNames.Count -gt 0) {
+            $line = [string]$State.Lines[$lineIndex]
+            $eventStart = $line.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase)
+            if ($eventStart -lt 0) { continue }
+            $eventStart += 6
+            $eventEnd = $line.IndexOf(';', $eventStart)
+            if ($eventEnd -lt 0) { $eventEnd = $line.Length }
+            $eventName = $line.Substring($eventStart, $eventEnd - $eventStart).Trim()
+            if ($eventName -notin $EventNames) { continue }
+            if ($CoalesceDataPathProjectionEvents -and
+                $eventName -in @(
+                    'filetransfer_data_path_send_result',
+                    'filetransfer_data_path_receive_result',
+                    'filetransfer_tuna_data_path_peer_visible')) {
+                $keyParts = New-Object System.Collections.Generic.List[string]
+                $complete = $true
+                foreach ($fieldName in @(
+                        'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+                        'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+                        'route_publication_generation', 'route_commit_generation')) {
+                    $match = [regex]::Match($line, "(?i)(?:^|;\s*)$([regex]::Escape($fieldName))=([^;`r`n]+)")
+                    if (-not $match.Success) { $complete = $false; break }
+                    $keyParts.Add($match.Groups[1].Value.Trim()) | Out-Null
+                }
+                if (-not $complete) { continue }
+                $projectionKey = [string]::Join('|', $keyParts).ToLowerInvariant()
+                if ($selectedDataPathKeys.ContainsKey($projectionKey)) { continue }
+                $selectedDataPathKeys[$projectionKey] = $true
+            }
+        }
         $result = & $Visitor ([string]$State.Lines[$lineIndex]) $lineIndex
         if ($null -ne $result) {
             return $result

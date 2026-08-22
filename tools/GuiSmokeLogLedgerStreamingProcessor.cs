@@ -72,6 +72,24 @@ namespace NLink.Tools
         public GuiSmokeLedgerDrainResult[] Drains { get; set; }
     }
 
+    public sealed class GuiSmokeLedgerFilteredLine
+    {
+        public GuiSmokeLedgerFilteredLine() { Line = ""; }
+        public long LineIndex { get; set; }
+        public string Line { get; set; }
+    }
+
+    public sealed class GuiSmokeLedgerFilteredRangeResult
+    {
+        public GuiSmokeLedgerFilteredRangeResult()
+        {
+            Lines = new GuiSmokeLedgerFilteredLine[0];
+        }
+
+        public long SourceLineVisitCount { get; set; }
+        public GuiSmokeLedgerFilteredLine[] Lines { get; set; }
+    }
+
     public static class GuiSmokeLogLedgerStreamingProcessor
     {
         private static readonly HashSet<string> WriterFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -104,6 +122,63 @@ namespace NLink.Tools
             public bool Valid;
             public bool CapturePayload;
             public readonly List<string> Payload = new List<string>();
+        }
+
+        public static GuiSmokeLedgerFilteredRangeResult SelectEvents(
+            string sourcePath,
+            long startOffset,
+            long startIndex,
+            long endIndex,
+            string[] eventNames,
+            bool coalesceDataPathProjectionEvents)
+        {
+            if (startOffset < 0 || startIndex < 0 || endIndex < startIndex)
+                throw new InvalidDataException("filtered_range_invalid");
+
+            var selectedNames = new HashSet<string>(
+                eventNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+            var selected = new List<GuiSmokeLedgerFilteredLine>();
+            var selectedDataPathKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var result = new GuiSmokeLedgerFilteredRangeResult();
+            var utf8 = new UTF8Encoding(false, true);
+
+            using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan))
+            {
+                input.Position = startOffset;
+                using (var reader = new StreamReader(input, utf8, true, 65536, true))
+                {
+                    for (long lineIndex = startIndex; lineIndex < endIndex; lineIndex++)
+                    {
+                        string line = reader.ReadLine();
+                        if (line == null)
+                            throw new InvalidDataException(
+                                "filtered_range_short_read:index=" +
+                                lineIndex.ToString(CultureInfo.InvariantCulture) +
+                                ";end=" + endIndex.ToString(CultureInfo.InvariantCulture));
+                        result.SourceLineVisitCount++;
+                        string eventName = ExtractEventName(line);
+                        if (selectedNames.Contains(eventName))
+                        {
+                            if (coalesceDataPathProjectionEvents && IsDataPathEvent(eventName))
+                            {
+                                ParsedLine parsed = Parse(line);
+                                string projectionKey = DataPathProjectionKey(parsed);
+                                if (projectionKey.Length == 0 || !selectedDataPathKeys.Add(projectionKey))
+                                    continue;
+                            }
+                            selected.Add(new GuiSmokeLedgerFilteredLine
+                            {
+                                LineIndex = lineIndex,
+                                Line = line
+                            });
+                        }
+                    }
+                }
+            }
+
+            result.Lines = selected.ToArray();
+            return result;
         }
 
         public static GuiSmokeLedgerStreamingResult Process(
@@ -468,6 +543,41 @@ namespace NLink.Tools
                 start = end + 1;
             }
             return parsed;
+        }
+
+        private static string ExtractEventName(string line)
+        {
+            int eventStart = line.IndexOf("event=", StringComparison.OrdinalIgnoreCase);
+            if (eventStart < 0) return "";
+            eventStart += 6;
+            int eventEnd = line.IndexOf(';', eventStart);
+            if (eventEnd < 0) eventEnd = line.Length;
+            return line.Substring(eventStart, eventEnd - eventStart).Trim();
+        }
+
+        private static bool IsDataPathEvent(string eventName)
+        {
+            return String.Equals(eventName, "filetransfer_data_path_send_result", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(eventName, "filetransfer_data_path_receive_result", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(eventName, "filetransfer_tuna_data_path_peer_visible", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string DataPathProjectionKey(ParsedLine parsed)
+        {
+            string[] names =
+            {
+                "session_id", "transfer_id", "direction", "route", "protocol_version",
+                "live_route_epoch", "runtime_generation", "terminal_generation", "leg_generation",
+                "route_publication_generation", "route_commit_generation"
+            };
+            var values = new List<string>();
+            foreach (string name in names)
+            {
+                string value = Get(parsed, name);
+                if (String.IsNullOrWhiteSpace(value)) return "";
+                values.Add(value);
+            }
+            return String.Join("|", values);
         }
 
         private static string StripPrefixes(string line)

@@ -2726,6 +2726,34 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -Events $fileTunaV4DataPathDownstreamEvents `
                     -LiveRouteProofMode $LiveRouteProofMode
             }
+    [object[]]$fileTransferGuiLiveReactivationActionWindowEvents = @(
+        Get-FileTransferCompactIndexEventsByNamesOrdered `
+            -Index $Index `
+            -Names @(
+                'filetransfer_live_route_epoch_recovered',
+                'filetransfer_fallback_tail_pairing_committed',
+                'filetransfer_fallback_tail_paired_yield_granted',
+                'runtime_unlock_retry_dispatch_authority_request_queued',
+                'runtime_unlock_retry_negotiation_slot_decided',
+                'runtime_unlock_post_fallback_negotiation_deferred',
+                'runtime_unlock_post_fallback_retry_intent_recheck_decided',
+                'runtime_unlock_retry_dispatch_authority_granted',
+                'runtime_unlock_retry_dispatch_settlement_decided',
+                'filetransfer_route_transition_prepared',
+                'filetransfer_live_route_epoch_terminal',
+                'runtime_unlock_filetransfer_owner_missing_before_path_lease',
+                'filetransfer_tuna_gui_live_reactivation_action_decided',
+                'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation')
+    )
+    $fileTransferGuiLiveReactivationActionWindowProof =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'filetransfer_gui_live_reactivation_action_window' `
+            -InputCount $fileTransferGuiLiveReactivationActionWindowEvents.Count `
+            -Action {
+                Get-FileTransferGuiLiveReactivationActionWindowCorrelation `
+                    -Events $fileTransferGuiLiveReactivationActionWindowEvents `
+                    -LiveRouteProofMode $LiveRouteProofMode
+            }
     $fileTransferRouteTransitionLiveEpochProjectionProof =
         Invoke-FileTransferCompactCorrelator `
             -Name 'filetransfer_route_transition_live_epoch_projection' `
@@ -3415,6 +3443,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = [string]$candidateRecord.Reason
         }) | Out-Null
     }
+    foreach ($candidateRecord in @(
+            $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_gui_live_reactivation_action_window_missed'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+            Variant = $candidateRecord.Variant
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($regularV4FrontierRepairPressureRecoveryHandoffProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'regular_v4_frontier_repair_pressure_recovery_handoff_missing'
@@ -3658,6 +3695,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         }
         elseif ($firstCompactClass -in @(
                 'filetransfer_gui_live_fallback_fault_window_missed',
+                'filetransfer_gui_live_reactivation_action_window_missed',
                 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
                 'runtime_unlock_retry_regular_v4_recovery_settlement_missing',
                 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved',
@@ -3771,7 +3809,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'paired_fallback_tail_yield_missing',
             'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback',
             'filetransfer_fallback_frontier_stall_grace_recheck_missing',
-            'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification') -and
+            'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+            'filetransfer_gui_live_reactivation_action_window_missed') -and
         $null -ne $firstCompactProofChainFailure.PSObject.Properties['Variant'] -and
         -not [string]::IsNullOrWhiteSpace([string]$firstCompactProofChainFailure.Variant)) {
         [string]$firstCompactProofChainFailure.Variant
@@ -3788,8 +3827,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     else {
         0L
     }
-    $semanticFailureDomain = if ($firstProofChainFailureClass -eq
-        'filetransfer_gui_live_fallback_fault_window_missed') {
+    $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
+            'filetransfer_gui_live_fallback_fault_window_missed',
+            'filetransfer_gui_live_reactivation_action_window_missed')) {
         'evidence_harness'
     }
     elseif ($firstProofChainFailureClass -eq
@@ -3901,6 +3941,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count=0"),
         ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.Verdict),
+        ("filetransfer_gui_live_reactivation_action_window_missed_raw_count={0}" -f $fileTransferGuiLiveReactivationActionWindowProof.RawCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_distinct_count={0}" -f $fileTransferGuiLiveReactivationActionWindowProof.DistinctCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_recovered_count=0"),
+        ("filetransfer_gui_live_reactivation_action_window_missed_unresolved_count={0}" -f $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_verdict={0}" -f $fileTransferGuiLiveReactivationActionWindowProof.Verdict),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount),
@@ -5686,6 +5731,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_gui_live_fallback_fault_window_missed_recovered_count = 0
         filetransfer_gui_live_fallback_fault_window_missed_unresolved_count = $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount
         filetransfer_gui_live_fallback_fault_window_missed_verdict = $fileTransferGuiLiveFallbackFaultWindowProof.Verdict
+        filetransfer_gui_live_reactivation_action_window_missed_raw_count = $fileTransferGuiLiveReactivationActionWindowProof.RawCount
+        filetransfer_gui_live_reactivation_action_window_missed_distinct_count = $fileTransferGuiLiveReactivationActionWindowProof.DistinctCount
+        filetransfer_gui_live_reactivation_action_window_missed_recovered_count = 0
+        filetransfer_gui_live_reactivation_action_window_missed_unresolved_count = $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCount
+        filetransfer_gui_live_reactivation_action_window_missed_verdict = $fileTransferGuiLiveReactivationActionWindowProof.Verdict
         filetransfer_fallback_v6_proof_bootstrap_missing_raw_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
         filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount
         filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount

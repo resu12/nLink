@@ -3318,6 +3318,18 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 throw 'terminal arbitration state was not preserved'
             }
 
+            $firstTerminalTracker = New-TunaGuiFaultAdmissionTracker -Bookmark 0
+            $firstTerminalTracker.FirstTerminal = [pscustomobject]@{ TransferId = 'tx-first'; Direction = 'outbound'; Line = 'outbound'; LineIndex = 3 }
+            if (Reset-TunaGuiFaultAdmissionActionWindow -Tracker $firstTerminalTracker -ActionBookmark 0) { throw 'first-terminal action window was reset' }
+
+            $rewindTracker = New-TunaGuiFaultAdmissionTracker -Bookmark 5
+            $rewindTracker.Cursor = 10
+            $rewindTracker.TerminalCursor = 10
+            if (-not (Reset-TunaGuiFaultAdmissionActionWindow -Tracker $rewindTracker -ActionBookmark 5) -or
+                $rewindTracker.Cursor -ne 5 -or $rewindTracker.TerminalCursor -ne 10) {
+                throw 'projection rewind moved the monotonic terminal cursor'
+            }
+
             Write-Output 'gui-switch-off-terminal-aware-ok'
             """;
 
@@ -10863,6 +10875,188 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("TryGetClickablePoint", functionBody, StringComparison.Ordinal);
         Assert.Contains("LegacyIAccessiblePattern", functionBody, StringComparison.Ordinal);
         Assert.Contains("Cannot click element without bounds (Id=", functionBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_FilteredAppendOnlyRangeVisitsOnlyActionEvents()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-filtered-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'nlink.log'
+                $state = New-GuiSmokeLogLedgerState
+                Enable-GuiSmokeAppendOnlyLogLedgerState -State $state -Path $path -MaximumBytes 8388608
+                $lines = [Collections.Generic.List[string]]::new()
+                for ($i = 0; $i -lt 100000; $i++) { $lines.Add("event=payload_noise; index=$i") }
+                $lines.Insert(50000, 'event=filetransfer_route_transition_committed; direction=outbound')
+                $lines.Add('event=transfer_terminal; direction=outbound')
+                [IO.File]::WriteAllLines($path, $lines, [Text.UTF8Encoding]::new($false))
+                Sync-GuiSmokeLogLedger -State $state -Paths @($path)
+                $visited = [Collections.Generic.List[string]]::new()
+                [void](Invoke-GuiSmokeLogLedgerRangeVisitor -State $state -StartIndex 0 -EndIndex $lines.Count `
+                    -EventNames @('filetransfer_route_transition_committed', 'transfer_terminal') -Visitor {
+                        param([string]$line, [int]$index)
+                        $visited.Add("$index=$line") | Out-Null
+                    })
+                if ($visited.Count -ne 2 -or $visited[0] -notlike '50000=*' -or $visited[1] -notlike '100001=*') {
+                    throw "filtered range mismatch: $($visited -join '|')"
+                }
+                $native = [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::SelectEvents(
+                    $state.AppendOnlyPath,
+                    [long]$state.AppendOnlyLineStartOffsets[0],
+                    0L,
+                    [long]$lines.Count,
+                    [string[]]@('filetransfer_route_transition_committed', 'transfer_terminal'),
+                    $false)
+                if ($native.SourceLineVisitCount -ne $lines.Count -or $native.Lines.Count -ne 2 -or
+                    $native.Lines[0].LineIndex -ne 50000 -or $native.Lines[1].LineIndex -ne 100001) {
+                    throw "native filtered diagnostics mismatch: scanned=$($native.SourceLineVisitCount) matched=$($native.Lines.Count)"
+                }
+                'filtered-range-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Filtered ledger test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("filtered-range-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeWindows_RegularActivationCycleRejectsTerminalBeforeReactivation()
+    {
+        var repoRoot = FindRepoRoot();
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var soakText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferSoak", "SoakSummaryExtraction.ps1"));
+
+        Assert.Contains("failure_class=filetransfer_gui_live_reactivation_action_window_missed", guiText, StringComparison.Ordinal);
+        Assert.Contains("Claim-TunaGuiLiveReactivationAction", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_tuna_gui_live_reactivation_action_decided", guiText, StringComparison.Ordinal);
+        Assert.Contains("$fallbackProjectionBookmark = if ($RouteMode -eq 'live-regular-activation-cycle')", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6')", soakText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_LiveReactivationActionWindowPrecedesTerminalFallbacks()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-reactivation-window-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $source = 'session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3'
+                @(
+                    "event=filetransfer_live_route_epoch_recovered; $source; direction=inbound; log_writer_id=helper",
+                    "event=filetransfer_live_route_epoch_recovered; $source; direction=outbound; log_writer_id=sender",
+                    "event=filetransfer_fallback_tail_pairing_committed; $source; direction=outbound; authority_id=yield-1; yield_generation=1; pairing_generation=1; pair_key=pair-1; transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; pairing_state=Paired; decision_status=Accepted; log_writer_id=sender",
+                    "event=filetransfer_fallback_tail_paired_yield_granted; $source; direction=outbound; authority_id=yield-1; yield_generation=1; pair_key=pair-1; log_writer_id=sender",
+                    'event=runtime_unlock_retry_dispatch_authority_request_queued; session_id=sess; transfer_id=transfer; direction=outbound; contract_generation=7; decision_reason=coordinator_request_queued; source_session_id=sess; source_transfer_id=transfer; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; log_writer_id=sender',
+                    'event=runtime_unlock_retry_negotiation_slot_decided; session_id=sess; transfer_id=transfer; intent_generation=7; contract_generation=7; decision_status=Deferred; decision_reason=retry_dispatch_authority_backoff_pending; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; log_writer_id=sender',
+                    'event=runtime_unlock_retry_negotiation_slot_decided; session_id=sess; transfer_id=transfer; intent_generation=7; contract_generation=7; decision_status=Deferred; decision_reason=retry_dispatch_negotiation_slot_ineligible; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; log_writer_id=sender',
+                    "event=filetransfer_live_route_epoch_terminal; $source; direction=outbound; terminal_state=completed; log_writer_id=sender"
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'live_route_proof' -or
+                    $result.Reason -ne 'fallback_reactivation_unlock_not_invoked_before_completed_transfer' -or
+                    $result.FailureVariant -ne 'fault_admission_tracker_backlog_delayed_prearmed_unlock_past_terminal') {
+                    throw "reactivation action-window classification mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                $unresolved = @(Get-Content -LiteralPath $path)
+                $unlock = 'event=runtime_unlock_post_fallback_retry_intent_recheck_decided; session_id=sess; transfer_id=transfer; direction=outbound; intent_generation=7; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; log_writer_id=sender'
+                @($unresolved[0..6] + $unlock + $unresolved[7]) | Set-Content -LiteralPath $path
+                $onTime = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($onTime.Reason -eq 'fallback_reactivation_unlock_not_invoked_before_completed_transfer') {
+                    throw 'matching preterminal unlock remained a harness incident'
+                }
+                Write-Output 'gui-reactivation-action-window-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Reactivation action-window GUI index failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-reactivation-action-window-index-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLiveReactivationActionClaim_IsGenerationOwnedAndTerminalFirst()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var claimBody = ExtractPowerShellFunctionBody(guiText, "Claim-TunaGuiLiveReactivationAction", "Complete-TunaGuiLiveReactivationAction");
+        var completeBody = ExtractPowerShellFunctionBody(guiText, "Complete-TunaGuiLiveReactivationAction", "New-TunaGuiLiveReactivationActionDiagnosticLine");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            function Claim-TunaGuiLiveReactivationAction { {{claimBody}} }
+            function Complete-TunaGuiLiveReactivationAction { {{completeBody}} }
+            function Update-TunaGuiFaultAdmissionTracker { param($Tracker) }
+            function New-Tracker {
+                param([long]$Generation = 2)
+                $current = [pscustomobject]@{
+                    ScopeKey = 'sess|transfer'; ActionWindowGeneration = $Generation
+                    ProjectionWindowGeneration = 4; Outbound = [pscustomobject]@{ Commit = [pscustomobject]@{ LineIndex = 88 } }
+                }
+                return [pscustomobject]@{
+                    FirstTerminal = $null; AuthoritativeFallbackProjection = $current
+                    ReactivationActionState = 'Unclaimed'; ReactivationActionWinner = '(none)'
+                    ReactivationActionTerminalLine = -1; ReactivationActionKey = '(none)'
+                    ReactivationActionClaimedUtc = '(none)'; ReactivationActionInvokedUtc = '(none)'
+                    ReactivationActionProjectionLine = -1; LastSynchronizedEndBookmark = 100
+                }
+            }
+            $projection = [pscustomobject]@{
+                ScopeKey = 'sess|transfer'; ActionWindowGeneration = 2
+                ProjectionWindowGeneration = 4; OutboundCommitLine = 88
+            }
+            $tracker = New-Tracker
+            $first = Claim-TunaGuiLiveReactivationAction -Tracker $tracker -Projection $projection
+            $duplicate = Claim-TunaGuiLiveReactivationAction -Tracker $tracker -Projection $projection
+            if (-not $first.Claimed -or -not $duplicate.Claimed -or $duplicate.Outcome -ne 'idempotent') { throw 'exact action did not coalesce' }
+            if (-not (Complete-TunaGuiLiveReactivationAction -Tracker $tracker) -or $tracker.ReactivationActionState -ne 'Invoked') { throw 'claimed action did not complete' }
+            $stale = New-Tracker -Generation 3
+            if ((Claim-TunaGuiLiveReactivationAction -Tracker $stale -Projection $projection).Claimed) { throw 'stale projection claimed action' }
+            $terminal = New-Tracker
+            $terminal.FirstTerminal = [pscustomobject]@{ LineIndex = 77 }
+            $terminalDecision = Claim-TunaGuiLiveReactivationAction -Tracker $terminal -Projection $projection
+            if ($terminalDecision.Claimed -or $terminalDecision.Outcome -ne 'terminal_won' -or $terminal.ReactivationActionTerminalLine -ne 77) { throw 'terminal did not win final recapture' }
+            Write-Output 'gui-reactivation-action-claim-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Reactivation action claim test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-reactivation-action-claim-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

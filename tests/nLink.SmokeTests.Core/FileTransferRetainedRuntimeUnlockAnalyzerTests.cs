@@ -7910,6 +7910,90 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_LiveReactivationActionWindowRequiresPreterminalUnlock(
+        bool compact,
+        bool unlocked)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string source =
+            "session_id=sess_reactivation_window; transfer_id=transfer_reactivation_window; " +
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "runtime_generation=3; terminal_generation=0; leg_generation=3; " +
+            "route_publication_generation=3";
+        const string sender = "log_writer_id=writer_reactivation_sender";
+        var messages = new List<string>
+        {
+            $"event=filetransfer_live_route_epoch_recovered; {source}; direction=inbound; log_writer_id=writer_reactivation_helper",
+            $"event=filetransfer_live_route_epoch_recovered; {source}; direction=outbound; {sender}",
+            $"event=filetransfer_fallback_tail_pairing_committed; {source}; direction=outbound; {sender}; " +
+                "authority_id=yield-1; yield_generation=1; pairing_generation=1; pair_key=pair-1; " +
+                "transport_epoch=1; bridge_recovery_generation=1; checkpoint_request_id=(none); " +
+                "data_session_identity=data:1; data_session_generation=1; " +
+                "pairing_state=Paired; decision_status=Accepted",
+            $"event=filetransfer_fallback_tail_paired_yield_granted; {source}; direction=outbound; {sender}; " +
+                "authority_id=yield-1; yield_generation=1; pair_key=pair-1",
+            "event=runtime_unlock_retry_dispatch_authority_request_queued; " +
+                "session_id=sess_reactivation_window; transfer_id=transfer_reactivation_window; direction=outbound; " +
+                "contract_generation=7; decision_reason=coordinator_request_queued; " +
+                "source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; " +
+                "source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; " +
+                "source_route_publication_generation=3; log_writer_id=writer_reactivation_sender",
+            "event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Deferred; " +
+                "intent_generation=7; contract_generation=7; session_id=sess_reactivation_window; " +
+                "transfer_id=transfer_reactivation_window; source_publication_generation=3; " +
+                "source_transport_epoch=1; source_bridge_recovery_generation=1; " +
+                "source_checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; " +
+                "decision_reason=retry_dispatch_authority_backoff_pending; log_writer_id=writer_reactivation_sender",
+            "event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Deferred; " +
+                "intent_generation=7; contract_generation=7; session_id=sess_reactivation_window; " +
+                "transfer_id=transfer_reactivation_window; source_publication_generation=3; " +
+                "source_transport_epoch=1; source_bridge_recovery_generation=1; " +
+                "source_checkpoint_request_id=(none); data_session_identity=data:1; data_session_generation=1; " +
+                "decision_reason=retry_dispatch_negotiation_slot_ineligible; log_writer_id=writer_reactivation_sender"
+        };
+        if (unlocked)
+        {
+            messages.Add(
+                "event=runtime_unlock_post_fallback_retry_intent_recheck_decided; " +
+                "session_id=sess_reactivation_window; transfer_id=transfer_reactivation_window; " +
+                "direction=outbound; intent_generation=7; result=scheduled; " +
+                "source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; " +
+                "source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; " +
+                "source_publication_generation=3; source_transport_epoch=1; " +
+                "source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); " +
+                "data_session_identity=data:1; data_session_generation=1; " +
+                "log_writer_id=writer_reactivation_sender");
+        }
+        messages.Add(
+            $"event=filetransfer_live_route_epoch_terminal; {source}; direction=outbound; {sender}; " +
+                "terminal_state=completed; log_writer_sequence=46595");
+
+        var result = await RunAnalyzeFixtureAsync(
+            messages.Select(LogLine).ToArray(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(unlocked ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_raw_count"]);
+        Assert.Equal(unlocked ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_distinct_count"]);
+        Assert.Equal(unlocked ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_unresolved_count"]);
+    }
+
+    [Theory]
     [InlineData(false, false, false)]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]

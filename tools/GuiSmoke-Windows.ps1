@@ -5449,6 +5449,12 @@ function Get-TunaGuiExplicitFailureClassification {
                     Reason = 'fallback_switch_off_not_injected_before_completed_transfer'
                 }
             }
+            'filetransfer_gui_live_reactivation_action_window_missed' {
+                return [pscustomobject]@{
+                    Phase = 'live_route_proof'
+                    Reason = 'fallback_reactivation_unlock_not_invoked_before_completed_transfer'
+                }
+            }
             'regular_v4_terminal_before_tuna_activation_commit' {
                 return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
             }
@@ -15789,6 +15795,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'transfer_terminal')
         PairedRetrySlot = @(
             'filetransfer_route_selected',
+            'filetransfer_live_route_epoch_recovered',
             'tuna_runtime_locked',
             'filetransfer_fallback_tail_local_proof_receipt_decided',
             'filetransfer_fallback_tail_peer_proof_receipt_decided',
@@ -15798,6 +15805,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'runtime_unlock_retry_dispatch_authority_request_queued',
             'runtime_unlock_post_fallback_negotiation_deferred',
             'runtime_unlock_post_fallback_retry_intent_recheck_decided',
+            'runtime_unlock_filetransfer_owner_missing_before_path_lease',
+            'filetransfer_tuna_gui_live_reactivation_action_decided',
+            'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation',
             'runtime_unlock_retry_negotiation_slot_decided',
             'runtime_unlock_retry_dispatch_authority_request_published',
             'runtime_unlock_retry_dispatch_install_committed',
@@ -18784,6 +18794,238 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $explicitResult.EvidenceParsedRecordCount = 0L
         $explicitResult.EvidenceLookupCount = 0L
         return $explicitResult
+    }
+
+    function Get-TunaGuiLiveReactivationActionWindowFailure {
+        param([AllowEmptyCollection()][string[]]$Lines)
+
+        $routeProofs = @{}
+        $states = @{}
+        $lineVisits = 0L
+        for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
+            $lineVisits++
+            $line = [string]$Lines[$lineIndex]
+            $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+            if ($eventName -notin @(
+                    'filetransfer_live_route_epoch_recovered',
+                    'filetransfer_fallback_tail_pairing_committed',
+                    'filetransfer_fallback_tail_paired_yield_granted',
+                    'runtime_unlock_retry_dispatch_authority_request_queued',
+                    'runtime_unlock_retry_negotiation_slot_decided',
+                    'runtime_unlock_post_fallback_negotiation_deferred',
+                    'runtime_unlock_post_fallback_retry_intent_recheck_decided',
+                    'runtime_unlock_retry_dispatch_authority_granted',
+                    'runtime_unlock_retry_dispatch_settlement_decided',
+                    'filetransfer_route_transition_prepared',
+                    'filetransfer_live_route_epoch_terminal')) {
+                continue
+            }
+
+            $writer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id'
+            $session = Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id'
+            $transfer = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id'
+            $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
+            if ($eventName -eq 'filetransfer_live_route_epoch_recovered') {
+                if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -ne 'post_tuna_fallback_v6' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -ne '6') { continue }
+                $tuple = @(
+                    $session, $transfer,
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'runtime_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'terminal_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'leg_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route_publication_generation')) -join '|'
+                if (-not $routeProofs.ContainsKey($tuple)) {
+                    $routeProofs[$tuple] = [pscustomobject]@{ Inbound = $false; Outbound = $false }
+                }
+                if ($direction -eq 'inbound') { $routeProofs[$tuple].Inbound = $true }
+                if ($direction -eq 'outbound') { $routeProofs[$tuple].Outbound = $true }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_fallback_tail_pairing_committed') {
+                if ($direction -ne 'outbound' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -ne 'post_tuna_fallback_v6' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -ne '6' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_state') -ne 'Paired' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -notin @('Accepted', 'Idempotent')) { continue }
+                $tuple = @(
+                    $session, $transfer,
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'runtime_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'terminal_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'leg_generation'),
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route_publication_generation')) -join '|'
+                if (-not $routeProofs.ContainsKey($tuple) -or
+                    -not $routeProofs[$tuple].Inbound -or -not $routeProofs[$tuple].Outbound) { continue }
+                $pairAuthority = Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id'
+                $pairYieldGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation'
+                $pairingGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation'
+                $pairKey = Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key'
+                $pairTransportEpoch = Get-TunaGuiLogLineFieldValue -Line $line -Name 'transport_epoch'
+                $pairBridgeGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'bridge_recovery_generation'
+                $pairCheckpoint = Get-TunaGuiLogLineFieldValue -Line $line -Name 'checkpoint_request_id'
+                $pairDataSession = Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_identity'
+                $pairDataSessionGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation'
+                if (@(
+                        $pairAuthority, $pairYieldGeneration, $pairingGeneration, $pairKey, $pairTransportEpoch,
+                        $pairBridgeGeneration, $pairCheckpoint, $pairDataSession,
+                        $pairDataSessionGeneration) |
+                    Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }) { continue }
+                $key = "$writer|$session|$transfer".ToLowerInvariant()
+                $states[$key] = [pscustomobject]@{
+                    Writer = $writer; Session = $session; Transfer = $transfer; Tuple = $tuple
+                    Authority = $pairAuthority
+                    YieldGeneration = $pairYieldGeneration
+                    PairingGeneration = $pairingGeneration
+                    PairKey = $pairKey
+                    LiveRouteEpoch = Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch'
+                    RuntimeGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'runtime_generation'
+                    TerminalGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'terminal_generation'
+                    LegGeneration = Get-TunaGuiLogLineFieldValue -Line $line -Name 'leg_generation'
+                    Publication = Get-TunaGuiLogLineFieldValue -Line $line -Name 'route_publication_generation'
+                    TransportEpoch = $pairTransportEpoch
+                    BridgeGeneration = $pairBridgeGeneration
+                    Checkpoint = $pairCheckpoint
+                    DataSession = $pairDataSession
+                    DataSessionGeneration = $pairDataSessionGeneration
+                    Grant = $false; Intent = ''; Backoff = $false; Ineligible = $false; Woken = $false
+                }
+                continue
+            }
+
+            $key = "$writer|$session|$transfer".ToLowerInvariant()
+            if (-not $states.ContainsKey($key)) { continue }
+            $state = $states[$key]
+            switch ($eventName) {
+                'filetransfer_fallback_tail_paired_yield_granted' {
+                    if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $state.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'yield_generation') -eq $state.YieldGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key') -eq $state.PairKey) {
+                        $state.Grant = $true
+                    }
+                }
+                'runtime_unlock_retry_dispatch_authority_request_queued' {
+                    $sourceTuple = @(
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_session_id'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_transfer_id'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_live_route_epoch'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_runtime_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_terminal_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_leg_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route_publication_generation')) -join '|'
+                    if ($state.Grant -and
+                        $sourceTuple -eq $state.Tuple -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason') -eq 'coordinator_request_queued') {
+                        $state.Intent = Get-TunaGuiLogLineFieldValue -Line $line -Name 'contract_generation'
+                    }
+                }
+                'runtime_unlock_retry_negotiation_slot_decided' {
+                    if ([string]::IsNullOrWhiteSpace($state.Intent) -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'intent_generation') -ne $state.Intent -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_publication_generation') -ne $state.Publication -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_transport_epoch') -ne $state.TransportEpoch -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_bridge_recovery_generation') -ne $state.BridgeGeneration -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_checkpoint_request_id') -ne $state.Checkpoint -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_identity') -ne $state.DataSession -or
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -ne $state.DataSessionGeneration) { break }
+                    $decisionReason = Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_reason'
+                    if ($decisionReason -eq 'retry_dispatch_authority_backoff_pending') { $state.Backoff = $true }
+                    elseif ($decisionReason -eq 'retry_dispatch_negotiation_slot_ineligible' -and $state.Backoff) { $state.Ineligible = $true }
+                    elseif ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -eq 'Reserved') { $state.Woken = $true }
+                }
+                { $_ -in @(
+                        'runtime_unlock_post_fallback_negotiation_deferred',
+                        'runtime_unlock_post_fallback_retry_intent_recheck_decided') } {
+                    $sourceTuple = @(
+                        $session, $transfer,
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_live_route_epoch'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_runtime_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_terminal_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_leg_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_publication_generation')) -join '|'
+                    if ($state.Ineligible -and $sourceTuple -eq $state.Tuple -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_transport_epoch') -eq $state.TransportEpoch -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_bridge_recovery_generation') -eq $state.BridgeGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_checkpoint_request_id') -eq $state.Checkpoint -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_identity') -eq $state.DataSession -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -eq $state.DataSessionGeneration -and
+                        ($_ -eq 'runtime_unlock_post_fallback_negotiation_deferred' -or
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'intent_generation') -eq $state.Intent)) {
+                        $state.Woken = $true
+                    }
+                }
+                { $_ -in @(
+                        'runtime_unlock_retry_dispatch_authority_granted',
+                        'runtime_unlock_retry_dispatch_settlement_decided') } {
+                    $directTuple = @(
+                        $session, $transfer,
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'runtime_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'terminal_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'leg_generation'),
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route_publication_generation')) -join '|'
+                    if ($state.Ineligible -and $directTuple -eq $state.Tuple -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'contract_generation') -eq $state.Intent -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transport_epoch') -eq $state.TransportEpoch -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'bridge_recovery_generation') -eq $state.BridgeGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_authority_id') -eq $state.Authority -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'release_generation') -eq $state.YieldGeneration -and
+                        ($_ -ne 'runtime_unlock_retry_dispatch_settlement_decided' -or
+                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'settlement_outcome') -eq 'DispatchObserved')) {
+                        $state.Woken = $true
+                    }
+                }
+                'filetransfer_route_transition_prepared' {
+                    if ($state.Ineligible -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_route') -eq 'file_tuna_v4' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_live_route_epoch') -eq $state.LiveRouteEpoch -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_runtime_generation') -eq $state.RuntimeGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_terminal_generation') -eq $state.TerminalGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_leg_generation') -eq $state.LegGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_route_publication_generation') -eq $state.Publication -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_transport_epoch') -eq $state.TransportEpoch -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'source_bridge_recovery_generation') -eq $state.BridgeGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'fallback_yield_generation') -eq $state.YieldGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_generation') -eq $state.PairingGeneration -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pair_key') -eq $state.PairKey) { $state.Woken = $true }
+                }
+                'filetransfer_live_route_epoch_terminal' {
+                    if ($state.Ineligible -and -not $state.Woken -and
+                        $direction -eq 'outbound' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'terminal_state') -eq 'completed') {
+                        return [pscustomobject]@{ Unresolved = $true; LineVisits = $lineVisits; Line = $line }
+                    }
+                }
+            }
+        }
+        return [pscustomobject]@{ Unresolved = $false; LineVisits = $lineVisits; Line = '' }
+    }
+
+    $liveReactivationActionWindowFastPath =
+        Get-TunaGuiLiveReactivationActionWindowFailure -Lines ([string[]]$evidenceLines)
+    if ($RouteMode -eq 'live-regular-activation-cycle' -and
+        $liveReactivationActionWindowFastPath.Unresolved) {
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'live_route_proof' `
+            -Reason 'fallback_reactivation_unlock_not_invoked_before_completed_transfer' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_live_reactivation_action_window_index" `
+            -EvidenceLineVisitCount ([long]$liveReactivationActionWindowFastPath.LineVisits) `
+            -EvidenceParsedRecordCount 0L `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.FailureVariant = 'fault_admission_tracker_backlog_delayed_prearmed_unlock_past_terminal'
+        return $result
     }
 
     $fallbackTailPeerFirstFastPath =
@@ -28496,6 +28738,7 @@ function New-TunaGuiFaultAdmissionTracker {
 
     return [pscustomobject]@{
         Cursor = $Bookmark
+        TerminalCursor = $Bookmark
         InboundCompletedByTransfer = @{}
         OutboundCompletedByTransfer = @{}
         FirstTerminal = $null
@@ -28528,6 +28771,16 @@ function New-TunaGuiFaultAdmissionTracker {
         CachedSwitchOffClickPoint = $null
         LastFaultResult = $null
         LineVisitCount = 0L
+        MatchedEventCount = 0L
+        LastUpdateElapsedMilliseconds = 0L
+        ReactivationActionGeneration = 0L
+        ReactivationActionState = 'Unclaimed'
+        ReactivationActionWinner = '(none)'
+        ReactivationActionKey = '(none)'
+        ReactivationActionClaimedUtc = '(none)'
+        ReactivationActionInvokedUtc = '(none)'
+        ReactivationActionProjectionLine = -1
+        ReactivationActionTerminalLine = -1
     }
 }
 
@@ -28537,7 +28790,7 @@ function Reset-TunaGuiFaultAdmissionActionWindow {
         [Parameter(Mandatory = $true)][int]$ActionBookmark
     )
 
-    if ($null -ne $Tracker.TerminalPair) {
+    if ($null -ne $Tracker.FirstTerminal -or $null -ne $Tracker.TerminalPair) {
         return $false
     }
     $minimumBookmark = [Math]::Max(0, $ActionBookmark)
@@ -28550,6 +28803,14 @@ function Reset-TunaGuiFaultAdmissionActionWindow {
     $Tracker.CachedSwitchOffControl = $null
     $Tracker.CachedSwitchOffClickPoint = $null
     $Tracker.LastFaultResult = $null
+    $Tracker.ReactivationActionGeneration = [long]$Tracker.ReactivationActionGeneration + 1L
+    $Tracker.ReactivationActionState = 'Unclaimed'
+    $Tracker.ReactivationActionWinner = '(none)'
+    $Tracker.ReactivationActionKey = '(none)'
+    $Tracker.ReactivationActionClaimedUtc = '(none)'
+    $Tracker.ReactivationActionInvokedUtc = '(none)'
+    $Tracker.ReactivationActionProjectionLine = -1
+    $Tracker.ReactivationActionTerminalLine = -1
     $Tracker.TransitionCommits = @{}
     $Tracker.TransitionPublications = @{}
     $Tracker.TransitionDispositions = @{}
@@ -28848,16 +29109,36 @@ function Update-TunaGuiFaultAdmissionTracker {
     else {
         Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
     }
-    $Tracker.LastSynchronizedEndBookmark = $endIndex
+    $startIndex = [int]$Tracker.Cursor
+    $terminalStartIndex = [int]$Tracker.TerminalCursor
+    $updateStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $matchedCount = 0L
+    $actionCriticalEvents = @(
+        'tuna_acceleration_reset',
+        'tuna_acceleration_timeline',
+        'tuna_runtime_locked',
+        'filetransfer_route_transition_committed',
+        'filetransfer_route_hint_authorized_publication_accepted',
+        'filetransfer_route_transition_disposition_applied',
+        'filetransfer_data_path_send_result',
+        'filetransfer_data_path_receive_result',
+        'filetransfer_tuna_data_path_peer_visible',
+        'file_transfer_inbound_terminal',
+        'file_transfer_outbound_terminal',
+        'transfer_terminal',
+        'runtime_unlock_post_fallback_negotiation_deferred',
+        'runtime_unlock_post_fallback_retry_intent_recheck_decided',
+        'runtime_unlock_filetransfer_owner_missing_before_path_lease')
     [void](Invoke-GuiSmokeLogLedgerRangeVisitor `
         -State $script:GuiSmokeAppLogLedger `
-        -StartIndex ([int]$Tracker.Cursor) `
+        -StartIndex $startIndex `
         -EndIndex $endIndex `
+        -EventNames $actionCriticalEvents `
+        -CoalesceDataPathProjectionEvents `
         -Visitor {
             param([string]$line, [int]$lineIndex)
 
-            $Tracker.Cursor = $lineIndex + 1
-            $Tracker.LineVisitCount++
+            $matchedCount++
             $eventName = ''
             $eventStart = $line.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase)
             if ($eventStart -ge 0) {
@@ -28964,7 +29245,7 @@ function Update-TunaGuiFaultAdmissionTracker {
             }
 
             $terminal = Get-TunaGuiCompletedTerminalFromLogLine -Line $line
-            if ($null -eq $terminal) {
+            if ($null -eq $terminal -or $lineIndex -lt $terminalStartIndex) {
                 return $null
             }
             if ($null -eq $Tracker.FirstTerminal) {
@@ -28988,6 +29269,13 @@ function Update-TunaGuiFaultAdmissionTracker {
             }
             return $null
         })
+    $Tracker.Cursor = $endIndex
+    $Tracker.TerminalCursor = [Math]::Max([int]$Tracker.TerminalCursor, $endIndex)
+    $Tracker.LastSynchronizedEndBookmark = $endIndex
+    $Tracker.LineVisitCount = [long]$Tracker.LineVisitCount + [Math]::Max(0, $endIndex - $startIndex)
+    $Tracker.MatchedEventCount = [long]$Tracker.MatchedEventCount + $matchedCount
+    $updateStopwatch.Stop()
+    $Tracker.LastUpdateElapsedMilliseconds = [long]$updateStopwatch.ElapsedMilliseconds
     Update-TunaGuiFaultAdmissionAuthority -Tracker $Tracker
     return $Tracker.TerminalPair
 }
@@ -29056,6 +29344,23 @@ function Wait-TunaGuiAuthoritativeFallbackFaultObservation {
                 Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
                 continue
             }
+            $capturedScopeKey = [string]$projection.ScopeKey
+            $capturedActionGeneration = [long]$projection.ActionWindowGeneration
+            $capturedProjectionGeneration = [long]$projection.ProjectionWindowGeneration
+            $capturedOutboundCommitLine = [int]$projection.Outbound.Commit.LineIndex
+            [void](Update-TunaGuiFaultAdmissionTracker -Tracker $Tracker)
+            if ($null -ne $Tracker.FirstTerminal) {
+                throw 'live_toggle_window_missed_transfer_completed: terminal_before_authoritative_fallback_action_claim'
+            }
+            $projection = $Tracker.AuthoritativeFallbackProjection
+            if ($null -eq $projection -or
+                [string]$projection.ScopeKey -ne $capturedScopeKey -or
+                [long]$projection.ActionWindowGeneration -ne $capturedActionGeneration -or
+                [long]$projection.ProjectionWindowGeneration -ne $capturedProjectionGeneration -or
+                [int]$projection.Outbound.Commit.LineIndex -ne $capturedOutboundCommitLine) {
+                Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
+                continue
+            }
             $publicationEpochs = @(
                 ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $projection.Inbound.Publication.Fields -Name 'live_route_epoch' -Default '0') -Default 0
                 ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $projection.Outbound.Publication.Fields -Name 'live_route_epoch' -Default '0') -Default 0)
@@ -29068,6 +29373,10 @@ function Wait-TunaGuiAuthoritativeFallbackFaultObservation {
                 RecoveredLine = "event=filetransfer_live_route_epoch_recovered; $common"
                 LiveRouteEpoch = [int]$liveRouteEpoch
                 EndBookmark = [int]$Tracker.LastSynchronizedEndBookmark
+                ActionWindowGeneration = [long]$projection.ActionWindowGeneration
+                ProjectionWindowGeneration = [long]$projection.ProjectionWindowGeneration
+                ScopeKey = [string]$projection.ScopeKey
+                OutboundCommitLine = [int]$projection.Outbound.Commit.LineIndex
             }
         }
         Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
@@ -30901,6 +31210,84 @@ function Get-TunaGuiEvidenceSummary {
     return $summary
 }
 
+function Claim-TunaGuiLiveReactivationAction {
+    param(
+        [Parameter(Mandatory = $true)]$Tracker,
+        [Parameter(Mandatory = $true)]$Projection
+    )
+
+    [void](Update-TunaGuiFaultAdmissionTracker -Tracker $Tracker)
+    if ($null -ne $Tracker.FirstTerminal) {
+        $Tracker.ReactivationActionState = 'Terminal'
+        $Tracker.ReactivationActionWinner = 'terminal'
+        $Tracker.ReactivationActionTerminalLine = [int]$Tracker.FirstTerminal.LineIndex
+        return [pscustomobject]@{ Claimed = $false; Outcome = 'terminal_won'; EndBookmark = [int]$Tracker.LastSynchronizedEndBookmark }
+    }
+
+    $current = $Tracker.AuthoritativeFallbackProjection
+    $projectionCurrent = $null -ne $current -and
+        [string]$current.ScopeKey -eq [string]$Projection.ScopeKey -and
+        [long]$current.ActionWindowGeneration -eq [long]$Projection.ActionWindowGeneration -and
+        [long]$current.ProjectionWindowGeneration -eq [long]$Projection.ProjectionWindowGeneration -and
+        [int]$current.Outbound.Commit.LineIndex -eq [int]$Projection.OutboundCommitLine
+    if (-not $projectionCurrent) {
+        $Tracker.ReactivationActionState = 'Stale'
+        $Tracker.ReactivationActionWinner = 'stale_projection'
+        return [pscustomobject]@{ Claimed = $false; Outcome = 'stale_projection'; EndBookmark = [int]$Tracker.LastSynchronizedEndBookmark }
+    }
+
+    $actionKey = '{0}|{1}|{2}|{3}' -f
+        [string]$Projection.ScopeKey,
+        [long]$Projection.ActionWindowGeneration,
+        [long]$Projection.ProjectionWindowGeneration,
+        [int]$Projection.OutboundCommitLine
+    if ([string]$Tracker.ReactivationActionState -in @('Claimed', 'Invoked')) {
+        return [pscustomobject]@{
+            Claimed = [string]$Tracker.ReactivationActionKey -eq $actionKey
+            Outcome = 'idempotent'
+            EndBookmark = [int]$Tracker.LastSynchronizedEndBookmark
+        }
+    }
+
+    $Tracker.ReactivationActionState = 'Claimed'
+    $Tracker.ReactivationActionWinner = 'reactivation'
+    $Tracker.ReactivationActionKey = $actionKey
+    $Tracker.ReactivationActionClaimedUtc = [datetime]::UtcNow.ToString('O')
+    $Tracker.ReactivationActionProjectionLine = [int]$Projection.OutboundCommitLine
+    return [pscustomobject]@{ Claimed = $true; Outcome = 'claimed'; EndBookmark = [int]$Tracker.LastSynchronizedEndBookmark }
+}
+
+function Complete-TunaGuiLiveReactivationAction {
+    param([Parameter(Mandatory = $true)]$Tracker)
+
+    if ([string]$Tracker.ReactivationActionState -ne 'Claimed') { return $false }
+    $Tracker.ReactivationActionState = 'Invoked'
+    $Tracker.ReactivationActionInvokedUtc = [datetime]::UtcNow.ToString('O')
+    return $true
+}
+
+function New-TunaGuiLiveReactivationActionDiagnosticLine {
+    param(
+        [Parameter(Mandatory = $true)]$Tracker,
+        [Parameter(Mandatory = $true)][string]$Outcome
+    )
+
+    return '[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_action_decided; action_window_generation={1}; projection_window_generation={2}; action_bookmark={3}; synchronized_end_bookmark={4}; projection_line={5}; terminal_line={6}; raw_line_visit_count={7}; matched_event_count={8}; update_elapsed_ms={9}; claimed_utc={10}; invoked_utc={11}; outcome={12}; authority_effect=none' -f
+        ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')),
+        [long]$Tracker.ActionWindowGeneration,
+        [long]$Tracker.FallbackProjectionWindowGeneration,
+        [int]$Tracker.ActionWindowMinimumBookmark,
+        [int]$Tracker.LastSynchronizedEndBookmark,
+        [int]$Tracker.ReactivationActionProjectionLine,
+        [int]$Tracker.ReactivationActionTerminalLine,
+        [long]$Tracker.LineVisitCount,
+        [long]$Tracker.MatchedEventCount,
+        [long]$Tracker.LastUpdateElapsedMilliseconds,
+        [string]$Tracker.ReactivationActionClaimedUtc,
+        [string]$Tracker.ReactivationActionInvokedUtc,
+        $Outcome
+}
+
 function Invoke-FileTransferTunaPostFallbackPrecondition {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -31511,6 +31898,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $stepBookmark = if ($earlyFallbackAccepted) { $bookmark } else { [int]$faultAdmissionTracker.LastSynchronizedEndBookmark }
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })))) | Out-Null
                 if (-not $earlyFallbackAccepted) {
+                    [void](Reset-TunaGuiFaultAdmissionActionWindow `
+                        -Tracker $faultAdmissionTracker `
+                        -ActionBookmark $stepBookmark)
                     $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs -AdmissionTracker $faultAdmissionTracker
                     $prearmedSwitchOffToggle = $null
                     $prearmedSwitchOffToggleWaitMs = 0L
@@ -31534,7 +31924,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 }
                 else {
                     try {
-                        $fallbackProjection = Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $faultAdmissionTracker -AfterBookmark ([int]$faultResult.AdmissionBookmark) -TimeoutMs 90000
+                        $fallbackProjectionBookmark = if ($RouteMode -eq 'live-regular-activation-cycle') {
+                            -1
+                        }
+                        else {
+                            [int]$faultResult.AdmissionBookmark
+                        }
+                        $fallbackProjection = Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $faultAdmissionTracker -AfterBookmark $fallbackProjectionBookmark -TimeoutMs 90000
                         [string]$fallbackProjection.StartedLine
                     }
                     catch {
@@ -31590,9 +31986,31 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $nextAction = if ($stepIndex + 1 -lt $sequence.Count) { [string]$sequence[$stepIndex + 1] } else { '' }
                 if (($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') -and
                     [string]::Equals($nextAction, 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $prearmedActivationBookmark = Get-AppLogBookmark
+                    if ($null -ne $fallbackProjection) {
+                        $reactivationClaim = Claim-TunaGuiLiveReactivationAction `
+                            -Tracker $faultAdmissionTracker `
+                            -Projection $fallbackProjection
+                        if (-not [bool]$reactivationClaim.Claimed) {
+                            $observedEvidenceLines.Add((New-TunaGuiLiveReactivationActionDiagnosticLine `
+                                    -Tracker $faultAdmissionTracker `
+                                    -Outcome ([string]$reactivationClaim.Outcome))) | Out-Null
+                            Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                            throw "Tuna GUI fallback reactivation action window closed before unlock. failure_class=filetransfer_gui_live_reactivation_action_window_missed failure_variant=fault_admission_tracker_backlog_delayed_prearmed_unlock_past_terminal"
+                        }
+                        $prearmedActivationBookmark = [int]$reactivationClaim.EndBookmark
+                    }
+                    else {
+                        $prearmedActivationBookmark = Get-AppLogBookmark
+                    }
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_epoch_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
                     Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                    if ($null -ne $fallbackProjection) {
+                        [void](Complete-TunaGuiLiveReactivationAction -Tracker $faultAdmissionTracker)
+                        $observedEvidenceLines.Add((New-TunaGuiLiveReactivationActionDiagnosticLine `
+                                -Tracker $faultAdmissionTracker `
+                                -Outcome 'invoked')) | Out-Null
+                        Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                    }
                 }
 
                 $fallbackRouteLine = if ($null -ne $fallbackProjection) {
@@ -31651,7 +32069,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $lastActivationPayloadBookmark = $stepBookmark
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed=1; immediate_after_fallback_recovered=1" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
-                    [void](Reset-TunaGuiFaultAdmissionActionWindow -Tracker $faultAdmissionTracker -ActionBookmark $stepBookmark)
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=started; step={0}" -f $stepNumber) -ForegroundColor DarkGray
                     $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark -AdmissionTracker $faultAdmissionTracker
                     Write-Host ("[GUI Smoke][filetransfer_tuna] event=filetransfer_gui_evidence_activity; activity=switch_off_prearm; status=completed; step={0}" -f $stepNumber) -ForegroundColor DarkGray
@@ -32504,22 +32921,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
         elseif ($firstTransferTerminalBeforeLiveReactivation) {
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6')
-            if (-not $evidence.tunaNegotiated -or
-                -not $evidence.fallbackEpochStarted -or
-                -not $evidence.activationEpochStarted -or
-                -not $evidence.activationEpochRecovered -or
-                -not $evidence.postTunaFallbackV6RouteObserved -or
-                -not $evidence.fallbackEpochRecovered -or
-                -not $liveRouteProof.Pass -or
-                $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6') {
-                $terminalFailureClass = if ([string]::IsNullOrWhiteSpace($joinedRouteSequence) -or $joinedRouteSequence -eq 'regular_nkn_v4_fast') {
-                    'regular_v4_terminal_before_tuna_activation_commit'
-                }
-                else {
-                    'terminal_fallback_prefix_missing'
-                }
-                throw "Tuna GUI live regular activation cycle did not prove terminal fallback outcome after first regular-to-Tuna/fallback leg. failure_class=$terminalFailureClass sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
-            }
+            throw "Tuna GUI live regular activation cycle reached terminal completion before fallback reactivation unlock. failure_class=filetransfer_gui_live_reactivation_action_window_missed failure_variant=fault_admission_tracker_backlog_delayed_prearmed_unlock_past_terminal sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
         else {
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')

@@ -12261,6 +12261,339 @@ function Get-FileTransferGuiLiveFallbackFaultWindowCorrelation {
     }
 }
 
+function Get-FileTransferGuiLiveReactivationActionWindowCorrelation {
+    param(
+        [object[]]$Events = @(),
+        [string]$LiveRouteProofMode = 'None'
+    )
+
+    if (-not [string]::Equals(
+            $LiveRouteProofMode,
+            'RegularActivationCycle',
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{
+            RawCount = 0; DistinctCount = 0; RecoveredCount = 0
+            UnresolvedCount = 0; Verdict = 'pass'
+            CandidateRecords = @(); UnresolvedCandidateRecords = @()
+        }
+    }
+
+    [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+
+    function Get-ReactivationField {
+        param($Event, [string]$Name)
+        return Get-FileTransferEventField -Event $Event -Name $Name -Default ''
+    }
+
+    function Test-ReactivationFieldEqual {
+        param($Left, $Right, [string]$LeftName, [string]$RightName = '')
+        if ([string]::IsNullOrWhiteSpace($RightName)) { $RightName = $LeftName }
+        $leftValue = Get-ReactivationField -Event $Left -Name $LeftName
+        $rightValue = Get-ReactivationField -Event $Right -Name $RightName
+        return -not [string]::IsNullOrWhiteSpace($leftValue) -and
+            -not [string]::IsNullOrWhiteSpace($rightValue) -and
+            [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Test-ReactivationWriterScope {
+        param($Anchor, $Candidate)
+        foreach ($name in @('log_writer_id', 'session_id', 'transfer_id', 'direction')) {
+            if ($name -eq 'direction' -and
+                [string]::IsNullOrWhiteSpace((Get-ReactivationField $Candidate $name))) {
+                continue
+            }
+            if (-not (Test-ReactivationFieldEqual -Left $Anchor -Right $Candidate -LeftName $name)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ReactivationSourceTuple {
+        param($Anchor, $Candidate, [switch]$CandidateUsesSourceFields)
+        foreach ($name in @(
+                'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                'terminal_generation', 'leg_generation', 'route_publication_generation')) {
+            $candidateName = if ($CandidateUsesSourceFields) { "source_$name" } else { $name }
+            if (-not (Test-ReactivationFieldEqual -Left $Anchor -Right $Candidate -LeftName $name -RightName $candidateName)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    function Test-ReactivationWakeTuple {
+        param($Anchor, $Pairing, $Candidate, [string]$IntentGeneration)
+
+        if (-not (Test-ReactivationWriterScope -Anchor $Anchor -Candidate $Candidate)) {
+            return $false
+        }
+        $eventName = [string]$Candidate.EventName
+        if ($eventName -in @(
+                'runtime_unlock_post_fallback_negotiation_deferred',
+                'runtime_unlock_post_fallback_retry_intent_recheck_decided')) {
+            foreach ($fields in @(
+                    @('route', 'source_route'),
+                    @('protocol_version', 'source_protocol_version'),
+                    @('live_route_epoch', 'source_live_route_epoch'),
+                    @('runtime_generation', 'source_runtime_generation'),
+                    @('terminal_generation', 'source_terminal_generation'),
+                    @('leg_generation', 'source_leg_generation'),
+                    @('route_publication_generation', 'source_publication_generation'))) {
+                if (-not (Test-ReactivationFieldEqual -Left $Anchor -Right $Candidate -LeftName $fields[0] -RightName $fields[1])) {
+                    return $false
+                }
+            }
+            if ((Get-ReactivationField $Candidate 'source_transport_epoch') -ne
+                    (Get-ReactivationField $Pairing 'transport_epoch') -or
+                (Get-ReactivationField $Candidate 'source_bridge_recovery_generation') -ne
+                    (Get-ReactivationField $Pairing 'bridge_recovery_generation') -or
+                (Get-ReactivationField $Candidate 'source_checkpoint_request_id') -ne
+                    (Get-ReactivationField $Pairing 'checkpoint_request_id') -or
+                (Get-ReactivationField $Candidate 'data_session_identity') -ne
+                    (Get-ReactivationField $Pairing 'data_session_identity') -or
+                (Get-ReactivationField $Candidate 'data_session_generation') -ne
+                    (Get-ReactivationField $Pairing 'data_session_generation')) {
+                return $false
+            }
+            return $eventName -eq 'runtime_unlock_post_fallback_negotiation_deferred' -or
+                (Get-ReactivationField $Candidate 'intent_generation') -eq $IntentGeneration
+        }
+        if ($eventName -eq 'runtime_unlock_retry_negotiation_slot_decided') {
+            return (Get-ReactivationField $Candidate 'decision_status') -eq 'Reserved' -and
+                (Get-ReactivationField $Candidate 'intent_generation') -eq $IntentGeneration -and
+                (Get-ReactivationField $Candidate 'contract_generation') -eq $IntentGeneration -and
+                (Get-ReactivationField $Candidate 'source_publication_generation') -eq
+                    (Get-ReactivationField $Anchor 'route_publication_generation') -and
+                (Get-ReactivationField $Candidate 'source_transport_epoch') -eq
+                    (Get-ReactivationField $Pairing 'transport_epoch') -and
+                (Get-ReactivationField $Candidate 'source_bridge_recovery_generation') -eq
+                    (Get-ReactivationField $Pairing 'bridge_recovery_generation') -and
+                (Get-ReactivationField $Candidate 'source_checkpoint_request_id') -eq
+                    (Get-ReactivationField $Pairing 'checkpoint_request_id') -and
+                (Get-ReactivationField $Candidate 'data_session_identity') -eq
+                    (Get-ReactivationField $Pairing 'data_session_identity') -and
+                (Get-ReactivationField $Candidate 'data_session_generation') -eq
+                    (Get-ReactivationField $Pairing 'data_session_generation')
+        }
+        if ($eventName -in @(
+                'runtime_unlock_retry_dispatch_authority_granted',
+                'runtime_unlock_retry_dispatch_settlement_decided')) {
+            return (Test-ReactivationSourceTuple -Anchor $Anchor -Candidate $Candidate) -and
+                (Get-ReactivationField $Candidate 'contract_generation') -eq $IntentGeneration -and
+                (Get-ReactivationField $Candidate 'transport_epoch') -eq
+                    (Get-ReactivationField $Pairing 'transport_epoch') -and
+                (Get-ReactivationField $Candidate 'bridge_recovery_generation') -eq
+                    (Get-ReactivationField $Pairing 'bridge_recovery_generation') -and
+                (Get-ReactivationField $Candidate 'release_authority_id') -eq
+                    (Get-ReactivationField $Pairing 'authority_id') -and
+                (Get-ReactivationField $Candidate 'release_generation') -eq
+                    (Get-ReactivationField $Pairing 'yield_generation') -and
+                ($eventName -ne 'runtime_unlock_retry_dispatch_settlement_decided' -or
+                    (Get-ReactivationField $Candidate 'settlement_outcome') -eq 'DispatchObserved')
+        }
+        if ($eventName -eq 'filetransfer_route_transition_prepared') {
+            return (Get-ReactivationField $Candidate 'target_route') -eq 'file_tuna_v4' -and
+                (Get-ReactivationField $Candidate 'source_route') -eq 'post_tuna_fallback_v6' -and
+                (Get-ReactivationField $Candidate 'source_protocol_version') -eq '6' -and
+                (Get-ReactivationField $Candidate 'source_live_route_epoch') -eq
+                    (Get-ReactivationField $Anchor 'live_route_epoch') -and
+                (Get-ReactivationField $Candidate 'source_runtime_generation') -eq
+                    (Get-ReactivationField $Anchor 'runtime_generation') -and
+                (Get-ReactivationField $Candidate 'source_terminal_generation') -eq
+                    (Get-ReactivationField $Anchor 'terminal_generation') -and
+                (Get-ReactivationField $Candidate 'source_leg_generation') -eq
+                    (Get-ReactivationField $Anchor 'leg_generation') -and
+                (Get-ReactivationField $Candidate 'source_route_publication_generation') -eq
+                    (Get-ReactivationField $Anchor 'route_publication_generation') -and
+                (Get-ReactivationField $Candidate 'source_transport_epoch') -eq
+                    (Get-ReactivationField $Pairing 'transport_epoch') -and
+                (Get-ReactivationField $Candidate 'source_bridge_recovery_generation') -eq
+                    (Get-ReactivationField $Pairing 'bridge_recovery_generation')
+        }
+        return $false
+    }
+
+    [object[]]$routeProofs = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_live_route_epoch_recovered' -and
+            (Get-ReactivationField $_ 'route') -eq 'post_tuna_fallback_v6' -and
+            (Get-ReactivationField $_ 'protocol_version') -eq '6'
+        })
+    [object[]]$pairings = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_pairing_committed' -and
+            (Get-ReactivationField $_ 'pairing_state') -eq 'Paired' -and
+            (Get-ReactivationField $_ 'decision_status') -in @('Accepted', 'Idempotent')
+        })
+    [object[]]$grants = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_paired_yield_granted'
+        })
+    [object[]]$requests = @($ordered | Where-Object {
+            $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_request_queued' -and
+            (Get-ReactivationField $_ 'decision_reason') -eq 'coordinator_request_queued'
+        })
+    [object[]]$slotDecisions = @($ordered | Where-Object {
+            $_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided'
+        })
+    [object[]]$terminals = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_live_route_epoch_terminal' -and
+            (Get-ReactivationField $_ 'direction') -eq 'outbound' -and
+            (Get-ReactivationField $_ 'route') -eq 'post_tuna_fallback_v6' -and
+            (Get-ReactivationField $_ 'protocol_version') -eq '6' -and
+            (Get-ReactivationField $_ 'terminal_state') -eq 'completed'
+        })
+
+    $raw = New-Object System.Collections.Generic.List[object]
+    $distinct = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($terminal in $terminals) {
+        $terminalSequence = [int64]$terminal.Sequence
+        [object[]]$outboundProofs = @($routeProofs | Where-Object {
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Get-ReactivationField $_ 'direction') -eq 'outbound' -and
+                (Test-ReactivationWriterScope -Anchor $terminal -Candidate $_) -and
+                (Test-ReactivationFieldEqual -Left $terminal -Right $_ -LeftName 'live_route_epoch')
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($outboundProofs.Count -ne 1) { continue }
+        $outboundProof = $outboundProofs[0]
+        [object[]]$inboundProofs = @($routeProofs | Where-Object {
+                [int64]$_.Sequence -le $terminalSequence -and
+                (Get-ReactivationField $_ 'direction') -eq 'inbound' -and
+                (Test-ReactivationFieldEqual -Left $outboundProof -Right $_ -LeftName 'session_id') -and
+                (Test-ReactivationFieldEqual -Left $outboundProof -Right $_ -LeftName 'transfer_id') -and
+                (Test-ReactivationSourceTuple -Anchor $outboundProof -Candidate $_)
+            } | Select-Object -First 1)
+        if ($inboundProofs.Count -ne 1) { continue }
+
+        [object[]]$matchingPairings = @($pairings | Where-Object {
+                [int64]$_.Sequence -gt [int64]$outboundProof.Sequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-ReactivationWriterScope -Anchor $terminal -Candidate $_) -and
+                (Test-ReactivationSourceTuple -Anchor $outboundProof -Candidate $_)
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($matchingPairings.Count -ne 1) { continue }
+        $pairing = $matchingPairings[0]
+        $authorityId = Get-ReactivationField $pairing 'authority_id'
+        $yieldGeneration = Get-ReactivationField $pairing 'yield_generation'
+        $pairingGeneration = Get-ReactivationField $pairing 'pairing_generation'
+        $pairKey = Get-ReactivationField $pairing 'pair_key'
+        $transportEpoch = Get-ReactivationField $pairing 'transport_epoch'
+        $bridgeGeneration = Get-ReactivationField $pairing 'bridge_recovery_generation'
+        $checkpoint = Get-ReactivationField $pairing 'checkpoint_request_id'
+        $dataSession = Get-ReactivationField $pairing 'data_session_identity'
+        $dataSessionGeneration = Get-ReactivationField $pairing 'data_session_generation'
+        if (@(
+                $authorityId, $yieldGeneration, $pairingGeneration, $pairKey,
+                $transportEpoch, $bridgeGeneration, $checkpoint, $dataSession,
+                $dataSessionGeneration) |
+            Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }) {
+            continue
+        }
+
+        [object[]]$matchingGrants = @($grants | Where-Object {
+                [int64]$_.Sequence -ge [int64]$pairing.Sequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-ReactivationWriterScope -Anchor $pairing -Candidate $_) -and
+                (Get-ReactivationField $_ 'authority_id') -eq $authorityId -and
+                (Get-ReactivationField $_ 'yield_generation') -eq $yieldGeneration -and
+                (Get-ReactivationField $_ 'pair_key') -eq $pairKey
+            } | Select-Object -First 1)
+        if ($matchingGrants.Count -ne 1) { continue }
+
+        [object[]]$matchingRequests = @($requests | Where-Object {
+                [int64]$_.Sequence -gt [int64]$matchingGrants[0].Sequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-ReactivationWriterScope -Anchor $terminal -Candidate $_) -and
+                (Test-ReactivationSourceTuple -Anchor $outboundProof -Candidate $_ -CandidateUsesSourceFields)
+            } | Select-Object -First 1)
+        if ($matchingRequests.Count -ne 1) { continue }
+        $request = $matchingRequests[0]
+        $intentGeneration = Get-ReactivationField $request 'contract_generation'
+
+        [object[]]$backoff = @($slotDecisions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$request.Sequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-ReactivationWriterScope -Anchor $terminal -Candidate $_) -and
+                (Get-ReactivationField $_ 'intent_generation') -eq $intentGeneration -and
+                (Get-ReactivationField $_ 'contract_generation') -eq $intentGeneration -and
+                (Get-ReactivationField $_ 'source_publication_generation') -eq
+                    (Get-ReactivationField $outboundProof 'route_publication_generation') -and
+                (Get-ReactivationField $_ 'source_transport_epoch') -eq $transportEpoch -and
+                (Get-ReactivationField $_ 'source_bridge_recovery_generation') -eq $bridgeGeneration -and
+                (Get-ReactivationField $_ 'source_checkpoint_request_id') -eq $checkpoint -and
+                (Get-ReactivationField $_ 'data_session_identity') -eq $dataSession -and
+                (Get-ReactivationField $_ 'data_session_generation') -eq $dataSessionGeneration -and
+                (Get-ReactivationField $_ 'decision_reason') -eq 'retry_dispatch_authority_backoff_pending'
+            } | Select-Object -First 1)
+        [object[]]$ineligible = @($slotDecisions | Where-Object {
+                [int64]$_.Sequence -gt $(if ($backoff.Count -eq 1) { [int64]$backoff[0].Sequence } else { [int64]$request.Sequence }) -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                (Test-ReactivationWriterScope -Anchor $terminal -Candidate $_) -and
+                (Get-ReactivationField $_ 'intent_generation') -eq $intentGeneration -and
+                (Get-ReactivationField $_ 'contract_generation') -eq $intentGeneration -and
+                (Get-ReactivationField $_ 'source_publication_generation') -eq
+                    (Get-ReactivationField $outboundProof 'route_publication_generation') -and
+                (Get-ReactivationField $_ 'source_transport_epoch') -eq $transportEpoch -and
+                (Get-ReactivationField $_ 'source_bridge_recovery_generation') -eq $bridgeGeneration -and
+                (Get-ReactivationField $_ 'source_checkpoint_request_id') -eq $checkpoint -and
+                (Get-ReactivationField $_ 'data_session_identity') -eq $dataSession -and
+                (Get-ReactivationField $_ 'data_session_generation') -eq $dataSessionGeneration -and
+                (Get-ReactivationField $_ 'decision_reason') -eq 'retry_dispatch_negotiation_slot_ineligible'
+            } | Select-Object -First 1)
+        if ($backoff.Count -ne 1 -or $ineligible.Count -ne 1) { continue }
+
+        [object[]]$preterminalWake = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$ineligible[0].Sequence -and
+                [int64]$_.Sequence -lt $terminalSequence -and
+                ($_.EventName -in @(
+                        'runtime_unlock_post_fallback_negotiation_deferred',
+                        'runtime_unlock_post_fallback_retry_intent_recheck_decided',
+                        'runtime_unlock_retry_dispatch_authority_granted',
+                        'runtime_unlock_retry_dispatch_settlement_decided') -or
+                 ($_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+                    (Get-ReactivationField $_ 'decision_status') -eq 'Reserved') -or
+                 ($_.EventName -eq 'filetransfer_route_transition_prepared' -and
+                    (Get-ReactivationField $_ 'target_route') -eq 'file_tuna_v4')) -and
+                (Test-ReactivationWakeTuple -Anchor $outboundProof -Pairing $pairing -Candidate $_ -IntentGeneration $intentGeneration)
+            } | Select-Object -First 1)
+        if ($preterminalWake.Count -gt 0) { continue }
+
+        $writer = Get-ReactivationField $terminal 'log_writer_id'
+        $session = Get-ReactivationField $terminal 'session_id'
+        $transfer = Get-ReactivationField $terminal 'transfer_id'
+        $direction = Get-ReactivationField $terminal 'direction'
+        $sourcePublication = Get-ReactivationField $outboundProof 'route_publication_generation'
+        $sourceRuntime = Get-ReactivationField $outboundProof 'runtime_generation'
+        $sourceTerminal = Get-ReactivationField $outboundProof 'terminal_generation'
+        $sourceLeg = Get-ReactivationField $outboundProof 'leg_generation'
+        $key = @(
+            'gui-reactivation-action-window', $writer, $session, $transfer, $direction,
+            $authorityId, $yieldGeneration, $pairingGeneration, $pairKey, $intentGeneration,
+            $sourcePublication, $sourceRuntime, $sourceTerminal, $sourceLeg,
+            $transportEpoch, $bridgeGeneration, $checkpoint, $dataSession,
+            $dataSessionGeneration) -join '|'
+        $record = [pscustomobject]@{
+            Class = 'filetransfer_gui_live_reactivation_action_window_missed'
+            Event = $terminal
+            Reason = 'fallback_reactivation_unlock_not_invoked_before_completed_transfer'
+            Variant = 'fault_admission_tracker_backlog_delayed_prearmed_unlock_past_terminal'
+            DistinctKey = $key
+        }
+        $raw.Add($record) | Out-Null
+        if ($seen.Add($key.ToLowerInvariant())) { $distinct.Add($record) | Out-Null }
+    }
+
+    return [pscustomobject]@{
+        RawCount = $raw.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = 0
+        UnresolvedCount = $distinct.Count
+        Verdict = if ($distinct.Count -gt 0) { 'fail' } else { 'pass' }
+        CandidateRecords = @($distinct.ToArray())
+        UnresolvedCandidateRecords = @($distinct.ToArray())
+    }
+}
+
 function Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation {
     param([object[]]$Events = @())
 
@@ -15842,6 +16175,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_recovered_count={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $RecoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_reactivation_action_window_missed_raw_count={0}" -f $RecoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRawCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_reactivation_action_window_missed_distinct_count={0}" -f $RecoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_reactivation_action_window_missed_recovered_count={0}" -f $RecoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_reactivation_action_window_missed_unresolved_count={0}" -f $RecoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_gui_live_reactivation_action_window_missed_verdict={0}" -f $RecoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedVerdict)) | Out-Null
     $lines.Add(("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $RecoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount)) | Out-Null
@@ -17708,6 +18046,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict),
+        ("filetransfer_gui_live_reactivation_action_window_missed_raw_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRawCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_distinct_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedDistinctCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_recovered_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRecoveredCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_unresolved_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedUnresolvedCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_verdict={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedVerdict),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount),
         ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount),
@@ -62019,6 +62362,10 @@ function Get-FileTransferRecoveryFailureClassification {
         Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
             -Events $allEvents `
             -LiveRouteProofMode $LiveRouteProofMode
+    $fileTransferGuiLiveReactivationActionWindowProof =
+        Get-FileTransferGuiLiveReactivationActionWindowCorrelation `
+            -Events $allEvents `
+            -LiveRouteProofMode $LiveRouteProofMode
     $fileTransferRouteTransitionLiveEpochProjectionProof =
         $fileTunaV4DataPathProof.RouteTransitionLiveEpochProjectionProof
     $fileTransferRouteTransitionDrainingTransportGraceProof =
@@ -65326,6 +65673,15 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason $fallbackRuntimeUnlockSeparationProof.FailureClass `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @(
+            $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_gui_live_reactivation_action_window_missed' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
 
     # Fallback symptoms are proof-chain candidates only after the retained slice
     # contains an actual fallback route or fallback-owner tuple. This prevents a
@@ -66062,6 +66418,21 @@ function Get-FileTransferRecoveryFailureClassification {
             $failureVariant = [string]$matchingVariantRecord[0].Variant
         }
     }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq
+            'filetransfer_gui_live_reactivation_action_window_missed') {
+        $matchingVariantRecord = @(
+            $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCandidateRecords |
+                Where-Object {
+                    [int64]$_.Event.Sequence -eq [int64]$firstProofChainFailure.Sequence -and
+                    [int]$_.Event.LineNumber -eq [int]$firstProofChainFailure.LineNumber
+                } |
+                Select-Object -First 1
+        )
+        if ($matchingVariantRecord.Count -eq 1) {
+            $failureVariant = [string]$matchingVariantRecord[0].Variant
+        }
+    }
 
     $classification = [pscustomobject]@{
         Class = $class
@@ -66075,8 +66446,9 @@ function Get-FileTransferRecoveryFailureClassification {
         FirstProofChainFailureWriterSequence = if ($null -ne $firstProofChainFailure) {
             [int64]$firstProofChainFailure.WriterSequence
         } else { 0L }
-        SemanticFailureDomain = if ($class -eq
-                'filetransfer_gui_live_fallback_fault_window_missed') {
+        SemanticFailureDomain = if ($class -in @(
+                'filetransfer_gui_live_fallback_fault_window_missed',
+                'filetransfer_gui_live_reactivation_action_window_missed')) {
             'evidence_harness'
         }
         elseif ($class -in @(
@@ -66723,6 +67095,16 @@ function Get-FileTransferRecoveryFailureClassification {
             $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount
         FileTransferGuiLiveFallbackFaultWindowMissedVerdict =
             $fileTransferGuiLiveFallbackFaultWindowProof.Verdict
+        FileTransferGuiLiveReactivationActionWindowMissedRawCount =
+            $fileTransferGuiLiveReactivationActionWindowProof.RawCount
+        FileTransferGuiLiveReactivationActionWindowMissedDistinctCount =
+            $fileTransferGuiLiveReactivationActionWindowProof.DistinctCount
+        FileTransferGuiLiveReactivationActionWindowMissedRecoveredCount =
+            $fileTransferGuiLiveReactivationActionWindowProof.RecoveredCount
+        FileTransferGuiLiveReactivationActionWindowMissedUnresolvedCount =
+            $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCount
+        FileTransferGuiLiveReactivationActionWindowMissedVerdict =
+            $fileTransferGuiLiveReactivationActionWindowProof.Verdict
         FileTransferFallbackV6ProofBootstrapMissingRawCount =
             $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
         FileTransferFallbackV6ProofBootstrapMissingDistinctCount =
@@ -67219,6 +67601,11 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_gui_live_fallback_fault_window_missed_recovered_count = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedRecoveredCount
         filetransfer_gui_live_fallback_fault_window_missed_unresolved_count = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedUnresolvedCount
         filetransfer_gui_live_fallback_fault_window_missed_verdict = [string]$recoveryClassification.FileTransferGuiLiveFallbackFaultWindowMissedVerdict
+        filetransfer_gui_live_reactivation_action_window_missed_raw_count = [string]$recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRawCount
+        filetransfer_gui_live_reactivation_action_window_missed_distinct_count = [string]$recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedDistinctCount
+        filetransfer_gui_live_reactivation_action_window_missed_recovered_count = [string]$recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRecoveredCount
+        filetransfer_gui_live_reactivation_action_window_missed_unresolved_count = [string]$recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedUnresolvedCount
+        filetransfer_gui_live_reactivation_action_window_missed_verdict = [string]$recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedVerdict
         filetransfer_fallback_v6_proof_bootstrap_missing_raw_count = [string]$recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRawCount
         filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count = [string]$recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingDistinctCount
         filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count = [string]$recoveryClassification.FileTransferFallbackV6ProofBootstrapMissingRecoveredCount
@@ -67952,7 +68339,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'post_fallback_initiator_probe_launch_accepted_without_route_transition_authority') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
+    elseif ($recoveryClassification.Class -in @('filetransfer_gui_live_fallback_fault_window_missed', 'filetransfer_gui_live_reactivation_action_window_missed', 'filetransfer_live_route_epoch_projection_missing', 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete', 'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid', 'runtime_unlock_retry_regular_v4_recovery_settlement_missing', 'runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_not_preserved', 'runtime_unlock_precommit_probe_start_handoff_missing', 'runtime_unlock_uncommitted_tuna_fallback_proof_authority_missing', 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed', 'regular_v4_frontier_repair_settlement_disposition_unverifiable', 'regular_v4_frontier_repair_initial_pressure_install_missing', 'regular_v4_frontier_repair_successor_pressure_install_missing', 'regular_v4_frontier_repair_projection_reauthorization_missing_after_recovery', 'regular_v4_frontier_repair_pressure_recovery_handoff_missing')) {
         'incomplete_proof'
     }
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
@@ -67982,6 +68369,11 @@ function Write-FileTransferDiagnosticsArtifacts {
     }
 
     $verdictLines = @(
+        ("filetransfer_gui_live_reactivation_action_window_missed_raw_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRawCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_distinct_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedDistinctCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_recovered_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedRecoveredCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_unresolved_count={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedUnresolvedCount),
+        ("filetransfer_gui_live_reactivation_action_window_missed_verdict={0}" -f $recoveryClassification.FileTransferGuiLiveReactivationActionWindowMissedVerdict),
         ("runtime_unlock_retry_dispatch_post_grant_hold_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRawCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldDistinctCount),
         ("runtime_unlock_retry_dispatch_post_grant_hold_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldRecoveredCount),

@@ -1649,50 +1649,17 @@ function Get-FileTransferLiveRouteEpochProof {
         $expectedRoutes = @('post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
     }
     elseif ($Mode -eq 'RegularActivationCycle') {
-        $terminalFallbackBeforeReactivation = @(
-            Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation')
-        ).Count -gt 0
-        if (-not $terminalFallbackBeforeReactivation) {
-            $actualRouteChangesForTerminalFallback = @($routeChanges.ToArray())
-            $fallbackTerminalEvents = @(
-                Get-FileTransferEventsByName -Events $TransferEvents -Names @('transfer_terminal') |
-                    Where-Object {
-                        $route = Get-FileTransferEventField -Event $_ -Name 'route' -Default ''
-                        if (-not [string]::Equals($route, 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase)) {
-                            return $false
-                        }
-
-                        $errorCode = Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)'
-                        if (-not ([string]::IsNullOrWhiteSpace($errorCode) -or
-                                  [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase))) {
-                            return $false
-                        }
-
-                        $bytesTransferred = Get-FileTransferEventInt64Field -Event $_ -Name 'bytes_transferred' -Default 0
-                        $fileSizeBytes = Get-FileTransferEventInt64Field -Event $_ -Name 'file_size_bytes' -Default 0
-                        $chunksTransferred = Get-FileTransferEventInt64Field -Event $_ -Name 'chunks_transferred' -Default 0
-                        $chunkCount = Get-FileTransferEventInt64Field -Event $_ -Name 'chunk_count' -Default 0
-                        ($fileSizeBytes -gt 0 -and $bytesTransferred -ge $fileSizeBytes) -or
-                            ($chunkCount -gt 0 -and $chunksTransferred -ge $chunkCount)
-                    }
-            )
-            if (($actualRouteChangesForTerminalFallback -join ',') -eq 'file_tuna_v4,post_tuna_fallback_v6' -and
-                $fallbackTerminalEvents.Count -gt 0) {
-                $terminalFallbackBeforeReactivation = $true
-                foreach ($terminalEvent in @($fallbackTerminalEvents | Select-Object -First 2)) {
-                    $evidence.Add($terminalEvent) | Out-Null
-                }
-            }
-        }
-
-        if ($terminalFallbackBeforeReactivation) {
-            $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6')
-            $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6')
-        }
-        else {
-            $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
-            $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
-        }
+        $expectedRoutes = @(
+            'file_tuna_v4',
+            'post_tuna_fallback_v6',
+            'file_tuna_v4',
+            'post_tuna_fallback_v6')
+        $expectedSelectedRouteChanges = @(
+            'regular_nkn_v4_fast',
+            'file_tuna_v4',
+            'post_tuna_fallback_v6',
+            'file_tuna_v4',
+            'post_tuna_fallback_v6')
         $actualSelectedRouteChanges = $selectedRouteChanges.ToArray()
         if (($actualSelectedRouteChanges -join ',') -ne ($expectedSelectedRouteChanges -join ',')) {
             $findings.Add(("selected route changes mismatch: mode={0}; expected={1}; actual={2}" -f $Mode, ($expectedSelectedRouteChanges -join ','), ($(if ($actualSelectedRouteChanges.Count -gt 0) { $actualSelectedRouteChanges -join ',' } else { '(none)' })))) | Out-Null
