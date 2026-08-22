@@ -3740,6 +3740,73 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-missing-dispatch-completion-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_ProbeRollbackRetryCycleUsesIndexedProofBeforeDeadline()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-retry-cycle-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'session_id=sess; transfer_id=transfer; direction=outbound; log_writer_id=writer'
+                @(
+                    "event=filetransfer_route_transition_disposition_applied; $scope; authority_id=transition-a; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; release_authority_id=yield-a; release_generation=1; install_generation=1; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; disposition=rolledback; apply_status=applied",
+                    "event=runtime_unlock_precommit_probe_failed; $scope; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; reason=inbound_fallback_tail_not_yielded",
+                    "event=filetransfer_runtime_unlock_probe_failed_fallback_resumed; $scope; route=post_tuna_fallback_v6; protocol_version=6; reason=inbound_fallback_tail_not_yielded",
+                    "event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; $scope; authority_id=yield-a; yield_generation=1; yield_kind=Quiescent; decision_status=Held; decision_reason=fallback_paired_tail_yield_pending",
+                    "event=file_transfer_outbound_terminal; $scope; state=Failed; error_code=route_cycle_missing"
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'runtime_unlock_retry' -or
+                    $result.Reason -ne 'pressure_rejected_precommit_probe_rollback_left_consumed_paired_yield_current_without_successor' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_fallback_tail_retry_cycle_successor_index' -or
+                    -not [bool]$result.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollback) {
+                    throw "retry-cycle successor fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+
+                @("event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; $scope; authority_id=yield-a; yield_generation=1; decision_status=Held; decision_reason=fallback_paired_tail_yield_pending") |
+                    Set-Content -LiteralPath $path
+                $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($singleton.Reason -eq 'pressure_rejected_precommit_probe_rollback_left_consumed_paired_yield_current_without_successor') {
+                    throw 'singleton hold was classified without rollback, probe failure, and resume evidence'
+                }
+                Write-Output 'gui-retry-cycle-successor-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Retry-cycle successor GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-retry-cycle-successor-index-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

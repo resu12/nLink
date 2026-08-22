@@ -284,6 +284,78 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [Trait("RetainedFallbackSuite", "FallbackTailRetryCycleSuccessor")]
+    public async Task AnalyzeRetained_ProbeRollbackRequiresFreshPairedYieldCycle(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string session = "sess_retry_cycle";
+        const string transfer = "transfer_retry_cycle";
+        const string writer = "writer_retry_cycle";
+        const string oldYield = "fta2-fallback_tail_yield-old";
+        const string newYield = "fta2-fallback_tail_yield-new";
+        const string transition = "fta2-filetransfer_route_transition-old";
+        const string scope =
+            "source_route=post_tuna_fallback_v6; source_protocol_version=6; " +
+            "source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; " +
+            "source_leg_generation=3; source_route_publication_generation=3; " +
+            "source_route_commit_generation=0; source_transport_epoch=1; " +
+            "source_bridge_recovery_generation=1; source_checkpoint_generation=1; " +
+            "source_checkpoint_request_id=(none); source_data_session_identity=data-session-a; " +
+            "source_data_session_generation=1";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_transition_disposition_applied; session_id={session}; transfer_id={transfer}; direction=outbound; authority_id={transition}; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; {scope}; release_authority_id={oldYield}; release_generation=1; install_generation=1; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; disposition=rolledback; apply_status=applied; log_writer_id={writer}; log_writer_sequence=1"),
+            LogLine($"event=runtime_unlock_precommit_probe_failed; session_id={session}; transfer_id={transfer}; direction=outbound; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; reason=inbound_fallback_tail_not_yielded; log_writer_id={writer}; log_writer_sequence=2", secondsOffset: 1),
+            LogLine($"event=filetransfer_runtime_unlock_probe_failed_fallback_resumed; session_id={session}; transfer_id={transfer}; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; reason=inbound_fallback_tail_not_yielded; log_writer_id={writer}; log_writer_sequence=3", secondsOffset: 2),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id={session}; transfer_id={transfer}; direction=outbound; authority_id={oldYield}; yield_generation=1; yield_kind=Quiescent; decision_status=Held; decision_reason=fallback_paired_tail_yield_pending; log_writer_id={writer}; log_writer_sequence=4", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested; session_id={session}; transfer_id={transfer}; direction=outbound; authority_id={oldYield}; yield_generation=1; yield_kind=Quiescent; decision_status=Held; decision_reason=fallback_paired_tail_yield_pending; log_writer_id={writer}; log_writer_sequence=5", secondsOffset: 4)
+        };
+        if (recovered)
+        {
+            lines.Add(LogLine($"event=filetransfer_fallback_tail_retry_cycle_supersession_decided; session_id={session}; transfer_id={transfer}; direction=outbound; role=initiator; authority_id={oldYield}; yield_generation=1; peer_authority_id=fta2-fallback_tail_yield-peer; peer_yield_generation=1; status=Accepted; reason=pressure_rejected_precommit_probe_rollback; log_writer_id={writer}; log_writer_sequence=6", secondsOffset: 5));
+            lines.Add(LogLine($"event=filetransfer_fallback_tail_retry_cycle_supersession_decided; session_id={session}; transfer_id={transfer}; direction=inbound; role=responder; authority_id=fta2-fallback_tail_yield-peer; yield_generation=1; peer_authority_id={oldYield}; peer_yield_generation=1; status=Accepted; reason=pressure_rejected_precommit_probe_rollback; log_writer_id=peer_writer; log_writer_sequence=1", secondsOffset: 6));
+            lines.Add(LogLine($"event=filetransfer_fallback_tail_yield_issued; session_id={session}; transfer_id={transfer}; direction=outbound; authority_id={newYield}; predecessor_authority_id={oldYield}; yield_generation=2; yield_kind=Quiescent; log_writer_id={writer}; log_writer_sequence=7", secondsOffset: 7));
+            lines.Add(LogLine($"event=filetransfer_route_transition_prepared; session_id={session}; transfer_id={transfer}; direction=outbound; authority_id=fta2-filetransfer_route_transition-new; transition_generation=4; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; fallback_yield_authority_id={newYield}; decision_status=Prepared; log_writer_id={writer}; log_writer_sequence=8", secondsOffset: 8));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        const string prefix =
+            "runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback";
+        Assert.Equal("2", verdict[$"{prefix}_raw_count"]);
+        Assert.Equal("1", verdict[$"{prefix}_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict[$"{prefix}_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict[$"{prefix}_unresolved_count"]);
+        Assert.Equal(recovered ? "pass" : "fail", verdict[$"{prefix}_verdict"]);
+        if (!recovered)
+        {
+            Assert.Equal(prefix, verdict["recovery_failure_class"]);
+            Assert.Equal(
+                "release_consumed_gen1_not_retired_for_fresh_quiescent_pair",
+                verdict["failure_variant"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedFallbackSuite", "Efficiency")]

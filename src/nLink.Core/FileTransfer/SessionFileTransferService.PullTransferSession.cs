@@ -3361,6 +3361,15 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         string reason)
     {
+        if (FileTransferCoordinator
+            .IsFallbackTailRetryCycleSupersessionPending(
+                CreateCoordinatorStateLocked(context)))
+        {
+            ResolveInboundFallbackTailSurvivalLocked(
+                context,
+                "pressure_rejected_precommit_probe_rollback");
+        }
+
         if (GetCurrentFallbackTailYieldOperation(context)?.PairedRelease is
             not { } pairedRelease)
         {

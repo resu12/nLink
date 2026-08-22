@@ -17571,6 +17571,123 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackTailYield_RejectedProbeSupersedesConsumedPairForFreshQuiescentCycle()
+    {
+        var (state, request, predecessor) =
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            predecessor.AuthorityId,
+            predecessor.YieldGeneration,
+            predecessor.YieldKind.ToString());
+        Assert.True(granted.Granted, granted.Reason);
+        var staged = StagePersistentRetryLifecycle(granted.State, granted, 30_000);
+        var issuance = FileTransferCoordinator
+            .IssueRuntimeUnlockRetryDispatchInstallReceipt(
+                staged.State,
+                granted,
+                request,
+                30_001);
+        var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
+            issuance.Receipt);
+        var committed = FileTransferCoordinator
+            .CommitRuntimeUnlockRetryDispatchInstall(
+                issuance.State,
+                new RuntimeUnlockRetryDispatchInstallResult(
+                    RuntimeUnlockRetryDispatchInstallStatus.Installed,
+                    "installed",
+                    receipt),
+                30_002);
+        var consumed = FileTransferCoordinator.GetFallbackTailYieldSubstate(
+            committed.State);
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            consumed.CurrentOperation);
+        var release = Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
+            operation.PairedRelease);
+
+        var superseded = FileTransferCoordinator
+            .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                committed.State,
+                FileTransferFallbackTailRetryCycleSupersessionRole.Initiator,
+                predecessor,
+                release,
+                receipt,
+                "pressure_rejected_precommit_probe_rollback");
+
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            superseded.Status);
+        Assert.True(
+            FileTransferCoordinator.IsFallbackTailRetryCycleSupersessionPending(
+                superseded.State));
+        var successor = MarkFallbackTailQuiescent(
+            superseded.State,
+            superseded.State.RouteSelection,
+            superseded.State.CurrentLeg!.TransportEpochId,
+            superseded.State.CurrentLeg.ProvenCommittedChunkIndex,
+            superseded.State.CurrentLeg.ProvenHighestObservedChunkIndex);
+        Assert.Null(successor.MutationRejectedReason);
+        var successorDecision = Assert.IsType<FallbackTailYieldDecision>(
+            successor.FallbackTailYieldDecision);
+        Assert.Equal(predecessor.AuthorityId, successorDecision.PredecessorAuthorityId);
+        Assert.True(successorDecision.YieldGeneration > predecessor.YieldGeneration);
+        Assert.False(
+            FileTransferCoordinator.IsFallbackTailRetryCycleSupersessionPending(
+                successor.State));
+        var staleCallback = FileTransferCoordinator
+            .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                successor.State,
+                FileTransferFallbackTailRetryCycleSupersessionRole.Initiator,
+                predecessor,
+                release,
+                receipt,
+                "pressure_rejected_precommit_probe_rollback");
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            staleCallback.Status);
+        Assert.Same(successor.State, staleCallback.State);
+    }
+
+    [Fact]
+    public void FallbackTailYield_RejectedResponderProbeSupersedesOnlyExactPairedOperation()
+    {
+        var (state, _, predecessor) =
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(state)
+                .CurrentOperation);
+        var release = Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
+            operation.PairedRelease);
+
+        var superseded = FileTransferCoordinator
+            .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                state,
+                FileTransferFallbackTailRetryCycleSupersessionRole.Responder,
+                predecessor,
+                release,
+                expectedInstallReceipt: null,
+                "pressure_rejected_precommit_probe_rollback");
+        var duplicate = FileTransferCoordinator
+            .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                superseded.State,
+                FileTransferFallbackTailRetryCycleSupersessionRole.Responder,
+                predecessor,
+                release,
+                expectedInstallReceipt: null,
+                "pressure_rejected_precommit_probe_rollback");
+
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            superseded.Status);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Same(superseded.State, duplicate.State);
+    }
+
+    [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     public void FileTransferRouteTransition_TunaFallbackCommitsAndAppliesRetainedFrameOnce()
     {

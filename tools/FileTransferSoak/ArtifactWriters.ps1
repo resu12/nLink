@@ -9019,6 +9019,7 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_route_transition_retained_frame_applied',
         'filetransfer_route_transition_retained_frame_rejected',
         'filetransfer_fallback_tail_yield_issued',
+        'filetransfer_fallback_tail_retry_cycle_supersession_decided',
         'filetransfer_fallback_tail_local_proof_receipt_decided',
         'filetransfer_fallback_tail_peer_proof_receipt_decided',
         'filetransfer_fallback_tail_pairing_committed',
@@ -15772,6 +15773,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount)) | Out-Null
     $lines.Add(("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_raw_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRawCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_distinct_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackDistinctCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_recovered_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRecoveredCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_unresolved_count={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackUnresolvedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_verdict={0}" -f $RecoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackVerdict)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_settlement_disposition_unverifiable_raw_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRawCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_settlement_disposition_unverifiable_distinct_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableDistinctCount)) | Out-Null
     $lines.Add(("regular_v4_frontier_repair_settlement_disposition_unverifiable_recovered_count={0}" -f $RecoveryClassification.RegularV4FrontierRepairSettlementDispositionUnverifiableRecoveredCount)) | Out-Null
@@ -17962,6 +17968,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRawCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackDistinctCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRecoveredCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackVerdict),
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
@@ -58015,6 +58026,156 @@ function Get-FileTransferFallbackFrontierCheckpointAcceptanceRecheckCorrelation 
     }
 }
 
+function Get-FileTransferFallbackTailRetryCycleSuccessorCorrelation {
+    param([object[]]$Events = @())
+
+    [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+    [object[]]$holds = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Held' -and
+            (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+                'fallback_paired_tail_yield_pending'
+        })
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($hold in $holds) {
+        $writer = Get-FileTransferEventField -Event $hold -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $hold -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $hold -Name 'transfer_id' -Default ''
+        $authority = Get-FileTransferEventField -Event $hold -Name 'authority_id' -Default ''
+        $yieldGeneration = Get-FileTransferEventInt64Field -Event $hold -Name 'yield_generation' -Default 0
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or
+            [string]::IsNullOrWhiteSpace($authority) -or
+            $yieldGeneration -le 0) {
+            continue
+        }
+
+        [object[]]$rollbacks = @($ordered | Where-Object {
+                [int64]$_.Sequence -lt [int64]$hold.Sequence -and
+                $_.EventName -eq 'filetransfer_route_transition_disposition_applied' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq
+                    'PostTunaFallbackV6ToTunaV4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq
+                    'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_protocol_version' -Default '') -eq '6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq 'rolledback' -and
+                (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '') -eq 'applied' -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'release_generation' -Default 0) -eq
+                    $yieldGeneration -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'install_generation' -Default 0) -gt 0
+            } | Select-Object -Last 1)
+        if ($rollbacks.Count -ne 1) { continue }
+        $rollback = $rollbacks[0]
+        $transitionAuthority = Get-FileTransferEventField -Event $rollback -Name 'authority_id' -Default ''
+        $transitionGeneration = Get-FileTransferEventInt64Field -Event $rollback -Name 'transition_generation' -Default 0
+        $transactionGeneration = Get-FileTransferEventInt64Field -Event $rollback -Name 'transaction_generation' -Default 0
+        $offerGeneration = Get-FileTransferEventInt64Field -Event $rollback -Name 'offer_generation' -Default 0
+        $leaseGeneration = Get-FileTransferEventInt64Field -Event $rollback -Name 'tuna_path_lease_generation' -Default 0
+        [object[]]$probeFailures = @($ordered | Where-Object {
+                [int64]$_.Sequence -le [int64]$hold.Sequence -and
+                [int64]$_.Sequence -ge [int64]$rollback.Sequence -and
+                $_.EventName -eq 'runtime_unlock_precommit_probe_failed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'transaction_generation' -Default 0) -eq $transactionGeneration -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'offer_generation' -Default 0) -eq $offerGeneration -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'tuna_path_lease_generation' -Default 0) -eq $leaseGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                    'inbound_fallback_tail_not_yielded'
+            })
+        [object[]]$resumes = @($ordered | Where-Object {
+                [int64]$_.Sequence -le [int64]$hold.Sequence -and
+                [int64]$_.Sequence -ge [int64]$rollback.Sequence -and
+                $_.EventName -eq 'filetransfer_runtime_unlock_probe_failed_fallback_resumed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                    'inbound_fallback_tail_not_yielded'
+            })
+        if ($probeFailures.Count -eq 0 -or $resumes.Count -eq 0) { continue }
+
+        [object[]]$initiatorSupersessions = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$rollback.Sequence -and
+                $_.EventName -eq 'filetransfer_fallback_tail_retry_cycle_supersession_decided' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'role' -Default '') -eq 'initiator' -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'yield_generation' -Default 0) -eq $yieldGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Accepted', 'Idempotent')
+            })
+        [object[]]$responderSupersessions = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$rollback.Sequence -and
+                $_.EventName -eq 'filetransfer_fallback_tail_retry_cycle_supersession_decided' -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'role' -Default '') -eq 'responder' -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_yield_generation' -Default 0) -eq $yieldGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Accepted', 'Idempotent')
+            })
+        [object[]]$successorYields = @($ordered | Where-Object {
+                [int64]$_.Sequence -gt [int64]$hold.Sequence -and
+                $_.EventName -eq 'filetransfer_fallback_tail_yield_issued' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '') -eq $authority -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'yield_generation' -Default 0) -gt $yieldGeneration
+            } | Select-Object -First 1)
+        $recovered = $false
+        if ($initiatorSupersessions.Count -gt 0 -and
+            $responderSupersessions.Count -gt 0 -and
+            $successorYields.Count -eq 1) {
+            $successor = $successorYields[0]
+            $successorAuthority = Get-FileTransferEventField -Event $successor -Name 'authority_id' -Default ''
+            [object[]]$prepared = @($ordered | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$successor.Sequence -and
+                    $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'fallback_yield_authority_id' -Default '') -eq $successorAuthority -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'transition_generation' -Default 0) -gt $transitionGeneration
+                } | Select-Object -First 1)
+            $recovered = $prepared.Count -eq 1
+        }
+        $key = "$writer|$session|$transfer|$authority|$yieldGeneration|$transitionAuthority|$transitionGeneration"
+        $records.Add([pscustomobject]@{ Event = $hold; Key = $key; Recovered = $recovered }) | Out-Null
+    }
+
+    [object[]]$distinct = @($records.ToArray() | Group-Object Key | ForEach-Object {
+            $_.Group | Sort-Object { [int64]$_.Event.Sequence }, { [int64]$_.Event.LineNumber } | Select-Object -First 1
+        })
+    [object[]]$recoveredRecords = @($distinct | Where-Object { $_.Recovered })
+    [object[]]$unresolvedRecords = @($distinct | Where-Object { -not $_.Recovered })
+    [pscustomobject]@{
+        RawCount = $records.Count
+        DistinctCount = $distinct.Count
+        RecoveredCount = $recoveredRecords.Count
+        UnresolvedCount = $unresolvedRecords.Count
+        Verdict = if ($unresolvedRecords.Count -gt 0) { 'fail' } elseif ($distinct.Count -gt 0) { 'pass' } else { 'none' }
+        CandidateEvents = @($records.ToArray() | ForEach-Object { $_.Event })
+        UnresolvedCandidateEvents = @($unresolvedRecords | ForEach-Object { $_.Event })
+    }
+}
+
 function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
     param([object[]]$Events = @())
 
@@ -61035,6 +61196,9 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fallbackTailFailedYieldQuiescentSuccessorProof =
         Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
+            -Events $events
+    $fallbackTailRetryCycleSuccessorProof =
+        Get-FileTransferFallbackTailRetryCycleSuccessorCorrelation `
             -Events $events
     $fileTransferReceiveRecoveryOperationPhase2EventNames = @(
         'runtime_unlock_retry_dispatch_decision_staged',
@@ -64863,6 +65027,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback' `
+        -Events @($fallbackTailRetryCycleSuccessorProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'pressure_rejected_precommit_probe_rollback_left_consumed_paired_yield_current_without_successor' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_authority_tuple_mismatch' `
         -Events $runtimeUnlockRetryDispatchAuthorityTupleMismatchClassificationEvents
     Add-FileTransferProofChainFailureCandidates `
@@ -65821,6 +65991,12 @@ function Get-FileTransferRecoveryFailureClassification {
     $failureVariant = '(none)'
     if ($null -ne $firstProofChainFailure -and
         [string]$firstProofChainFailure.Class -eq
+            'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback') {
+        $failureVariant =
+            'release_consumed_gen1_not_retired_for_fresh_quiescent_pair'
+    }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing') {
         $matchingVariantRecord = @(
             $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateRecords |
@@ -65936,6 +66112,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'runtime_unlock_retry_dispatch_held_after_authority_granted',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
                 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
+                'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback',
                 'runtime_fallback_separation_violation',
                 'file_tuna_data_path_mismatch',
                 'runtime_unlock_precommit_probe_start_handoff_missing',
@@ -66037,6 +66214,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount = $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.RecoveredCount
         RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount = $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.UnresolvedCount
         RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict = $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof.Verdict
+        RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRawCount = $fallbackTailRetryCycleSuccessorProof.RawCount
+        RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackDistinctCount = $fallbackTailRetryCycleSuccessorProof.DistinctCount
+        RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRecoveredCount = $fallbackTailRetryCycleSuccessorProof.RecoveredCount
+        RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackUnresolvedCount = $fallbackTailRetryCycleSuccessorProof.UnresolvedCount
+        RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackVerdict = $fallbackTailRetryCycleSuccessorProof.Verdict
         RuntimeUnlockRetryDispatchDecisionTupleRejectedCount = $runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count
         RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount = $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents.Count
         RuntimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
@@ -67277,6 +67459,11 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount
         runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount
         runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRawCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackDistinctCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRecoveredCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackUnresolvedCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackVerdict
         fallback_tail_coordinator_aggregate_verdict = $recoveryClassification.FallbackTailCoordinatorAggregateVerdict
         fallback_tail_coordinator_yield_issued_count = [string]$recoveryClassification.FallbackTailCoordinatorYieldIssuedCount
         fallback_tail_coordinator_local_proof_receipt_decided_count = [string]$recoveryClassification.FallbackTailCoordinatorLocalProofReceiptDecidedCount
@@ -67500,6 +67687,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_retry_dispatch_missing',
             'runtime_unlock_retry_dispatch_missing_after_authority_granted',
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
+            'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget',
             'runtime_unlock_retry_dispatch_contract_unsettled',
@@ -67571,6 +67759,10 @@ function Write-FileTransferDiagnosticsArtifacts {
             }
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' {
                 'recovery: runtime unlock MissingDispatch settlement missing coordinator successor'
+                break
+            }
+            'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback' {
+                'recovery: rejected PostFallback probe rollback did not retire the consumed paired-yield lineage'
                 break
             }
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid' {
@@ -68070,6 +68262,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidRecoveredCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseInvalidUnresolvedCount),
         ("runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackPairedYieldSuccessorReleaseVerdict),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRawCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackDistinctCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackRecoveredCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollbackVerdict),
         ("verdict={0}" -f $effectiveVerdict),
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),

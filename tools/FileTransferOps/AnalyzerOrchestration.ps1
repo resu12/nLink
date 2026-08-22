@@ -2487,6 +2487,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_initial_activation_receive_recovery_hold_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_handoff_held_for_retry_authority') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_retry_cycle_supersession_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_precommit_probe_failed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_probe_failed_fallback_resumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_disposition_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_request_queue_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_unlock_admission_denied') +
@@ -2533,6 +2537,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     $fallbackTailFailedYieldQuiescentSuccessorProof =
         Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
+            -Events $fallbackTailPairingEvents
+    $fallbackTailRetryCycleSuccessorProof =
+        Get-FileTransferFallbackTailRetryCycleSuccessorCorrelation `
             -Events $fallbackTailPairingEvents
     $fallbackTailPairedYieldValidation =
         Get-FileTransferFallbackTailPairedYieldValidation -Events $fallbackTailPairingEvents
@@ -3513,6 +3520,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Variant = $candidateRecord.Variant
         }) | Out-Null
     }
+    foreach ($candidateEvent in @($fallbackTailRetryCycleSuccessorProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback'
+            Event = $candidateEvent
+            Reason = 'pressure_rejected_precommit_probe_rollback_left_consumed_paired_yield_current_without_successor'
+            Variant = 'release_consumed_gen1_not_retired_for_fresh_quiescent_pair'
+        }) | Out-Null
+    }
     $firstCompactProofChainFailure = @(
         $compactProofChainCandidates.ToArray() |
             Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
@@ -3754,6 +3769,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         [string]$firstCompactProofChainFailure.Class -in @(
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'paired_fallback_tail_yield_missing',
+            'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback',
             'filetransfer_fallback_frontier_stall_grace_recheck_missing',
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification') -and
         $null -ne $firstCompactProofChainFailure.PSObject.Properties['Variant'] -and
@@ -4117,6 +4133,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("paired_fallback_tail_yield_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount),
         ("paired_fallback_tail_yield_missing_unresolved_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount),
         ("paired_fallback_tail_yield_missing_verdict={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_raw_count={0}" -f $fallbackTailRetryCycleSuccessorProof.RawCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_distinct_count={0}" -f $fallbackTailRetryCycleSuccessorProof.DistinctCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_recovered_count={0}" -f $fallbackTailRetryCycleSuccessorProof.RecoveredCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_unresolved_count={0}" -f $fallbackTailRetryCycleSuccessorProof.UnresolvedCount),
+        ("runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_verdict={0}" -f $fallbackTailRetryCycleSuccessorProof.Verdict),
         ("failed_yield_quiescent_successor_missing_raw_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRawCount),
         ("failed_yield_quiescent_successor_missing_distinct_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldDistinctCount),
         ("failed_yield_quiescent_successor_missing_recovered_count={0}" -f $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRecoveredCount),
@@ -5897,6 +5918,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         paired_fallback_tail_yield_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.RecoveredCount
         paired_fallback_tail_yield_missing_unresolved_count = $fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount
         paired_fallback_tail_yield_missing_verdict = $fallbackTailFailedYieldQuiescentSuccessorProof.Verdict
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_raw_count = $fallbackTailRetryCycleSuccessorProof.RawCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_distinct_count = $fallbackTailRetryCycleSuccessorProof.DistinctCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_recovered_count = $fallbackTailRetryCycleSuccessorProof.RecoveredCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_unresolved_count = $fallbackTailRetryCycleSuccessorProof.UnresolvedCount
+        runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback_verdict = $fallbackTailRetryCycleSuccessorProof.Verdict
         failed_yield_quiescent_successor_missing_raw_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRawCount
         failed_yield_quiescent_successor_missing_distinct_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldDistinctCount
         failed_yield_quiescent_successor_missing_recovered_count = $fallbackTailFailedYieldQuiescentSuccessorProof.FailedYieldRecoveredCount

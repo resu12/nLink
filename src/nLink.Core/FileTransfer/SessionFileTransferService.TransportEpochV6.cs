@@ -2077,6 +2077,15 @@ public sealed partial class SessionFileTransferService
 
             if (!accepted)
             {
+                lock (gate)
+                {
+                    TrySupersedeInboundFallbackTailRetryCycleAfterRejectedProbeLocked(
+                        direction,
+                        sessionId,
+                        transferId,
+                        probe,
+                        ackReason);
+                }
                 LocalOperationalLog.Warn(
                     "FileTransferService",
                     $"event=runtime_unlock_precommit_probe_rejected_for_fallback_survival; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; reason={FormatProtocolLogValue(ackReason)}");
@@ -4613,6 +4622,14 @@ public sealed partial class SessionFileTransferService
                 resumed = outbound.RuntimeUnlockActivationWindowGranted ||
                     outbound.RuntimeUnlockWaitingForFallbackSurvival;
                 ClearOutboundRuntimeUnlockFallbackSeparationStateLocked(outbound);
+                if (FileTransferCoordinator
+                    .IsFallbackTailRetryCycleSupersessionPending(
+                        CreateCoordinatorStateLocked(outbound)))
+                {
+                    ResolveOutboundFallbackTailSurvivalLocked(
+                        outbound,
+                        "pressure_rejected_precommit_probe_rollback");
+                }
             }
             else if (direction == FileTransferDirection.Inbound &&
                      IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
@@ -4783,7 +4800,163 @@ public sealed partial class SessionFileTransferService
             }
 
             ApplyCoordinatorDecisionToContextLocked(outbound, retiredPending);
+            var tailState = CreateCoordinatorStateLocked(outbound);
+            var tailOperation = FileTransferCoordinator
+                .GetFallbackTailYieldSubstate(tailState)
+                .CurrentOperation;
+            if (string.Equals(
+                    reason,
+                    "inbound_fallback_tail_not_yielded",
+                    StringComparison.Ordinal) &&
+                tailOperation is
+                {
+                    PairedRelease: { } pairedRelease,
+                    PairingState:
+                        FileTransferFallbackTailYieldPairingState.ReleaseConsumed,
+                } &&
+                tailState.PersistentState.FallbackTailYield
+                    .LastConsumingInstallReceipt is { } installReceipt)
+            {
+                var superseded = FileTransferCoordinator
+                    .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                        tailState,
+                        FileTransferFallbackTailRetryCycleSupersessionRole.Initiator,
+                        tailOperation.Value.Decision,
+                        pairedRelease,
+                        installReceipt,
+                        "pressure_rejected_precommit_probe_rollback");
+                if (superseded.Accepted)
+                {
+                    ApplyFallbackTailYieldTransitionToContextLocked(
+                        outbound,
+                        superseded);
+                }
+                LogFallbackTailRetryCycleSupersessionDecision(
+                    FileTransferDirection.Outbound,
+                    outbound.SessionId,
+                    outbound.TransferId,
+                    tailOperation.Value,
+                    installReceipt,
+                    execution.Authority.Value,
+                    superseded.Status.ToString(),
+                    superseded.Reason,
+                    reason);
+            }
         }
+    }
+
+    private void TrySupersedeInboundFallbackTailRetryCycleAfterRejectedProbeLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+        string reason)
+    {
+        if (direction != FileTransferDirection.Inbound ||
+            !string.Equals(
+                reason,
+                "inbound_fallback_tail_not_yielded",
+                StringComparison.Ordinal) ||
+            !IsInboundLifecycleMessageMatchLocked(sessionId, transferId) ||
+            inboundTransfer is not { IsTerminal: false } inbound ||
+            !inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+        {
+            return;
+        }
+
+        var state = CreateCoordinatorStateLocked(inbound);
+        var operation = FileTransferCoordinator
+            .GetFallbackTailYieldSubstate(state)
+            .CurrentOperation;
+        if (operation is not
+            {
+                PairedRelease: { } pairedRelease,
+                PairingState: FileTransferFallbackTailYieldPairingState.Paired,
+            })
+        {
+            return;
+        }
+
+        var superseded = FileTransferCoordinator
+            .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                state,
+                FileTransferFallbackTailRetryCycleSupersessionRole.Responder,
+                operation.Value.Decision,
+                pairedRelease,
+                expectedInstallReceipt: null,
+                "pressure_rejected_precommit_probe_rollback");
+        if (superseded.Accepted)
+        {
+            ApplyFallbackTailYieldTransitionToContextLocked(
+                inbound,
+                superseded);
+        }
+        LogFallbackTailRetryCycleSupersessionDecision(
+            FileTransferDirection.Inbound,
+            inbound.SessionId,
+            inbound.TransferId,
+            operation.Value,
+            installReceipt: null,
+            transitionAuthority: null,
+            superseded.Status.ToString(),
+            superseded.Reason,
+            reason,
+            probe.TransactionGeneration,
+            probe.OfferGeneration,
+            probe.TunaPathLeaseGeneration,
+            probe.ProbeId);
+    }
+
+    private static void ApplyFallbackTailYieldTransitionToContextLocked(
+        OutboundTransferContext context,
+        FileTransferFallbackTailYieldTransitionDecision transition)
+    {
+        var previous = context.CoordinatorPersistentState.FallbackTailYield;
+        context.CoordinatorPersistentState = transition.State.PersistentState;
+        LogFallbackTailYieldAggregateTransitions(
+            previous,
+            transition.State.PersistentState.FallbackTailYield,
+            transition.Reason);
+    }
+
+    private static void ApplyFallbackTailYieldTransitionToContextLocked(
+        InboundTransferContext context,
+        FileTransferFallbackTailYieldTransitionDecision transition)
+    {
+        var previous = context.CoordinatorPersistentState.FallbackTailYield;
+        context.CoordinatorPersistentState = transition.State.PersistentState;
+        LogFallbackTailYieldAggregateTransitions(
+            previous,
+            transition.State.PersistentState.FallbackTailYield,
+            transition.Reason);
+    }
+
+    private static void LogFallbackTailRetryCycleSupersessionDecision(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        FileTransferFallbackTailYieldOperation operation,
+        RuntimeUnlockRetryDispatchInstallReceipt? installReceipt,
+        FileTransferRouteTransitionAuthority? transitionAuthority,
+        string status,
+        string decisionReason,
+        string triggerReason,
+        long transactionGeneration = 0,
+        long offerGeneration = 0,
+        long leaseGeneration = 0,
+        string? probeId = null)
+    {
+        var scope = FileTransferCoordinator
+            .GetEffectiveFallbackTailYieldScope(operation);
+        var release = operation.PairedRelease;
+        var peer = release?.PeerProof.Proof;
+        var transition = transitionAuthority;
+        var launch = (transition?.ProofBoundary as
+            FileTransferTunaActivationTransitionProofBoundary)?
+            .AcceptedLaunchBoundary;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_tail_retry_cycle_supersession_decided; authority_schema={FileTransferAuthoritySchema.Current}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={direction.ToString().ToLowerInvariant()}; role={(direction == FileTransferDirection.Outbound ? "initiator" : "responder")}; trigger=pressure_rejected_precommit_probe_rollback; authority_id={FormatProtocolLogValue(operation.Decision.AuthorityId.ToString())}; yield_generation={operation.Decision.YieldGeneration}; peer_authority_id={FormatProtocolLogValue(peer?.AuthorityId.ToString() ?? "(none)")}; peer_yield_generation={peer?.YieldGeneration ?? 0}; pairing_generation={release?.PairingGeneration ?? 0}; release_generation={release?.ReleaseGeneration ?? 0}; install_generation={installReceipt?.InstallGeneration ?? 0}; transaction_generation={launch?.TransactionGeneration ?? transactionGeneration}; offer_generation={launch?.OfferGeneration ?? offerGeneration}; tuna_path_lease_generation={launch?.TunaPathLeaseGeneration ?? leaseGeneration}; probe_id={FormatProtocolLogValue(launch?.PathProbeId ?? probeId ?? "(none)")}; transition_authority_id={FormatProtocolLogValue(transition?.AuthorityId.ToString() ?? "(none)")}; transition_generation={transition?.TransitionGeneration ?? 0}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; route_publication_generation={scope.RoutePublication?.PublicationGeneration ?? 0}; route_commit_generation={scope.RoutePublication?.RouteCommitGeneration ?? 0}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_generation={scope.CheckpointGeneration}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot)}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity ?? "(none)")}; data_session_generation={scope.DataSessionGeneration}; successor_generation={operation.Decision.YieldGeneration + 1}; status={FormatProtocolLogValue(status)}; reason={FormatProtocolLogValue(decisionReason)}; trigger_reason={FormatProtocolLogValue(triggerReason)}; authority_effect={(string.Equals(status, "Accepted", StringComparison.Ordinal) ? "retired_exact_predecessor" : "none")}");
     }
 
     private static bool FileTransferRouteCommitProofMatchesSnapshot(

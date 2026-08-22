@@ -765,6 +765,12 @@ internal readonly record struct FileTransferFallbackTailYieldOperation(
     public bool IsDefault => Decision.IsDefault || Scope.IsDefault;
 }
 
+internal enum FileTransferFallbackTailRetryCycleSupersessionRole
+{
+    Initiator = 0,
+    Responder = 1,
+}
+
 internal readonly record struct FileTransferFallbackTailYieldRetryDispatchHold(
     RuntimeUnlockRetryDispatchAuthorityRequest Request,
     FileTransferFallbackTailPairedReleaseReceipt Release,
@@ -11520,6 +11526,141 @@ internal static class FileTransferCoordinator
             ApplyFallbackTailYieldSubstate(state, nextSubstate),
             FileTransferFallbackTailYieldTransitionStatus.Accepted,
             "fallback_tail_paired_release_consumed");
+    }
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
+        SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailRetryCycleSupersessionRole role,
+            FallbackTailYieldDecision expectedDecision,
+            FileTransferFallbackTailPairedReleaseReceipt expectedRelease,
+            RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
+            string reason)
+    {
+        var originalSubstate = state.PersistentState.FallbackTailYield;
+        state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
+        if (!ReferenceEquals(
+                originalSubstate,
+                state.PersistentState.FallbackTailYield))
+        {
+            return FallbackTailYieldTransitionInvalidated(
+                state,
+                "data_session_replaced");
+        }
+
+        var substate = state.PersistentState.FallbackTailYield;
+        var normalizedReason = NormalizeReason(reason);
+        var exactIdempotentRole = role switch
+        {
+            FileTransferFallbackTailRetryCycleSupersessionRole.Initiator =>
+                expectedInstallReceipt is { } expectedInstall &&
+                substate.LastConsumingInstallReceipt == expectedInstall,
+            FileTransferFallbackTailRetryCycleSupersessionRole.Responder =>
+                expectedInstallReceipt is null &&
+                (substate.LastConsumedReservation is null ||
+                 substate.LastConsumedReservation.Value.Release != expectedRelease),
+            _ => false,
+        };
+        if (substate.CurrentOperation is null &&
+            exactIdempotentRole &&
+            substate.RetainedPredecessor == expectedDecision &&
+            substate.LastTerminalOperation is { } alreadyRetired &&
+            alreadyRetired.Decision == expectedDecision &&
+            alreadyRetired.PairedRelease == expectedRelease &&
+            string.Equals(
+                alreadyRetired.InvalidationReason,
+                normalizedReason,
+                StringComparison.Ordinal))
+        {
+            return FallbackTailYieldTransition(
+                state,
+                FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                "fallback_tail_retry_cycle_supersession_idempotent");
+        }
+
+        var currentnessReason = "fallback_tail_retry_cycle_scope_not_current";
+        if (substate.CurrentOperation is not { } operation ||
+            operation.Decision != expectedDecision ||
+            operation.PairedRelease != expectedRelease ||
+            !IsFallbackTailYieldScopeCurrent(
+                state,
+                GetEffectiveFallbackTailYieldScope(operation),
+                out currentnessReason))
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                substate.CurrentOperation is null
+                    ? "fallback_tail_retry_cycle_predecessor_missing"
+                    : currentnessReason);
+        }
+
+        if (role == FileTransferFallbackTailRetryCycleSupersessionRole.Initiator)
+        {
+            if (operation.PairingState !=
+                    FileTransferFallbackTailYieldPairingState.ReleaseConsumed ||
+                expectedInstallReceipt is not { IsDefault: false } installReceipt ||
+                substate.LastConsumedReservation is not { } consumed ||
+                consumed.Release != expectedRelease ||
+                consumed.RetryAuthority != installReceipt.Authority ||
+                substate.LastConsumingInstallReceipt != installReceipt)
+            {
+                return FallbackTailYieldTransitionRejected(
+                    state,
+                    "fallback_tail_retry_cycle_consumed_release_mismatch");
+            }
+        }
+        else if (operation.PairingState !=
+                     FileTransferFallbackTailYieldPairingState.Paired ||
+                 expectedInstallReceipt is not null ||
+                 substate.CurrentReservation is not null)
+        {
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_retry_cycle_responder_pairing_mismatch");
+        }
+
+        var terminal = operation with
+        {
+            PairingState = FileTransferFallbackTailYieldPairingState.Invalidated,
+            InvalidationReason = normalizedReason,
+        };
+        var nextSubstate = substate with
+        {
+            CurrentOperation = null,
+            RetainedPredecessor = operation.Decision,
+            PendingReauthorization = null,
+            PendingReauthorizationPeerProof = null,
+            PendingPeerProofBeforeLocalYield = null,
+            PendingRetryRecheckRequest = null,
+            CurrentRetryDispatchHold = null,
+            PendingRetryDispatchRecheckCommand = null,
+            CurrentReservation = null,
+            LastTerminalOperation = terminal,
+        };
+        return FallbackTailYieldTransition(
+            ApplyFallbackTailYieldSubstate(state, nextSubstate),
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            "fallback_tail_retry_cycle_superseded_after_rejected_probe");
+    }
+
+    internal static bool IsFallbackTailRetryCycleSupersessionPending(
+        FileTransferCoordinatorState state)
+    {
+        var substate = state.PersistentState.FallbackTailYield;
+        return substate.CurrentOperation is null &&
+               substate.RetainedPredecessor is { } predecessor &&
+               substate.LastTerminalOperation is
+               {
+                   Decision: var terminalDecision,
+                   PairingState:
+                       FileTransferFallbackTailYieldPairingState.Invalidated,
+                   InvalidationReason: { } invalidationReason,
+               } &&
+               terminalDecision == predecessor &&
+               string.Equals(
+                   invalidationReason,
+                   "pressure_rejected_precommit_probe_rollback",
+                   StringComparison.Ordinal);
     }
 
     private static bool IsFallbackTailPairedReleaseConsumedByInstall(
@@ -24346,8 +24487,13 @@ internal static class FileTransferCoordinator
 
         var reauthorization =
             coordinatorEvent.FallbackTailYieldTransportEpochReauthorization;
+        var retryCyclePredecessor =
+            IsFallbackTailRetryCycleSupersessionPending(state)
+                ? state.PersistentState.FallbackTailYield.RetainedPredecessor
+                : null;
         var requestedPredecessor =
-            reauthorization?.PredecessorDecision.AuthorityId;
+            reauthorization?.PredecessorDecision.AuthorityId ??
+            retryCyclePredecessor?.AuthorityId;
         var hasExactCurrentYield =
             TryGetExactCurrentFallbackTailYieldDecision(
                 state,
