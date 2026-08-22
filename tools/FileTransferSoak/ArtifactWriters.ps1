@@ -1693,6 +1693,7 @@ function New-FileTransferThroughputSummaryLines {
         'filetransfer_v6_frontier_request_failed',
         'filetransfer_v6_frontier_request_deferred',
         'filetransfer_v6_frontier_stall_grace_recheck_decided',
+        'filetransfer_post_tuna_fallback_rebind_state_replay_suppressed',
         'filetransfer_v6_frontier_request_received',
         'filetransfer_v6_frontier_request_coalesced',
         'filetransfer_v6_frontier_request_duplicate_ignored',
@@ -15685,6 +15686,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $RecoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict)) | Out-Null
+    $lines.Add(("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_raw_count={0}" -f $RecoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRawCount)) | Out-Null
+    $lines.Add(("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_distinct_count={0}" -f $RecoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationDistinctCount)) | Out-Null
+    $lines.Add(("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $RecoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $RecoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationUnresolvedCount)) | Out-Null
+    $lines.Add(("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $RecoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationVerdict)) | Out-Null
     $lines.Add(("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $RecoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount)) | Out-Null
     $lines.Add(("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $RecoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $RecoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount)) | Out-Null
@@ -17836,6 +17842,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_raw_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRawCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_distinct_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationDistinctCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRecoveredCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationUnresolvedCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationVerdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount),
@@ -56917,6 +56928,234 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
     }
 }
 
+function Get-FileTransferPostTunaFallbackDuplicateStateReplayAmplificationCorrelation {
+    param([object[]]$Events = @())
+
+    [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
+            Sort-Object Sequence, LineNumber)
+    [object[]]$states = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_v4_state_received' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6'
+        })
+    [object[]]$grants = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '0') -eq '6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'source_kind' -Default '') -eq 'SenderLivenessRescue' -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_decision_reason' -Default '') -eq
+                'duplicate_frontier_rebind'
+        })
+    [object[]]$replayStarts = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_transport_rebind_safety_replay_started' -and
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                'duplicate_frontier_rebind' -and
+            (Get-FileTransferEventField -Event $_ -Name 'post_tuna_v6_frontier_sweep' -Default '0') -eq '1'
+        })
+
+    $stateIndex = @{}
+    $duplicateStateIndex = @{}
+    foreach ($state in $states) {
+        $stateKey = @(
+            (Get-FileTransferEventField -Event $state -Name 'log_writer_id' -Default ''),
+            (Get-FileTransferEventField -Event $state -Name 'session_id' -Default ''),
+            (Get-FileTransferEventField -Event $state -Name 'transfer_id' -Default ''),
+            (Get-FileTransferEventField -Event $state -Name 'contiguous_committed_chunk_index' -Default '-1')
+        ) -join '|'
+        $stateKey = $stateKey.ToLowerInvariant()
+        if (-not $stateIndex.ContainsKey($stateKey)) {
+            $stateIndex[$stateKey] = New-Object System.Collections.Generic.List[object]
+        }
+        $stateIndex[$stateKey].Add($state) | Out-Null
+        if ((Get-FileTransferEventField -Event $state -Name 'duplicate' -Default '0') -eq '1') {
+            $duplicateKey = @(
+                (Get-FileTransferEventField -Event $state -Name 'log_writer_id' -Default ''),
+                (Get-FileTransferEventField -Event $state -Name 'session_id' -Default ''),
+                (Get-FileTransferEventField -Event $state -Name 'transfer_id' -Default '')
+            ) -join '|'
+            $duplicateKey = $duplicateKey.ToLowerInvariant()
+            if (-not $duplicateStateIndex.ContainsKey($duplicateKey)) {
+                $duplicateStateIndex[$duplicateKey] = New-Object System.Collections.Generic.List[object]
+            }
+            $duplicateStateIndex[$duplicateKey].Add($state) | Out-Null
+        }
+    }
+    $replayStartIndex = @{}
+    foreach ($replayStart in $replayStarts) {
+        $replayKey = @(
+            (Get-FileTransferEventField -Event $replayStart -Name 'log_writer_id' -Default ''),
+            (Get-FileTransferEventField -Event $replayStart -Name 'session_id' -Default ''),
+            (Get-FileTransferEventField -Event $replayStart -Name 'transfer_id' -Default ''),
+            (Get-FileTransferEventField -Event $replayStart -Name 'replay_start_chunk_index' -Default '-1'),
+            (Get-FileTransferEventField -Event $replayStart -Name 'requested_chunk_count' -Default '0')
+        ) -join '|'
+        $replayKey = $replayKey.ToLowerInvariant()
+        if (-not $replayStartIndex.ContainsKey($replayKey)) {
+            $replayStartIndex[$replayKey] = New-Object System.Collections.Generic.List[object]
+        }
+        $replayStartIndex[$replayKey].Add($replayStart) | Out-Null
+    }
+
+    $candidateByAuthority = [ordered]@{}
+    foreach ($grant in $grants) {
+        $writer = Get-FileTransferEventField -Event $grant -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $grant -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $grant -Name 'transfer_id' -Default ''
+        $authority = Get-FileTransferEventField -Event $grant -Name 'authority_id' -Default ''
+        $repairGeneration = Get-FileTransferEventInt64Field -Event $grant -Name 'repair_generation' -Default 0
+        $repairKey = Get-FileTransferEventField -Event $grant -Name 'repair_request_key' -Default ''
+        $rangeFingerprint = Get-FileTransferEventField -Event $grant -Name 'range_fingerprint' -Default ''
+        $protocolRepairRequestId = Get-FileTransferEventField -Event $grant -Name 'protocol_repair_request_id' -Default ''
+        $frontier = Get-FileTransferEventInt64Field -Event $grant -Name 'frontier_chunk_index' -Default -1
+        $requested = Get-FileTransferEventInt64Field -Event $grant -Name 'requested_chunk_count' -Default 0
+        $grantWriterSequence = Get-FileTransferEventInt64Field -Event $grant -Name 'log_writer_sequence' -Default 0
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer) -or
+            [string]::IsNullOrWhiteSpace($authority) -or
+            $repairGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace($repairKey) -or
+            [string]::IsNullOrWhiteSpace($rangeFingerprint) -or
+            $protocolRepairRequestId -notmatch '^transport_rebind_safety_replay:(?<generation>[1-9][0-9]*):' -or
+            $frontier -lt 0 -or $requested -ne 64 -or $grantWriterSequence -le 0) {
+            continue
+        }
+        $grantRebindGeneration = [int64]$Matches['generation']
+
+        $duplicateKey = "$writer|$session|$transfer".ToLowerInvariant()
+        [object[]]$lineageDuplicates = if ($duplicateStateIndex.ContainsKey($duplicateKey)) {
+            @($duplicateStateIndex[$duplicateKey].ToArray())
+        } else { @() }
+        [object[]]$duplicates = @($lineageDuplicates | Where-Object {
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt $grantWriterSequence
+            } | Sort-Object { Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0 } |
+                Select-Object -Last 1)
+        if ($duplicates.Count -ne 1) { continue }
+        $duplicate = $duplicates[0]
+        $duplicateFrontier = Get-FileTransferEventInt64Field `
+            -Event $duplicate `
+            -Name 'contiguous_committed_chunk_index' `
+            -Default -1
+        $stateKey = "$writer|$session|$transfer|$duplicateFrontier".ToLowerInvariant()
+        [object[]]$frontierStates = if ($stateIndex.ContainsKey($stateKey)) {
+            @($stateIndex[$stateKey] | Where-Object { $null -ne $_.PSObject.Properties['Sequence'] })
+        } else { @() }
+        $duplicateWriterSequence = Get-FileTransferEventInt64Field -Event $duplicate -Name 'log_writer_sequence' -Default 0
+        $stateEpoch = Get-FileTransferEventField -Event $duplicate -Name 'epoch' -Default ''
+        $fingerprint = Get-FileTransferEventField -Event $duplicate -Name 'v4_state_wire_fingerprint' -Default ''
+        if ([string]::IsNullOrWhiteSpace($stateEpoch) -or
+            [string]::IsNullOrWhiteSpace($fingerprint)) {
+            continue
+        }
+
+        $scopeFields = @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+            'protocol_version', 'live_route_epoch', 'runtime_generation',
+            'terminal_generation', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'route_publication_generation',
+            'route_commit_generation')
+        $sameScope = {
+            param($event, $reference)
+            foreach ($field in $scopeFields) {
+                if ((Get-FileTransferEventField -Event $event -Name $field -Default '__missing__') -ne
+                    (Get-FileTransferEventField -Event $reference -Name $field -Default '__missing__')) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        if (-not (& $sameScope $duplicate $grant)) { continue }
+
+        [object[]]$applied = @($frontierStates | Where-Object {
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt $duplicateWriterSequence -and
+                (& $sameScope $_ $duplicate) -and
+                (Get-FileTransferEventField -Event $_ -Name 'applied' -Default '0') -eq '1' -and
+                (Get-FileTransferEventField -Event $_ -Name 'duplicate' -Default '0') -eq '0' -and
+                (Get-FileTransferEventField -Event $_ -Name 'stale' -Default '0') -eq '0' -and
+                (Get-FileTransferEventField -Event $_ -Name 'epoch' -Default '') -eq $stateEpoch -and
+                (Get-FileTransferEventField -Event $_ -Name 'v4_state_wire_fingerprint' -Default '') -eq $fingerprint -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -1) -eq $duplicateFrontier
+            } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($applied.Count -ne 1) { continue }
+
+        $replayKey = "$writer|$session|$transfer|$frontier|$requested".ToLowerInvariant()
+        [object[]]$frontierReplayStarts = if ($replayStartIndex.ContainsKey($replayKey)) {
+            @($replayStartIndex[$replayKey] | Where-Object { $null -ne $_.PSObject.Properties['Sequence'] })
+        } else { @() }
+        [object[]]$matchingStarts = @($frontierReplayStarts | Where-Object {
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $grantWriterSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'remote_next_expected_chunk_index' -Default -1) -eq $duplicateFrontier -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'replay_start_chunk_index' -Default -1) -eq $frontier -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'requested_chunk_count' -Default 0) -eq $requested -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'scheduled_chunk_count' -Default $requested) -eq $requested -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'replay_end_chunk_exclusive' -Default -1) -eq ($frontier + $requested) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'rebind_generation' -Default 0) -eq $grantRebindGeneration
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($matchingStarts.Count -ne 1) { continue }
+
+        $authorityKey = "$writer|$authority".ToLowerInvariant()
+        if (-not $candidateByAuthority.Contains($authorityKey)) {
+            $candidateByAuthority[$authorityKey] = [pscustomobject]@{
+                Event = $grant
+                AppliedState = $applied[0]
+                DuplicateState = $duplicate
+                ReplayStart = $matchingStarts[0]
+                Writer = $writer
+                Session = $session
+                Transfer = $transfer
+                RebindGeneration = $grantRebindGeneration
+            }
+        }
+    }
+
+    $incidentByLineage = [ordered]@{}
+    foreach ($candidate in @($candidateByAuthority.Values)) {
+        $grant = $candidate.Event
+        $lineageKey = @(
+            $candidate.Writer, $candidate.Session, $candidate.Transfer,
+            (Get-FileTransferEventField -Event $grant -Name 'direction' -Default ''),
+            (Get-FileTransferEventField -Event $grant -Name 'route' -Default ''),
+            (Get-FileTransferEventField -Event $grant -Name 'protocol_version' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'live_route_epoch' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'runtime_generation' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'terminal_generation' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'leg_generation' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'transport_epoch' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'bridge_recovery_generation' -Default '0'),
+            (Get-FileTransferEventField -Event $grant -Name 'route_publication_generation' -Default '0'),
+            (Get-FileTransferEventField -Event $candidate.AppliedState -Name 'data_session_generation' -Default '0'),
+            $candidate.RebindGeneration
+        ) -join '|'
+        $lineageKey = $lineageKey.ToLowerInvariant()
+        if (-not $incidentByLineage.Contains($lineageKey)) {
+            $incidentByLineage[$lineageKey] = [pscustomobject]@{
+                Event = $grant
+                Reason = 'duplicate_current_receiver_state_created_sender_liveness_replay_authority'
+                Variant = 'redundant_control_bulk_state_copy_started_64_chunk_repair_sweep'
+                Recovered = $false
+                RawEvents = New-Object System.Collections.Generic.List[object]
+            }
+        }
+        $incidentByLineage[$lineageKey].RawEvents.Add($grant) | Out-Null
+    }
+
+    [object[]]$records = @($incidentByLineage.Values)
+    return [pscustomobject]@{
+        RawCount = $candidateByAuthority.Count
+        DistinctCount = $records.Count
+        RecoveredCount = 0
+        UnresolvedCount = $records.Count
+        Verdict = if ($records.Count -gt 0) { 'fail' } else { 'pass' }
+        CandidateRecords = $records
+        UnresolvedCandidateRecords = $records
+    }
+}
+
 function Get-FileTransferFallbackFrontierCheckpointAcceptanceRecheckCorrelation {
     param([object[]]$Events = @())
 
@@ -60639,6 +60878,9 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fileTransferFallbackFrontierStallGraceRecheckProof =
         Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation `
+            -Events $events
+    $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof =
+        Get-FileTransferPostTunaFallbackDuplicateStateReplayAmplificationCorrelation `
             -Events $events
     $fallbackTailFailedYieldQuiescentSuccessorProof =
         Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
@@ -64621,6 +64863,14 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
     }
+    foreach ($candidateRecord in @($fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification' `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
     foreach ($candidateRecord in @($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCandidateRecords)) {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
@@ -64983,6 +65233,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount -gt 0) {
         $class = 'filetransfer_fallback_frontier_stall_grace_recheck_missing'
+    }
+    elseif ($fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount -gt 0) {
+        $class = 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification'
     }
     elseif ($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCount -gt 0) {
         $class = 'paired_fallback_tail_yield_missing'
@@ -65467,6 +65720,21 @@ function Get-FileTransferRecoveryFailureClassification {
             $failureVariant = [string]$matchingVariantRecord[0].Variant
         }
     }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq
+            'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification') {
+        $matchingVariantRecord = @(
+            $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCandidateRecords |
+                Where-Object {
+                    [int64]$_.Event.Sequence -eq [int64]$firstProofChainFailure.Sequence -and
+                    [int]$_.Event.LineNumber -eq [int]$firstProofChainFailure.LineNumber
+                } |
+                Select-Object -First 1
+        )
+        if ($matchingVariantRecord.Count -eq 1) {
+            $failureVariant = [string]$matchingVariantRecord[0].Variant
+        }
+    }
 
     $classification = [pscustomobject]@{
         Class = $class
@@ -65497,6 +65765,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 'filetransfer_receive_recovery_completed_proven_successor_missing',
                 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
                 'filetransfer_fallback_frontier_stall_grace_recheck_missing',
+                'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
                 'filetransfer_route_transition_draining_transport_grace_terminalization',
                 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
                 'filetransfer_route_transition_incomplete',
@@ -65732,6 +66001,11 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount
         FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount
         FileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict
+        FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRawCount = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RawCount
+        FileTransferPostTunaFallbackDuplicateStateReplayAmplificationDistinctCount = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.DistinctCount
+        FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRecoveredCount = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RecoveredCount
+        FileTransferPostTunaFallbackDuplicateStateReplayAmplificationUnresolvedCount = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount
+        FileTransferPostTunaFallbackDuplicateStateReplayAmplificationVerdict = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.Verdict
         FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount
         FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount
         FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount
@@ -66732,6 +67006,11 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount
         filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount
         filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict = [string]$recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict
+        filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_raw_count = [string]$recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRawCount
+        filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_distinct_count = [string]$recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationDistinctCount
+        filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count = [string]$recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRecoveredCount
+        filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count = [string]$recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationUnresolvedCount
+        filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict = [string]$recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationVerdict
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count = [string]$recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count = [string]$recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count = [string]$recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount
@@ -67099,6 +67378,7 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing',
             'filetransfer_fallback_frontier_stall_grace_recheck_missing',
+            'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
             'regular_v4_frontier_tail_repair_state_publication_missing',
             'regular_v4_frontier_repair_missing_range_not_preserved',
             'regular_v4_frontier_repair_settlement_disposition_unverifiable',
@@ -67254,6 +67534,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: post-fallback frontier stall grace expired without an exact receiver-request recheck'
                 break
             }
+            'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification' {
+                'recovery: duplicate current post-fallback receiver state created sender-liveness replay authority'
+                break
+            }
             'regular_v4_frontier_tail_repair_state_publication_missing' {
                 'recovery: coordinator-authorized regular-V4 frontier-tail repair was not published to the peer'
                 break
@@ -67331,7 +67615,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     elseif ($recoveryClassification.Class -eq 'runtime_unlock_initial_activation_answer_peer_delivery_missing') {
         'route_runtime'
     }
-    elseif ($recoveryClassification.Class -in @('runtime_fallback_separation_violation', 'file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'filetransfer_fallback_frontier_stall_grace_recheck_missing', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
+    elseif ($recoveryClassification.Class -in @('runtime_fallback_separation_violation', 'file_tuna_data_path_mismatch', 'filetransfer_receive_recovery_operation_incomplete', 'filetransfer_receive_recovery_completed_unproven_successor_missing', 'filetransfer_receive_recovery_completed_unproven_payload_hold_not_preserved', 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing', 'filetransfer_receive_recovery_completed_proven_successor_missing', 'filetransfer_receive_recovery_post_tuna_runtime_successor_liveness_handoff_missing', 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing', 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing', 'filetransfer_fallback_frontier_stall_grace_recheck_missing', 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification', 'runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'filetransfer_bridge_recovery_execution_payload_hold_missing', 'filetransfer_bridge_recovery_execution_submission_barrier_drain_missing', 'filetransfer_bridge_recovery_execution_startup_payload_isolation_missing', 'filetransfer_bridge_recovery_execution_soft_to_hard_handoff_missing', 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing', 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing', 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing', 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved', 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing', 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired', 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired', 'runtime_unlock_retry_dispatch_held_after_authority_granted', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing', 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected', 'runtime_unlock_retry_dispatch_current_listener_adoption_missing', 'regular_v4_frontier_tail_repair_state_publication_missing', 'regular_v4_frontier_repair_missing_range_not_preserved', 'regular_v4_frontier_repair_pressure_authority_lifecycle_split', 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch', 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing', 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing', 'fallback_tail_yield_authority_invalid', 'paired_fallback_tail_yield_missing', 'filetransfer_route_transition_draining_transport_grace_terminalization', 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing', 'filetransfer_route_transition_incomplete', 'runtime_unlock_regular_v4_route_commit_send_drain_missing', 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound')) {
         'route_runtime'
     }
     elseif ($invariantMayOwnAcceptanceFailure) {
@@ -67455,6 +67739,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierStallGraceRecheckMissingVerdict),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_raw_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRawCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_distinct_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationDistinctCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationRecoveredCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationUnresolvedCount),
+        ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $recoveryClassification.FileTransferPostTunaFallbackDuplicateStateReplayAmplificationVerdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $recoveryClassification.FileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount),

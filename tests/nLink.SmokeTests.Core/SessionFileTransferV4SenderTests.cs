@@ -9215,7 +9215,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
-    public void PostTunaFallbackV6SafetyReplay_DoesNotMoveAcceptedTailWhileHandoffBlocks()
+    public void PostTunaFallbackV6PeerSilenceSafetyReplay_DoesNotMoveAcceptedTailWhileHandoffBlocks()
     {
         const string transferId = "transfer_post_tuna_fallback_replay_tail_static";
         var logStart = GetOperationalLogLength();
@@ -9242,7 +9242,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         serviceType
             .GetMethod("QueueOutboundV4TransportRebindSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "duplicate_frontier_rebind", true]);
+            .Invoke(service, [context, "post_tuna_fallback_peer_silence", true]);
 
         var replay = Assert.Single(GetQueuedV4RepairSends(context));
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
@@ -26859,7 +26859,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
-    public void PostTunaFallbackV6CurrentLegDuplicateFrontierReplay_UsesBoundedSweep()
+    public void PostTunaFallbackV6CurrentLegDuplicateFrontierReplay_IsEvidenceOnly()
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -26908,13 +26908,18 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var log = ReadOperationalLogTail(logStart);
         var retainedLog = log + Environment.NewLine + ReadRetainedOperationalLogs();
-        Assert.Contains("event=filetransfer_transport_rebind_safety_replay_skipped;", retainedLog, StringComparison.Ordinal);
-        Assert.Contains("skip_reason=post_tuna_fallback_future_replay_waiting_for_frontier_proof", retainedLog, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_post_tuna_fallback_rebind_state_replay_suppressed;", retainedLog, StringComparison.Ordinal);
+        Assert.Contains("authority_effect=none", retainedLog, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=defensive_replay_queue_rejection", retainedLog, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            retainedLog.Split(Environment.NewLine),
+            line => line.Contains("event=filetransfer_transport_rebind_safety_replay_started;", StringComparison.Ordinal) &&
+                    line.Contains("reason=duplicate_frontier_rebind", StringComparison.Ordinal));
         Assert.DoesNotContain($"event=filetransfer_fallback_checkpoint_owner_violation; direction=outbound; transfer_id={transferId};", retainedLog, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void PostTunaFallbackV6CurrentLegDuplicateFrontierReplay_WaitsForExactFrontierRepairProof()
+    public void PostTunaFallbackV6CurrentLegDuplicateFrontierReplay_RemainsEvidenceOnlyWithExactFrontierRepair()
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -26971,10 +26976,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Empty(repairQueue.Cast<object>());
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_transport_rebind_safety_replay_skipped;", log, StringComparison.Ordinal);
-        Assert.Contains("skip_reason=post_tuna_fallback_exact_frontier_repair_pending", log, StringComparison.Ordinal);
-        Assert.Contains("exact_frontier_suppression_reason=exact_frontier_repair_recently_sent", log, StringComparison.Ordinal);
-        Assert.Contains("exact_frontier_repair_key=100:1:100:1", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_post_tuna_fallback_rebind_state_replay_suppressed;", log, StringComparison.Ordinal);
+        Assert.Contains("authority_effect=none", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=defensive_replay_queue_rejection", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
     }
 
@@ -28863,6 +28867,68 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.DoesNotContain("event=filetransfer_fallback_stale_proof_ignored; direction=outbound; transfer_id=transfer_post_tuna_fallback_v6_duplicate_checkpoint_proof;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("transfer_id=transfer_post_tuna_fallback_v6_duplicate_checkpoint_proof; session_id=session_transfer_post_tuna_fallback_v6_duplicate_checkpoint_proof; reason=checkpoint_not_pending", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_checkpoint_reissue_suppressed; direction=outbound; transfer_id=transfer_post_tuna_fallback_v6_duplicate_checkpoint_proof;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackFrontierRepair")]
+    public void PostTunaFallbackV6DuplicateReceiverState_IsEvidenceOnlyForRepairScheduling()
+    {
+        const string transferId = "transfer_post_tuna_fallback_v6_duplicate_state_evidence_only";
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 180,
+            remoteGrantedUntilExclusive: 180,
+            chunkCount: 512);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_duplicate_state_evidence_only"]);
+
+        var state = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 7,
+            ContiguousCommittedChunkIndex = 100,
+            DurableReceivedHighestChunkIndex = 179,
+            CreditUntilChunkIndexExclusive = 180,
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 100, ChunkCount = 80 }],
+            BytesCommitted = 100L * 21 * 1024,
+            TransportEpoch = 3,
+            Priority = "frontier",
+        };
+        var applyState = serviceType.GetMethod(
+            "ApplyOutboundV4State",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var logStart = GetOperationalLogLength();
+
+        applyState.Invoke(service, [context, state]);
+        applyState.Invoke(service, [context, state]);
+
+        Assert.Equal(7, GetPrivateProperty<int>(context, "V4LastStateEpoch"));
+        Assert.Equal(100, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+
+        var log = ReadOperationalLogTail(logStart) + Environment.NewLine + ReadRetainedOperationalLogs();
+        Assert.Contains("event=filetransfer_fallback_frontier_receiver_state_evidence_only;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_post_tuna_fallback_rebind_state_replay_suppressed;", log, StringComparison.Ordinal);
+        Assert.Contains("state_kind=duplicate", log, StringComparison.Ordinal);
+        Assert.Contains("authority_effect=none", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            log.Split(Environment.NewLine),
+            line => line.Contains("event=filetransfer_fallback_frontier_repair_authority_granted;", StringComparison.Ordinal) &&
+                    line.Contains("authority_decision_reason=duplicate_frontier_rebind", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            log.Split(Environment.NewLine),
+            line => line.Contains("event=filetransfer_transport_rebind_safety_replay_started;", StringComparison.Ordinal) &&
+                    line.Contains("reason=duplicate_frontier_rebind", StringComparison.Ordinal));
+        Assert.DoesNotContain("event=filetransfer_rebind_duplicate_state_repair_enqueued;", log, StringComparison.Ordinal);
     }
 
     [Fact]

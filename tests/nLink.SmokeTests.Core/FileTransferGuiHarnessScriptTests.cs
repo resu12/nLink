@@ -6059,6 +6059,65 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-frontier-stall-grace-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_PostFallbackDuplicateStateReplayUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-duplicate-state-replay-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'direction=outbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; bridge_recovery_generation=1; route_publication_generation=5; route_commit_generation=0; log_writer_id=writer'
+                $lines = @(
+                    "event=filetransfer_v4_state_received; $scope; epoch=8; applied=1; stale=0; duplicate=0; v4_state_wire_fingerprint=v4sf1-state; contiguous_committed_chunk_index=40",
+                    "event=filetransfer_v4_state_received; $scope; epoch=8; applied=0; duplicate=1; v4_state_wire_fingerprint=v4sf1-state; contiguous_committed_chunk_index=40",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $scope; authority_id=repair-a; repair_generation=1; repair_request_key=fallback-frontier:42:64:range; range_fingerprint=range; frontier_chunk_index=42; requested_chunk_count=64; source_kind=SenderLivenessRescue; authority_decision_reason=duplicate_frontier_rebind; protocol_repair_request_id=transport_rebind_safety_replay:1:40:42:64",
+                    'event=filetransfer_transport_rebind_safety_replay_started; session_id=sess; transfer_id=transfer; log_writer_id=writer; reason=duplicate_frontier_rebind; rebind_generation=1; remote_next_expected_chunk_index=40; replay_start_chunk_index=42; replay_end_chunk_exclusive=106; requested_chunk_count=64; scheduled_chunk_count=64; post_tuna_v6_frontier_sweep=1'
+                )
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not [bool]$result.PostTunaFallbackDuplicateStateReplayAmplification -or
+                    $result.Phase -ne 'fallback_frontier_repair' -or
+                    $result.Reason -ne 'duplicate_current_receiver_state_created_sender_liveness_replay_authority' -or
+                    $result.FailureVariant -ne 'redundant_control_bulk_state_copy_started_64_chunk_repair_sweep' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_post_tuna_fallback_duplicate_state_replay_index') {
+                    throw "duplicate-state replay indexed result mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-duplicate-state-replay-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Duplicate-state replay GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-duplicate-state-replay-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("unresolved", true)]
     [InlineData("recovered", false)]

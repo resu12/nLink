@@ -8828,7 +8828,10 @@ function Test-Phase4PerformanceFailureLine {
     param([Parameter(Mandatory = $true)][string]$Line)
 
     return $Line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $Line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        $Line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Line.IndexOf(
+            'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+            [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Get-Phase4FailureClass {
@@ -9289,7 +9292,10 @@ function Get-Phase5FailureClass {
 
     foreach ($line in $failureLines) {
         if ($line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf(
+                'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'performance'
         }
     }

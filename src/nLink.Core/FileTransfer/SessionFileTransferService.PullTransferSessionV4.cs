@@ -13303,6 +13303,16 @@ public sealed partial class SessionFileTransferService
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_v4_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_generation={context.DataSessionGeneration}; epoch={state.Epoch}; previous_epoch={previousEpoch}; stale=1; applied=0; v4_state_wire_fingerprint={stateWireFingerprint}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(state.MissingRanges))}; terminal_ready={(state.TerminalReady ? 1 : 0)}");
+                if (IsStrictFallbackFrontierRuntime(context) && state.MissingRanges.Count > 0)
+                {
+                    LogOutboundPostTunaFallbackRebindStateReplaySuppressedLocked(
+                        context,
+                        state,
+                        stateWireFingerprint,
+                        "stale",
+                        "stale_receiver_state_evidence_only");
+                }
+
                 if (state.MissingRanges.Count > 0)
                 {
                     if (ShouldEnqueueRepairOnlyForRebindStateLocked(context, state, staleCommitted))
@@ -13369,6 +13379,16 @@ public sealed partial class SessionFileTransferService
                     LocalOperationalLog.Info(
                         "FileTransferService",
                         $"event=filetransfer_v4_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_generation={context.DataSessionGeneration}; epoch={state.Epoch}; previous_epoch={previousEpoch}; duplicate=1; applied=0; v4_state_wire_fingerprint={stateWireFingerprint}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(state.MissingRanges))}; terminal_ready={(state.TerminalReady ? 1 : 0)}");
+                    if (IsStrictFallbackFrontierRuntime(context) && state.MissingRanges.Count > 0)
+                    {
+                        LogOutboundPostTunaFallbackRebindStateReplaySuppressedLocked(
+                            context,
+                            state,
+                            stateWireFingerprint,
+                            "duplicate",
+                            "duplicate_receiver_state_evidence_only");
+                    }
+
                     if (ShouldEnqueueRepairOnlyForRebindStateLocked(context, state, normalizedCommitted))
                     {
                         if (!TrySuppressRetiredFallbackTailOwnerUpdateLocked(
@@ -14036,7 +14056,8 @@ public sealed partial class SessionFileTransferService
         FileTransferStateFrameV4 state,
         int normalizedCommitted)
     {
-        if (!IsOutboundPostTunaRecoveryActiveLocked(context) ||
+        if (IsStrictFallbackFrontierRuntime(context) ||
+            !IsOutboundPostTunaRecoveryActiveLocked(context) ||
             state.MissingRanges.Count == 0 ||
             context.IsTerminal)
         {
@@ -14065,6 +14086,18 @@ public sealed partial class SessionFileTransferService
         }
 
         return false;
+    }
+
+    private static void LogOutboundPostTunaFallbackRebindStateReplaySuppressedLocked(
+        OutboundTransferContext context,
+        FileTransferStateFrameV4 state,
+        string stateWireFingerprint,
+        string stateKind,
+        string decisionReason)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_post_tuna_fallback_rebind_state_replay_suppressed; authority_effect=none; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; state_kind={stateKind}; decision_reason={decisionReason}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)")}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_identity={FormatProtocolLogValue(context.DataSession?.GetType().Name ?? "(none)")}; data_session_generation={context.DataSessionGeneration}; rebind_generation={GetOutboundPostTunaRecoveryGenerationLocked(context)}; epoch={state.Epoch}; v4_state_wire_fingerprint={stateWireFingerprint}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; projected_ranges={FormatProtocolLogValue(FormatInboundRegularV4FrontierRepairProjectionRanges(state.MissingRanges))}");
     }
 
     private static IReadOnlyList<FileTransferRangeV4> ClampV6HandoffFrontierRepairRangesForSend(
@@ -20913,6 +20946,17 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        if (allowPostTunaFallbackV6Repair &&
+            IsStrictFallbackFrontierRuntime(context) &&
+            (string.Equals(reason, "duplicate_frontier_rebind", StringComparison.Ordinal) ||
+             string.Equals(reason, "stale_frontier_rebind", StringComparison.Ordinal)))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_post_tuna_fallback_rebind_state_replay_suppressed; authority_effect=none; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; state_kind={(string.Equals(reason, "stale_frontier_rebind", StringComparison.Ordinal) ? "stale" : "duplicate")}; decision_reason=defensive_replay_queue_rejection; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)")}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; data_session_identity={FormatProtocolLogValue(context.DataSession?.GetType().Name ?? "(none)")}; data_session_generation={context.DataSessionGeneration}; rebind_generation={GetOutboundPostTunaRecoveryGenerationLocked(context)}; replay_reason={reason}; epoch={context.V4LastStateEpoch}; v4_state_wire_fingerprint=(unavailable)");
+            return;
+        }
+
         if (!allowPostTunaFallbackV6Repair &&
             !TryAuthorizeRepairReplayLocked(
                 context,
@@ -21033,9 +21077,7 @@ public sealed partial class SessionFileTransferService
             IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
             context.PullTransportFrontierOnlyRepairActive &&
             remoteFrontier < context.ChunkCount &&
-            (string.Equals(reason, "duplicate_frontier_rebind", StringComparison.Ordinal) ||
-             string.Equals(reason, "stale_frontier_rebind", StringComparison.Ordinal) ||
-             string.Equals(reason, "post_fallback_sender_wait", StringComparison.Ordinal) ||
+            (string.Equals(reason, "post_fallback_sender_wait", StringComparison.Ordinal) ||
              string.Equals(reason, "post_tuna_fallback_peer_silence", StringComparison.Ordinal) ||
              string.Equals(reason, "post_tuna_fallback_state_refresh_send_timeout", StringComparison.Ordinal) ||
              string.Equals(reason, "post_tuna_fallback_state_refresh_send_failed", StringComparison.Ordinal));

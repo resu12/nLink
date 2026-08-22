@@ -3420,6 +3420,49 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    public async Task AnalyzeRetained_PostFallbackDuplicateStateReplayAmplification_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_duplicate_state_replay";
+        const string scope = "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; " +
+            "bridge_recovery_generation=1; route_publication_generation=5; route_commit_generation=0; log_writer_id=writer";
+        const string fingerprint = "v4sf1-duplicate-state";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {scope}; data_session_generation=1; epoch=8; previous_epoch=7; applied=1; stale=0; duplicate=0; v4_state_wire_fingerprint={fingerprint}; contiguous_committed_chunk_index=40; missing_range_count=1; log_writer_sequence=1"),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {scope}; data_session_generation=1; epoch=8; previous_epoch=8; applied=0; duplicate=1; v4_state_wire_fingerprint={fingerprint}; contiguous_committed_chunk_index=40; missing_range_count=1; log_writer_sequence=2"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {scope}; authority_id=repair-a; repair_generation=1; repair_request_key=fallback-frontier:40:64:range; range_fingerprint=range; frontier_chunk_index=40; requested_chunk_count=64; source_kind=SenderLivenessRescue; authority_decision_reason=duplicate_frontier_rebind; protocol_repair_request_id=transport_rebind_safety_replay:1:40:40:64; log_writer_sequence=3"),
+            LogLine($"event=filetransfer_transport_rebind_safety_replay_started; transfer_id={transferId}; session_id=sess_a; log_writer_id=writer; reason=duplicate_frontier_rebind; rebind_generation=1; remote_next_expected_chunk_index=40; replay_start_chunk_index=40; replay_end_chunk_exclusive=104; requested_chunk_count=64; scheduled_chunk_count=64; post_tuna_v6_frontier_sweep=1; log_writer_sequence=4")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count"]);
+        Assert.Equal("fail", verdict["filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict"]);
+        Assert.Equal("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification", verdict["recovery_failure_class"]);
+        Assert.Equal("redundant_control_bulk_state_copy_started_64_chunk_repair_sweep", verdict["failure_variant"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_ExplicitFallbackFrontierRepairStalledThenTerminalCompletion_DoesNotFail()

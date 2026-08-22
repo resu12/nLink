@@ -145,6 +145,53 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
     [Fact]
     [Trait("RetainedV4Suite", "Efficiency")]
+    public async Task AnalyzeRetained_EfficiencySummary_UsesWriterDirectionCumulativeDeltasPerRouteEpoch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_route_epoch_deltas";
+        const string identity = "direction=outbound; session_id=sess_a; log_writer_id=writer_a";
+        const string senderIdentity = "session_id=sess_a; log_writer_id=writer_a";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_live_route_epoch_started; transfer_id={transferId}; {identity}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_profile=regular_nkn_v4_fast", secondsOffset: 0),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {identity}; route=regular_nkn_v4_fast; protocol_version=4; epoch=0; bytes_acknowledged_by_receiver=0; contiguous_committed_chunk_index=0", secondsOffset: 0),
+            LogLine($"event=filetransfer_v4_sender_pump_summary; transfer_id={transferId}; {senderIdentity}; raw_bytes_sent_total=0; normal_raw_bytes_sent_total=0; repair_raw_bytes_sent_total=0", secondsOffset: 0),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {identity}; route=regular_nkn_v4_fast; protocol_version=4; epoch=1; bytes_acknowledged_by_receiver=100; contiguous_committed_chunk_index=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_v4_sender_pump_summary; transfer_id={transferId}; {senderIdentity}; raw_bytes_sent_total=1000; normal_raw_bytes_sent_total=1000; repair_raw_bytes_sent_total=0", secondsOffset: 2),
+            LogLine($"event=filetransfer_data_path_send_result; transfer_id={transferId}; {identity}; delivery_result=sent; transport_payload_bytes=1200", secondsOffset: 3),
+            LogLine($"event=filetransfer_live_route_epoch_started; transfer_id={transferId}; {identity}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_profile=default_v6", secondsOffset: 4),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {identity}; route=post_tuna_fallback_v6; protocol_version=6; epoch=1; bytes_acknowledged_by_receiver=100; contiguous_committed_chunk_index=1", secondsOffset: 4),
+            LogLine($"event=filetransfer_v4_sender_pump_summary; transfer_id={transferId}; {senderIdentity}; raw_bytes_sent_total=1000; normal_raw_bytes_sent_total=1000; repair_raw_bytes_sent_total=0", secondsOffset: 4),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {identity}; route=post_tuna_fallback_v6; protocol_version=6; epoch=2; bytes_acknowledged_by_receiver=500; contiguous_committed_chunk_index=5", secondsOffset: 5),
+            LogLine($"event=filetransfer_v4_sender_pump_summary; transfer_id={transferId}; {senderIdentity}; raw_bytes_sent_total=4000; normal_raw_bytes_sent_total=1500; repair_raw_bytes_sent_total=2500", secondsOffset: 6),
+            LogLine($"event=filetransfer_data_path_send_result; transfer_id={transferId}; {identity}; delivery_result=sent; transport_payload_bytes=3300", secondsOffset: 7),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 8),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 8),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("2", efficiency["route_epoch_count"]);
+        Assert.Equal("100", efficiency["route_epoch.0.useful_bytes_delta"]);
+        Assert.Equal("1000", efficiency["route_epoch.0.logical_raw_bytes_delta"]);
+        Assert.Equal("1200", efficiency["route_epoch.0.physical_raw_bytes_delta"]);
+        Assert.Equal("400", efficiency["route_epoch.1.useful_bytes_delta"]);
+        Assert.Equal("3000", efficiency["route_epoch.1.logical_raw_bytes_delta"]);
+        Assert.Equal("500", efficiency["route_epoch.1.normal_raw_bytes_delta"]);
+        Assert.Equal("2500", efficiency["route_epoch.1.repair_raw_bytes_delta"]);
+        Assert.Equal("3300", efficiency["route_epoch.1.physical_raw_bytes_delta"]);
+        Assert.Equal("7.5", efficiency["route_epoch.1.raw_amplification"]);
+        Assert.Equal("0.833333", efficiency["route_epoch.1.repair_share"]);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "Efficiency")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_CorrectnessFailureDefersEfficiency()
     {
@@ -167,6 +214,40 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("not_evaluated_due_correctness_failure", efficiency["efficiency_verdict"]);
         Assert.Equal("none", efficiency["efficiency_failure_class"]);
         Assert.Contains("file_tuna_v6", efficiency["correctness_blockers"], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("RetainedV4Suite", "Efficiency")]
+    public async Task AnalyzeRetained_EfficiencySummary_StructuralAmplificationFailsDespiteCorrectnessBlocker()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_duplicate_state_replay";
+        const string scope = "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; " +
+            "bridge_recovery_generation=1; route_publication_generation=5; route_commit_generation=0; log_writer_id=writer";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_live_route_epoch_started; transfer_id={transferId}; {scope}; runtime_profile=default_v6"),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {scope}; epoch=8; applied=1; stale=0; duplicate=0; v4_state_wire_fingerprint=v4sf1-state; contiguous_committed_chunk_index=40; bytes_committed=100; log_writer_sequence=1"),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; {scope}; epoch=8; applied=0; duplicate=1; v4_state_wire_fingerprint=v4sf1-state; contiguous_committed_chunk_index=40; log_writer_sequence=2"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {scope}; authority_id=repair-a; repair_generation=1; repair_request_key=fallback-frontier:40:64:range; range_fingerprint=range; frontier_chunk_index=40; requested_chunk_count=64; source_kind=SenderLivenessRescue; authority_decision_reason=duplicate_frontier_rebind; protocol_repair_request_id=transport_rebind_safety_replay:1:40:40:64; log_writer_sequence=3"),
+            LogLine($"event=filetransfer_transport_rebind_safety_replay_started; transfer_id={transferId}; session_id=sess_a; log_writer_id=writer; reason=duplicate_frontier_rebind; rebind_generation=1; remote_next_expected_chunk_index=40; replay_start_chunk_index=40; replay_end_chunk_exclusive=104; requested_chunk_count=64; scheduled_chunk_count=64; post_tuna_v6_frontier_sweep=1; log_writer_sequence=4")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("fail", efficiency["efficiency_verdict"]);
+        Assert.Equal(
+            "filetransfer_post_tuna_fallback_duplicate_state_replay_amplification",
+            efficiency["efficiency_failure_class"]);
+        Assert.Equal("1", efficiency["post_tuna_fallback_duplicate_state_replay_authority_count"]);
+        Assert.NotEqual("(none)", efficiency["correctness_blockers"]);
     }
 
     [Fact]
