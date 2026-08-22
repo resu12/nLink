@@ -29112,7 +29112,7 @@ function Update-TunaGuiFaultAdmissionTracker {
     $startIndex = [int]$Tracker.Cursor
     $terminalStartIndex = [int]$Tracker.TerminalCursor
     $updateStopwatch = [Diagnostics.Stopwatch]::StartNew()
-    $matchedCount = 0L
+    $matchedCount = [ref]0L
     $actionCriticalEvents = @(
         'tuna_acceleration_reset',
         'tuna_acceleration_timeline',
@@ -29138,7 +29138,7 @@ function Update-TunaGuiFaultAdmissionTracker {
         -Visitor {
             param([string]$line, [int]$lineIndex)
 
-            $matchedCount++
+            $matchedCount.Value = [long]$matchedCount.Value + 1L
             $eventName = ''
             $eventStart = $line.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase)
             if ($eventStart -ge 0) {
@@ -29273,7 +29273,7 @@ function Update-TunaGuiFaultAdmissionTracker {
     $Tracker.TerminalCursor = [Math]::Max([int]$Tracker.TerminalCursor, $endIndex)
     $Tracker.LastSynchronizedEndBookmark = $endIndex
     $Tracker.LineVisitCount = [long]$Tracker.LineVisitCount + [Math]::Max(0, $endIndex - $startIndex)
-    $Tracker.MatchedEventCount = [long]$Tracker.MatchedEventCount + $matchedCount
+    $Tracker.MatchedEventCount = [long]$Tracker.MatchedEventCount + [long]$matchedCount.Value
     $updateStopwatch.Stop()
     $Tracker.LastUpdateElapsedMilliseconds = [long]$updateStopwatch.ElapsedMilliseconds
     Update-TunaGuiFaultAdmissionAuthority -Tracker $Tracker

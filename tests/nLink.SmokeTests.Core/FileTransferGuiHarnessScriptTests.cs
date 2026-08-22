@@ -3092,8 +3092,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 throw "initial Tuna projection missing commits=$($tracker.TransitionCommits.Count) publications=$($tracker.TransitionPublications.Count) dispositions=$($tracker.TransitionDispositions.Count) payloads=$($tracker.TransitionPayloads.Count) directions=$($tracker.AuthoritativeTunaDirections.Count)"
             }
             $projection = Wait-TunaGuiAuthoritativeTunaFaultAdmission -Tracker $tracker -AfterBookmark 0 -TimeoutMs 100
-            if ($projection -notlike '*authoritative_direction_count=2*' -or $tracker.LineVisitCount -ne 8 -or $tracker.Cursor -ne 8) {
-                throw "two-direction projection mismatch: $projection visits=$($tracker.LineVisitCount) cursor=$($tracker.Cursor)"
+            if ($projection -notlike '*authoritative_direction_count=2*' -or $tracker.LineVisitCount -ne 8 -or
+                $tracker.MatchedEventCount -ne 8 -or $tracker.Cursor -ne 8) {
+                throw "two-direction projection mismatch: $projection visits=$($tracker.LineVisitCount) matched=$($tracker.MatchedEventCount) cursor=$($tracker.Cursor)"
             }
             for ($i = 0; $i -lt 100; $i++) {
                 $script:lines.Add("event=filetransfer_chunk_batch_sent_as_batch; sequence=$i; route=file_tuna_v4")
