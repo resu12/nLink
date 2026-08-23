@@ -6556,7 +6556,9 @@ function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
     $stability = Read-RouteAcceptanceKeyValueArtifact -Path $stabilitySummaryPath
     $stabilityGateStatus = Get-RouteAcceptanceReportValue -Report $stability -Name 'gate_status' -DefaultValue '(missing)'
     $stabilityHardFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $stability -Name 'hard_failure_count' -DefaultValue '0')
-    if (-not [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $stabilityCompleted = [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($stabilityGateStatus, 'warn', [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $stabilityCompleted -or
         $stabilityHardFailureCount -ne 0) {
         return $false
     }

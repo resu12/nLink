@@ -1081,7 +1081,9 @@ function Test-TunaGuiRetainedAnalysisCompletedProofArtifacts {
     $stabilityGateStatus = Read-TunaGuiReportValue -ReportPath $stabilitySummaryPath -Key 'gate_status' -DefaultValue '(missing)'
     $stabilityHardFailureCountText = Read-TunaGuiReportValue -ReportPath $stabilitySummaryPath -Key 'hard_failure_count' -DefaultValue '0'
     $stabilityHardFailureCount = 0
-    if (-not [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $stabilityCompleted = [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($stabilityGateStatus, 'warn', [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $stabilityCompleted -or
         -not [int]::TryParse($stabilityHardFailureCountText, [ref]$stabilityHardFailureCount) -or
         $stabilityHardFailureCount -ne 0) {
         return $false

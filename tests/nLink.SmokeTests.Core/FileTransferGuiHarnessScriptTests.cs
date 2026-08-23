@@ -10720,6 +10720,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Assert.Contains("stability-gates-summary.txt", scriptText, StringComparison.Ordinal);
             Assert.Contains("hard_failure_count", scriptText, StringComparison.Ordinal);
             Assert.Contains("gate_status", scriptText, StringComparison.Ordinal);
+            Assert.Contains("[string]::Equals($stabilityGateStatus, 'warn'", scriptText, StringComparison.Ordinal);
             Assert.Contains("StartsWith('FAIL'", scriptText, StringComparison.Ordinal);
             Assert.Contains("StartsWith('INVALID'", scriptText, StringComparison.Ordinal);
             Assert.Contains("StartsWith('INCONCLUSIVE'", scriptText, StringComparison.Ordinal);
@@ -10744,6 +10745,88 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.Contains("'stability-gates-summary.txt'", analyzerText, StringComparison.Ordinal);
         Assert.Contains("\"hard_failure_count={0}\" -f $hardFailureCount", analyzerText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetainedAnalysisCompletedProof_AllowsWarningWithoutHardFailures()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var wrapperBody = ExtractPowerShellFunctionBody(
+            wrapperText,
+            "Test-TunaGuiRetainedAnalysisCompletedProofArtifacts",
+            "Stop-TunaGuiRetainedAnalysisProcess");
+        var routeBody = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts",
+            "Stop-RouteAcceptanceRetainedAnalysisProcess");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Read-Report([string]$Path) {
+                $result = @{}
+                Get-Content -LiteralPath $Path | ForEach-Object {
+                    if ($_ -match '^([^=]+)=(.*)$') { $result[$matches[1]] = $matches[2] }
+                }
+                return $result
+            }
+            function Read-TunaGuiReportValue([string]$ReportPath, [string]$Key, [string]$DefaultValue) {
+                $report = Read-Report $ReportPath
+                if ($report.ContainsKey($Key)) { return [string]$report[$Key] }
+                return $DefaultValue
+            }
+            function Read-RouteAcceptanceKeyValueArtifact([string]$Path) { return Read-Report $Path }
+            function Get-RouteAcceptanceReportValue($Report, [string]$Name, [string]$DefaultValue) {
+                if ($Report.ContainsKey($Name)) { return [string]$Report[$Name] }
+                return $DefaultValue
+            }
+            function ConvertTo-RouteAcceptanceInt($Value) { return [int]$Value }
+            function Test-TunaGuiRetainedAnalysisCompletedProofArtifacts {
+            {{wrapperBody}}
+            }
+            function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
+            {{routeBody}}
+            }
+            $root = Join-Path ([IO.Path]::GetTempPath()) ('nlink-analysis-warning-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            try {
+                Set-Content -LiteralPath (Join-Path $root 'filetransfer-operator-verdict.txt') -Value @('verdict=WARN_EXTERNAL_TRANSPORT','hard_failure_count=0')
+                Set-Content -LiteralPath (Join-Path $root 'stability-gates-summary.txt') -Value @('gate_status=warn','hard_failure_count=0')
+                Set-Content -LiteralPath (Join-Path $root 'filetransfer-route-consistency-summary.txt') -Value @(
+                    'route_consistency_verdict=pass',
+                    'live_route_epoch_proof_verdict=pass',
+                    'fallback_leg_authority_proof_verdict=pass',
+                    'clean_fallback_leg_proof_verdict=pass',
+                    'bridge_liveness_integration_verdict=pass',
+                    'control_plane_isolation_verdict=pass')
+                $log = Join-Path $root 'filetransfer-retained-log-slice.log'
+                Set-Content -LiteralPath $log -Value 'event=proof'
+                if (-not (Test-TunaGuiRetainedAnalysisCompletedProofArtifacts -AnalysisDir $root -LogPath $log -LiveRouteProofMode RegularActivationCycle)) {
+                    throw 'wrapper rejected warning-only completed proof'
+                }
+                if (-not (Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts -ArtifactDir $root -LiveRouteProofMode RegularActivationCycle)) {
+                    throw 'route acceptance rejected warning-only completed proof'
+                }
+                Set-Content -LiteralPath (Join-Path $root 'stability-gates-summary.txt') -Value @('gate_status=warn','hard_failure_count=1')
+                if ((Test-TunaGuiRetainedAnalysisCompletedProofArtifacts -AnalysisDir $root -LogPath $log -LiveRouteProofMode RegularActivationCycle) -or
+                    (Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts -ArtifactDir $root -LiveRouteProofMode RegularActivationCycle)) {
+                    throw 'hard failure was accepted as completed proof'
+                }
+                Write-Output 'analysis-warning-proof-ok'
+            }
+            finally {
+                if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Warning proof test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("analysis-warning-proof-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
