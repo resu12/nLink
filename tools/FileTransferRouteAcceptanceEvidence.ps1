@@ -1444,9 +1444,16 @@ function Get-RouteAcceptanceCursorEvidence {
     }
 
     $eventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'event_count' -DefaultValue -1) -DefaultValue -1
+    $sourceEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'source_event_count' -DefaultValue $retainedLineCount) -DefaultValue -1
+    $augmentedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'augmented_event_count' -DefaultValue $eventCount) -DefaultValue -1
+    $syntheticEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'synthetic_event_count' -DefaultValue ($augmentedEventCount - $sourceEventCount)) -DefaultValue -1
+    $syntheticEventNames = [string](Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'synthetic_event_names' -DefaultValue '(legacy_unreported)')
     $indexedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'indexed_event_count' -DefaultValue -1) -DefaultValue -1
     $logFileCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $diagnostics -Name 'log_file_count' -DefaultValue -1) -DefaultValue -1
-    if ($eventCount -lt 0 -or $indexedEventCount -lt 0 -or $eventCount -ne $indexedEventCount) {
+    if ($eventCount -lt 0 -or $sourceEventCount -lt 0 -or $syntheticEventCount -lt 0 -or
+        $augmentedEventCount -lt 0 -or $indexedEventCount -lt 0 -or
+        $sourceEventCount + $syntheticEventCount -ne $augmentedEventCount -or
+        $eventCount -ne $augmentedEventCount -or $augmentedEventCount -ne $indexedEventCount) {
         $reasons.Add('cursor_event_index_count_mismatch') | Out-Null
     }
     if ($logFileCount -ne 1) {
@@ -1500,6 +1507,10 @@ function Get-RouteAcceptanceCursorEvidence {
         consumedIndexCount = $consumedIndexCount
         indexedEventCount = $indexedEventCount
         eventCount = $eventCount
+        sourceEventCount = $sourceEventCount
+        syntheticEventCount = $syntheticEventCount
+        syntheticEventNames = $syntheticEventNames
+        augmentedEventCount = $augmentedEventCount
         logFileCount = $logFileCount
         ledgerPath = $ledgerResult.Path
         ledgerSha256 = $ledgerResult.Sha256
@@ -1596,6 +1607,10 @@ function Get-RouteAcceptanceScenarioEvidence {
             consumedIndexCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $ledger -Name 'consumedIndexCount' -DefaultValue 0)
             indexedEventCount = -1L
             eventCount = -1L
+            sourceEventCount = -1L
+            syntheticEventCount = -1L
+            syntheticEventNames = ''
+            augmentedEventCount = -1L
             logFileCount = -1L
             ledgerPath = $ledgerResult.Path
             ledgerSha256 = $ledgerResult.Sha256
@@ -1651,6 +1666,10 @@ function Get-RouteAcceptanceScenarioEvidence {
             consumedIndexCount = 0L
             indexedEventCount = 0L
             eventCount = 0L
+            sourceEventCount = 0L
+            syntheticEventCount = 0L
+            syntheticEventNames = '(none)'
+            augmentedEventCount = 0L
             logFileCount = 0L
             ledgerPath = [System.IO.Path]::GetFullPath($LogLedgerPath)
             ledgerSha256 = ''
@@ -1741,6 +1760,10 @@ function Get-RouteAcceptanceScenarioEvidence {
             diagnosticsPath = $cursor.diagnosticsPath
             diagnosticsSha256 = $cursor.diagnosticsSha256
             eventCount = $cursor.eventCount
+            sourceEventCount = $cursor.sourceEventCount
+            syntheticEventCount = $cursor.syntheticEventCount
+            syntheticEventNames = $cursor.syntheticEventNames
+            augmentedEventCount = $cursor.augmentedEventCount
             indexedEventCount = $cursor.indexedEventCount
             logFileCount = $cursor.logFileCount
             retainedSlicePath = $cursor.retainedSlicePath
@@ -2387,9 +2410,17 @@ function Get-RouteAcceptanceEvidenceManifestValidation {
         }
         elseif (-not [string]::IsNullOrWhiteSpace($diagnosticsPath) -and (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
             $eventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'eventCount' -DefaultValue -1) -DefaultValue -1
-            $indexedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'indexedEventCount' -DefaultValue -1) -DefaultValue -1
             $analyzerInputLineCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'lineCount' -DefaultValue -1) -DefaultValue -1
-            if ($eventCount -lt 0 -or $indexedEventCount -lt 0 -or $eventCount -ne $indexedEventCount -or $analyzerInputLineCount -ne $indexedEventCount) {
+            $sourceEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'sourceEventCount' -DefaultValue $analyzerInputLineCount) -DefaultValue -1
+            $syntheticEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'syntheticEventCount' -DefaultValue ($eventCount - $sourceEventCount)) -DefaultValue -1
+            $augmentedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'augmentedEventCount' -DefaultValue $eventCount) -DefaultValue -1
+            $indexedEventCount = ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'indexedEventCount' -DefaultValue -1) -DefaultValue -1
+            if ($eventCount -lt 0 -or $sourceEventCount -lt 0 -or $syntheticEventCount -lt 0 -or
+                $augmentedEventCount -lt 0 -or $indexedEventCount -lt 0 -or
+                $sourceEventCount + $syntheticEventCount -ne $augmentedEventCount -or
+                $eventCount -ne $augmentedEventCount -or
+                $augmentedEventCount -ne $indexedEventCount -or
+                $analyzerInputLineCount -ne $sourceEventCount) {
                 $cursorReasons.Add('cursor_event_index_count_mismatch') | Out-Null
             }
             if ((ConvertTo-RouteAcceptanceEvidenceInt64 -Value (Get-RouteAcceptanceEvidencePropertyValue -Object $analyzerInput -Name 'logFileCount' -DefaultValue -1) -DefaultValue -1) -ne 1) {

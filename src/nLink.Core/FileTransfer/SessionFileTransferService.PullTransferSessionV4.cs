@@ -14582,6 +14582,7 @@ public sealed partial class SessionFileTransferService
         };
         FallbackFrontierRepairContract? fallbackFrontierContract = null;
         var fallbackFrontierContractNewlyIssued = false;
+        var repairDispatchScheduled = false;
         lock (gate)
         {
             LogOutboundV6FrontierRequestReceiveDispatch(
@@ -15002,13 +15003,16 @@ public sealed partial class SessionFileTransferService
                 context,
                 syntheticState,
                 fallbackFrontierContract,
-                fallbackFrontierContractNewlyIssued);
+                fallbackFrontierContractNewlyIssued,
+                dispatchScheduled: out repairDispatchScheduled);
             LogOutboundV6FrontierRequestReceiveDispatch(
                 context,
                 repairRequest,
                 receivedTransportKind,
-                "dispatched",
-                "queued_for_legacy_sender_repair",
+                repairDispatchScheduled ? "dispatched" : "rejected",
+                repairDispatchScheduled
+                    ? "queued_for_legacy_sender_repair"
+                    : "legacy_sender_repair_not_scheduled",
                 first.StartChunkIndex,
                 first.ChunkCount,
                 repairRequest.MissingRanges.Count,
@@ -15018,9 +15022,13 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
         }
 
-        return new RetainedPeerProofApplicationResult(
-            RetainedPeerProofApplicationStatus.Applied,
-            "frontier_request_dispatched");
+        return repairDispatchScheduled
+            ? new RetainedPeerProofApplicationResult(
+                RetainedPeerProofApplicationStatus.Applied,
+                "frontier_request_dispatched")
+            : new RetainedPeerProofApplicationResult(
+                RetainedPeerProofApplicationStatus.Rejected,
+                "legacy_sender_repair_not_scheduled");
     }
 
     private static bool IsEpochlessOutboundPostTunaFallbackV6FrontierRequestLocked(
@@ -15289,6 +15297,7 @@ public sealed partial class SessionFileTransferService
             state,
             fallbackFrontierContract: null,
             fallbackFrontierContractNewlyIssued: false,
+            dispatchScheduled: out _,
             requiredReceiveInstall: requiredReceiveInstall,
             requiredReceiveRuntimeOwner: requiredReceiveRuntimeOwner,
             requiredReceiveDataSession: requiredReceiveDataSession,
@@ -15388,11 +15397,13 @@ public sealed partial class SessionFileTransferService
         FileTransferStateFrameV4 state,
         FallbackFrontierRepairContract? fallbackFrontierContract,
         bool fallbackFrontierContractNewlyIssued,
+        out bool dispatchScheduled,
         OutboundSparsePumpInstall? requiredReceiveInstall = null,
         RuntimeOwnerToken? requiredReceiveRuntimeOwner = null,
         IFileTransferDataSession? requiredReceiveDataSession = null,
         long requiredReceiveDataSessionGeneration = 0)
     {
+        dispatchScheduled = false;
         if (requiredReceiveDataSession is not null)
         {
             lock (gate)
@@ -15984,6 +15995,30 @@ public sealed partial class SessionFileTransferService
 
             if (deduped.Count == 0)
             {
+                var successorQueuedRepair = queuedRepair with
+                {
+                    DeliveryMode = deliveryDecision.Mode,
+                    DeliveryEscalationReason = deliveryDecision.Reason,
+                    CreditExhaustedTimeMsAtDecision = deliveryDecision.CreditExhaustedTimeMs,
+                };
+                if (fallbackFrontierContractNewlyIssued &&
+                    fallbackFrontierContract is not null &&
+                    TryTransferQueuedOutboundFallbackFrontierRepairToSuccessorLocked(
+                        context,
+                        successorQueuedRepair,
+                        fallbackFrontierContract,
+                        repairState,
+                        chunkIndices,
+                        out var transferredChunkCount))
+                {
+                    dispatchScheduled = true;
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={transferredChunkCount}; scheduled_chunk_indices={FormatV4ChunkIndicesForLog(chunkIndices)}; repair_delivery_mode={FormatV4RepairDeliveryMode(deliveryDecision.Mode)}; repair_delivery_escalation_reason=queued_predecessor_rebound; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; post_rebind_frontier_exclusive={(postRebindFrontierRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair={deliveryDecision.CreditExhaustedTimeMs}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
+                    context.SignalSparseSenderPump();
+                    return;
+                }
+
                 if (context.PullV4SenderPumpRepairRequests.TryGetValue(repairRequestKey, out var queuedState))
                 {
                     queuedState.Queued = false;
@@ -16101,12 +16136,148 @@ public sealed partial class SessionFileTransferService
             }
 
             context.PullV4SenderPumpRepairQueue.Enqueue(finalizedQueuedRepair);
+            dispatchScheduled = true;
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={deduped.Count}; scheduled_chunk_indices={FormatV4ChunkIndicesForLog(deduped)}; repair_delivery_mode={FormatV4RepairDeliveryMode(deliveryDecision.Mode)}; repair_delivery_escalation_reason={deliveryDecision.Reason}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; post_rebind_frontier_exclusive={(postRebindFrontierRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair={deliveryDecision.CreditExhaustedTimeMs}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
             context.SignalSparseSenderPump();
         }
     }
+
+    private static bool TryTransferQueuedOutboundFallbackFrontierRepairToSuccessorLocked(
+        OutboundTransferContext context,
+        PullV4QueuedRepairSend successorTemplate,
+        FallbackFrontierRepairContract successor,
+        V4SenderRepairRequestState successorState,
+        IReadOnlyCollection<int> requestedChunkIndices,
+        out int transferredChunkCount)
+    {
+        transferredChunkCount = 0;
+        var successorAuthority = successor.Authority;
+        if (requestedChunkIndices.Count == 0 ||
+            successorAuthority.PredecessorAuthorityId is not { IsDefault: false } predecessorAuthorityId ||
+            !ReferenceEquals(context.CurrentFallbackFrontierRepairContract, successor) ||
+            successor.Lifecycle.IsSettled ||
+            !IsFallbackFrontierRepairContractCurrent(context, successor, out _))
+        {
+            return false;
+        }
+
+        var requestedChunks = requestedChunkIndices.ToHashSet();
+        PullV4QueuedRepairSend? predecessorSend = null;
+        V4SenderRepairRequestState? predecessorState = null;
+        foreach (var candidate in context.PullV4SenderPumpRepairQueue)
+        {
+            if (candidate.FallbackFrontierRepairContract is not { } predecessor ||
+                predecessor.Authority.AuthorityId != predecessorAuthorityId ||
+                predecessor.Lifecycle.SettlementOutcome != FallbackFrontierRepairSettlementOutcome.Superseded ||
+                predecessor.Lifecycle.SuccessorAuthorityId != successorAuthority.AuthorityId ||
+                !HasSameFallbackFrontierRepairDispatchScope(predecessor.Authority, successorAuthority) ||
+                !candidate.ChunkIndices.Any(requestedChunks.Contains) ||
+                !context.PullV4SenderPumpRepairRequests.TryGetValue(candidate.RepairRequestKey, out var candidateState) ||
+                !candidateState.Queued ||
+                candidateState.InFlight ||
+                !ReferenceEquals(candidateState.FallbackFrontierRepairContract, predecessor))
+            {
+                continue;
+            }
+
+            if (predecessorSend is not null)
+            {
+                return false;
+            }
+
+            predecessorSend = candidate;
+            predecessorState = candidateState;
+        }
+
+        if (predecessorSend is null || predecessorState is null)
+        {
+            return false;
+        }
+
+        var transferredChunks = predecessorSend.ChunkIndices
+            .Where(requestedChunks.Contains)
+            .Distinct()
+            .OrderBy(static chunkIndex => chunkIndex)
+            .ToList();
+        if (transferredChunks.Count != requestedChunks.Count)
+        {
+            return false;
+        }
+
+        var retained = new Queue<PullV4QueuedRepairSend>(context.PullV4SenderPumpRepairQueue.Count);
+        while (context.PullV4SenderPumpRepairQueue.Count > 0)
+        {
+            var queued = context.PullV4SenderPumpRepairQueue.Dequeue();
+            if (!ReferenceEquals(queued, predecessorSend))
+            {
+                retained.Enqueue(queued);
+                continue;
+            }
+
+            foreach (var chunkIndex in queued.ChunkIndices)
+            {
+                context.PullV4SenderPumpRepairQueuedChunkIndices.Remove(chunkIndex);
+            }
+
+            foreach (var chunkIndex in transferredChunks)
+            {
+                context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunkIndex);
+            }
+
+            retained.Enqueue(successorTemplate with
+            {
+                ChunkIndices = transferredChunks,
+                RepairRequestKey = successorAuthority.CanonicalRepairKey,
+                ProtocolRepairRequestId = successorAuthority.ProtocolRepairRequestId,
+                ProtocolPriority = successorAuthority.Priority,
+                ProtocolRecoveryMode = successorAuthority.RecoveryMode,
+                RuntimeOwner = successorAuthority.RuntimeOwner,
+                FallbackFrontierRepairContract = successor,
+            });
+        }
+
+        while (retained.Count > 0)
+        {
+            context.PullV4SenderPumpRepairQueue.Enqueue(retained.Dequeue());
+        }
+
+        predecessorState.Queued = false;
+        predecessorState.QueuedUtc = null;
+        successorState.Queued = true;
+        successorState.QueuedUtc ??= DateTimeOffset.UtcNow;
+        successorState.InFlight = false;
+        successorState.FallbackFrontierRepairContract = successor;
+        transferredChunkCount = transferredChunks.Count;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided; {FormatFallbackFrontierRepairAuthorityTuple(successorAuthority)}; predecessor_authority_id={FormatProtocolLogValue(predecessorAuthorityId.ToString())}; predecessor_repair_request_key={FormatProtocolLogValue(predecessorSend.RepairRequestKey)}; predecessor_protocol_repair_request_id={FormatProtocolLogValue(predecessorSend.ProtocolRepairRequestId ?? "(none)")}; successor_repair_request_key={FormatProtocolLogValue(successorAuthority.CanonicalRepairKey)}; successor_protocol_repair_request_id={FormatProtocolLogValue(successorAuthority.ProtocolRepairRequestId)}; transferred_chunk_count={transferredChunkCount}; transferred_chunk_indices={FormatV4ChunkIndicesForLog(transferredChunks)}; result=queued_predecessor_rebound; authority_effect=none; decision_reason=exact_queued_predecessor_dispatch_transferred");
+        return true;
+    }
+
+    private static bool HasSameFallbackFrontierRepairDispatchScope(
+        FallbackFrontierRepairAuthority predecessor,
+        FallbackFrontierRepairAuthority successor)
+        => string.Equals(predecessor.SessionId, successor.SessionId, StringComparison.Ordinal) &&
+           string.Equals(predecessor.TransferId, successor.TransferId, StringComparison.Ordinal) &&
+           predecessor.Direction == successor.Direction &&
+           predecessor.RuntimeOwner == successor.RuntimeOwner &&
+           predecessor.Route == successor.Route &&
+           string.Equals(predecessor.RouteToken, successor.RouteToken, StringComparison.Ordinal) &&
+           predecessor.ProtocolVersion == successor.ProtocolVersion &&
+           predecessor.LiveRouteEpoch == successor.LiveRouteEpoch &&
+           predecessor.RuntimeGeneration == successor.RuntimeGeneration &&
+           predecessor.TerminalGeneration == successor.TerminalGeneration &&
+           predecessor.LegGeneration == successor.LegGeneration &&
+           predecessor.TransportEpoch == successor.TransportEpoch &&
+           predecessor.BridgeRecoveryGeneration == successor.BridgeRecoveryGeneration &&
+           predecessor.BridgeDecisionGeneration == successor.BridgeDecisionGeneration &&
+           predecessor.RoutePublicationGeneration == successor.RoutePublicationGeneration &&
+           predecessor.RouteCommitGeneration == successor.RouteCommitGeneration &&
+           string.Equals(predecessor.CheckpointRequestId, successor.CheckpointRequestId, StringComparison.Ordinal) &&
+           predecessor.FrontierChunkIndex == successor.FrontierChunkIndex &&
+           predecessor.TargetTransport == successor.TargetTransport;
 
     private static void CleanupOutboundV4RepairRequestStateLocked(OutboundTransferContext context, DateTimeOffset now)
     {

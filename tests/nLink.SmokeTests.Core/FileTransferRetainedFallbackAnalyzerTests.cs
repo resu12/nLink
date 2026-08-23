@@ -4740,6 +4740,59 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    public async Task AnalyzeRetained_PostFallbackQueuedPredecessorSupersessionMissingDispatch_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_frontier_successor_dispatch";
+        const string predecessor = "fta2-repair_replay-predecessor";
+        const string successor = "fta2-repair_replay-successor";
+        const string scope = "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; runtime_generation=6; terminal_generation=0; leg_generation=6; transport_epoch=1; " +
+            "bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); " +
+            "route_publication_generation=6; route_commit_generation=0; frontier_chunk_index=6204; " +
+            "source_kind=PeerRequest; priority=frontier; target_transport=regular_nkn; log_writer_id=writer";
+        const string predecessorTuple = "repair_generation=13; repair_request_key=fallback-frontier:6204:32:range-a; " +
+            "range_fingerprint=range-a; primary_protocol_repair_request_id=v6-frontier:6204:23; " +
+            "primary_request_correlation_id=correlation-a";
+        const string successorTuple = "repair_generation=14; repair_request_key=fallback-frontier:6204:12:range-b; " +
+            "range_fingerprint=range-b; primary_protocol_repair_request_id=v6-frontier:1:6204:24; " +
+            "primary_request_correlation_id=correlation-b";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {scope}; authority_id={predecessor}; predecessor_authority_id=(none); {predecessorTuple}; requested_chunk_count=32; log_writer_sequence=1"),
+            LogLine($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}; session_id=sess_a; log_writer_id=writer; repair_request_key=fallback-frontier:6204:32:range-a; protocol_repair_request_id=v6-frontier:6204:23; first_start_chunk_index=6204; last_end_chunk_exclusive=6205; requested_chunk_count=1; scheduled_chunk_count=1; log_writer_sequence=2"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {scope}; authority_id={successor}; predecessor_authority_id={predecessor}; {successorTuple}; requested_chunk_count=12; log_writer_sequence=3"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {scope}; authority_id={predecessor}; predecessor_authority_id=(none); successor_authority_id={successor}; {predecessorTuple}; requested_chunk_count=32; settlement_outcome=Superseded; dispatch_observed=0; decision_reason=fallback_frontier_successor_authorized; log_writer_sequence=4"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {scope}; authority_id={successor}; predecessor_authority_id={predecessor}; successor_authority_id=(none); {successorTuple}; requested_chunk_count=12; settlement_outcome=MissingDispatch; dispatch_observed=0; decision_reason=chunks_already_queued_before_dispatch; log_writer_sequence=5")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_repair_successor_dispatch_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_repair_successor_dispatch_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_fallback_frontier_repair_successor_dispatch_missing_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_repair_successor_dispatch_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["filetransfer_fallback_frontier_repair_successor_dispatch_missing_verdict"]);
+        Assert.Equal("filetransfer_fallback_frontier_repair_successor_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("successor_missing_dispatch_due_predecessor_queued_chunk_ownership", verdict["failure_variant"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("RetainedFallbackSuite", "Efficiency")]
     public async Task AnalyzeRetained_PostFallbackDuplicateStateReplayAmplification_HasFullCompactParity(
         bool compact)

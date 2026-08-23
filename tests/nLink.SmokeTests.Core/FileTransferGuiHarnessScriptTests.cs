@@ -6373,6 +6373,67 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-duplicate-state-replay-fast-path-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_PostFallbackQueuedPredecessorSupersessionUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-frontier-successor-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'direction=outbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=6; terminal_generation=0; leg_generation=6; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); route_publication_generation=6; route_commit_generation=0; frontier_chunk_index=6204; source_kind=PeerRequest; target_transport=regular_nkn; log_writer_id=writer'
+                $a = 'repair_generation=13; repair_request_key=fallback-frontier:6204:32:range-a; range_fingerprint=range-a; primary_protocol_repair_request_id=v6-frontier:6204:23; primary_request_correlation_id=correlation-a'
+                $b = 'repair_generation=14; repair_request_key=fallback-frontier:6204:12:range-b; range_fingerprint=range-b; primary_protocol_repair_request_id=v6-frontier:1:6204:24; primary_request_correlation_id=correlation-b'
+                $lines = @(
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $scope; authority_id=repair-a; predecessor_authority_id=(none); $a",
+                    'event=filetransfer_v4_repair_scheduled; transfer_id=transfer; session_id=sess; log_writer_id=writer; repair_request_key=fallback-frontier:6204:32:range-a; protocol_repair_request_id=v6-frontier:6204:23; first_start_chunk_index=6204; last_end_chunk_exclusive=6205; scheduled_chunk_count=1',
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $scope; authority_id=repair-b; predecessor_authority_id=repair-a; $b",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $scope; authority_id=repair-a; predecessor_authority_id=(none); successor_authority_id=repair-b; $a; settlement_outcome=Superseded; dispatch_observed=0",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $scope; authority_id=repair-b; predecessor_authority_id=repair-a; successor_authority_id=(none); $b; settlement_outcome=MissingDispatch; dispatch_observed=0; decision_reason=chunks_already_queued_before_dispatch"
+                )
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'fallback_frontier_repair' -or
+                    $result.Reason -ne 'queued_predecessor_superseded_without_transferring_exact_frontier_dispatch_to_successor' -or
+                    $result.FailureVariant -ne 'successor_missing_dispatch_due_predecessor_queued_chunk_ownership' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_fallback_frontier_successor_dispatch_index') {
+                    throw "frontier successor indexed result mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-frontier-successor-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Frontier-successor GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-frontier-successor-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("unresolved", true)]
     [InlineData("recovered", false)]

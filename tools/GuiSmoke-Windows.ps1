@@ -5552,6 +5552,12 @@ function Get-TunaGuiExplicitFailureClassification {
                     Reason = 'post_tuna_fallback_frontier_stall_grace_expired_without_exact_receiver_request_recheck'
                 }
             }
+            'filetransfer_fallback_frontier_repair_successor_dispatch_missing' {
+                return [pscustomobject]@{
+                    Phase = 'fallback_frontier_repair'
+                    Reason = 'queued_predecessor_superseded_without_transferring_exact_frontier_dispatch_to_successor'
+                }
+            }
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification' {
                 return [pscustomobject]@{
                     Phase = 'fallback_frontier_repair'
@@ -5946,6 +5952,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $explicitResult.FallbackFrontierStallGraceRecheckMissing = $true
             $explicitResult.FailureVariant =
                 'settled_frontier_progress_successor_not_rechecked_after_stall_grace'
+        }
+        if ($ErrorMessage.IndexOf(
+                'failure_class=filetransfer_fallback_frontier_repair_successor_dispatch_missing',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $explicitResult.FailureVariant =
+                'successor_missing_dispatch_due_predecessor_queued_chunk_ownership'
         }
         if ($ErrorMessage.IndexOf(
                 'failure_class=filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
@@ -13182,6 +13194,157 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiFallbackFrontierRepairSuccessorDispatchMissingFailure {
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            })
+        $scopeFields = @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+            'protocol_version', 'live_route_epoch', 'runtime_generation',
+            'terminal_generation', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'bridge_decision_generation',
+            'checkpoint_request_id', 'route_publication_generation',
+            'route_commit_generation', 'frontier_chunk_index', 'target_transport')
+        $sameScope = {
+            param([string]$Left, [string]$Right)
+            foreach ($field in $scopeFields) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Left -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Right -Name $field)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $sameAuthority = {
+            param([string]$Left, [string]$Right)
+            if (-not (& $sameScope $Left $Right)) { return $false }
+            foreach ($field in @(
+                    'authority_id', 'repair_generation', 'repair_request_key',
+                    'range_fingerprint', 'primary_protocol_repair_request_id',
+                    'primary_request_correlation_id')) {
+                if ((Get-TunaGuiLogLineFieldValue -Line $Left -Name $field) -ne
+                    (Get-TunaGuiLogLineFieldValue -Line $Right -Name $field)) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        [object[]]$settlements = @($records | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_fallback_frontier_repair_contract_settled'
+            })
+        [object[]]$grants = @($records | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_fallback_frontier_repair_authority_granted'
+            })
+        [object[]]$scheduled = @($records | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'filetransfer_v4_repair_scheduled'
+            })
+        [object[]]$candidates = @($settlements | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'outbound' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'protocol_version') -eq '6' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_kind') -eq 'PeerRequest' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').ToLowerInvariant() -eq 'missingdispatch' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq 'chunks_already_queued_before_dispatch' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'dispatch_observed') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_authority_id') -notin @('', '(none)', 'none')
+            })
+        $lookupCount = 0L
+        foreach ($candidate in $candidates) {
+            $authority = Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'authority_id'
+            $predecessor = Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'predecessor_authority_id'
+            $writer = Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'log_writer_id'
+            $frontier = Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'frontier_chunk_index'
+            [object[]]$successorGrant = @($grants | Where-Object {
+                    $lookupCount++
+                    $_.Index -lt $candidate.Index -and (& $sameAuthority $_.Line $candidate.Line)
+                } | Select-Object -Last 1)
+            [object[]]$predecessorSettlement = @($settlements | Where-Object {
+                    $lookupCount++
+                    $_.Index -lt $candidate.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $predecessor -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_authority_id') -eq $authority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').ToLowerInvariant() -eq 'superseded' -and
+                    (& $sameScope $_.Line $candidate.Line)
+                } | Select-Object -Last 1)
+            if ($successorGrant.Count -ne 1 -or $predecessorSettlement.Count -ne 1) { continue }
+            [object[]]$predecessorGrant = @($grants | Where-Object {
+                    $lookupCount++
+                    $_.Index -lt $predecessorSettlement[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $predecessor -and
+                    (& $sameScope $_.Line $candidate.Line)
+                } | Select-Object -Last 1)
+            if ($predecessorGrant.Count -ne 1) { continue }
+            $predecessorKey = Get-TunaGuiLogLineFieldValue -Line $predecessorGrant[0].Line -Name 'repair_request_key'
+            $predecessorRequest = Get-TunaGuiLogLineFieldValue -Line $predecessorGrant[0].Line -Name 'primary_protocol_repair_request_id'
+            [object[]]$queued = @($scheduled | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $predecessorGrant[0].Index -and $_.Index -lt $candidate.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'repair_request_key') -eq $predecessorKey -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'protocol_repair_request_id') -eq $predecessorRequest -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'first_start_chunk_index') -eq $frontier -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'scheduled_chunk_count') -match '^[1-9][0-9]*$'
+                })
+            if ($queued.Count -ne 1) { continue }
+
+            [object[]]$handoff = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $candidate.Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                        'filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided' -and
+                    (& $sameAuthority $_.Line $candidate.Line) -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_authority_id') -eq $predecessor -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'result') -eq 'queued_predecessor_rebound'
+                } | Select-Object -First 1)
+            $recovered = $false
+            if ($handoff.Count -eq 1) {
+                [object[]]$dispatch = @($records | Where-Object {
+                        $lookupCount++
+                        $_.Index -gt $handoff[0].Index -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                            'filetransfer_fallback_frontier_repair_dispatched' -and
+                        (& $sameAuthority $_.Line $candidate.Line) -and
+                        (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'dispatch_observed') -eq '1'
+                    } | Select-Object -First 1)
+                if ($dispatch.Count -eq 1) {
+                    [object[]]$progress = @($settlements | Where-Object {
+                            $lookupCount++
+                            $_.Index -gt $dispatch[0].Index -and
+                            (& $sameAuthority $_.Line $candidate.Line) -and
+                            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'settlement_outcome').ToLowerInvariant() -eq 'progressobserved'
+                        } | Select-Object -First 1)
+                    $recovered = $progress.Count -eq 1
+                }
+            }
+            if (-not $recovered) {
+                $sequence = Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'gui_evidence_sequence'
+                return [pscustomobject]@{
+                    Unresolved = $true
+                    FirstSequence = if ($sequence -match '^[1-9][0-9]*$') { [long]$sequence } else { [long]($candidate.Index + 1) }
+                    ParsedRecords = [long]$records.Count
+                    LookupCount = $lookupCount
+                }
+            }
+        }
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
+    }
+
     function Get-TunaGuiFallbackFrontierStallGraceRecheckFailure {
         param(
             [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -16335,7 +16498,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_fallback_frontier_repair_authority_granted',
             'filetransfer_fallback_frontier_repair_contract_settled',
             'filetransfer_fallback_frontier_repair_dispatched',
+            'filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided',
             'filetransfer_fallback_frontier_repair_progress_observed',
+            'filetransfer_v4_repair_scheduled', 'filetransfer_v4_repair_sent',
             'filetransfer_fallback_leg_transport_epoch_adopted',
             'filetransfer_fallback_tail_frontier_repair_cleared',
             'filetransfer_fallback_tail_paired_release_consumed',
@@ -18553,6 +18718,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackFrontierStallGraceRecheckFastPath =
         Get-TunaGuiFallbackFrontierStallGraceRecheckFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
+    $fallbackFrontierRepairSuccessorDispatchMissingFastPath =
+        Get-TunaGuiFallbackFrontierRepairSuccessorDispatchMissingFailure `
+            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
     $postTunaFallbackDuplicateStateReplayAmplificationFastPath =
         Get-TunaGuiPostTunaFallbackDuplicateStateReplayAmplificationFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
@@ -18644,6 +18812,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{ Kind = 'PairedRetryResponderBinding'; Result = $pairedRetryResponderBindingFastPath },
             [pscustomobject]@{ Kind = 'Checkpoint'; Result = $fallbackFrontierCheckpointAcceptanceRecheckFastPath },
             [pscustomobject]@{ Kind = 'StallGrace'; Result = $fallbackFrontierStallGraceRecheckFastPath },
+            [pscustomobject]@{
+                Kind = 'FrontierSuccessorDispatch'
+                Result = $fallbackFrontierRepairSuccessorDispatchMissingFastPath
+            },
             [pscustomobject]@{ Kind = 'DuplicateStateReplay'; Result = $postTunaFallbackDuplicateStateReplayAmplificationFastPath },
             [pscustomobject]@{ Kind = 'Adoption'; Result = $currentListenerAdoptionFastPath },
             [pscustomobject]@{ Kind = 'Unblock'; Result = $fallbackTailRepairUnblockFastPath },
@@ -19152,6 +19324,28 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $result.FallbackFrontierStallGraceRecheckMissing = $true
         $result.FailureVariant =
             'settled_frontier_progress_successor_not_rechecked_after_stall_grace'
+        return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'FrontierSuccessorDispatch') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$fallbackFrontierRepairSuccessorDispatchMissingFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_fallback_frontier_successor_dispatch_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'fallback_frontier_repair' `
+            -Reason 'queued_predecessor_superseded_without_transferring_exact_frontier_dispatch_to_successor' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_frontier_successor_dispatch_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$fallbackFrontierRepairSuccessorDispatchMissingFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$fallbackFrontierRepairSuccessorDispatchMissingFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.FailureVariant =
+            'successor_missing_dispatch_due_predecessor_queued_chunk_ownership'
         return $result
     }
 

@@ -765,6 +765,25 @@ $unbalanced = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -
 Assert-Contains $unbalanced.reasons 'cursor_event_index_count_mismatch' 'event/index count mismatch reason'
 
 $diagnostics = Get-Content -LiteralPath $fixture.DiagnosticsPath -Raw | ConvertFrom-Json
+$diagnostics | Add-Member -NotePropertyName source_event_count -NotePropertyValue 2 -Force
+$diagnostics | Add-Member -NotePropertyName synthetic_event_count -NotePropertyValue 2 -Force
+$diagnostics | Add-Member -NotePropertyName synthetic_event_names -NotePropertyValue 'filetransfer_live_progress_timeout,filetransfer_artifact_slice_summary' -Force
+$diagnostics | Add-Member -NotePropertyName augmented_event_count -NotePropertyValue 4 -Force
+$diagnostics.event_count = 4
+$diagnostics.indexed_event_count = 4
+$syntheticBalanced = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $diagnostics -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+if (@($syntheticBalanced.reasons) -contains 'cursor_event_index_count_mismatch') {
+    throw 'source plus declared synthetic events may equal the augmented index'
+}
+Assert-Equal $syntheticBalanced.sourceEventCount 2 'source event count'
+Assert-Equal $syntheticBalanced.syntheticEventCount 2 'synthetic event count'
+Assert-Equal $syntheticBalanced.augmentedEventCount 4 'augmented event count'
+
+$diagnostics.synthetic_event_count = 1
+$syntheticUnbalanced = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $diagnostics -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $syntheticUnbalanced.reasons 'cursor_event_index_count_mismatch' 'synthetic event accounting mismatch reason'
+
+$diagnostics = Get-Content -LiteralPath $fixture.DiagnosticsPath -Raw | ConvertFrom-Json
 $diagnostics.log_file_count = 2
 $multipleLogs = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $diagnostics -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
 Assert-Contains $multipleLogs.reasons 'cursor_log_file_count_mismatch' 'log file count mismatch reason'

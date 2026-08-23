@@ -15817,6 +15817,108 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackFrontierRepair")]
+    public void PostTunaFallbackV6FrontierRequest_QueuedPredecessorTransfersExactDispatchToSuccessor()
+    {
+        const string transferId = "transfer_post_tuna_fallback_v6_frontier_successor_handoff";
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 180,
+            remoteGrantedUntilExclusive: 180,
+            chunkCount: 256);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var contextType = context.GetType();
+        var queue = (System.Collections.IEnumerable)contextType
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(context)!;
+        var currentContractProperty = contextType.GetProperty(
+            "CurrentFallbackFrontierRepairContract",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+        var applyRequest = serviceType.GetMethod(
+            "ApplyOutboundV6RepairRequest",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var logStart = GetOperationalLogLength();
+
+        var predecessorRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = 3,
+            RepairRequestId = "v6-frontier:100:23",
+            RequestCorrelationId = "frq-frontier-successor-predecessor",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 100, ChunkCount = 32 }],
+            Priority = "frontier",
+            RecoveryMode = "regular_nkn_frontier_stall_control_bulk",
+        };
+        applyRequest.Invoke(service, [context, predecessorRequest]);
+
+        var predecessor = currentContractProperty.GetValue(context);
+        Assert.NotNull(predecessor);
+        var predecessorQueueEntry = Assert.Single(queue.Cast<object>());
+        Assert.Equal(
+            predecessorRequest.RepairRequestId,
+            predecessorQueueEntry.GetType().GetProperty("ProtocolRepairRequestId")!.GetValue(predecessorQueueEntry));
+        Assert.Equal(
+            [100],
+            ((IEnumerable<int>)predecessorQueueEntry.GetType().GetProperty("ChunkIndices")!.GetValue(predecessorQueueEntry)!).ToArray());
+
+        var successorRequest = predecessorRequest with
+        {
+            RepairRequestId = "v6-frontier:1:100:24",
+            RequestCorrelationId = "frq-frontier-successor-current",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 100, ChunkCount = 12 }],
+            RecoveryMode = "frontier_repair_only",
+        };
+        applyRequest.Invoke(service, [context, successorRequest]);
+
+        var successor = currentContractProperty.GetValue(context);
+        Assert.NotNull(successor);
+        Assert.NotSame(predecessor, successor);
+        var successorQueueEntry = Assert.Single(queue.Cast<object>());
+        Assert.Same(
+            successor,
+            successorQueueEntry.GetType().GetProperty("FallbackFrontierRepairContract")!.GetValue(successorQueueEntry));
+        Assert.Equal(
+            successorRequest.RepairRequestId,
+            successorQueueEntry.GetType().GetProperty("ProtocolRepairRequestId")!.GetValue(successorQueueEntry));
+        Assert.Equal(
+            [100],
+            ((IEnumerable<int>)successorQueueEntry.GetType().GetProperty("ChunkIndices")!.GetValue(successorQueueEntry)!).ToArray());
+
+        var predecessorLifecycle = predecessor!.GetType().GetProperty("Lifecycle")!.GetValue(predecessor)!;
+        var successorLifecycle = successor!.GetType().GetProperty("Lifecycle")!.GetValue(successor)!;
+        Assert.Equal(
+            "Superseded",
+            predecessorLifecycle.GetType().GetProperty("SettlementOutcome")!.GetValue(predecessorLifecycle)!.ToString());
+        Assert.Null(successorLifecycle.GetType().GetProperty("SettlementOutcome")!.GetValue(successorLifecycle));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_fallback_frontier_repair_successor_dispatch_handoff_decided;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains("result=queued_predecessor_rebound", log, StringComparison.Ordinal);
+        Assert.Contains("authority_effect=none", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "settlement_outcome=MissingDispatch; dispatch_observed=0; decision_reason=chunks_already_queued_before_dispatch",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_v6_frontier_request_receive_dispatched;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "decision_reason=legacy_sender_repair_not_scheduled",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PostTunaFallbackV6FrontierRequest_NativeQueueCoalescesAliasesAndInstallsSuccessorContract()
     {
         using var service = new SessionFileTransferService();
