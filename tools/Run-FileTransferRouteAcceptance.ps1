@@ -1591,6 +1591,10 @@ function New-RouteAcceptanceRunResult {
         efficiencyPostYieldMaxNoProgressFrontierEffectCount = 0L
         efficiencyPostYieldMaxNoProgressRepeatedTupleCount = 0L
         efficiencyDuplicateStateReplayAuthorityCount = 0L
+        efficiencyExactFrontierRepairPreemptionRawCount = 0L
+        efficiencyExactFrontierRepairPreemptionDistinctCount = 0L
+        efficiencyExactFrontierRepairPreemptionRecoveredCount = 0L
+        efficiencyExactFrontierRepairPreemptionUnresolvedCount = 0L
         fallbackTailEfficiencyTreadmillRawCount = 0L
         fallbackTailEfficiencyTreadmillDistinctCount = 0L
         fallbackTailEfficiencyTreadmillRecoveredCount = 0L
@@ -4165,6 +4169,10 @@ function Assert-Phase4EfficiencySummary {
     $maxNoProgressFrontierEffectText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_max_no_progress_frontier_effect_count' -DefaultValue ''
     $maxNoProgressRepeatedTupleText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_max_no_progress_repeated_tuple_count' -DefaultValue ''
     $duplicateReplayText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_tuna_fallback_duplicate_state_replay_authority_count' -DefaultValue ''
+    $exactFrontierPreemptionRawText = Get-RouteAcceptanceReportValue -Report $summary -Name 'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count' -DefaultValue ''
+    $exactFrontierPreemptionDistinctText = Get-RouteAcceptanceReportValue -Report $summary -Name 'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count' -DefaultValue ''
+    $exactFrontierPreemptionRecoveredText = Get-RouteAcceptanceReportValue -Report $summary -Name 'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count' -DefaultValue ''
+    $exactFrontierPreemptionUnresolvedText = Get-RouteAcceptanceReportValue -Report $summary -Name 'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count' -DefaultValue ''
     $treadmillRawText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_raw_count' -DefaultValue ''
     $treadmillDistinctText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_distinct_count' -DefaultValue ''
     $treadmillRecoveredText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_recovered_count' -DefaultValue ''
@@ -4186,6 +4194,10 @@ function Assert-Phase4EfficiencySummary {
         max_no_progress_frontier_effect = $maxNoProgressFrontierEffectText
         max_no_progress_repeated_tuple = $maxNoProgressRepeatedTupleText
         duplicate_replay = $duplicateReplayText
+        exact_frontier_preemption_raw = $exactFrontierPreemptionRawText
+        exact_frontier_preemption_distinct = $exactFrontierPreemptionDistinctText
+        exact_frontier_preemption_recovered = $exactFrontierPreemptionRecoveredText
+        exact_frontier_preemption_unresolved = $exactFrontierPreemptionUnresolvedText
         treadmill_raw = $treadmillRawText
         treadmill_distinct = $treadmillDistinctText
         treadmill_recovered = $treadmillRecoveredText
@@ -4219,12 +4231,21 @@ function Assert-Phase4EfficiencySummary {
     $treadmillQuartetValid = $false
     $structuralVerdictValid = $false
     $episodeCountsValid = $false
+    $exactFrontierPreemptionQuartetValid = $false
     if ($numericFieldsValid) {
         $treadmillRaw = [long]$numericValues.treadmill_raw
         $treadmillDistinct = [long]$numericValues.treadmill_distinct
         $treadmillRecovered = [long]$numericValues.treadmill_recovered
         $treadmillUnresolved = [long]$numericValues.treadmill_unresolved
         $duplicateReplay = [long]$numericValues.duplicate_replay
+        $exactFrontierPreemptionRaw = [long]$numericValues.exact_frontier_preemption_raw
+        $exactFrontierPreemptionDistinct = [long]$numericValues.exact_frontier_preemption_distinct
+        $exactFrontierPreemptionRecovered = [long]$numericValues.exact_frontier_preemption_recovered
+        $exactFrontierPreemptionUnresolved = [long]$numericValues.exact_frontier_preemption_unresolved
+        $exactFrontierPreemptionQuartetValid =
+            $exactFrontierPreemptionRaw -ge $exactFrontierPreemptionDistinct -and
+            $exactFrontierPreemptionDistinct -eq
+                ($exactFrontierPreemptionRecovered + $exactFrontierPreemptionUnresolved)
         $episodeCountsValid = [long]$numericValues.frontier_episode -eq
             ([long]$numericValues.frontier_progress_closed_episode +
                 [long]$numericValues.frontier_unresolved_episode)
@@ -4235,7 +4256,14 @@ function Assert-Phase4EfficiencySummary {
                 ($treadmillUnresolved -eq 0 -and $treadmillVerdict -ne 'fail')) -and
             (($failureClass -ne 'fallback_tail_efficiency_treadmill') -or
                 ($treadmillUnresolved -gt 0 -and $treadmillVerdict -eq 'fail'))
-        $structuralVerdictValid = if ($duplicateReplay -gt 0) {
+        $structuralVerdictValid = if ($exactFrontierPreemptionUnresolved -gt 0) {
+            $exactFrontierPreemptionRaw -ge $exactFrontierPreemptionDistinct -and
+                $exactFrontierPreemptionDistinct -eq
+                    ($exactFrontierPreemptionRecovered + $exactFrontierPreemptionUnresolved) -and
+                $verdict -eq 'fail' -and
+                $failureClass -eq 'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay'
+        }
+        elseif ($duplicateReplay -gt 0) {
             $verdict -eq 'fail' -and
                 $failureClass -eq 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification'
         }
@@ -4246,13 +4274,15 @@ function Assert-Phase4EfficiencySummary {
         else {
             $failureClass -notin @(
                 'fallback_tail_efficiency_treadmill',
-                'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification')
+                'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+                'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay')
         }
     }
     $isMalformed = $verdict -notin $validVerdicts -or
         -not $failureClassMatchesVerdict -or
         -not $numericFieldsValid -or
         -not $episodeCountsValid -or
+        -not $exactFrontierPreemptionQuartetValid -or
         -not $treadmillQuartetValid -or
         -not $structuralVerdictValid
     if ($isMalformed) {
@@ -4277,6 +4307,10 @@ function Assert-Phase4EfficiencySummary {
     $Result.efficiencyPostYieldMaxNoProgressFrontierEffectCount = [long]$numericValues.max_no_progress_frontier_effect
     $Result.efficiencyPostYieldMaxNoProgressRepeatedTupleCount = [long]$numericValues.max_no_progress_repeated_tuple
     $Result.efficiencyDuplicateStateReplayAuthorityCount = [long]$numericValues.duplicate_replay
+    $Result.efficiencyExactFrontierRepairPreemptionRawCount = [long]$numericValues.exact_frontier_preemption_raw
+    $Result.efficiencyExactFrontierRepairPreemptionDistinctCount = [long]$numericValues.exact_frontier_preemption_distinct
+    $Result.efficiencyExactFrontierRepairPreemptionRecoveredCount = [long]$numericValues.exact_frontier_preemption_recovered
+    $Result.efficiencyExactFrontierRepairPreemptionUnresolvedCount = [long]$numericValues.exact_frontier_preemption_unresolved
     $Result.fallbackTailEfficiencyTreadmillRawCount = [long]$numericValues.treadmill_raw
     $Result.fallbackTailEfficiencyTreadmillDistinctCount = [long]$numericValues.treadmill_distinct
     $Result.fallbackTailEfficiencyTreadmillRecoveredCount = [long]$numericValues.treadmill_recovered
@@ -8243,6 +8277,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         'post_yield_max_no_progress_frontier_effect_count=0',
         'post_yield_max_no_progress_repeated_tuple_count=0',
         'post_tuna_fallback_duplicate_state_replay_authority_count=0',
+        'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count=0',
+        'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count=0',
+        'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count=0',
+        'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count=0',
         'fallback_tail_efficiency_treadmill_raw_count=0',
         'fallback_tail_efficiency_treadmill_distinct_count=0',
         'fallback_tail_efficiency_treadmill_recovered_count=0',
@@ -8354,6 +8392,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         postYieldMaxNoProgressFrontierEffectCount = 0
         postYieldMaxNoProgressRepeatedTupleCount = 0
         postTunaFallbackDuplicateStateReplayAuthorityCount = 0
+        postTunaFallbackExactFrontierRepairPreemptionRawCount = 0
+        postTunaFallbackExactFrontierRepairPreemptionDistinctCount = 0
+        postTunaFallbackExactFrontierRepairPreemptionRecoveredCount = 0
+        postTunaFallbackExactFrontierRepairPreemptionUnresolvedCount = 0
         fallbackTailEfficiencyTreadmillRawCount = 0
         fallbackTailEfficiencyTreadmillDistinctCount = 0
         fallbackTailEfficiencyTreadmillRecoveredCount = 0
@@ -9056,6 +9098,9 @@ function Test-Phase4PerformanceFailureLine {
         $Line.IndexOf('efficiency_verdict=fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Line.IndexOf(
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+            [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Line.IndexOf(
+            'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay',
             [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
@@ -10552,6 +10597,10 @@ function New-RouteAcceptanceSummaryRunDto {
         postYieldMaxNoProgressFrontierEffectCount = [long]$Result.efficiencyPostYieldMaxNoProgressFrontierEffectCount
         postYieldMaxNoProgressRepeatedTupleCount = [long]$Result.efficiencyPostYieldMaxNoProgressRepeatedTupleCount
         postTunaFallbackDuplicateStateReplayAuthorityCount = [long]$Result.efficiencyDuplicateStateReplayAuthorityCount
+        postTunaFallbackExactFrontierRepairPreemptionRawCount = [long]$Result.efficiencyExactFrontierRepairPreemptionRawCount
+        postTunaFallbackExactFrontierRepairPreemptionDistinctCount = [long]$Result.efficiencyExactFrontierRepairPreemptionDistinctCount
+        postTunaFallbackExactFrontierRepairPreemptionRecoveredCount = [long]$Result.efficiencyExactFrontierRepairPreemptionRecoveredCount
+        postTunaFallbackExactFrontierRepairPreemptionUnresolvedCount = [long]$Result.efficiencyExactFrontierRepairPreemptionUnresolvedCount
         fallbackTailEfficiencyTreadmillRawCount = [long]$Result.fallbackTailEfficiencyTreadmillRawCount
         fallbackTailEfficiencyTreadmillDistinctCount = [long]$Result.fallbackTailEfficiencyTreadmillDistinctCount
         fallbackTailEfficiencyTreadmillRecoveredCount = [long]$Result.fallbackTailEfficiencyTreadmillRecoveredCount
@@ -10692,6 +10741,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $efficiencyPostYieldMaxNoProgressFrontierEffectCount = [long](($runDtos | Measure-Object -Property postYieldMaxNoProgressFrontierEffectCount -Maximum).Maximum)
     $efficiencyPostYieldMaxNoProgressRepeatedTupleCount = [long](($runDtos | Measure-Object -Property postYieldMaxNoProgressRepeatedTupleCount -Maximum).Maximum)
     $efficiencyDuplicateStateReplayAuthorityCount = [long](($runDtos | Measure-Object -Property postTunaFallbackDuplicateStateReplayAuthorityCount -Sum).Sum)
+    $efficiencyExactFrontierRepairPreemptionRawCount = [long](($runDtos | Measure-Object -Property postTunaFallbackExactFrontierRepairPreemptionRawCount -Sum).Sum)
+    $efficiencyExactFrontierRepairPreemptionDistinctCount = [long](($runDtos | Measure-Object -Property postTunaFallbackExactFrontierRepairPreemptionDistinctCount -Sum).Sum)
+    $efficiencyExactFrontierRepairPreemptionRecoveredCount = [long](($runDtos | Measure-Object -Property postTunaFallbackExactFrontierRepairPreemptionRecoveredCount -Sum).Sum)
+    $efficiencyExactFrontierRepairPreemptionUnresolvedCount = [long](($runDtos | Measure-Object -Property postTunaFallbackExactFrontierRepairPreemptionUnresolvedCount -Sum).Sum)
     $fallbackTailEfficiencyTreadmillRawCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillRawCount -Sum).Sum)
     $fallbackTailEfficiencyTreadmillDistinctCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillDistinctCount -Sum).Sum)
     $fallbackTailEfficiencyTreadmillRecoveredCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillRecoveredCount -Sum).Sum)
@@ -11731,6 +11784,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("post_yield_max_no_progress_frontier_effect_count={0}" -f $efficiencyPostYieldMaxNoProgressFrontierEffectCount),
         ("post_yield_max_no_progress_repeated_tuple_count={0}" -f $efficiencyPostYieldMaxNoProgressRepeatedTupleCount),
         ("post_tuna_fallback_duplicate_state_replay_authority_count={0}" -f $efficiencyDuplicateStateReplayAuthorityCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count={0}" -f $efficiencyExactFrontierRepairPreemptionRawCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count={0}" -f $efficiencyExactFrontierRepairPreemptionDistinctCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count={0}" -f $efficiencyExactFrontierRepairPreemptionRecoveredCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count={0}" -f $efficiencyExactFrontierRepairPreemptionUnresolvedCount),
         ("fallback_tail_efficiency_treadmill_raw_count={0}" -f $fallbackTailEfficiencyTreadmillRawCount),
         ("fallback_tail_efficiency_treadmill_distinct_count={0}" -f $fallbackTailEfficiencyTreadmillDistinctCount),
         ("fallback_tail_efficiency_treadmill_recovered_count={0}" -f $fallbackTailEfficiencyTreadmillRecoveredCount),
@@ -12435,6 +12492,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.post_yield_max_no_progress_frontier_effect_count={1}" -f $prefix, $result.postYieldMaxNoProgressFrontierEffectCount)
         $textLines += ("{0}.post_yield_max_no_progress_repeated_tuple_count={1}" -f $prefix, $result.postYieldMaxNoProgressRepeatedTupleCount)
         $textLines += ("{0}.post_tuna_fallback_duplicate_state_replay_authority_count={1}" -f $prefix, $result.postTunaFallbackDuplicateStateReplayAuthorityCount)
+        $textLines += ("{0}.filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count={1}" -f $prefix, $result.postTunaFallbackExactFrontierRepairPreemptionRawCount)
+        $textLines += ("{0}.filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count={1}" -f $prefix, $result.postTunaFallbackExactFrontierRepairPreemptionDistinctCount)
+        $textLines += ("{0}.filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count={1}" -f $prefix, $result.postTunaFallbackExactFrontierRepairPreemptionRecoveredCount)
+        $textLines += ("{0}.filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count={1}" -f $prefix, $result.postTunaFallbackExactFrontierRepairPreemptionUnresolvedCount)
         $textLines += ("{0}.fallback_tail_efficiency_treadmill_raw_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillRawCount)
         $textLines += ("{0}.fallback_tail_efficiency_treadmill_distinct_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillDistinctCount)
         $textLines += ("{0}.fallback_tail_efficiency_treadmill_recovered_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillRecoveredCount)
@@ -12595,6 +12656,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         postYieldMaxNoProgressFrontierEffectCount = $efficiencyPostYieldMaxNoProgressFrontierEffectCount
         postYieldMaxNoProgressRepeatedTupleCount = $efficiencyPostYieldMaxNoProgressRepeatedTupleCount
         postTunaFallbackDuplicateStateReplayAuthorityCount = $efficiencyDuplicateStateReplayAuthorityCount
+        postTunaFallbackExactFrontierRepairPreemptionRawCount = $efficiencyExactFrontierRepairPreemptionRawCount
+        postTunaFallbackExactFrontierRepairPreemptionDistinctCount = $efficiencyExactFrontierRepairPreemptionDistinctCount
+        postTunaFallbackExactFrontierRepairPreemptionRecoveredCount = $efficiencyExactFrontierRepairPreemptionRecoveredCount
+        postTunaFallbackExactFrontierRepairPreemptionUnresolvedCount = $efficiencyExactFrontierRepairPreemptionUnresolvedCount
         fallbackTailEfficiencyTreadmillRawCount = $fallbackTailEfficiencyTreadmillRawCount
         fallbackTailEfficiencyTreadmillDistinctCount = $fallbackTailEfficiencyTreadmillDistinctCount
         fallbackTailEfficiencyTreadmillRecoveredCount = $fallbackTailEfficiencyTreadmillRecoveredCount

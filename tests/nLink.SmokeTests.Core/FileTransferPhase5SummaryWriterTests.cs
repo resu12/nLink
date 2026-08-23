@@ -104,6 +104,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     efficiencyPostYieldMaxNoProgressFrontierEffectCount = 0L
                     efficiencyPostYieldMaxNoProgressRepeatedTupleCount = 0L
                     efficiencyDuplicateStateReplayAuthorityCount = 0L
+                    efficiencyExactFrontierRepairPreemptionRawCount = 0L
+                    efficiencyExactFrontierRepairPreemptionDistinctCount = 0L
+                    efficiencyExactFrontierRepairPreemptionRecoveredCount = 0L
+                    efficiencyExactFrontierRepairPreemptionUnresolvedCount = 0L
                     fallbackTailEfficiencyTreadmillRawCount = 0L
                     fallbackTailEfficiencyTreadmillDistinctCount = 0L
                     fallbackTailEfficiencyTreadmillRecoveredCount = 0L
@@ -119,7 +123,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     [string]$FailureClass,
                     [string]$RecoveryCount = '4',
                     [string]$TreadmillEffect = '',
-                    [string]$DuplicateReplayCount = '0')
+                    [string]$DuplicateReplayCount = '0',
+                    [string]$ExactFrontierPreemptionCount = '0')
                 if ([string]::IsNullOrWhiteSpace($TreadmillEffect)) {
                     $TreadmillEffect = if ($Verdict -eq 'fail' -and
                         $FailureClass -eq 'fallback_tail_efficiency_treadmill') { '1' } else { '0' }
@@ -141,6 +146,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     'post_yield_max_no_progress_frontier_effect_count=31',
                     'post_yield_max_no_progress_repeated_tuple_count=7',
                     "post_tuna_fallback_duplicate_state_replay_authority_count=$DuplicateReplayCount",
+                    "filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count=$ExactFrontierPreemptionCount",
+                    "filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count=$ExactFrontierPreemptionCount",
+                    'filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count=0',
+                    "filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count=$ExactFrontierPreemptionCount",
                     "fallback_tail_efficiency_treadmill_raw_count=$treadmillEffect",
                     "fallback_tail_efficiency_treadmill_distinct_count=$treadmillEffect",
                     'fallback_tail_efficiency_treadmill_recovered_count=0',
@@ -158,6 +167,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     [pscustomobject]@{ Name = 'not_evaluated'; Verdict = 'not_evaluated_due_correctness_failure'; Class = 'none'; Recovery = '0'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
                     [pscustomobject]@{ Name = 'fail'; Verdict = 'fail'; Class = 'fallback_tail_efficiency_treadmill'; Recovery = '75'; Treadmill = ''; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
                     [pscustomobject]@{ Name = 'duplicate_fail'; Verdict = 'fail'; Class = 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification'; Recovery = '4'; Treadmill = '0'; Duplicate = '1'; Correctness = $false; WriteSummary = $true },
+                    [pscustomobject]@{ Name = 'preemption_fail'; Verdict = 'fail'; Class = 'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay'; Recovery = '4'; Treadmill = '0'; Duplicate = '0'; Preemption = '1'; Correctness = $false; WriteSummary = $true },
                     [pscustomobject]@{ Name = 'mixed'; Verdict = 'fail'; Class = 'fallback_tail_efficiency_treadmill'; Recovery = '75'; Treadmill = ''; Duplicate = '0'; Correctness = $true; WriteSummary = $true },
                     [pscustomobject]@{ Name = 'contradictory_treadmill'; Verdict = 'warning'; Class = 'efficiency_warning'; Recovery = '8'; Treadmill = '1'; Duplicate = '0'; Correctness = $false; WriteSummary = $true },
                     [pscustomobject]@{ Name = 'contradictory_duplicate'; Verdict = 'pass'; Class = 'none'; Recovery = '4'; Treadmill = '0'; Duplicate = '1'; Correctness = $false; WriteSummary = $true },
@@ -170,7 +180,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     [void][IO.Directory]::CreateDirectory($dir)
                     Set-Content -LiteralPath (Join-Path $dir 'filetransfer-operator-verdict.txt') -Value 'verdict=PASS'
                     if ($case.WriteSummary) {
-                        Write-TestEfficiencySummary -ArtifactDir $dir -Verdict $case.Verdict -FailureClass $case.Class -RecoveryCount $case.Recovery -TreadmillEffect $case.Treadmill -DuplicateReplayCount $case.Duplicate
+                        $preemptionCount = if ($null -ne $case.PSObject.Properties['Preemption']) { [string]$case.Preemption } else { '0' }
+                        Write-TestEfficiencySummary -ArtifactDir $dir -Verdict $case.Verdict -FailureClass $case.Class -RecoveryCount $case.Recovery -TreadmillEffect $case.Treadmill -DuplicateReplayCount $case.Duplicate -ExactFrontierPreemptionCount $preemptionCount
                     }
                     $result = New-TestResult -ArtifactDir $dir
                     Assert-Phase4EfficiencySummary -Result $result
@@ -266,6 +277,9 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         Assert.Equal("pass", cases["duplicate_fail"].GetProperty("validation").GetString());
         Assert.Equal(1, cases["duplicate_fail"].GetProperty("performanceFailureCount").GetInt32());
         Assert.Equal(0, cases["duplicate_fail"].GetProperty("correctnessFailureCount").GetInt32());
+        Assert.Equal("pass", cases["preemption_fail"].GetProperty("validation").GetString());
+        Assert.Equal(1, cases["preemption_fail"].GetProperty("performanceFailureCount").GetInt32());
+        Assert.Equal(0, cases["preemption_fail"].GetProperty("correctnessFailureCount").GetInt32());
         Assert.Equal(1, cases["mixed"].GetProperty("performanceFailureCount").GetInt32());
         Assert.Equal(1, cases["mixed"].GetProperty("correctnessFailureCount").GetInt32());
 

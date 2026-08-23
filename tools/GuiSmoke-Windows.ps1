@@ -5410,6 +5410,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $false
         FallbackFrontierStallGraceRecheckMissing = $false
         PostTunaFallbackDuplicateStateReplayAmplification = $false
+        PostTunaFallbackExactFrontierRepairPreemption = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
         FallbackTailPeerProofBeforeLocalYieldNotRetained = $false
         FallbackTailPeerProofBeforeLocalYieldAsymmetricRecoveryScopeNotRetained = $false
@@ -5562,6 +5563,12 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'fallback_frontier_repair'
                     Reason = 'duplicate_current_receiver_state_created_sender_liveness_replay_authority'
+                }
+            }
+            'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay' {
+                return [pscustomobject]@{
+                    Phase = 'fallback_frontier_repair'
+                    Reason = 'dispatched_exact_peer_frontier_repair_superseded_by_post_fallback_sender_wait_before_hold_elapsed'
                 }
             }
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' {
@@ -5965,6 +5972,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $explicitResult.PostTunaFallbackDuplicateStateReplayAmplification = $true
             $explicitResult.FailureVariant =
                 'redundant_control_bulk_state_copy_started_64_chunk_repair_sweep'
+        }
+        if ($ErrorMessage.IndexOf(
+                'failure_class=filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $explicitResult.PostTunaFallbackExactFrontierRepairPreemption = $true
+            $explicitResult.FailureVariant =
+                'canonical_fallback_frontier_key_not_resolved_by_legacy_exact_repair_suppression'
         }
         if ($ErrorMessage.IndexOf(
                 'failure_class=runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
@@ -13194,6 +13208,206 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiPostTunaFallbackExactFrontierRepairPreemptionFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $exactByAuthority = @{}
+        $pendingBySuccessor = @{}
+        $candidateAuthorities = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        $firstSequence = [long]::MaxValue
+        $visits = 0L
+        $scopeFields = @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+            'protocol_version', 'live_route_epoch', 'runtime_generation',
+            'terminal_generation', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'bridge_decision_generation',
+            'checkpoint_request_id', 'route_publication_generation',
+            'route_commit_generation')
+
+        foreach ($line in $Lines) {
+            $visits++
+            $fields = @{}
+            foreach ($match in [regex]::Matches(
+                    $line,
+                    '(?i)(?<name>[a-z0-9_]+)=(?<value>[^;\r\n]+)')) {
+                $fields[$match.Groups['name'].Value] = $match.Groups['value'].Value.Trim()
+            }
+            $eventName = [string]$fields['event']
+            $writer = [string]$fields['log_writer_id']
+            if ([string]::IsNullOrWhiteSpace($eventName) -or
+                [string]::IsNullOrWhiteSpace($writer)) {
+                continue
+            }
+            $sequence = if ([string]$fields['gui_evidence_sequence'] -match '^[1-9][0-9]*$') {
+                [long]$fields['gui_evidence_sequence']
+            }
+            elseif ([string]$fields['log_writer_sequence'] -match '^[1-9][0-9]*$') {
+                [long]$fields['log_writer_sequence']
+            }
+            else { $visits }
+            $scope = @($scopeFields | ForEach-Object { [string]$fields[$_] }) -join '|'
+
+            if ($eventName -eq 'filetransfer_fallback_frontier_repair_authority_granted') {
+                $authority = [string]$fields['authority_id']
+                if ([string]$fields['direction'] -ne 'outbound' -or
+                    [string]$fields['route'] -ne 'post_tuna_fallback_v6' -or
+                    [string]$fields['protocol_version'] -ne '6' -or
+                    [string]::IsNullOrWhiteSpace($authority)) {
+                    continue
+                }
+                if ([string]$fields['source_kind'] -eq 'PeerRequest' -and
+                    [string]$fields['requested_chunk_count'] -eq '1' -and
+                    [string]$fields['repair_request_key'] -match '^fallback-frontier:') {
+                    $exactByAuthority["$writer|$authority".ToLowerInvariant()] = [pscustomobject]@{
+                        Authority = $authority
+                        Scope = $scope
+                        Writer = $writer
+                        Session = [string]$fields['session_id']
+                        Transfer = [string]$fields['transfer_id']
+                        Frontier = [string]$fields['frontier_chunk_index']
+                        RepairKey = [string]$fields['repair_request_key']
+                        RequestId = [string]$fields['primary_protocol_repair_request_id']
+                        CorrelationId = [string]$fields['primary_request_correlation_id']
+                        Scheduled = $false
+                        ReceiveDispatched = $false
+                        PhysicalSend = $false
+                        DispatchObserved = $false
+                        DispatchTicks = 0L
+                    }
+                    continue
+                }
+                if ([string]$fields['source_kind'] -eq 'SenderLivenessRescue' -and
+                    [string]$fields['authority_decision_reason'] -eq 'post_fallback_sender_wait' -and
+                    [string]$fields['requested_chunk_count'] -eq '64') {
+                    $predecessor = [string]$fields['predecessor_authority_id']
+                    $predecessorKey = "$writer|$predecessor".ToLowerInvariant()
+                    if (-not $exactByAuthority.ContainsKey($predecessorKey)) { continue }
+                    $exact = $exactByAuthority[$predecessorKey]
+                    $successorTicks = if ([string]$fields['log_writer_attempt_utc_ticks'] -match '^[1-9][0-9]*$') {
+                        [long]$fields['log_writer_attempt_utc_ticks']
+                    } else { 0L }
+                    $protocolId = [string]$fields['primary_protocol_repair_request_id']
+                    if ($scope -ne $exact.Scope -or [string]$fields['frontier_chunk_index'] -ne $exact.Frontier -or
+                        -not $exact.Scheduled -or -not $exact.ReceiveDispatched -or
+                        -not $exact.PhysicalSend -or -not $exact.DispatchObserved -or
+                        $successorTicks -le $exact.DispatchTicks -or
+                        ($successorTicks - $exact.DispatchTicks) -ge 50000000L -or
+                        $protocolId -notmatch '^transport_rebind_safety_replay:(?<generation>[1-9][0-9]*):') {
+                        continue
+                    }
+                    $pendingBySuccessor["$writer|$authority".ToLowerInvariant()] = [pscustomobject]@{
+                        Authority = $authority
+                        Predecessor = $predecessor
+                        Writer = $writer
+                        Session = $exact.Session
+                        Transfer = $exact.Transfer
+                        Frontier = $exact.Frontier
+                        RebindGeneration = [string]$Matches['generation']
+                        Sequence = $sequence
+                        Settled = $false
+                    }
+                }
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_v4_repair_scheduled') {
+                foreach ($exact in @($exactByAuthority.Values)) {
+                    if ($writer -eq $exact.Writer -and
+                        [string]$fields['repair_request_key'] -eq $exact.RepairKey -and
+                        [string]$fields['protocol_repair_request_id'] -eq $exact.RequestId -and
+                        [string]$fields['first_start_chunk_index'] -eq $exact.Frontier -and
+                        [string]$fields['requested_chunk_count'] -eq '1') {
+                        $exact.Scheduled = $true
+                    }
+                }
+                continue
+            }
+            if ($eventName -eq 'filetransfer_v6_frontier_request_receive_dispatched') {
+                foreach ($exact in @($exactByAuthority.Values)) {
+                    if ($writer -eq $exact.Writer -and
+                        [string]$fields['repair_request_id'] -eq $exact.RequestId -and
+                        [string]$fields['request_correlation_id'] -eq $exact.CorrelationId -and
+                        [string]$fields['first_start_chunk_index'] -eq $exact.Frontier -and
+                        [string]$fields['first_chunk_count'] -eq '1' -and
+                        [string]$fields['data_session_generation'] -match '^[1-9][0-9]*$') {
+                        $exact.ReceiveDispatched = $true
+                    }
+                }
+                continue
+            }
+            if ($eventName -in @('filetransfer_data_path_send_result', 'filetransfer_v4_repair_sent')) {
+                foreach ($exact in @($exactByAuthority.Values)) {
+                    $matchesPhysicalSend = if ($eventName -eq 'filetransfer_data_path_send_result') {
+                        [string]$fields['frame_repair_request_id'] -eq $exact.RequestId -and
+                        [string]$fields['start_chunk_index'] -eq $exact.Frontier -and
+                        [string]$fields['frame_chunk_count'] -eq '1' -and
+                        [string]$fields['delivery_result'] -eq 'sent'
+                    }
+                    else {
+                        [string]$fields['protocol_repair_request_id'] -eq $exact.RequestId -and
+                        [string]$fields['first_start_chunk_index'] -eq $exact.Frontier -and
+                        [string]$fields['sent_chunk_count'] -match '^[1-9][0-9]*$'
+                    }
+                    if ($writer -eq $exact.Writer -and $matchesPhysicalSend) {
+                        $exact.PhysicalSend = $true
+                    }
+                }
+                continue
+            }
+            if ($eventName -eq 'filetransfer_fallback_frontier_repair_dispatched') {
+                $key = "$writer|$([string]$fields['authority_id'])".ToLowerInvariant()
+                if ($exactByAuthority.ContainsKey($key) -and
+                    [string]$fields['dispatch_observed'] -eq '1') {
+                    $exact = $exactByAuthority[$key]
+                    $exact.DispatchObserved = $true
+                    $exact.DispatchTicks = if ([string]$fields['log_writer_attempt_utc_ticks'] -match '^[1-9][0-9]*$') {
+                        [long]$fields['log_writer_attempt_utc_ticks']
+                    } else { 0L }
+                }
+                continue
+            }
+            if ($eventName -eq 'filetransfer_fallback_frontier_repair_contract_settled') {
+                $successorKey = "$writer|$([string]$fields['successor_authority_id'])".ToLowerInvariant()
+                if ($pendingBySuccessor.ContainsKey($successorKey)) {
+                    $pending = $pendingBySuccessor[$successorKey]
+                    if ([string]$fields['authority_id'] -eq $pending.Predecessor -and
+                        [string]$fields['settlement_outcome'] -eq 'Superseded' -and
+                        [string]$fields['decision_reason'] -eq 'post_fallback_sender_wait') {
+                        $pending.Settled = $true
+                    }
+                }
+                continue
+            }
+            if ($eventName -ne 'filetransfer_transport_rebind_safety_replay_started' -or
+                [string]$fields['reason'] -ne 'post_fallback_sender_wait' -or
+                [string]$fields['requested_chunk_count'] -ne '64' -or
+                [string]$fields['scheduled_chunk_count'] -ne '64' -or
+                [string]$fields['post_tuna_v6_frontier_sweep'] -ne '1') {
+                continue
+            }
+            foreach ($pending in @($pendingBySuccessor.Values)) {
+                if ($pending.Settled -and $writer -eq $pending.Writer -and
+                    [string]$fields['session_id'] -eq $pending.Session -and
+                    [string]$fields['transfer_id'] -eq $pending.Transfer -and
+                    [string]$fields['remote_next_expected_chunk_index'] -eq $pending.Frontier -and
+                    [string]$fields['replay_start_chunk_index'] -eq $pending.Frontier -and
+                    [string]$fields['rebind_generation'] -eq $pending.RebindGeneration -and
+                    $candidateAuthorities.Add("$writer|$($pending.Authority)")) {
+                    $firstSequence = [Math]::Min($firstSequence, [long]$pending.Sequence)
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = $candidateAuthorities.Count -gt 0
+            FirstSequence = $firstSequence
+            ParsedRecords = $visits
+        }
+    }
+
     function Get-TunaGuiFallbackFrontierRepairSuccessorDispatchMissingFailure {
         param(
             [Parameter(Mandatory = $true)]
@@ -16525,11 +16739,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_v6_epoch_terminal', 'filetransfer_v6_frontier_request_advanced_remote_frontier',
             'filetransfer_v6_frontier_request_ignored_obsolete',
             'filetransfer_v6_frontier_request_receive_dispatch_rejected',
+            'filetransfer_v6_frontier_request_receive_dispatched',
             'filetransfer_v6_frontier_request_deferred',
             'filetransfer_v6_frontier_stall_grace_recheck_decided',
             'filetransfer_v4_state_received',
             'filetransfer_transport_rebind_safety_replay_started',
             'filetransfer_post_tuna_fallback_rebind_state_replay_suppressed',
+            'filetransfer_post_tuna_fallback_exact_frontier_replay_preemption_suppressed',
             'filetransfer_v6_fallback_frontier_repair_progress_state_forced',
             'filetransfer_v6_sparse_write_committed',
             'filetransfer_v6_receiver_state_sent', 'filetransfer_v6_frontier_request_sent',
@@ -18724,6 +18940,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $postTunaFallbackDuplicateStateReplayAmplificationFastPath =
         Get-TunaGuiPostTunaFallbackDuplicateStateReplayAmplificationFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
+    $postTunaFallbackExactFrontierRepairPreemptionFastPath =
+        Get-TunaGuiPostTunaFallbackExactFrontierRepairPreemptionFailure `
+            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
     $currentListenerAdoptionFastPath =
         Get-TunaGuiCurrentListenerAdoptionFailure `
             -Lines ([string[]]$earlyPredicateLines.Adoption.ToArray())
@@ -18817,6 +19036,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 Result = $fallbackFrontierRepairSuccessorDispatchMissingFastPath
             },
             [pscustomobject]@{ Kind = 'DuplicateStateReplay'; Result = $postTunaFallbackDuplicateStateReplayAmplificationFastPath },
+            [pscustomobject]@{ Kind = 'ExactFrontierRepairPreemption'; Result = $postTunaFallbackExactFrontierRepairPreemptionFastPath },
             [pscustomobject]@{ Kind = 'Adoption'; Result = $currentListenerAdoptionFastPath },
             [pscustomobject]@{ Kind = 'Unblock'; Result = $fallbackTailRepairUnblockFastPath },
             [pscustomobject]@{ Kind = 'UnblockProgress'; Result = $fallbackFrontierRepairProgressStateFastPath },
@@ -19368,6 +19588,28 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $result.PostTunaFallbackDuplicateStateReplayAmplification = $true
         $result.FailureVariant =
             'redundant_control_bulk_state_copy_started_64_chunk_repair_sweep'
+        return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'ExactFrontierRepairPreemption') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource =
+                "${classificationSource}_post_tuna_fallback_exact_frontier_repair_preemption_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'fallback_frontier_repair' `
+            -Reason 'dispatched_exact_peer_frontier_repair_superseded_by_post_fallback_sender_wait_before_hold_elapsed' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_post_tuna_fallback_exact_frontier_repair_preemption_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$postTunaFallbackExactFrontierRepairPreemptionFastPath.ParsedRecords) `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.PostTunaFallbackExactFrontierRepairPreemption = $true
+        $result.FailureVariant =
+            'canonical_fallback_frontier_key_not_resolved_by_legacy_exact_repair_suppression'
         return $result
     }
 

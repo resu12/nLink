@@ -16452,9 +16452,21 @@ public sealed partial class SessionFileTransferService
         }
 
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
+        var canonicalContract = repairState.FallbackFrontierRepairContract;
+        var canonicalExactRepair = canonicalContract is not null &&
+            ReferenceEquals(context.CurrentFallbackFrontierRepairContract, canonicalContract) &&
+            !canonicalContract.Lifecycle.IsSettled &&
+            canonicalContract.Authority.SourceKind == FallbackFrontierRepairSourceKind.PeerRequest &&
+            canonicalContract.Authority.FrontierChunkIndex == remoteFrontier &&
+            string.Equals(
+                canonicalContract.Authority.CanonicalRepairKey,
+                repairRequestKey,
+                StringComparison.Ordinal) &&
+            IsFallbackFrontierRepairContractCurrent(context, canonicalContract, out _);
+        var legacyExactRepair = repairRequestKey == $"{remoteFrontier}:1:{remoteFrontier}:1";
         if (remoteFrontier < 0 ||
             remoteFrontier >= context.ChunkCount ||
-            repairRequestKey != $"{remoteFrontier}:1:{remoteFrontier}:1")
+            (!canonicalExactRepair && !legacyExactRepair))
         {
             return false;
         }
@@ -21218,6 +21230,37 @@ public sealed partial class SessionFileTransferService
 
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
         var now = DateTimeOffset.UtcNow;
+        var currentPostTunaFallbackLegSweep = allowPostTunaFallbackV6Repair &&
+            IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
+            context.PullTransportFrontierOnlyRepairActive &&
+            remoteFrontier < context.ChunkCount &&
+            (string.Equals(reason, "post_fallback_sender_wait", StringComparison.Ordinal) ||
+             string.Equals(reason, "post_tuna_fallback_peer_silence", StringComparison.Ordinal) ||
+             string.Equals(reason, "post_tuna_fallback_state_refresh_send_timeout", StringComparison.Ordinal) ||
+             string.Equals(reason, "post_tuna_fallback_state_refresh_send_failed", StringComparison.Ordinal));
+        if (currentPostTunaFallbackLegSweep &&
+            ShouldSuppressPostTunaFallbackSafetyReplayForExactFrontierRepairLocked(
+                context,
+                remoteFrontier,
+                now,
+                out var exactFrontierRepairKey,
+                out var exactFrontierSuppressionReason,
+                out var exactFrontierLastSentAgeMs,
+                out var exactFrontierHoldMs,
+                out var exactFrontierContract))
+        {
+            if (exactFrontierContract is not null)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_post_tuna_fallback_exact_frontier_replay_preemption_suppressed; authority_effect=none; {FormatFallbackFrontierRepairAuthorityTuple(exactFrontierContract.Authority)}; attempted_replay_reason={FormatProtocolLogValue(reason)}; exact_frontier_suppression_reason={exactFrontierSuppressionReason}; exact_frontier_repair_key={FormatProtocolLogValue(exactFrontierRepairKey)}; exact_frontier_last_sent_age_ms={exactFrontierLastSentAgeMs}; exact_frontier_hold_ms={exactFrontierHoldMs}; remote_next_expected_chunk_index={remoteFrontier}; data_session_generation={context.DataSessionGeneration}");
+            }
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_transport_rebind_safety_replay_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={recoveryGeneration}; skip_reason=post_tuna_fallback_exact_frontier_repair_pending; exact_frontier_suppression_reason={exactFrontierSuppressionReason}; exact_frontier_repair_key={FormatProtocolLogValue(exactFrontierRepairKey)}; remote_next_expected_chunk_index={remoteFrontier}; exact_frontier_last_sent_age_ms={exactFrontierLastSentAgeMs}; exact_frontier_hold_ms={exactFrontierHoldMs}");
+            return;
+        }
+
         if (context.PullTransportLastSafetyReplayGeneration == recoveryGeneration)
         {
             if (!allowRepeatForSameGeneration)
@@ -21244,29 +21287,6 @@ public sealed partial class SessionFileTransferService
         }
 
         var replayStartChunkIndex = remoteFrontier;
-        var currentPostTunaFallbackLegSweep = allowPostTunaFallbackV6Repair &&
-            IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
-            context.PullTransportFrontierOnlyRepairActive &&
-            remoteFrontier < context.ChunkCount &&
-            (string.Equals(reason, "post_fallback_sender_wait", StringComparison.Ordinal) ||
-             string.Equals(reason, "post_tuna_fallback_peer_silence", StringComparison.Ordinal) ||
-             string.Equals(reason, "post_tuna_fallback_state_refresh_send_timeout", StringComparison.Ordinal) ||
-             string.Equals(reason, "post_tuna_fallback_state_refresh_send_failed", StringComparison.Ordinal));
-        if (currentPostTunaFallbackLegSweep &&
-            ShouldSuppressPostTunaFallbackSafetyReplayForExactFrontierRepairLocked(
-                context,
-                remoteFrontier,
-                now,
-                out var exactFrontierRepairKey,
-                out var exactFrontierSuppressionReason,
-                out var exactFrontierLastSentAgeMs,
-                out var exactFrontierHoldMs))
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_transport_rebind_safety_replay_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={recoveryGeneration}; skip_reason=post_tuna_fallback_exact_frontier_repair_pending; exact_frontier_suppression_reason={exactFrontierSuppressionReason}; exact_frontier_repair_key={exactFrontierRepairKey}; remote_next_expected_chunk_index={remoteFrontier}; exact_frontier_last_sent_age_ms={exactFrontierLastSentAgeMs}; exact_frontier_hold_ms={exactFrontierHoldMs}");
-            return;
-        }
 
         var postTunaFallbackPeerSilenceSweep = allowPostTunaFallbackV6Repair &&
             !IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
@@ -21539,11 +21559,13 @@ public sealed partial class SessionFileTransferService
         out string exactFrontierRepairKey,
         out string suppressionReason,
         out long lastSentAgeMs,
-        out long holdMs)
+        out long holdMs,
+        out FallbackFrontierRepairContract? exactFrontierContract)
     {
         exactFrontierRepairKey = $"{Math.Max(0, remoteFrontier)}:1:{Math.Max(0, remoteFrontier)}:1";
         suppressionReason = "(none)";
         lastSentAgeMs = -1;
+        exactFrontierContract = null;
         holdMs = Math.Max(
             ResolveV4SenderRepairRepeatIntervalMs(context, frontierRepair: true),
             (long)PullTransportRebindSafetyReplayRearmCooldown.TotalMilliseconds);
@@ -21555,6 +21577,38 @@ public sealed partial class SessionFileTransferService
             remoteFrontier >= context.ChunkCount)
         {
             return false;
+        }
+
+        var currentContract = context.CurrentFallbackFrontierRepairContract;
+        if (currentContract is not null &&
+            !currentContract.Lifecycle.IsSettled &&
+            currentContract.Authority.SourceKind == FallbackFrontierRepairSourceKind.PeerRequest &&
+            currentContract.Authority.FrontierChunkIndex == remoteFrontier &&
+            currentContract.Authority.TargetTransport == FileTransferTransportKind.RegularNkn &&
+            IsFallbackFrontierRepairContractCurrent(context, currentContract, out _))
+        {
+            exactFrontierContract = currentContract;
+            exactFrontierRepairKey = currentContract.Authority.CanonicalRepairKey;
+            if (!context.PullV4SenderPumpRepairRequests.TryGetValue(
+                    exactFrontierRepairKey,
+                    out var canonicalRepairState) ||
+                !ReferenceEquals(
+                    canonicalRepairState.FallbackFrontierRepairContract,
+                    currentContract))
+            {
+                suppressionReason = "canonical_exact_frontier_repair_state_missing_or_replaced";
+                return true;
+            }
+
+            return ShouldSuppressPostTunaFallbackSafetyReplayForRepairStateLocked(
+                context,
+                remoteFrontier,
+                now,
+                exactFrontierRepairKey,
+                canonicalRepairState,
+                holdMs,
+                out suppressionReason,
+                out lastSentAgeMs);
         }
 
         if (context.PullV4SenderPumpRepairQueuedChunkIndices.Contains(remoteFrontier))
@@ -21579,6 +21633,30 @@ public sealed partial class SessionFileTransferService
         {
             return false;
         }
+
+        return ShouldSuppressPostTunaFallbackSafetyReplayForRepairStateLocked(
+            context,
+            remoteFrontier,
+            now,
+            exactFrontierRepairKey,
+            exactRepairState,
+            holdMs,
+            out suppressionReason,
+            out lastSentAgeMs);
+    }
+
+    private static bool ShouldSuppressPostTunaFallbackSafetyReplayForRepairStateLocked(
+        OutboundTransferContext context,
+        int remoteFrontier,
+        DateTimeOffset now,
+        string exactFrontierRepairKey,
+        V4SenderRepairRequestState exactRepairState,
+        long holdMs,
+        out string suppressionReason,
+        out long lastSentAgeMs)
+    {
+        suppressionReason = "(none)";
+        lastSentAgeMs = -1;
 
         if (exactRepairState.Queued)
         {

@@ -4833,6 +4833,57 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    public async Task AnalyzeRetained_PostFallbackExactFrontierRepairPreemptedBySenderWait_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_exact_frontier_preemption";
+        const string scope = "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; " +
+            "bridge_recovery_generation=1; bridge_decision_generation=2; checkpoint_request_id=checkpoint-a; " +
+            "route_publication_generation=5; route_commit_generation=4; log_writer_id=writer";
+        const string requestId = "peer-request-1";
+        const string correlationId = "correlation-1";
+        const string repairKey = "fallback-frontier:1079:1:range-a";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {scope}; authority_id=repair-a; repair_generation=1; repair_request_key={repairKey}; range_fingerprint=range-a; frontier_chunk_index=1079; requested_chunk_count=1; source_kind=PeerRequest; primary_protocol_repair_request_id={requestId}; primary_request_correlation_id={correlationId}; log_writer_sequence=1"),
+            LogLine($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}; log_writer_id=writer; repair_request_key={repairKey}; protocol_repair_request_id={requestId}; first_start_chunk_index=1079; requested_chunk_count=1; log_writer_sequence=2"),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {scope}; repair_request_id={requestId}; request_correlation_id={correlationId}; first_start_chunk_index=1079; first_chunk_count=1; data_session_generation=3; log_writer_sequence=3"),
+            LogLine($"event=filetransfer_v4_repair_sent; transfer_id={transferId}; {scope}; protocol_repair_request_id={requestId}; first_start_chunk_index=1079; sent_chunk_count=1; data_session_generation=3; log_writer_sequence=4"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; transfer_id={transferId}; {scope}; authority_id=repair-a; repair_request_key={repairKey}; range_fingerprint=range-a; dispatch_observed=1; log_writer_attempt_utc_ticks=100000000; log_writer_sequence=5"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {scope}; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=2; repair_request_key=fallback-frontier:1079:64:range-b; range_fingerprint=range-b; frontier_chunk_index=1079; requested_chunk_count=64; source_kind=SenderLivenessRescue; authority_decision_reason=post_fallback_sender_wait; primary_protocol_repair_request_id=transport_rebind_safety_replay:7:1079:1079:64; log_writer_attempt_utc_ticks=102580000; log_writer_sequence=6"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {scope}; authority_id=repair-a; successor_authority_id=repair-b; settlement_outcome=Superseded; decision_reason=post_fallback_sender_wait; log_writer_sequence=7"),
+            LogLine($"event=filetransfer_transport_rebind_safety_replay_started; transfer_id={transferId}; session_id=sess_a; log_writer_id=writer; reason=post_fallback_sender_wait; rebind_generation=7; remote_next_expected_chunk_index=1079; replay_start_chunk_index=1079; replay_end_chunk_exclusive=1143; requested_chunk_count=64; scheduled_chunk_count=64; post_tuna_v6_frontier_sweep=1; log_writer_sequence=8")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count"]);
+        Assert.Equal("fail", verdict["filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_verdict"]);
+        Assert.Equal("filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay", verdict["recovery_failure_class"]);
+        Assert.Equal("canonical_fallback_frontier_key_not_resolved_by_legacy_exact_repair_suppression", verdict["failure_variant"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_ExplicitFallbackFrontierRepairStalledThenTerminalCompletion_DoesNotFail()

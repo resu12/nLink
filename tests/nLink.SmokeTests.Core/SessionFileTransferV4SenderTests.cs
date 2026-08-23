@@ -7957,6 +7957,105 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackFrontierRepair")]
+    public void PostTunaFallbackV6DispatchedPeerFrontierRepair_SuppressesSenderWaitReplayWithinHold()
+    {
+        const string transferId = "transfer_post_tuna_fallback_v6_dispatched_frontier_sender_wait";
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 181,
+            remoteGrantedUntilExclusive: 181,
+            chunkCount: 256);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_dispatched_frontier_sender_wait"]);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = 3,
+            RepairRequestId = "v6-frontier:100:sender-wait",
+            RequestCorrelationId = "frq-dispatched-frontier-sender-wait",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 100, ChunkCount = 1 }],
+            Priority = "frontier",
+            RecoveryMode = "frontier_repair_only",
+        };
+        serviceType
+            .GetMethod("ApplyOutboundV6RepairRequest", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, request]);
+
+        var queuedRepair = Assert.Single(GetQueuedV4RepairSends(context));
+        var canonicalRepairKey = GetStringProperty(queuedRepair, "RepairRequestKey");
+        Assert.StartsWith("fallback-frontier:100:1:frng-", canonicalRepairKey);
+        var contract = GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract");
+        Assert.NotNull(contract);
+        var lifecycle = GetPrivatePropertyValue(contract!, "Lifecycle");
+        Assert.NotNull(lifecycle);
+        Assert.True((bool)lifecycle!.GetType().GetMethod("TryMarkDispatched")!.Invoke(lifecycle, null)!);
+
+        var contextType = context.GetType();
+        var repairRequests = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            contextType
+                .GetProperty("PullV4SenderPumpRepairRequests", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+                .GetValue(context));
+        var repairState = repairRequests[canonicalRepairKey];
+        Assert.NotNull(repairState);
+        SetPrivateProperty(repairState, "Queued", false);
+        SetPrivateProperty(repairState, "QueuedUtc", null);
+        SetPrivateProperty(repairState, "InFlight", false);
+        SetPrivateProperty(repairState, "LastSentUtc", DateTimeOffset.UtcNow);
+        SetPrivateProperty(repairState, "SentCount", 1);
+        SetPrivateProperty(repairState, "LastSentRemoteFrontierChunkIndex", 100);
+        contextType
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(context)!
+            .GetType()
+            .GetMethod("Clear")!
+            .Invoke(
+                contextType
+                    .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+                    .GetValue(context),
+                null);
+        var queuedIndices = Assert.IsAssignableFrom<ISet<int>>(
+            contextType
+                .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+                .GetValue(context));
+        queuedIndices.Clear();
+
+        SetPrivateProperty(context, "PullTransportLastSafetyReplayGeneration", 3);
+        SetPrivateProperty(context, "PullTransportLastSafetyReplayUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        var rearmCountBefore = GetPrivateProperty<int>(context, "PullTransportSafetyReplayRearmCount");
+        var lastReplayUtcBefore = GetPrivatePropertyValue(context, "PullTransportLastSafetyReplayUtc");
+        var logStart = GetOperationalLogLength();
+
+        serviceType
+            .GetMethod("QueueOutboundV4TransportRebindSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "post_fallback_sender_wait", true]);
+
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "IsSettled"));
+        Assert.Equal(rearmCountBefore, GetPrivateProperty<int>(context, "PullTransportSafetyReplayRearmCount"));
+        Assert.Equal(lastReplayUtcBefore, GetPrivatePropertyValue(context, "PullTransportLastSafetyReplayUtc"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_post_tuna_fallback_exact_frontier_replay_preemption_suppressed;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains($"exact_frontier_repair_key={canonicalRepairKey}", log, StringComparison.Ordinal);
+        Assert.Contains("exact_frontier_suppression_reason=exact_frontier_repair_recently_sent", log, StringComparison.Ordinal);
+        Assert.Contains("authority_effect=none", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PostTunaFallbackV6CurrentLegExactFrontierRepair_RetiresStaleQueuedMarker()
     {
         const string transferId = "transfer_post_tuna_fallback_v6_exact_frontier_stale_queue";

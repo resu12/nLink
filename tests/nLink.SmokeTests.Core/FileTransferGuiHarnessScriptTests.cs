@@ -6374,6 +6374,69 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_ExactFrontierRepairPreemptionUsesIndexedFastPath()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-exact-frontier-preemption-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'direction=outbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=2; checkpoint_request_id=checkpoint-a; route_publication_generation=5; route_commit_generation=4; log_writer_id=writer'
+                $lines = @(
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $scope; authority_id=repair-a; repair_generation=1; repair_request_key=fallback-frontier:1079:1:range-a; range_fingerprint=range-a; frontier_chunk_index=1079; requested_chunk_count=1; source_kind=PeerRequest; primary_protocol_repair_request_id=peer-request-1; primary_request_correlation_id=correlation-1; log_writer_sequence=1",
+                    'event=filetransfer_v4_repair_scheduled; transfer_id=transfer; log_writer_id=writer; repair_request_key=fallback-frontier:1079:1:range-a; protocol_repair_request_id=peer-request-1; first_start_chunk_index=1079; requested_chunk_count=1; log_writer_sequence=2',
+                    'event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id=transfer; log_writer_id=writer; repair_request_id=peer-request-1; request_correlation_id=correlation-1; first_start_chunk_index=1079; first_chunk_count=1; data_session_generation=3; log_writer_sequence=3',
+                    'event=filetransfer_v4_repair_sent; transfer_id=transfer; log_writer_id=writer; protocol_repair_request_id=peer-request-1; first_start_chunk_index=1079; sent_chunk_count=1; log_writer_sequence=4',
+                    "event=filetransfer_fallback_frontier_repair_dispatched; $scope; authority_id=repair-a; repair_request_key=fallback-frontier:1079:1:range-a; range_fingerprint=range-a; dispatch_observed=1; log_writer_attempt_utc_ticks=100000000; log_writer_sequence=5",
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $scope; authority_id=repair-b; predecessor_authority_id=repair-a; repair_generation=2; repair_request_key=fallback-frontier:1079:64:range-b; frontier_chunk_index=1079; requested_chunk_count=64; source_kind=SenderLivenessRescue; authority_decision_reason=post_fallback_sender_wait; primary_protocol_repair_request_id=transport_rebind_safety_replay:7:1079:1079:64; log_writer_attempt_utc_ticks=102580000; log_writer_sequence=6",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $scope; authority_id=repair-a; successor_authority_id=repair-b; settlement_outcome=Superseded; decision_reason=post_fallback_sender_wait; log_writer_sequence=7",
+                    'event=filetransfer_transport_rebind_safety_replay_started; session_id=sess; transfer_id=transfer; log_writer_id=writer; reason=post_fallback_sender_wait; rebind_generation=7; remote_next_expected_chunk_index=1079; replay_start_chunk_index=1079; replay_end_chunk_exclusive=1143; requested_chunk_count=64; scheduled_chunk_count=64; post_tuna_v6_frontier_sweep=1; log_writer_sequence=8'
+                )
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if (-not [bool]$result.PostTunaFallbackExactFrontierRepairPreemption -or
+                    $result.Phase -ne 'fallback_frontier_repair' -or
+                    $result.Reason -ne 'dispatched_exact_peer_frontier_repair_superseded_by_post_fallback_sender_wait_before_hold_elapsed' -or
+                    $result.FailureVariant -ne 'canonical_fallback_frontier_key_not_resolved_by_legacy_exact_repair_suppression' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_post_tuna_fallback_exact_frontier_repair_preemption_index') {
+                    throw "exact frontier repair preemption indexed result mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-exact-frontier-preemption-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Exact-frontier preemption GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-exact-frontier-preemption-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_PostFallbackQueuedPredecessorSupersessionUsesIndexedFastPath()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

@@ -1517,6 +1517,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_deferred') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_stall_grace_recheck_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_rebind_state_replay_suppressed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_exact_frontier_replay_preemption_suppressed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_transport_rebind_safety_replay_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_sparse_write_committed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_sent') +
@@ -1528,6 +1529,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_advanced_remote_frontier') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_staged') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatch_coalesced') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatched') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_hold_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_issued') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied') +
@@ -1820,6 +1822,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
             -Action {
                 Get-FileTransferPostTunaFallbackDuplicateStateReplayAmplificationCorrelation `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
+            }
+    $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'post_tuna_fallback_exact_frontier_repair_preemption' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                Get-FileTransferPostTunaFallbackExactFrontierRepairPreemptionCorrelation `
                     -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
             }
     [object[]]$legacyRuntimeUnlockRegularV4RecoveryLeaseEvents = @(
@@ -3568,6 +3578,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Variant = $candidateRecord.Variant
         }) | Out-Null
     }
+    foreach ($candidateRecord in @($fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+            Variant = $candidateRecord.Variant
+        }) | Out-Null
+    }
     foreach ($candidateRecord in @($fallbackTailFailedYieldQuiescentSuccessorProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'paired_fallback_tail_yield_missing'
@@ -3831,6 +3849,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_fallback_frontier_stall_grace_recheck_missing',
             'filetransfer_fallback_frontier_repair_successor_dispatch_missing',
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+            'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay',
             'filetransfer_gui_live_reactivation_action_window_missed') -and
         $null -ne $firstCompactProofChainFailure.PSObject.Properties['Variant'] -and
         -not [string]::IsNullOrWhiteSpace([string]$firstCompactProofChainFailure.Variant)) {
@@ -3870,6 +3889,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_fallback_frontier_stall_grace_recheck_missing',
             'filetransfer_fallback_frontier_repair_successor_dispatch_missing',
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
+            'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay',
             'filetransfer_route_transition_draining_transport_grace_terminalization',
             'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
             'filetransfer_route_transition_incomplete',
@@ -4200,6 +4220,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RecoveredCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.Verdict),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RawCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.DistinctCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RecoveredCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.UnresolvedCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_verdict={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.Verdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
@@ -4669,6 +4694,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RecoveredCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.Verdict),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RawCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.DistinctCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RecoveredCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.UnresolvedCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_verdict={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.Verdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
@@ -5107,6 +5137,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RecoveredCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.Verdict),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RawCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.DistinctCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RecoveredCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.UnresolvedCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_verdict={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.Verdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
@@ -5549,6 +5584,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RecoveredCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount),
         ("filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict={0}" -f $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.Verdict),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RawCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.DistinctCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RecoveredCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.UnresolvedCount),
+        ("filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_verdict={0}" -f $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.Verdict),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount),
         ("filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count={0}" -f $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount),
@@ -6026,6 +6066,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_recovered_count = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.RecoveredCount
         filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_unresolved_count = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.UnresolvedCount
         filetransfer_post_tuna_fallback_duplicate_state_replay_amplification_verdict = $fileTransferPostTunaFallbackDuplicateStateReplayAmplificationProof.Verdict
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count = $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RawCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count = $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.DistinctCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count = $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.RecoveredCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count = $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.UnresolvedCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_verdict = $fileTransferPostTunaFallbackExactFrontierRepairPreemptionProof.Verdict
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRawCount
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestDistinctCount
         filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count = $fileTransferFallbackFrontierCheckpointAcceptanceRecheckProof.CheckpointPendingRequestRecoveredCount
@@ -6629,6 +6674,13 @@ function Get-FileTransferEfficiencyEventsByName {
     )
 
     $normalizedNames = @($Names | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($null -ne $Index -and $null -ne $Index.PSObject.Properties['EventsByName']) {
+        return @(
+            Get-FileTransferCompactIndexEventsByNamesOrdered `
+                -Index $Index `
+                -Names $normalizedNames)
+    }
+
     $items = New-Object System.Collections.Generic.List[object]
     foreach ($event in @($Events)) {
         if ($normalizedNames -contains $event.EventName) {
@@ -9295,15 +9347,37 @@ function Write-FileTransferEfficiencySummaryArtifacts {
     $postYieldRepeatedUnchangedFrontierTupleCount =
         [int]$exactWindowMetrics.RepeatedUnchangedFrontierTupleCount
     $correctnessBlockers = @(Get-FileTransferEfficiencyCorrectnessBlockers -Events $Events -GateResult $GateResult -ShaOk $shaOk -InboundTerminalState $inboundTerminalState -OutboundTerminalState $outboundTerminalState)
+    [object[]]$structuralReplayEvents = @(
+        Get-FileTransferEfficiencyEventsByName `
+            -Index $Index `
+            -Events $Events `
+            -Names @(
+                'filetransfer_v4_state_received',
+                'filetransfer_fallback_frontier_repair_authority_granted',
+                'filetransfer_v4_repair_scheduled',
+                'filetransfer_v6_frontier_request_receive_dispatched',
+                'filetransfer_data_path_send_result',
+                'filetransfer_v4_repair_sent',
+                'filetransfer_fallback_frontier_repair_dispatched',
+                'filetransfer_fallback_frontier_repair_contract_settled',
+                'filetransfer_transport_rebind_safety_replay_started'))
     $duplicateStateReplayProof =
         Get-FileTransferPostTunaFallbackDuplicateStateReplayAmplificationCorrelation `
-            -Events $Events
+            -Events $structuralReplayEvents
     $duplicateStateReplayRawCount = [int]$duplicateStateReplayProof.RawCount
+    $exactFrontierRepairPreemptionProof =
+        Get-FileTransferPostTunaFallbackExactFrontierRepairPreemptionCorrelation `
+            -Events $structuralReplayEvents
+    $exactFrontierRepairPreemptionRawCount = [int]$exactFrontierRepairPreemptionProof.RawCount
     $efficiencyVerdict = 'pass'
     $efficiencyFailureClass = 'none'
     if ($duplicateStateReplayRawCount -gt 0) {
         $efficiencyVerdict = 'fail'
         $efficiencyFailureClass = 'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification'
+    }
+    elseif ($exactFrontierRepairPreemptionRawCount -gt 0) {
+        $efficiencyVerdict = 'fail'
+        $efficiencyFailureClass = 'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay'
     }
     elseif ($correctnessBlockers.Count -gt 0) {
         $efficiencyVerdict = 'not_evaluated_due_correctness_failure'
@@ -9363,6 +9437,11 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         efficiency_verdict = $efficiencyVerdict
         efficiency_failure_class = $efficiencyFailureClass
         post_tuna_fallback_duplicate_state_replay_authority_count = $duplicateStateReplayRawCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_raw_count = $exactFrontierRepairPreemptionProof.RawCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_distinct_count = $exactFrontierRepairPreemptionProof.DistinctCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_recovered_count = $exactFrontierRepairPreemptionProof.RecoveredCount
+        filetransfer_post_tuna_fallback_exact_frontier_repair_preemption_unresolved_count = $exactFrontierRepairPreemptionProof.UnresolvedCount
+        post_tuna_fallback_exact_frontier_repair_preemption_count = $exactFrontierRepairPreemptionRawCount
         route_epoch_count = $epochRows.Count
         route_epochs = @($epochRows)
     }
