@@ -2095,8 +2095,110 @@ internal sealed class RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs(
         evaluation;
 }
 
+internal enum RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus
+{
+    Rejected = 0,
+    Accepted = 1,
+    Idempotent = 2,
+    Stale = 3,
+}
+
+internal sealed record RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest(
+    FileTransferRoutePublicationAuthority PublicationAuthority,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    string CheckpointRequestId,
+    string DataSessionIdentity,
+    long DataSessionGeneration,
+    long PayerDecisionId,
+    string MessageId,
+    string SourceFingerprint)
+{
+    public bool IsDefault =>
+        PublicationAuthority is null ||
+        PublicationAuthority.Direction != FileTransferDirection.Inbound ||
+        !string.Equals(
+            PublicationAuthority.RouteToken,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            StringComparison.Ordinal) ||
+        PublicationAuthority.ProtocolVersion !=
+            FileTransferProtocol.ProtocolVersionV6 ||
+        TransportEpoch <= 0 ||
+        BridgeRecoveryGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(CheckpointRequestId) ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0 ||
+        PayerDecisionId <= 0 ||
+        string.IsNullOrWhiteSpace(MessageId) ||
+        SourceFingerprint.Length != 64;
+}
+
+internal readonly record struct RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt(
+    RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest Request,
+    RuntimeUnlockPeerPreCommitAnswerAcceptanceScope AcceptanceScope,
+    FileTransferFallbackTailPairedReleaseReceipt PairedRelease,
+    FileTransferFallbackTailYieldScope PairedScope)
+{
+    public bool IsDefault =>
+        Request is null ||
+        Request.IsDefault ||
+        AcceptanceScope.IsDefault ||
+        PairedRelease.IsDefault ||
+        PairedScope.IsDefault ||
+        PairedScope.Direction != FileTransferDirection.Inbound ||
+        PairedScope.RuntimeOwner != AcceptanceScope.RuntimeOwner ||
+        PairedScope.RoutePublication != AcceptanceScope.RoutePublication ||
+        PairedScope.TransportEpoch != AcceptanceScope.TransportEpoch ||
+        PairedScope.BridgeRecoveryGeneration !=
+            AcceptanceScope.BridgeRecoveryGeneration ||
+        !string.Equals(
+            PairedScope.CheckpointRequestIdSnapshot,
+            AcceptanceScope.CheckpointRequestId,
+            StringComparison.Ordinal) ||
+        PairedScope.CheckpointGeneration != AcceptanceScope.CheckpointGeneration ||
+        !string.Equals(
+            PairedScope.DataSessionIdentity,
+            AcceptanceScope.DataSessionIdentity,
+            StringComparison.Ordinal) ||
+        PairedScope.DataSessionGeneration !=
+            AcceptanceScope.DataSessionGeneration;
+}
+
+internal readonly record struct RuntimeUnlockPostFallbackPairedRetryOfferBindingDecision(
+    RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus Status,
+    string Reason,
+    RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt Receipt = default)
+{
+    public bool Accepted =>
+        Status is (RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Accepted or
+            RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Idempotent) &&
+        !Receipt.IsDefault;
+}
+
+internal sealed class RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs(
+    RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest request) : EventArgs
+{
+    public RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest Request { get; } =
+        request;
+
+    public RuntimeUnlockPostFallbackPairedRetryOfferBindingDecision Decision
+    {
+        get;
+        set;
+    } = new(
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Rejected,
+        "paired_retry_offer_binding_subscriber_missing");
+}
+
 internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 {
+    event EventHandler<RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs>?
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested
+    {
+        add { }
+        remove { }
+    }
+
     event EventHandler<RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs>?
         RuntimeUnlockRetryDispatchInitialEvaluationRequested;
 

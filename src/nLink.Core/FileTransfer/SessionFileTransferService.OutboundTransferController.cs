@@ -1327,6 +1327,7 @@ public sealed partial class SessionFileTransferService
 
             transport = null;
             transportLifecycle = null;
+            runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt = null;
         }
 
         if (previousTransport is not null)
@@ -1346,6 +1347,9 @@ public sealed partial class SessionFileTransferService
             previousTransport.FileTransferFallbackTailYieldProofReceived -= OnFileTransferFallbackTailYieldProofReceived;
             if (previousTransport is IRuntimeUnlockRetryDispatchAuthorityBridge retryDispatchBridge)
             {
+                retryDispatchBridge
+                        .RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested -=
+                    OnRuntimeUnlockPostFallbackPairedRetryOfferBindingRequested;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchInitialEvaluationRequested -=
                     OnRuntimeUnlockRetryDispatchInitialEvaluationRequested;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested -=

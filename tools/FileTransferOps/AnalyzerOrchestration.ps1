@@ -1445,6 +1445,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_payer_decision_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_payer_intent_queued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_post_fallback_paired_retry_offer_binding_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_post_fallback_paired_retry_offer_classified') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_control_priority_failed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority') +

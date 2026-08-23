@@ -32944,13 +32944,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     }
 
     [Theory]
+    [InlineData("coordinator_route_publication_successor", true)]
     [InlineData("fallback_tail_quiescent", true)]
-    [InlineData("accepted", false)]
+    [InlineData("fallback_tail_quiescent", false)]
     [Trait("Category", "Smoke")]
     [Trait("FileTransferInfraSuite", "RuntimeUnlockResponderPeerProbe")]
     public async Task PostFallbackPairedRetryOffer_BindsOnlyExactResponderLineageBeforeAnswerVisibility(
         string routeHintSource,
-        bool expectedBound)
+        bool coordinatorBindingAvailable)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -33006,6 +33007,21 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 payerDecisionId: 91L);
             offer.Trigger = "fallback_paired_tail_yield";
             offer.SenderRole = "helpee";
+            var bridge =
+                Assert.IsAssignableFrom<
+                    IRuntimeUnlockRetryDispatchAuthorityBridge>(helper);
+            EventHandler<
+                RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs>?
+                bindingHandler = null;
+            if (coordinatorBindingAvailable)
+            {
+                bindingHandler = (_, args) =>
+                    args.Decision =
+                        CreatePostFallbackPairedRetryOfferBindingDecisionForTests(
+                            args.Request);
+                bridge.RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested +=
+                    bindingHandler;
+            }
             var logStart = GetOperationalLogLength();
 
             var task = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(
@@ -33019,9 +33035,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("trigger=fallback_paired_tail_yield", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_answer_ack_pending;", logTail, StringComparison.Ordinal);
-            if (expectedBound)
+            if (coordinatorBindingAvailable)
             {
+                Assert.Contains("event=tuna_acceleration_answer_ack_pending;", logTail, StringComparison.Ordinal);
+                Assert.Contains("event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; status=Accepted;", logTail, StringComparison.Ordinal);
                 var transaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
                     GetPrivateField(helper, "runtimeUnlockTransactionState"));
                 Assert.True(transaction.AnswerReceived);
@@ -33041,12 +33058,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             }
             else
             {
+                Assert.DoesNotContain("event=tuna_acceleration_answer_ack_pending;", logTail, StringComparison.Ordinal);
+                Assert.Contains("decision_reason=exact_paired_retry_offer_binding_missing", logTail, StringComparison.Ordinal);
                 var transaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(
                     GetPrivateField(helper, "runtimeUnlockTransactionState"));
                 Assert.False(transaction.AnswerReceived);
                 Assert.Equal(0, transaction.TransactionGeneration);
                 Assert.Equal(0, transaction.OfferGeneration);
                 Assert.Null(GetPrivateField(helper, "pendingAccelerationAnswerAckAuthorityMode"));
+            }
+
+            if (bindingHandler is not null)
+            {
+                bridge.RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested -=
+                    bindingHandler;
             }
         }
         finally
@@ -33554,6 +33579,167 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     .InitialRegularV4
                 : RuntimeUnlockResponderPeerProbeTransitionMode
                     .PostFallbackV6Paired);
+    }
+
+    private static RuntimeUnlockPostFallbackPairedRetryOfferBindingDecision
+        CreatePostFallbackPairedRetryOfferBindingDecisionForTests(
+            RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest request)
+    {
+        var source = request.PublicationAuthority;
+        Assert.True(FileTransferRouteResolver.TryParseTelemetryToken(
+            source.RouteToken,
+            out var route));
+        Assert.True(FileTransferRouteResolver.TryParseTelemetryToken(
+            source.TargetRouteToken,
+            out var targetRoute));
+        Assert.True(Enum.TryParse<FileTransferCoordinatorActionKind>(
+            source.RoutePublicationActionKind,
+            out var actionKind));
+        var owner = new RuntimeOwnerToken(
+            source.SessionId,
+            source.TransferId,
+            source.Direction,
+            route,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            "post_tuna_fallback_v6",
+            "paired_retry_offer_binding_test");
+        var publication = new RoutePublicationToken(
+            source.SessionId,
+            source.TransferId,
+            source.Direction,
+            owner,
+            route,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            checked((int)source.LegGeneration),
+            source.RouteCommitGeneration,
+            targetRoute,
+            source.TargetProtocolVersion,
+            source.TargetTransport,
+            source.RoutePublicationGeneration,
+            actionKind,
+            source.CoordinatorDecisionReason);
+        var admission = new RuntimeUnlockAdmissionToken(
+            source.SessionId,
+            source.TransferId,
+            source.Direction,
+            owner,
+            route,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            checked((int)source.LegGeneration),
+            AdmissionGeneration: 1,
+            "paired_retry_offer_binding_test",
+            RuntimeUnlockFallbackSurvivalState.Empty);
+        var acceptanceScope =
+            new RuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                owner,
+                publication,
+                source.TerminalGeneration,
+                checked((int)source.LegGeneration),
+                request.TransportEpoch,
+                request.BridgeRecoveryGeneration,
+                request.CheckpointRequestId,
+                CheckpointGeneration: 1,
+                request.DataSessionIdentity,
+                request.DataSessionGeneration,
+                admission,
+                RuntimeUnlockResponderPeerProbeTransitionMode
+                    .PostFallbackV6Paired);
+        var yield = new FallbackTailYieldDecision(
+            Accepted: true,
+            FallbackTailYieldKind.Quiescent,
+            "paired_retry_offer_binding_test",
+            YieldGeneration: 1,
+            OwnerKey: "paired-owner",
+            PairKey: "paired-pair",
+            request.CheckpointRequestId,
+            route,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            checked((int)source.LegGeneration),
+            request.BridgeRecoveryGeneration,
+            CheckpointLease: null,
+            RuntimeUnlockFallbackSurvivalState.Empty)
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                "fta2-paired-retry-offer-binding-local"),
+        };
+        var pairedScope = new FileTransferFallbackTailYieldScope(
+            source.SessionId,
+            source.TransferId,
+            source.Direction,
+            owner,
+            publication,
+            route,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.TerminalGeneration,
+            checked((int)source.LegGeneration),
+            request.TransportEpoch,
+            request.BridgeRecoveryGeneration,
+            request.CheckpointRequestId,
+            CheckpointGeneration: 1,
+            request.DataSessionIdentity,
+            request.DataSessionGeneration,
+            yield.OwnerKey,
+            yield.PairKey);
+        var local = new FileTransferFallbackTailLocalProofReceipt(
+            yield,
+            pairedScope,
+            "paired-local-proof",
+            "paired-local-frame",
+            ObservedUtcMs: 1);
+        var peerProof = new FileTransferFallbackTailPeerProof(
+            source.SessionId,
+            source.TransferId,
+            FileTransferDirection.Outbound,
+            new FileTransferAuthorityId(
+                "fta2-paired-retry-offer-binding-peer"),
+            PredecessorAuthorityId: null,
+            YieldGeneration: 1,
+            yield.OwnerKey,
+            yield.PairKey,
+            source.LiveRouteEpoch,
+            checked((int)source.LegGeneration),
+            request.BridgeRecoveryGeneration,
+            request.TransportEpoch,
+            request.CheckpointRequestId,
+            CommittedChunkIndex: 0,
+            HighestObservedChunkIndex: 0,
+            FrameFingerprint: "paired-peer-frame");
+        var peer = new FileTransferFallbackTailPeerProofReceipt(
+            peerProof,
+            pairedScope,
+            "paired-peer-proof",
+            ObservedUtcMs: 1);
+        var release = new FileTransferFallbackTailPairedReleaseReceipt(
+            local,
+            peer,
+            PairingGeneration: 1,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            FallbackTailYieldKind.Quiescent.ToString());
+        return new(
+            RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Accepted,
+            "paired_retry_offer_binding_accepted",
+            new(
+                request,
+                acceptanceScope,
+                release,
+                pairedScope));
     }
 
     private static object GetRuntimeUnlockOfferAuthorityModeForTests(string name)

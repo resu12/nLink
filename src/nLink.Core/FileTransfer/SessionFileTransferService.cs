@@ -480,6 +480,8 @@ public sealed partial class SessionFileTransferService :
 
     private RuntimeUnlockInitialActivationEnvelopeRefreshStage?
         runtimeUnlockInitialActivationEnvelopeRefreshStage;
+    private RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt?
+        runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt;
     private readonly object inboundLifecycleDispatchGate = new();
     private readonly object inboundControlDispatchGate = new();
     private readonly object inboundChunkDispatchGate = new();
@@ -788,6 +790,9 @@ public sealed partial class SessionFileTransferService :
         transport.FileTransferFallbackTailYieldProofReceived += OnFileTransferFallbackTailYieldProofReceived;
         if (transport is IRuntimeUnlockRetryDispatchAuthorityBridge retryDispatchBridge)
         {
+            retryDispatchBridge
+                    .RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested +=
+                OnRuntimeUnlockPostFallbackPairedRetryOfferBindingRequested;
             retryDispatchBridge.RuntimeUnlockRetryDispatchInitialEvaluationRequested +=
                 OnRuntimeUnlockRetryDispatchInitialEvaluationRequested;
             retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested +=
@@ -2124,6 +2129,138 @@ public sealed partial class SessionFileTransferService :
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event={eventName}; transfer_id={transferId}; session_id={sessionId ?? "(none)"}; direction={direction}; state={state}; paused={(paused ? 1 : 0)}; reason={FormatProtocolLogValue(reason ?? "(none)")}; transport_paused={(transportPaused ? 1 : 0)}");
+    }
+
+    private void OnRuntimeUnlockPostFallbackPairedRetryOfferBindingRequested(
+        object? sender,
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs args)
+    {
+        if (sender is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            var request = args.Request;
+            var bridgeIsCurrentTransport =
+                transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
+                ReferenceEquals(currentBridge, bridge);
+            if (!bridgeIsCurrentTransport ||
+                request is null ||
+                request.IsDefault ||
+                inboundTransfer is not { IsTerminal: false } inbound ||
+                request.PublicationAuthority.Direction !=
+                    FileTransferDirection.Inbound ||
+                !string.Equals(
+                    request.PublicationAuthority.SessionId,
+                    inbound.SessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    request.PublicationAuthority.TransferId,
+                    inbound.TransferId,
+                    StringComparison.Ordinal) ||
+                inbound.RouteSelection.Route !=
+                    FileTransferRoute.PostTunaFallbackV6 ||
+                inbound.NegotiatedDataProtocolVersion !=
+                    FileTransferProtocol.ProtocolVersionV6 ||
+                inbound.CurrentRoutePublicationToken is not { } publication ||
+                !FileTransferCoordinator.MatchesRoutePublicationAuthority(
+                    request.PublicationAuthority,
+                    publication) ||
+                inbound.CurrentTransferLeg is not { } leg ||
+                leg.TransportEpochId != request.TransportEpoch ||
+                leg.BridgeRecoveryGeneration !=
+                    request.BridgeRecoveryGeneration ||
+                !string.Equals(
+                    leg.CheckpointRequestId ?? "(none)",
+                    request.CheckpointRequestId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    CreateReceiveRecoveryDataSessionIdentity(
+                        inbound.TransferId,
+                        inbound.DataSession,
+                        inbound.DataSessionGeneration),
+                    request.DataSessionIdentity,
+                    StringComparison.Ordinal) ||
+                inbound.DataSessionGeneration != request.DataSessionGeneration)
+            {
+                args.Decision = new(
+                    RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Stale,
+                    "paired_retry_offer_binding_source_not_current");
+                return;
+            }
+
+            var state = CreateCoordinatorStateLocked(inbound);
+            var acceptanceReason =
+                "paired_retry_offer_binding_authority_missing";
+            if (GetCurrentFallbackTailYieldOperation(inbound) is not
+                {
+                    PairingState:
+                        FileTransferFallbackTailYieldPairingState.Paired,
+                    PairedRelease: { IsDefault: false } pairedRelease,
+                } operation ||
+                !FileTransferCoordinator
+                    .TryGetCurrentFallbackTailYieldOperationScope(
+                        state,
+                        operation.Decision,
+                        out var currentOperation,
+                        out var pairedScope,
+                        out _) ||
+                currentOperation != operation ||
+                pairedScope.TransportEpoch != request.TransportEpoch ||
+                pairedScope.BridgeRecoveryGeneration !=
+                    request.BridgeRecoveryGeneration ||
+                pairedScope.CheckpointGeneration != leg.CheckpointGeneration ||
+                !string.Equals(
+                    pairedScope.CheckpointRequestIdSnapshot,
+                    request.CheckpointRequestId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    pairedScope.DataSessionIdentity,
+                    request.DataSessionIdentity,
+                    StringComparison.Ordinal) ||
+                pairedScope.DataSessionGeneration !=
+                    request.DataSessionGeneration ||
+                !TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                    state,
+                    out var acceptanceScope,
+                    out acceptanceReason))
+            {
+                args.Decision = new(
+                    RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Rejected,
+                    string.IsNullOrWhiteSpace(acceptanceReason)
+                        ? "paired_retry_offer_binding_authority_missing"
+                        : acceptanceReason);
+                return;
+            }
+
+            var receipt =
+                new RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt(
+                    request,
+                    acceptanceScope,
+                    pairedRelease,
+                    pairedScope);
+            if (receipt.IsDefault)
+            {
+                args.Decision = new(
+                    RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Rejected,
+                    "paired_retry_offer_binding_receipt_invalid");
+                return;
+            }
+
+            var idempotent =
+                runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt == receipt;
+            runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt = receipt;
+            args.Decision = new(
+                idempotent
+                    ? RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Idempotent
+                    : RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Accepted,
+                idempotent
+                    ? "paired_retry_offer_binding_idempotent"
+                    : "paired_retry_offer_binding_accepted",
+                receipt);
+        }
     }
 
     public void Dispose()

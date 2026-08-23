@@ -241,6 +241,9 @@ public sealed partial class NknSignalingTransport
     private long runtimeUnlockPostTunaFallbackActivationOperationNextGeneration;
     private event EventHandler<RuntimeUnlockRetryDispatchInitialEvaluationRequestedEventArgs>?
         runtimeUnlockRetryDispatchInitialEvaluationRequested;
+    private event EventHandler<
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs>?
+        runtimeUnlockPostFallbackPairedRetryOfferBindingRequested;
     private event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
         runtimeUnlockRetryDispatchAuthorityRequested;
     private event EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>?
@@ -1240,7 +1243,8 @@ public sealed partial class NknSignalingTransport
         string DataSessionIdentity,
         long DataSessionGeneration,
         string SourceFingerprint,
-        string MessageId)
+        string MessageId,
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt BindingReceipt)
     {
         public bool IsDefault =>
             PublicationAuthority is null ||
@@ -1255,7 +1259,8 @@ public sealed partial class NknSignalingTransport
             string.IsNullOrWhiteSpace(DataSessionIdentity) ||
             DataSessionGeneration <= 0 ||
             SourceFingerprint.Length != 64 ||
-            string.IsNullOrWhiteSpace(MessageId);
+            string.IsNullOrWhiteSpace(MessageId) ||
+            BindingReceipt.IsDefault;
     }
 
     private readonly record struct PostTunaFallbackActivationPauseScope(
@@ -9024,6 +9029,7 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest request;
         lock (gate)
         {
             var key = CreateFileTransferRouteHintKey(
@@ -9032,10 +9038,6 @@ public sealed partial class NknSignalingTransport
                 authority.Direction);
             if (!fileTransferRouteHints.TryGetValue(key, out var routeHint) ||
                 routeHint.Route != FileTransferRoute.PostTunaFallbackV6 ||
-                !string.Equals(
-                    routeHint.Source,
-                    "fallback_tail_quiescent",
-                    StringComparison.Ordinal) ||
                 routeHint.LiveRouteEpoch != authority.LiveRouteEpoch ||
                 routeHint.RuntimeGeneration != authority.RuntimeGeneration ||
                 routeHint.TerminalGeneration != authority.TerminalGeneration ||
@@ -9053,20 +9055,43 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            scope = new InboundPostFallbackPairedRetryOfferScope(
+            request =
+                new RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest(
                 authority,
                 routeHint.FallbackTransportEpoch,
                 routeHint.FallbackBridgeRecoveryGeneration,
                 routeHint.FallbackCheckpointRequestId ?? "(none)",
                 $"{authority.TransferId}:{dataSession.Generation}",
                 dataSession.Generation,
+                offer.PayerDecisionId,
+                messageId.Trim(),
                 Convert.ToHexString(
                         SHA256.HashData(
                             Encoding.UTF8.GetBytes(source.Trim())))
-                    .ToLowerInvariant(),
-                messageId.Trim());
-            return !scope.IsDefault;
+                    .ToLowerInvariant());
         }
+
+        var decision =
+            RequestRuntimeUnlockPostFallbackPairedRetryOfferBinding(request);
+        if (!decision.Accepted ||
+            decision.Receipt.Request != request ||
+            !TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(
+                request))
+        {
+            return false;
+        }
+
+        scope = new InboundPostFallbackPairedRetryOfferScope(
+            request.PublicationAuthority,
+            request.TransportEpoch,
+            request.BridgeRecoveryGeneration,
+            request.CheckpointRequestId,
+            request.DataSessionIdentity,
+            request.DataSessionGeneration,
+            request.SourceFingerprint,
+            request.MessageId,
+            decision.Receipt);
+        return !scope.IsDefault;
     }
 
     private bool TryRecaptureInboundPostFallbackPairedRetryOfferScope(
@@ -9075,49 +9100,107 @@ public sealed partial class NknSignalingTransport
         out string rejectionReason)
     {
         rejectionReason = "post_fallback_paired_retry_scope_not_current";
+        var request = expected.BindingReceipt.Request;
+        if (request is null ||
+            request.IsDefault ||
+            !string.Equals(
+                offer.SessionId?.Trim(),
+                expected.PublicationAuthority.SessionId,
+                StringComparison.Ordinal) ||
+            offer.PayerDecisionId != request.PayerDecisionId ||
+            !TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(request))
+        {
+            return false;
+        }
+
+        var decision =
+            RequestRuntimeUnlockPostFallbackPairedRetryOfferBinding(request);
+        if (!decision.Accepted ||
+            decision.Receipt != expected.BindingReceipt ||
+            !TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(request))
+        {
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private bool TryRecaptureInboundPostFallbackPairedRetryOfferLocalScope(
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest request)
+    {
         lock (gate)
         {
-            var authority = expected.PublicationAuthority;
+            var authority = request.PublicationAuthority;
             var key = CreateFileTransferRouteHintKey(
                 authority.SessionId,
                 authority.TransferId,
                 authority.Direction);
-            if (!string.Equals(
-                    offer.SessionId?.Trim(),
-                    authority.SessionId,
-                    StringComparison.Ordinal) ||
-                !fileTransferRoutePublicationAuthorities.TryGetValue(
+            return fileTransferRoutePublicationAuthorities.TryGetValue(
                     key,
-                    out var currentAuthority) ||
-                currentAuthority != authority ||
-                !fileTransferRouteHints.TryGetValue(key, out var routeHint) ||
-                !string.Equals(
-                    routeHint.Source,
-                    "fallback_tail_quiescent",
-                    StringComparison.Ordinal) ||
-                routeHint.FallbackTransportEpoch != expected.TransportEpoch ||
-                routeHint.FallbackBridgeRecoveryGeneration !=
-                    expected.BridgeRecoveryGeneration ||
-                !string.Equals(
+                    out var currentAuthority) &&
+                currentAuthority == authority &&
+                fileTransferRouteHints.TryGetValue(key, out var routeHint) &&
+                routeHint.Route == FileTransferRoute.PostTunaFallbackV6 &&
+                routeHint.LiveRouteEpoch == authority.LiveRouteEpoch &&
+                routeHint.RuntimeGeneration == authority.RuntimeGeneration &&
+                routeHint.TerminalGeneration == authority.TerminalGeneration &&
+                routeHint.PublicationLegGeneration == authority.LegGeneration &&
+                routeHint.RoutePublicationGeneration ==
+                    authority.RoutePublicationGeneration &&
+                routeHint.FallbackTransportEpoch == request.TransportEpoch &&
+                routeHint.FallbackBridgeRecoveryGeneration ==
+                    request.BridgeRecoveryGeneration &&
+                string.Equals(
                     routeHint.FallbackCheckpointRequestId ?? "(none)",
-                    expected.CheckpointRequestId,
-                    StringComparison.Ordinal) ||
-                !fileTransferDataSessions.TryGetValue(
+                    request.CheckpointRequestId,
+                    StringComparison.Ordinal) &&
+                fileTransferDataSessions.TryGetValue(
                     authority.TransferId,
-                    out var dataSession) ||
-                dataSession.IsDisposed ||
-                dataSession.Generation != expected.DataSessionGeneration ||
-                !string.Equals(
+                    out var dataSession) &&
+                !dataSession.IsDisposed &&
+                dataSession.Generation == request.DataSessionGeneration &&
+                string.Equals(
                     $"{authority.TransferId}:{dataSession.Generation}",
-                    expected.DataSessionIdentity,
-                    StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            rejectionReason = "accepted";
-            return true;
+                    request.DataSessionIdentity,
+                    StringComparison.Ordinal);
         }
+    }
+
+    private RuntimeUnlockPostFallbackPairedRetryOfferBindingDecision
+        RequestRuntimeUnlockPostFallbackPairedRetryOfferBinding(
+            RuntimeUnlockPostFallbackPairedRetryOfferBindingRequest request)
+    {
+        var args =
+            new RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs(
+                request);
+        var subscriber =
+            runtimeUnlockPostFallbackPairedRetryOfferBindingRequested;
+        if (subscriber is not null)
+        {
+            try
+            {
+                subscriber.Invoke(this, args);
+            }
+            catch (Exception ex)
+            {
+                args.Decision = new(
+                    RuntimeUnlockPostFallbackPairedRetryOfferBindingStatus.Rejected,
+                    $"paired_retry_offer_binding_handler_failed_{ex.GetType().Name}");
+            }
+        }
+
+        RuntimeUnlockTransactionSnapshot currentTransaction;
+        lock (accelerationGate)
+        {
+            currentTransaction = runtimeUnlockTransactionState;
+        }
+
+        var receipt = args.Decision.Receipt;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; status={args.Decision.Status}; decision_status={args.Decision.Status}; session_id={SanitizeLogToken(request.PublicationAuthority.SessionId)}; transfer_id={SanitizeLogToken(request.PublicationAuthority.TransferId)}; direction=inbound; payer_decision_id={request.PayerDecisionId}; inbound_msg_id={SanitizeLogToken(request.MessageId)}; source_fingerprint={SanitizeLogToken(request.SourceFingerprint)}; route={SanitizeLogToken(request.PublicationAuthority.RouteToken)}; protocol_version={request.PublicationAuthority.ProtocolVersion}; live_route_epoch={request.PublicationAuthority.LiveRouteEpoch}; runtime_generation={request.PublicationAuthority.RuntimeGeneration}; terminal_generation={request.PublicationAuthority.TerminalGeneration}; leg_generation={request.PublicationAuthority.LegGeneration}; route_publication_generation={request.PublicationAuthority.RoutePublicationGeneration}; route_commit_generation={request.PublicationAuthority.RouteCommitGeneration ?? 0}; transport_epoch={request.TransportEpoch}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId)}; data_session_identity={SanitizeLogToken(request.DataSessionIdentity)}; data_session_generation={request.DataSessionGeneration}; release_authority_id={SanitizeLogToken(receipt.PairedRelease.ReleaseAuthorityId.ToString())}; release_generation={receipt.PairedRelease.ReleaseGeneration}; pairing_generation={receipt.PairedRelease.PairingGeneration}; owner_key={SanitizeLogToken(receipt.PairedScope.OwnerKey ?? "none")}; pair_key={SanitizeLogToken(receipt.PairedScope.PairKey ?? "none")}; local_proof_identity={SanitizeLogToken(receipt.PairedRelease.LocalProof.ProofIdentity ?? "none")}; peer_observation_identity={SanitizeLogToken(receipt.PairedRelease.PeerProof.ObservationIdentity ?? "none")}; admission_generation={receipt.AcceptanceScope.Admission.AdmissionGeneration}; previous_transaction_generation={currentTransaction.TransactionGeneration}; previous_offer_generation={currentTransaction.OfferGeneration}; previous_tuna_path_lease_generation={currentTransaction.TunaPathLeaseGeneration}; current_transaction_generation={currentTransaction.TransactionGeneration}; current_offer_generation={currentTransaction.OfferGeneration}; current_tuna_path_lease_generation={currentTransaction.TunaPathLeaseGeneration}; authority_effect=none; decision_reason={SanitizeLogToken(args.Decision.Reason)}");
+        return args.Decision;
     }
 
     private static bool RuntimeUnlockRetryNegotiationSourcePublicationMatchesCurrent(
@@ -18455,6 +18538,15 @@ public sealed partial class NknSignalingTransport
         remove => runtimeUnlockRetryDispatchInitialEvaluationRequested -= value;
     }
 
+    event EventHandler<
+        RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs>?
+        IRuntimeUnlockRetryDispatchAuthorityBridge
+            .RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested
+    {
+        add => runtimeUnlockPostFallbackPairedRetryOfferBindingRequested += value;
+        remove => runtimeUnlockPostFallbackPairedRetryOfferBindingRequested -= value;
+    }
+
     event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
         IRuntimeUnlockRetryDispatchAuthorityBridge.RuntimeUnlockRetryDispatchAuthorityRequested
     {
@@ -24769,7 +24861,7 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
-    private void MarkInboundRuntimeUnlockOfferAccepted(
+    private bool MarkInboundRuntimeUnlockOfferAccepted(
         TransportAccelerationOfferPayload offer,
         long answerAckGeneration,
         InboundPostFallbackPairedRetryOfferScope? pairedRetryScope = null)
@@ -24778,7 +24870,7 @@ public sealed partial class NknSignalingTransport
             (!IsRuntimeUnlockActivationReason(offer.Trigger) &&
              pairedRetryScope is not { IsDefault: false }))
         {
-            return;
+            return false;
         }
 
         var sessionId = string.IsNullOrWhiteSpace(offer.SessionId)
@@ -24786,7 +24878,7 @@ public sealed partial class NknSignalingTransport
             : offer.SessionId.Trim();
         if (string.IsNullOrWhiteSpace(sessionId))
         {
-            return;
+            return false;
         }
 
         FileTransferRoutePublicationAuthority? runtimeUnlockFileTransferOwnerAuthority = null;
@@ -24803,7 +24895,7 @@ public sealed partial class NknSignalingTransport
                         sessionId,
                         offer.Trigger,
                         ownerRejectionReason);
-                    return;
+                    return false;
                 }
 
                 runtimeUnlockFileTransferOwnerAuthority =
@@ -24818,7 +24910,7 @@ public sealed partial class NknSignalingTransport
                     sessionId,
                     offer.Trigger,
                     ownerRejectionReason);
-                return;
+                return false;
             }
             else
             {
@@ -24865,6 +24957,7 @@ public sealed partial class NknSignalingTransport
         LogRuntimeUnlockTransactionDecision(RuntimeUnlockTransactionEventKind.OfferGenerationCreated, started);
         LogRuntimeUnlockTransactionDecision(RuntimeUnlockTransactionEventKind.PeerReceived, peerReceived);
         LogRuntimeUnlockTransactionDecision(RuntimeUnlockTransactionEventKind.AnswerReceived, answerReceived);
+        return true;
     }
 
     private RuntimeUnlockTunaPathLeaseSnapshot StartPeerOfferRuntimeUnlockTunaPathLeaseUnsafe(
@@ -28282,6 +28375,20 @@ public sealed partial class NknSignalingTransport
                                    out var capturedPairedRetryScope)
             ? capturedPairedRetryScope
             : (InboundPostFallbackPairedRetryOfferScope?)null;
+        var isPostFallbackPairedRetryOffer =
+            validation.IsValid &&
+            string.Equals(
+                SanitizeLogToken(offer.Trigger),
+                "fallback_paired_tail_yield",
+                StringComparison.Ordinal);
+        if (isPostFallbackPairedRetryOffer &&
+            pairedRetryScope is not { IsDefault: false })
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; status=Rejected; decision_status=Rejected; session_id={SanitizeLogToken(offer.SessionId)}; transfer_id=none; direction=inbound; payer_decision_id={offer.PayerDecisionId}; inbound_msg_id={SanitizeLogToken(messageId)}; trigger=fallback_paired_tail_yield; authority_effect=none; decision_reason=exact_paired_retry_offer_binding_missing");
+            return;
+        }
         if (pairedRetryScope is { IsDefault: false } paired)
         {
             LocalOperationalLog.Info(
@@ -28531,16 +28638,50 @@ public sealed partial class NknSignalingTransport
 
         if (accepted)
         {
+            if (pairedRetryScope is { IsDefault: false } paired &&
+                !TryRecaptureInboundPostFallbackPairedRetryOfferScope(
+                    offer,
+                    paired,
+                    out var pairedRetryRejectionReason))
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; status=Stale; decision_status=Stale; session_id={SanitizeLogToken(offer.SessionId)}; transfer_id={SanitizeLogToken(paired.PublicationAuthority.TransferId)}; direction=inbound; payer_decision_id={offer.PayerDecisionId}; inbound_msg_id={SanitizeLogToken(paired.MessageId)}; trigger=fallback_paired_tail_yield; authority_effect=none; decision_reason={SanitizeLogToken(pairedRetryRejectionReason)}");
+                await StopAccelerationLaneAsync(
+                        "post_fallback_paired_retry_offer_binding_stale",
+                        ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             NotifyTransportAccelerationStateChanged("dialer_ready");
             var answerAckGeneration = BeginPendingAccelerationAnswerAck(
                 offer,
                 validation.AcceptedLanes,
                 replyTarget,
                 pairedRetryScope);
-            MarkInboundRuntimeUnlockOfferAccepted(
-                offer,
-                answerAckGeneration,
-                pairedRetryScope);
+            if (!MarkInboundRuntimeUnlockOfferAccepted(
+                    offer,
+                    answerAckGeneration,
+                    pairedRetryScope))
+            {
+                lock (accelerationGate)
+                {
+                    if (pendingAccelerationAnswerAckGeneration ==
+                            answerAckGeneration &&
+                        pendingAccelerationAnswerAckPayerDecisionId ==
+                            offer.PayerDecisionId)
+                    {
+                        ClearPendingAccelerationAnswerAckLocked(
+                            schedulePendingNegotiationWake: false);
+                    }
+                }
+                await StopAccelerationLaneAsync(
+                        "post_fallback_paired_retry_offer_binding_stale",
+                        ct)
+                    .ConfigureAwait(false);
+                return;
+            }
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_answer_ack_pending; session_id={SanitizeLogToken(offer.SessionId)}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes)}; payer_decision_id={offer.PayerDecisionId}; generation={answerAckGeneration}");

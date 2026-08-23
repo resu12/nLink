@@ -53778,8 +53778,46 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
                 (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId
             }).Count -gt 0
             if ($blocked) { continue }
-            [object[]]$matchingPrepared = @($prepared | Where-Object {
+            $localTransaction = Get-ResponderProbeField -Event $accepted -Names @('local_transaction_generation')
+            $localOffer = Get-ResponderProbeField -Event $accepted -Names @('local_offer_generation')
+            $localLease = Get-ResponderProbeField -Event $accepted -Names @('local_tuna_path_lease_generation')
+            if ($localTransaction -notmatch '^[1-9][0-9]*$' -or
+                $localOffer -notmatch '^[1-9][0-9]*$' -or
+                $localLease -notmatch '^[1-9][0-9]*$') { continue }
+            $staleLocalTuple =
+                $localTransaction -eq (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('local_transaction_generation')) -and
+                $localOffer -eq (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('local_offer_generation')) -and
+                $localLease -eq (Get-ResponderProbeField -Event $pairedRetryProbeMismatch -Names @('local_tuna_path_lease_generation'))
+            if ($staleLocalTuple) { continue }
+            [object[]]$matchingBindings = @($boundLaunches | Where-Object {
                 [int64]$_.Sequence -gt [int64]$accepted.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $localTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $localOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -eq $localLease -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_transaction_generation')) -eq $peerTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_offer_generation')) -eq $peerOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('peer_tuna_path_lease_generation')) -eq $peerLease -and
+                (Get-ResponderProbeField -Event $_ -Names @('probe_id')) -eq $probeId
+            } | Sort-Object Sequence, LineNumber)
+            if ($matchingBindings.Count -eq 0) { continue }
+            $binding = $matchingBindings[0]
+            [object[]]$matchingRouteHandoffs = @($responderHandoffDecisions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$binding.Sequence -and
+                (Get-ResponderProbeField -Event $_ -Names @('status', 'decision_status')) -in @('Accepted', 'Idempotent') -and
+                (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                (Get-ResponderProbeField -Event $_ -Names @('transaction_generation')) -eq $localTransaction -and
+                (Get-ResponderProbeField -Event $_ -Names @('offer_generation')) -eq $localOffer -and
+                (Get-ResponderProbeField -Event $_ -Names @('tuna_path_lease_generation')) -eq $localLease
+            } | Sort-Object Sequence, LineNumber)
+            if ($matchingRouteHandoffs.Count -eq 0) { continue }
+            $routeHandoff = $matchingRouteHandoffs[0]
+            [object[]]$matchingPrepared = @($prepared | Where-Object {
+                [int64]$_.Sequence -gt [int64]$routeHandoff.Sequence -and
                 (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
                 (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
                 (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
@@ -53791,15 +53829,47 @@ function Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation {
             foreach ($prepare in $matchingPrepared) {
                 $authorityId = Get-ResponderProbeField -Event $prepare -Names @('authority_id')
                 $transitionGeneration = Get-ResponderProbeField -Event $prepare -Names @('transition_generation')
-                if (@($draining | Where-Object {
+                [object[]]$matchingDrains = @($draining | Where-Object {
                         [int64]$_.Sequence -gt [int64]$prepare.Sequence -and
                         (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
                         (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authorityId -and
                         (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
-                    }).Count -gt 0) {
-                    $recovered = $true
-                    break
-                }
+                    } | Sort-Object Sequence, LineNumber)
+                if ($matchingDrains.Count -eq 0) { continue }
+                $drain = $matchingDrains[0]
+                [object[]]$matchingReceipts = @($drainReceipts | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$drain.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authorityId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                } | Sort-Object Sequence, LineNumber)
+                if ($matchingReceipts.Count -eq 0) { continue }
+                $drainReceipt = $matchingReceipts[0]
+                [object[]]$matchingCommits = @($committed | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$drainReceipt.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authorityId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                } | Sort-Object Sequence, LineNumber)
+                if ($matchingCommits.Count -eq 0) { continue }
+                $commit = $matchingCommits[0]
+                [object[]]$matchingDispositions = @($dispositions | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$commit.Sequence -and
+                    (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                    (Get-ResponderProbeField -Event $_ -Names @('authority_id')) -eq $authorityId -and
+                    (Get-ResponderProbeField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+                } | Sort-Object Sequence, LineNumber)
+                if ($matchingDispositions.Count -eq 0) { continue }
+                $disposition = $matchingDispositions[0]
+                if (@($routePublications | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$disposition.Sequence -and
+                        (Get-ResponderProbeField -Event $_ -Names @('log_writer_id')) -eq $writer -and
+                        (Get-ResponderProbeField -Event $_ -Names @('session_id')) -eq $sessionId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('transfer_id')) -eq $transferId -and
+                        (Get-ResponderProbeField -Event $_ -Names @('live_route_epoch')) -eq '3'
+                    }).Count -eq 0) { continue }
+                $recovered = $true
+                break
             }
             if ($recovered) { break }
         }

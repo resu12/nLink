@@ -6100,7 +6100,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
 
         $escapedName = [regex]::Escape($Name)
-        $match = [regex]::Match($Line, "(?i)(?:^|;\s*)$escapedName=([^;`r`n]+)")
+        $pattern = if ([string]::Equals($Name, 'event', [System.StringComparison]::OrdinalIgnoreCase)) {
+            "(?i)(?:^|\]\s+|;\s*)event=([^;`r`n]+)"
+        }
+        else {
+            "(?i)(?:^|;\s*)$escapedName=([^;`r`n]+)"
+        }
+        $match = [regex]::Match($Line, $pattern)
         if (-not $match.Success) {
             return ''
         }
@@ -16035,6 +16041,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $index++
             $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
             if ($eventName -in @(
+                    'runtime_unlock_post_fallback_paired_retry_offer_binding_decided',
                     'runtime_unlock_retry_dispatch_observed',
                     'tuna_acceleration_offer_queued',
                     'tuna_acceleration_answer_sent',
@@ -16042,8 +16049,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'runtime_unlock_precommit_probe_ack_sent',
                     'runtime_unlock_peer_precommit_answer_acceptance_decided',
                     'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
+                    'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided',
                     'filetransfer_route_transition_prepared',
                     'filetransfer_route_transition_draining',
+                    'filetransfer_route_transition_drain_receipt_decided',
+                    'filetransfer_route_transition_committed',
+                    'filetransfer_route_transition_disposition_applied',
+                    'filetransfer_live_route_epoch_recovered',
                     'file_transfer_inbound_terminal',
                     'transfer_terminal')) {
                 $records.Add([pscustomobject]@{ Index = $index; Event = $eventName; Line = $line })
@@ -16132,16 +16144,43 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -in @('Accepted', 'Held', 'Idempotent')
                 } | Select-Object -First 1)
+            $localTransaction = if ($accepted.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $accepted[0].Line -Name 'local_transaction_generation'
+            } else { '' }
+            $localOffer = if ($accepted.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $accepted[0].Line -Name 'local_offer_generation'
+            } else { '' }
+            $localLease = if ($accepted.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $accepted[0].Line -Name 'local_tuna_path_lease_generation'
+            } else { '' }
+            $freshLocalTuple = $localTransaction -match '^[1-9][0-9]*$' -and
+                $localOffer -match '^[1-9][0-9]*$' -and
+                $localLease -match '^[1-9][0-9]*$' -and
+                -not ($localTransaction -eq (Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'local_transaction_generation') -and
+                    $localOffer -eq (Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'local_offer_generation') -and
+                    $localLease -eq (Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'local_tuna_path_lease_generation'))
             $handoff = @(@($records.ToArray()) | Where-Object {
-                    $accepted.Count -eq 1 -and $_.Event -eq
+                    $accepted.Count -eq 1 -and $freshLocalTuple -and $_.Event -eq
                         'runtime_unlock_precommit_responder_peer_probe_handoff_bound' -and
                     $_.Index -gt $accepted[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -eq $localTransaction -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq $localOffer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_generation') -eq $localLease
+                } | Select-Object -First 1)
+            $routeHandoff = @(@($records.ToArray()) | Where-Object {
+                    $handoff.Count -eq 1 -and $_.Event -eq
+                        'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided' -and
+                    $_.Index -gt $handoff[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'status') -in @('Accepted', 'Idempotent')
                 } | Select-Object -First 1)
             $prepared = @(@($records.ToArray()) | Where-Object {
-                    $handoff.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_prepared' -and
-                    $_.Index -gt $handoff[0].Index -and
+                    $routeHandoff.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_prepared' -and
+                    $_.Index -gt $routeHandoff[0].Index -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
@@ -16154,8 +16193,45 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
                         (Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'authority_id')
                 } | Select-Object -First 1)
+            $transitionAuthority = if ($prepared.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'authority_id'
+            } else { '' }
+            $transitionGeneration = if ($prepared.Count -eq 1) {
+                Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'transition_generation'
+            } else { '' }
+            $drainReceipt = @(@($records.ToArray()) | Where-Object {
+                    $draining.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_drain_receipt_decided' -and
+                    $_.Index -gt $draining[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $transitionAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Accepted', 'Applied', 'Idempotent')
+                } | Select-Object -First 1)
+            $commit = @(@($records.ToArray()) | Where-Object {
+                    $drainReceipt.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_committed' -and
+                    $_.Index -gt $drainReceipt[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $transitionAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration
+                } | Select-Object -First 1)
+            $disposition = @(@($records.ToArray()) | Where-Object {
+                    $commit.Count -eq 1 -and $_.Event -eq 'filetransfer_route_transition_disposition_applied' -and
+                    $_.Index -gt $commit[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $transitionAuthority -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration
+                } | Select-Object -First 1)
+            $publication = @(@($records.ToArray()) | Where-Object {
+                    $disposition.Count -eq 1 -and $_.Event -eq 'filetransfer_live_route_epoch_recovered' -and
+                    $_.Index -gt $disposition[0].Index -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'route') -eq 'file_tuna_v4' -and
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'live_route_epoch') -eq '3'
+                } | Select-Object -First 1)
             if ($accepted.Count -eq 1 -and $handoff.Count -eq 1 -and
-                $prepared.Count -eq 1 -and $draining.Count -eq 1) { continue }
+                $routeHandoff.Count -eq 1 -and $prepared.Count -eq 1 -and
+                $draining.Count -eq 1 -and $drainReceipt.Count -eq 1 -and
+                $commit.Count -eq 1 -and $disposition.Count -eq 1 -and
+                $publication.Count -eq 1) { continue }
 
             $sequenceText = Get-TunaGuiLogLineFieldValue -Line $rejection.Line -Name 'gui_evidence_sequence'
             return [pscustomobject]@{
@@ -16888,6 +16964,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'runtime_unlock_offer_authority_boundary_decided',
             'filetransfer_bridge_recovery_execution_command_issued',
             'filetransfer_bridge_recovery_execution_start_decided',
+            'runtime_unlock_post_fallback_paired_retry_offer_binding_decided',
             'runtime_unlock_post_fallback_paired_retry_offer_classified',
             'tuna_acceleration_answer_sent',
             'tuna_acceleration_answer_replay_sent',
@@ -16912,6 +16989,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled',
             'tuna_payer_decision_started',
             'tuna_acceleration_payer_intent_queued',
+            'runtime_unlock_post_fallback_paired_retry_offer_binding_decided',
             'runtime_unlock_post_fallback_paired_retry_offer_classified',
             'runtime_unlock_retry_dispatch_observed',
             'runtime_unlock_tuna_dial_attempt_started',
