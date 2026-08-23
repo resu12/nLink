@@ -294,6 +294,10 @@ internal interface IFileTransferBridgeRecoveryExecutionBridge
         bool accepted,
         string reason);
 
+    void ObserveReceiveRecoveryProofDecision(
+        FileTransferReceiveRecoveryProofObservation observation,
+        FileTransferReceiveRecoveryDecision decision);
+
     bool InvalidateBridgeRecoveryExecution(
         FileTransferBridgeRecoveryExecutionCommand command,
         string reason);

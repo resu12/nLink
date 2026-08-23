@@ -636,6 +636,12 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 string.IsNullOrWhiteSpace(reason) ? "none" : reason.Trim()));
         }
 
+        void IFileTransferBridgeRecoveryExecutionBridge.ObserveReceiveRecoveryProofDecision(
+            FileTransferReceiveRecoveryProofObservation observation,
+            FileTransferReceiveRecoveryDecision decision)
+        {
+        }
+
         private static FileTransferReceiveRecoveryRequest CreateReceiveRecoveryRequest(
             FileTransferBridgeRecoveryExecutionCommand command)
         {

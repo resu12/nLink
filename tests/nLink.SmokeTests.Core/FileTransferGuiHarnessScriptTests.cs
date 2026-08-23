@@ -3754,6 +3754,56 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_MissingDispatchSuccessorDuringReceiveRecoveryUsesIndexedProof()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var proofMatch = Regex.Match(
+            guiText,
+            @"(?s)function\s+Get-TunaGuiMissingDispatchSuccessorReceiveRecoveryHoldFailure\s*\{(?<body>.*?)\r?\n\s*\}\r?\n\s*\r?\n\s*\$earlyEvidenceLineVisitCount\b");
+        Assert.True(proofMatch.Success, "Could not extract receive-recovery hold GUI correlator.");
+        var proofBody = proofMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineFieldValue {
+                param([string]$Line, [string]$Name)
+                $match = [regex]::Match($Line, "(?i)(?:^|;\s*)$([regex]::Escape($Name))=([^;`r`n]+)")
+                if ($match.Success) { return $match.Groups[1].Value.Trim() }
+                return ''
+            }
+            function Get-TunaGuiMissingDispatchSuccessorReceiveRecoveryHoldFailure { {{proofBody}} }
+            $source = 'log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; route=post_tuna_fallback_v6; route_publication_generation=3; transport_epoch=1; bridge_recovery_generation=1; data_session_generation=1'
+            $slotSource = 'log_writer_id=writer; session_id=sess; transfer_id=transfer; source_route=post_tuna_fallback_v6; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; data_session_generation=1'
+            $failure = Get-TunaGuiMissingDispatchSuccessorReceiveRecoveryHoldFailure -Lines @(
+                "event=filetransfer_receive_recovery_operation_issued; $source; receive_recovery_operation_generation=3; bridge_decision_generation=3",
+                'event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; authority_id=retry-a; predecessor_offer_generation=2; successor_intent_generation=2; decision_status=Accepted',
+                "event=runtime_unlock_retry_negotiation_slot_decided; $slotSource; intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=6; decision_status=Reserved",
+                'event=runtime_unlock_retry_dispatch_authority_granted; log_writer_id=writer; session_id=sess; transfer_id=transfer; authority_id=retry-b; predecessor_authority_id=retry-a; missing_dispatch_successor_generation=1; bridge_decision_generation=3',
+                'event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed; log_writer_id=writer; authority_id=retry-b; blocker_reason=receive_stall_recovery_in_progress',
+                'event=runtime_unlock_retry_dispatch_contract_settled; log_writer_id=writer; authority_id=retry-b; settlement_outcome=MissingDispatch',
+                'event=runtime_unlock_retry_dispatch_bounded_closure_retained; log_writer_id=writer; authority_id=retry-b; decision_reason=bounded_missing_dispatch_chain_closed'
+            )
+            if (-not $failure.Unresolved -or $failure.FirstSequence -ne 3) {
+                throw "receive-recovery successor hold proof mismatch: $($failure | ConvertTo-Json -Compress)"
+            }
+            $suppressed = Get-TunaGuiMissingDispatchSuccessorReceiveRecoveryHoldFailure -Lines @(
+                "event=filetransfer_receive_recovery_operation_issued; $source; receive_recovery_operation_generation=3; bridge_decision_generation=3",
+                'event=runtime_unlock_retry_post_fallback_receive_recovery_deferral_decided; decision_status=Held; authority_effect=none'
+            )
+            if ($suppressed.Unresolved) { throw 'correct deferral produced an indexed incident' }
+            Write-Output 'gui-missing-dispatch-receive-recovery-hold-index-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"MissingDispatch receive-recovery GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-missing-dispatch-receive-recovery-hold-index-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_ProbeRollbackRetryCycleUsesIndexedProofBeforeDeadline()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

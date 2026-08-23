@@ -582,6 +582,12 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_receive_recovery_operation_proof_decision_observed; session_id={FormatProtocolLogValue(observation.Command.Decision.RuntimeOwner.SessionId)}; transfer_id={FormatProtocolLogValue(observation.Command.Decision.RuntimeOwner.TransferId)}; direction={observation.Command.Decision.RuntimeOwner.Direction.ToString().ToLowerInvariant()}; recovery_operation_generation={operation?.Authority.OperationGeneration ?? 0}; bridge_decision_generation={observation.Command.Decision.BridgeDecisionGeneration}; recovery_liveness_lease_generation={observation.Command.RecoveryLivenessLease?.LeaseGeneration ?? 0}; proof_identity={FormatProtocolLogValue(observation.ProofIdentity)}; closure_state={operation?.ClosureState.ToString() ?? "none"}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_operation_missing")}");
+        if (decision is { } exactDecision)
+        {
+            executionBridge.ObserveReceiveRecoveryProofDecision(
+                observation,
+                exactDecision);
+        }
         ProcessReceiveRecoveryRetryDispatchDecision(retryDispatchDecision);
     }
 

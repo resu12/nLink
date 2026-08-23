@@ -1209,6 +1209,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_execution_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_execution_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_successor_evaluation_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_successor_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_successor_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_deadline_evaluation_requested') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_lifecycle_deadline_decided')
@@ -2275,6 +2276,21 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $runtimeUnlockRetryMissingDispatchOfferCompletionProof =
         Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrelation `
             -Events $runtimeUnlockRetryZeroOfferSuccessorEvents
+    [object[]]$runtimeUnlockRetryPostFallbackReceiveRecoveryHoldEvents = @(
+        $runtimeUnlockRetryZeroOfferSuccessorEvents +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_issued') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_execution_start_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_payload_submission_held') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_bounded_closure_retained') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_receive_recovery_operation_proof_decision_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_post_fallback_receive_recovery_deferral_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_observed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared')
+    )
+    $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof =
+        Get-FileTransferRuntimeUnlockRetryPostFallbackReceiveRecoveryHoldCorrelation `
+            -Events $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldEvents
     $runtimeUnlockRetryFallbackPairedYieldSuccessorReleaseProof =
         Get-FileTransferRuntimeUnlockRetryFallbackPairedYieldSuccessorReleaseCorrelation `
             -Events $runtimeUnlockRetryZeroOfferSuccessorEvents `
@@ -3000,6 +3016,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
             Event = $candidateEvent
             Reason = 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing'
+            Event = $candidateEvent
+            Reason = 'missing_dispatch_successor_reserved_while_exact_post_fallback_receive_recovery_current'
         }) | Out-Null
     }
     foreach ($candidateEvent in @($runtimeUnlockRetryCurrentListenerAdoptionProof.NoCurrentListenerUnresolvedCandidateEvents)) {
@@ -4357,6 +4380,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count={0}" -f $runtimeUnlockRetryMissingDispatchOfferCompletionProof.RecoveredCount),
        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count={0}" -f $runtimeUnlockRetryMissingDispatchOfferCompletionProof.UnresolvedCount),
        ("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_verdict={0}" -f $runtimeUnlockRetryMissingDispatchOfferCompletionProof.Verdict),
+       ("runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_raw_count={0}" -f $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.RawCount),
+       ("runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_distinct_count={0}" -f $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.DistinctCount),
+       ("runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_recovered_count={0}" -f $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.RecoveredCount),
+       ("runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_unresolved_count={0}" -f $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.UnresolvedCount),
+       ("runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_verdict={0}" -f $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.Verdict),
        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_raw_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRawCount),
        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementDistinctCount),
        ("runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count={0}" -f $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRecoveredCount),
@@ -6203,6 +6231,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.RecoveredCount
         runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.UnresolvedCount
         runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_verdict = $runtimeUnlockRetryMissingDispatchOfferCompletionProof.Verdict
+        runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_raw_count = $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.RawCount
+        runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_distinct_count = $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.DistinctCount
+        runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_recovered_count = $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.RecoveredCount
+        runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_unresolved_count = $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.UnresolvedCount
+        runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing_verdict = $runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.Verdict
         runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_raw_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRawCount
         runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_distinct_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementDistinctCount
         runtime_unlock_retry_dispatch_fallback_frontier_repair_settlement_recheck_missing_recovered_count = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.FallbackFrontierRepairSettlementRecoveredCount

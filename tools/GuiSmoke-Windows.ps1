@@ -5480,6 +5480,12 @@ function Get-TunaGuiExplicitFailureClassification {
                     Reason = 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor'
                 }
             }
+            'runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing' {
+                return [pscustomobject]@{
+                    Phase = 'runtime_unlock_retry'
+                    Reason = 'missing_dispatch_successor_reserved_while_exact_post_fallback_receive_recovery_current'
+                }
+            }
             'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback' {
                 return [pscustomobject]@{
                     Phase = 'runtime_unlock_retry'
@@ -16843,6 +16849,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'file_transfer_inbound_terminal',
             'transfer_terminal',
             'filetransfer_runtime_terminalized')
+        MissingDispatchReceiveRecoveryHold = @(
+            'filetransfer_receive_recovery_operation_issued',
+            'filetransfer_receive_recovery_operation_execution_start_decided',
+            'filetransfer_bridge_recovery_payload_submission_held',
+            'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided',
+            'runtime_unlock_retry_negotiation_slot_decided',
+            'runtime_unlock_retry_dispatch_install_committed',
+            'runtime_unlock_retry_dispatch_authority_granted',
+            'tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed',
+            'runtime_unlock_retry_dispatch_contract_settled',
+            'runtime_unlock_retry_dispatch_bounded_closure_retained',
+            'filetransfer_receive_recovery_operation_execution_receipt_applied',
+            'filetransfer_receive_recovery_operation_proof_decision_observed',
+            'runtime_unlock_retry_post_fallback_receive_recovery_deferral_decided',
+            'runtime_unlock_retry_dispatch_observed',
+            'filetransfer_route_transition_prepared',
+            'filetransfer_data_session_recreated', 'filetransfer_data_session_removed',
+            'filetransfer_runtime_terminalized', 'file_transfer_outbound_terminal',
+            'transfer_terminal')
         PostGrantHold = @(
             'runtime_unlock_retry_dispatch_authority_granted',
             'runtime_unlock_retry_dispatch_held_by_active_negotiation',
@@ -18894,6 +18919,173 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiMissingDispatchSuccessorReceiveRecoveryHoldFailure {
+        param(
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [AllowEmptyString()]
+            [string[]]$Lines
+        )
+
+        [object[]]$records = @(for ($index = 0; $index -lt $Lines.Count; $index++) {
+            [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+        })
+        $lookupCount = 0L
+        $field = {
+            param($Record, [string]$Name)
+            Get-TunaGuiLogLineFieldValue -Line $Record.Line -Name $Name
+        }
+        $sameSource = {
+            param($Slot, $Recovery)
+            foreach ($pair in @(
+                    @('log_writer_id', 'log_writer_id'),
+                    @('session_id', 'session_id'),
+                    @('transfer_id', 'transfer_id'),
+                    @('source_route', 'route'),
+                    @('source_publication_generation', 'route_publication_generation'),
+                    @('source_transport_epoch', 'transport_epoch'),
+                    @('source_bridge_recovery_generation', 'bridge_recovery_generation'),
+                    @('data_session_generation', 'data_session_generation'))) {
+                $left = & $field $Slot $pair[0]
+                $right = & $field $Recovery $pair[1]
+                if ([string]::IsNullOrWhiteSpace($left) -or
+                    [string]::IsNullOrWhiteSpace($right) -or $left -ne $right) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        [object[]]$slots = @($records | Where-Object {
+            (& $field $_ 'event') -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+            (& $field $_ 'decision_status') -eq 'Reserved' -and
+            (& $field $_ 'intent_kind') -eq 'SuccessorEvaluation' -and
+            (& $field $_ 'source_route') -eq 'post_tuna_fallback_v6'
+        })
+        foreach ($slot in $slots) {
+            $lookupCount++
+            [object[]]$recoveries = @($records | Where-Object {
+                $_.Index -lt $slot.Index -and
+                (& $field $_ 'event') -in @(
+                    'filetransfer_receive_recovery_operation_issued',
+                    'filetransfer_receive_recovery_operation_execution_start_decided') -and
+                (& $field $_ 'direction') -eq 'outbound' -and
+                (& $field $_ 'route') -eq 'post_tuna_fallback_v6' -and
+                [int64](& $field $_ 'receive_recovery_operation_generation') -gt 0 -and
+                (& $sameSource $slot $_)
+            } | Select-Object -Last 1)
+            if ($recoveries.Count -ne 1) { continue }
+            $recovery = $recoveries[0]
+            $operationGeneration = & $field $recovery 'receive_recovery_operation_generation'
+            $bridgeDecisionGeneration = & $field $recovery 'bridge_decision_generation'
+            $intentGeneration = & $field $slot 'intent_generation'
+            [object[]]$cleanup = @($records | Where-Object {
+                $_.Index -gt $recovery.Index -and $_.Index -lt $slot.Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided' -and
+                (& $field $_ 'log_writer_id') -eq (& $field $slot 'log_writer_id') -and
+                (& $field $_ 'session_id') -eq (& $field $slot 'session_id') -and
+                (& $field $_ 'transfer_id') -eq (& $field $slot 'transfer_id') -and
+                (& $field $_ 'successor_intent_generation') -eq $intentGeneration -and
+                [int64](& $field $_ 'predecessor_offer_generation') -gt 0
+            } | Select-Object -Last 1)
+            if ($cleanup.Count -ne 1) { continue }
+            $predecessorAuthority = & $field $cleanup[0] 'authority_id'
+            [object[]]$releasedSlot = @($records | Where-Object {
+                $_.Index -gt $slot.Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+                (& $field $_ 'decision_status') -eq 'Released' -and
+                (& $field $_ 'slot_generation') -eq (& $field $slot 'slot_generation') -and
+                (& $field $_ 'intent_generation') -eq $intentGeneration
+            } | Select-Object -First 1)
+            [object[]]$proof = @($records | Where-Object {
+                $releasedSlot.Count -eq 1 -and $_.Index -gt $releasedSlot[0].Index -and
+                (& $field $_ 'event') -eq 'filetransfer_receive_recovery_operation_proof_decision_observed' -and
+                (& $field $_ 'recovery_operation_generation') -eq $operationGeneration -and
+                (& $field $_ 'decision_status') -in @('Accepted', 'Idempotent')
+            } | Select-Object -First 1)
+            [object[]]$releasedDeferral = @($records | Where-Object {
+                $proof.Count -eq 1 -and $_.Index -gt $proof[0].Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_post_fallback_receive_recovery_deferral_decided' -and
+                (& $field $_ 'decision_status') -eq 'Released' -and
+                (& $field $_ 'intent_generation') -eq $intentGeneration
+            } | Select-Object -First 1)
+            [object[]]$postProofGrant = @($records | Where-Object {
+                $releasedDeferral.Count -eq 1 -and $_.Index -gt $releasedDeferral[0].Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_dispatch_authority_granted' -and
+                (& $field $_ 'log_writer_id') -eq (& $field $slot 'log_writer_id') -and
+                (& $field $_ 'predecessor_authority_id') -eq $predecessorAuthority -and
+                (& $field $_ 'bridge_decision_generation') -eq $bridgeDecisionGeneration
+            } | Select-Object -First 1)
+            [object[]]$postProofDispatch = @($records | Where-Object {
+                $postProofGrant.Count -eq 1 -and $_.Index -gt $postProofGrant[0].Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_dispatch_observed' -and
+                (& $field $_ 'authority_id') -eq (& $field $postProofGrant[0] 'authority_id')
+            } | Select-Object -First 1)
+            [object[]]$postProofPrepared = @($records | Where-Object {
+                $postProofDispatch.Count -eq 1 -and $_.Index -gt $postProofDispatch[0].Index -and
+                (& $field $_ 'event') -eq 'filetransfer_route_transition_prepared' -and
+                (& $field $_ 'source_route') -eq 'post_tuna_fallback_v6' -and
+                (& $field $_ 'target_route') -eq 'file_tuna_v4'
+            } | Select-Object -First 1)
+            if ($releasedSlot.Count -eq 1 -and $releasedDeferral.Count -eq 1 -and
+                $postProofGrant.Count -eq 1 -and $postProofDispatch.Count -eq 1 -and
+                $postProofPrepared.Count -eq 1) {
+                continue
+            }
+
+            [object[]]$grant = @($records | Where-Object {
+                $_.Index -gt $slot.Index -and
+                ($releasedSlot.Count -eq 0 -or $_.Index -lt $releasedSlot[0].Index) -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_dispatch_authority_granted' -and
+                (& $field $_ 'log_writer_id') -eq (& $field $slot 'log_writer_id') -and
+                (& $field $_ 'predecessor_authority_id') -eq $predecessorAuthority -and
+                (& $field $_ 'bridge_decision_generation') -eq $bridgeDecisionGeneration
+            } | Select-Object -First 1)
+            if ($grant.Count -ne 1) { continue }
+            $successorAuthority = & $field $grant[0] 'authority_id'
+            [object[]]$bypass = @($records | Where-Object {
+                $_.Index -gt $grant[0].Index -and
+                (& $field $_ 'event') -eq 'tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed' -and
+                (& $field $_ 'authority_id') -eq $successorAuthority -and
+                (& $field $_ 'blocker_reason') -in @(
+                    'receive_stall_recovery_in_progress',
+                    'receive_stall_recovery_awaiting_receive_proof')
+            } | Select-Object -First 1)
+            [object[]]$settlement = @($records | Where-Object {
+                $bypass.Count -eq 1 -and $_.Index -gt $bypass[0].Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_dispatch_contract_settled' -and
+                (& $field $_ 'authority_id') -eq $successorAuthority -and
+                (& $field $_ 'settlement_outcome') -eq 'MissingDispatch'
+            } | Select-Object -First 1)
+            [object[]]$closure = @($records | Where-Object {
+                $settlement.Count -eq 1 -and $_.Index -gt $settlement[0].Index -and
+                (& $field $_ 'event') -eq 'runtime_unlock_retry_dispatch_bounded_closure_retained' -and
+                (& $field $_ 'authority_id') -eq $successorAuthority -and
+                (& $field $_ 'decision_reason') -eq 'bounded_missing_dispatch_chain_closed'
+            } | Select-Object -First 1)
+            if ($bypass.Count -ne 1 -or $settlement.Count -ne 1 -or $closure.Count -ne 1) {
+                continue
+            }
+
+            $sequence = & $field $slot 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequence -match '^[1-9][0-9]*$') {
+                    [long]$sequence
+                } else { [long]($slot.Index + 1) }
+                ParsedRecords = [long]$records.Count
+                LookupCount = [long]$lookupCount
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = [long]$lookupCount
+        }
+    }
+
     $earlyEvidenceLineVisitCount = 0L
     foreach ($line in $evidenceLines) {
         $earlyEvidenceLineVisitCount++
@@ -18961,6 +19153,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $missingDispatchCompletionFastPath =
         Get-TunaGuiMissingDispatchPredecessorCompletionFailure `
             -Lines ([string[]]$earlyPredicateLines.MissingDispatchCompletion.ToArray())
+    $missingDispatchReceiveRecoveryHoldFastPath =
+        Get-TunaGuiMissingDispatchSuccessorReceiveRecoveryHoldFailure `
+            -Lines ([string[]]$earlyPredicateLines.MissingDispatchReceiveRecoveryHold.ToArray())
     $retryCycleSuccessorFastPath =
         Get-TunaGuiFallbackTailRetryCycleSuccessorFailure `
             -Lines ([string[]]$earlyPredicateLines.RetryCycleSuccessor.ToArray())
@@ -19042,6 +19237,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{ Kind = 'UnblockProgress'; Result = $fallbackFrontierRepairProgressStateFastPath },
             [pscustomobject]@{ Kind = 'PostGrantHold'; Result = $postGrantHoldFastPath },
             [pscustomobject]@{
+                Kind = 'MissingDispatchReceiveRecoveryHold'
+                Result = $missingDispatchReceiveRecoveryHoldFastPath
+            },
+            [pscustomobject]@{
                 Kind = 'MissingDispatchCompletion'
                 Result = $missingDispatchCompletionFastPath
             },
@@ -19113,6 +19312,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
             -EvidenceParsedRecordCount ([long]$routeTransitionPressureLocalLifecycleFastPath.ParsedRecords) `
             -EvidenceLookupCount ([long]$routeTransitionPressureLocalLifecycleFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'MissingDispatchReceiveRecoveryHold') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$missingDispatchReceiveRecoveryHoldFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_missing_dispatch_receive_recovery_hold_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'runtime_unlock_retry' `
+            -Reason 'missing_dispatch_successor_reserved_while_exact_post_fallback_receive_recovery_current' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_missing_dispatch_receive_recovery_hold_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$missingDispatchReceiveRecoveryHoldFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$missingDispatchReceiveRecoveryHoldFastPath.LookupCount) `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 
@@ -32535,6 +32753,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $liveRouteEpochObservations = New-Object System.Collections.Generic.List[object]
     $firstTransferTerminalBeforeLiveReactivation = $false
     $firstTransferTerminalBeforeLiveReactivationTransferId = ''
+    $liveReactivationUnlockInvoked = $false
     $secondTransferRequiresFreshDiagnosticReadiness = $false
     $firstTransferTerminalBeforeFallbackSwitchOff = $false
     $firstTransferTerminalBeforeFallbackSwitchOffTransferId = ''
@@ -32941,6 +33160,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     }
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_epoch_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
                     Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                    $liveReactivationUnlockInvoked = $true
                     if ($null -ne $fallbackProjection) {
                         [void](Complete-TunaGuiLiveReactivationAction -Tracker $faultAdmissionTracker)
                         $observedEvidenceLines.Add((New-TunaGuiLiveReactivationActionDiagnosticLine `
@@ -33856,7 +34076,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes $terminalBeforeFallbackExpectedRoutes
             throw "Tuna GUI live regular activation cycle reached terminal completion before fallback switch-off proof. failure_class=filetransfer_gui_live_fallback_fault_window_missed sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
-        elseif ($firstTransferTerminalBeforeLiveReactivation) {
+        elseif ($firstTransferTerminalBeforeLiveReactivation -and
+            -not $liveReactivationUnlockInvoked) {
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6')
             throw "Tuna GUI live regular activation cycle reached terminal completion before fallback reactivation unlock. failure_class=filetransfer_gui_live_reactivation_action_window_missed failure_variant=fault_admission_tracker_backlog_delayed_prearmed_unlock_past_terminal sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
