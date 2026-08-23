@@ -6162,6 +6162,83 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData("successor_deferral", false)]
+    [InlineData("route_scope_recheck", false)]
+    [InlineData("unknown_stale_reason", true)]
+    public async Task GuiSmokeFailureClassification_PostFallbackSupersededStallWakeUsesExactIndexedFastPath(
+        string closure,
+        bool expectMissing)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-superseded-stall-wake-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'direction=inbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); route_publication_generation=3; route_commit_generation=0; log_writer_id=writer'
+                $stallScope = "$scope; checkpoint_generation=1; data_session_identity=data-session; data_session_generation=1"
+                $predecessor = "authority_id=repair-predecessor; predecessor_authority_id=(none); repair_generation=4; repair_request_key=fallback-frontier:40:1:predecessor; range_fingerprint=predecessor; frontier_chunk_index=40; durable_received_highest_chunk_index=60; source_kind=ReceiverRequest; primary_protocol_repair_request_id=v6-frontier:40:4; primary_request_correlation_id=correlation-predecessor; $scope"
+                $successor = "authority_id=repair-successor; predecessor_authority_id=repair-predecessor; repair_generation=5; repair_request_key=fallback-frontier:41:1:successor; range_fingerprint=successor; frontier_chunk_index=41; durable_received_highest_chunk_index=60; source_kind=ReceiverRequest; primary_protocol_repair_request_id=v6-frontier:41:5; primary_request_correlation_id=correlation-successor; $scope"
+                $lines = @(
+                    "event=filetransfer_fallback_frontier_repair_authority_granted; $predecessor",
+                    "event=filetransfer_fallback_frontier_repair_contract_settled; $predecessor; settlement_outcome=ProgressObserved",
+                    "event=filetransfer_fallback_frontier_repair_progress_observed; $predecessor; previous_frontier_chunk_index=40; current_frontier_chunk_index=41",
+                    "event=filetransfer_v6_fallback_frontier_repair_progress_state_forced; $predecessor; previous_frontier_chunk_index=40; current_frontier_chunk_index=41; receiver_state_epoch=7; data_session_identity=data-session; data_session_generation=1; decision_status=Accepted",
+                    "event=filetransfer_v6_receiver_state_sent; $scope; epoch=7; contiguous_committed_chunk_index=41; durable_received_highest_chunk_index=60; transfer_paused=0; log_writer_attempt_utc_ticks=639000000000000000",
+                    "event=filetransfer_v6_frontier_request_deferred; $stallScope; frontier_chunk_index=41; highest_received_chunk_index=60; elapsed_ms=0; stall_grace_ms=750; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; reason=chunk_batch_committed; authority_effect=none; log_writer_attempt_utc_ticks=639000000001000000"
+                )
+                if ('{{closure}}' -in @('successor_deferral', 'unknown_stale_reason')) {
+                    $lines += "event=filetransfer_v6_frontier_request_deferred; $stallScope; frontier_chunk_index=44; highest_received_chunk_index=65; elapsed_ms=0; stall_grace_ms=750; stall_started_utc=2026-04-26T11:17:59.6000000+00:00; wake_generation=9; wake_deadline_utc=2026-04-26T11:18:00.3500000+00:00; reason=chunk_batch_committed; authority_effect=none; log_writer_attempt_utc_ticks=639000000007000000"
+                    $staleReason = if ('{{closure}}' -eq 'unknown_stale_reason') { 'unexpected_stale_reason' } else { 'wake_generation_replaced' }
+                    $lines += "event=filetransfer_v6_frontier_stall_grace_recheck_decided; $stallScope; frontier_chunk_index=41; highest_received_chunk_index=60; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; decision_status=stale; decision_reason=$staleReason; authority_effect=none; log_writer_attempt_utc_ticks=639000000010000000"
+                }
+                else {
+                    $lines += "event=filetransfer_v6_frontier_stall_grace_recheck_decided; $stallScope; frontier_chunk_index=41; highest_received_chunk_index=60; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; decision_status=stale; decision_reason=route_scope_changed; authority_effect=none; log_writer_attempt_utc_ticks=639000000009000000"
+                    $lines += "event=filetransfer_fallback_frontier_repair_authority_granted; $successor"
+                    $lines += 'event=filetransfer_control_plane_delivery_observed; direction=inbound; session_id=sess; transfer_id=transfer; log_writer_id=writer; kind=frontier_request; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; checkpoint_request_id=(none); reason=retry; repair_request_id=v6-frontier:41:5; request_correlation_id=correlation-successor; repair_request_key=fallback-frontier:41:1:successor; range_fingerprint=successor; peer_visible_any=1; accepted_any=1'
+                    $lines += "event=filetransfer_fallback_frontier_repair_dispatched; $successor; dispatch_observed=1"
+                    $lines += "event=filetransfer_v6_frontier_request_sent; $successor; repair_request_id=v6-frontier:41:5; request_correlation_id=correlation-successor; reason=retry"
+                }
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ([bool]$result.FallbackFrontierStallGraceRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                    throw "superseded stall-wake indexed result mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-superseded-stall-wake-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Superseded stall-wake GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-superseded-stall-wake-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, true)]
     public async Task GuiSmokeFailureClassification_PostFallbackTerminalFrontierUsesExactIndexedFastPath(
@@ -11009,6 +11086,78 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
         Assert.True(result.ExitCode == 0, $"Reactivation action-window GUI index failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-reactivation-action-window-index-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_FileTunaV4RejectedReceiveAllowsInterleavedSidecarTelemetry()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-data-path-rejection-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $payload = 'session_id=sess; transfer_id=transfer; frame_type=filetransfer.chunk_batch.v4; lane=bulk; start_chunk_index=939; last_end_chunk_exclusive=942; raw_payload_bytes=64512; batch_chunk_count=3'
+                $scope = 'live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1'
+                $lines = New-Object System.Collections.Generic.List[string]
+                $lines.Add("event=filetransfer_data_path_send_result; $payload; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; actual_transport=regular_nkn; delivery_transport=regular_nkn; delivery_result=sent; target_transport=regular_nkn; log_writer_id=sender; log_writer_sequence=1")
+                $lines.Add("event=filetransfer_route_transitioned; session_id=sess; transfer_id=transfer; direction=inbound; route=file_tuna_v4; protocol_version=4; previous_route=regular_nkn_v4_fast; new_route=file_tuna_v4; $scope; log_writer_id=helper; log_writer_sequence=2")
+                $lines.Add("event=filetransfer_data_path_receive_result; $payload; direction=inbound; route=file_tuna_v4; protocol_version=4; actual_transport=regular_nkn; delivery_transport=regular_nkn; target_transport=tuna; $scope; log_writer_id=helper; log_writer_sequence=3")
+                $lines.Add("event=filetransfer_tuna_data_path_mismatch; $payload; direction=inbound; route=file_tuna_v4; protocol_version=4; actual_transport=regular_nkn; delivery_transport=regular_nkn; target_transport=tuna; proof_direction=receive; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn; $scope; log_writer_id=helper; log_writer_sequence=4")
+                for ($index = 0; $index -lt 12; $index++) {
+                    $lines.Add("event=tuna_dialer_sidecar_stderr; line_len=$($index + 100); log_writer_id=helper; log_writer_sequence=$($index + 5)")
+                }
+                $lines.Add('event=filetransfer_data_frame_ignored; session_id=sess; transfer_id=transfer; frame_type=filetransfer.chunk_batch.v4; lane=bulk; chunk_index=939-941; route=file_tuna_v4; protocol_version=4; actual_transport=regular_nkn; target_transport=tuna; reason=file_tuna_v4_payload_requires_tuna; log_writer_id=helper; log_writer_sequence=17')
+                $lines.Add('event=file_transfer_inbound_terminal; session_id=sess; transfer_id=transfer; terminal_state=completed; log_writer_id=helper; log_writer_sequence=18')
+                [IO.File]::WriteAllLines($path, $lines)
+                $recovered = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=file_tuna_data_path_mismatch' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($recovered.Reason -eq 'file_tuna_data_path_mismatch') { throw 'interleaved exact ignore did not recover the receive candidate' }
+
+                [IO.File]::WriteAllLines($path, @($lines | Where-Object { $_ -notmatch 'event=filetransfer_data_frame_ignored' }))
+                $unresolved = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'failure_class=file_tuna_data_path_mismatch' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($unresolved.Phase -ne 'route_runtime' -or $unresolved.Reason -ne 'file_tuna_data_path_mismatch') {
+                    throw "missing-ignore classification mismatch: $($unresolved | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-file-tuna-data-path-rejection-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"File-Tuna rejected receive GUI index failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-file-tuna-data-path-rejection-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

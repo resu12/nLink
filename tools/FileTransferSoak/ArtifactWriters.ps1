@@ -8965,6 +8965,46 @@ function Get-FileTransferFileTunaV4DataPathTransferScopeKey {
     return ("{0}|{1}" -f $sessionId.ToLowerInvariant(), $transferId.ToLowerInvariant())
 }
 
+function Get-FileTransferFileTunaV4RejectedReceiveCorrelationKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -notin @(
+            'filetransfer_data_path_receive_result',
+            'filetransfer_tuna_data_path_mismatch',
+            'filetransfer_data_frame_ignored')) {
+        return ''
+    }
+
+    $rangeStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Event
+    $rangeEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Event
+    if ($rangeStart -lt 0 -or $rangeEndExclusive -le $rangeStart) {
+        return ''
+    }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($fieldName in @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'frame_type',
+            'lane',
+            'route',
+            'protocol_version',
+            'actual_transport',
+            'target_transport')) {
+        $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            return ''
+        }
+
+        $parts.Add($value.ToLowerInvariant()) | Out-Null
+    }
+
+    $parts.Add([string]$rangeStart) | Out-Null
+    $parts.Add([string]$rangeEndExclusive) | Out-Null
+    return [string]::Join('|', $parts)
+}
+
 function Add-FileTransferFileTunaV4DataPathIndexEvent {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Lookup,
@@ -9096,9 +9136,9 @@ function New-FileTransferFileTunaV4DataPathCorrelationIndex {
     param([object[]]$Events = @())
 
     $payloadEvents = @{}
-    $writerSequenceEvents = @{}
     $terminalEventsByScope = @{}
     $receiverTransitionsByWriterScope = @{}
+    $rejectedReceiveEventsByKey = @{}
     $orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
     $buildVisitCount = 0L
 
@@ -9113,27 +9153,17 @@ function New-FileTransferFileTunaV4DataPathCorrelationIndex {
                 -Event $event
         }
 
-        $writerId =
-            Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''
-        $writerSequence =
-            Get-FileTransferEventInt64Field `
-                -Event $event `
-                -Name 'log_writer_sequence' `
-                -Default 0
-        if (-not [string]::IsNullOrWhiteSpace($writerId) -and
-            $writerSequence -gt 0) {
-            $writerKey = $writerId.ToLowerInvariant()
-            if (-not $writerSequenceEvents.ContainsKey($writerKey)) {
-                $writerSequenceEvents[$writerKey] = @{}
-            }
-
-            $sequenceKey = [string]$writerSequence
+        $rejectedReceiveKey =
+            Get-FileTransferFileTunaV4RejectedReceiveCorrelationKey -Event $event
+        if (-not [string]::IsNullOrWhiteSpace($rejectedReceiveKey)) {
             Add-FileTransferFileTunaV4DataPathIndexEvent `
-                -Lookup $writerSequenceEvents[$writerKey] `
-                -Key $sequenceKey `
+                -Lookup $rejectedReceiveEventsByKey `
+                -Key $rejectedReceiveKey `
                 -Event $event
         }
 
+        $writerId =
+            Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''
         $scopeKey =
             Get-FileTransferFileTunaV4DataPathTransferScopeKey -Event $event
         if ($event.EventName -in @(
@@ -9163,14 +9193,14 @@ function New-FileTransferFileTunaV4DataPathCorrelationIndex {
     return [pscustomobject]@{
         OrderedEvents = $orderedEvents
         PayloadEvents = $payloadEvents
-        WriterSequenceEvents = $writerSequenceEvents
         TerminalEventsByScope = $terminalEventsByScope
         ReceiverTransitionsByWriterScope = $receiverTransitionsByWriterScope
+        RejectedReceiveEventsByKey = $rejectedReceiveEventsByKey
         Statistics = [ordered]@{
             build_visit_count = $buildVisitCount
             bounded_lookup_visit_count = 0L
             payload_key_count = $payloadEvents.Count
-            writer_count = $writerSequenceEvents.Count
+            rejected_receive_key_count = $rejectedReceiveEventsByKey.Count
         }
     }
 }
@@ -9190,38 +9220,6 @@ function Get-FileTransferFileTunaV4DataPathIndexedPayloadEvents {
     [object[]]$events = $Index.PayloadEvents[$key].ToArray()
     $Index.Statistics.bounded_lookup_visit_count += $events.Count
     return $events
-}
-
-function Get-FileTransferFileTunaV4DataPathIndexedWriterWindow {
-    param(
-        [Parameter(Mandatory = $true)]$Index,
-        [Parameter(Mandatory = $true)][string]$WriterId,
-        [Parameter(Mandatory = $true)][int64]$AfterSequence,
-        [int]$WindowSize = 8
-    )
-
-    if ([string]::IsNullOrWhiteSpace($WriterId) -or $WindowSize -le 0) {
-        return @()
-    }
-
-    $writerKey = $WriterId.ToLowerInvariant()
-    if (-not $Index.WriterSequenceEvents.ContainsKey($writerKey)) {
-        return @()
-    }
-
-    $events = New-Object System.Collections.Generic.List[object]
-    $sequenceLookup = $Index.WriterSequenceEvents[$writerKey]
-    for ($offset = 1; $offset -le $WindowSize; $offset++) {
-        $Index.Statistics.bounded_lookup_visit_count++
-        $sequenceKey = [string]($AfterSequence + $offset)
-        if ($sequenceLookup.ContainsKey($sequenceKey)) {
-            foreach ($event in $sequenceLookup[$sequenceKey].ToArray()) {
-                $events.Add($event) | Out-Null
-            }
-        }
-    }
-
-    return @($events.ToArray())
 }
 
 function Get-FileTransferFileTunaV4DataPathIndexedTerminalEvents {
@@ -9264,6 +9262,28 @@ function Get-FileTransferFileTunaV4DataPathIndexedReceiverTransitions {
         $Index.ReceiverTransitionsByWriterScope[$key].ToArray()
     $Index.Statistics.bounded_lookup_visit_count += $events.Count
     return $events
+}
+
+function Get-FileTransferFileTunaV4DataPathIndexedRejectedReceiveEvents {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    $key = Get-FileTransferFileTunaV4RejectedReceiveCorrelationKey -Event $Event
+    if ([string]::IsNullOrWhiteSpace($key) -or
+        -not $Index.RejectedReceiveEventsByKey.ContainsKey($key)) {
+        return @()
+    }
+
+    [object[]]$events = $Index.RejectedReceiveEventsByKey[$key].ToArray()
+    $Index.Statistics.bounded_lookup_visit_count += $events.Count
+    return @($events | Sort-Object {
+            Get-FileTransferEventInt64Field `
+                -Event $_ `
+                -Name 'log_writer_sequence' `
+                -Default 0
+        })
 }
 
 function Test-FileTransferFileTunaV4DataPathSameReceiveTuple {
@@ -9352,6 +9372,233 @@ function Test-FileTransferFileTunaV4DataPathIgnoredCompanionMatches {
         (Get-FileTransferEventField -Event $Candidate -Name 'target_transport' -Default '') -eq 'tuna'
 }
 
+function Test-FileTransferFileTunaV4DataPathMismatchCompanionMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Reference,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if ($Candidate.EventName -ne 'filetransfer_tuna_data_path_mismatch' -or
+        (Get-FileTransferEventField -Event $Candidate -Name 'proof_direction' -Default '') -ne 'receive' -or
+        (Get-FileTransferEventField -Event $Candidate -Name 'mismatch_reason' -Default '') -ne
+            'file_tuna_v4_resolved_to_regular_nkn' -or
+        (Get-FileTransferEventField -Event $Candidate -Name 'actual_transport' -Default '') -ne 'regular_nkn' -or
+        (Get-FileTransferEventField -Event $Candidate -Name 'delivery_transport' -Default '') -ne 'regular_nkn' -or
+        (Get-FileTransferEventField -Event $Candidate -Name 'target_transport' -Default '') -ne 'tuna' -or
+        (Get-FileTransferEventInt64Field -Event $Candidate -Name 'raw_payload_bytes' -Default 0) -ne
+            (Get-FileTransferEventInt64Field -Event $Reference -Name 'raw_payload_bytes' -Default 0) -or
+        (Get-FileTransferEventInt64Field -Event $Candidate -Name 'batch_chunk_count' -Default 0) -ne
+            (Get-FileTransferEventInt64Field -Event $Reference -Name 'batch_chunk_count' -Default 0) -or
+        -not (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Reference -Actual $Candidate)) {
+        return $false
+    }
+
+    foreach ($fieldName in @(
+            'log_writer_id',
+            'transfer_id',
+            'session_id',
+            'frame_type',
+            'lane',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'route_publication_generation',
+            'route_commit_generation',
+            'target_route',
+            'target_protocol_version',
+            'target_transport')) {
+        $referenceValue =
+            Get-FileTransferEventField -Event $Reference -Name $fieldName -Default ''
+        $candidateValue =
+            Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($referenceValue) -or
+            [string]::IsNullOrWhiteSpace($candidateValue) -or
+            -not [string]::Equals(
+                $referenceValue,
+                $candidateValue,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return (Test-FileTransferFileTunaV4DataPathHasRange -Event $Reference) -and
+        (Test-FileTransferFileTunaV4DataPathHasRange -Event $Candidate)
+}
+
+function Get-FileTransferFileTunaV4DataPathRejectedReceiveChain {
+    param(
+        [Parameter(Mandatory = $true)]$Reference,
+        [Parameter(Mandatory = $true)]$DataPathIndex,
+        [switch]$ReturnBeforeIgnore
+    )
+
+    [object[]]$chainEvents = @(
+        Get-FileTransferFileTunaV4DataPathIndexedRejectedReceiveEvents `
+            -Index $DataPathIndex `
+            -Event $Reference)
+    if ($chainEvents.Count -eq 0) {
+        return $null
+    }
+
+    $referenceWriterSequence =
+        Get-FileTransferEventInt64Field `
+            -Event $Reference `
+            -Name 'log_writer_sequence' `
+            -Default 0
+    if ($referenceWriterSequence -le 0) {
+        return $null
+    }
+
+    $receive = $null
+    if ($Reference.EventName -eq 'filetransfer_data_path_receive_result') {
+        $receive = $Reference
+    }
+    elseif ($Reference.EventName -eq 'filetransfer_tuna_data_path_mismatch') {
+        [object[]]$precedingReceives = @(
+            $chainEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_data_path_receive_result' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -lt
+                    $referenceWriterSequence -and
+                (Test-FileTransferFileTunaV4DataPathSameReceiveTuple `
+                    -Reference $Reference `
+                    -Candidate $_)
+            } |
+            Sort-Object {
+                Get-FileTransferEventInt64Field `
+                    -Event $_ `
+                    -Name 'log_writer_sequence' `
+                    -Default 0
+            } -Descending)
+        if ($precedingReceives.Count -eq 0) {
+            return $null
+        }
+
+        $receive = $precedingReceives[0]
+    }
+    else {
+        return $null
+    }
+
+    $receiveWriterSequence =
+        Get-FileTransferEventInt64Field `
+            -Event $receive `
+            -Name 'log_writer_sequence' `
+            -Default 0
+    $nextReceiveBoundarySequence = 0L
+    foreach ($candidate in @($chainEvents)) {
+        $candidateWriterSequence =
+            Get-FileTransferEventInt64Field `
+                -Event $candidate `
+                -Name 'log_writer_sequence' `
+                -Default 0
+        if ($candidateWriterSequence -le $receiveWriterSequence -or
+            -not (Test-FileTransferFileTunaV4DataPathSameReceiveTuple `
+                -Reference $receive `
+                -Candidate $candidate)) {
+            continue
+        }
+
+        $nextReceiveBoundarySequence = $candidateWriterSequence
+        break
+    }
+
+    [object[]]$mismatchEvents = @(
+        $chainEvents |
+        Where-Object {
+            $candidateWriterSequence =
+                Get-FileTransferEventInt64Field `
+                    -Event $_ `
+                    -Name 'log_writer_sequence' `
+                    -Default 0
+            $candidateWriterSequence -gt $receiveWriterSequence -and
+                ($nextReceiveBoundarySequence -le 0 -or
+                    $candidateWriterSequence -lt $nextReceiveBoundarySequence) -and
+                (Test-FileTransferFileTunaV4DataPathMismatchCompanionMatches `
+                    -Reference $receive `
+                    -Candidate $_)
+        })
+    if ($mismatchEvents.Count -ne 1) {
+        return $null
+    }
+
+    $mismatch = $mismatchEvents[0]
+    $mismatchWriterSequence =
+        Get-FileTransferEventInt64Field `
+            -Event $mismatch `
+            -Name 'log_writer_sequence' `
+            -Default 0
+    if ($Reference.EventName -eq 'filetransfer_tuna_data_path_mismatch' -and
+        $mismatchWriterSequence -ne $referenceWriterSequence) {
+        return $null
+    }
+
+    if ($ReturnBeforeIgnore) {
+        return [pscustomobject]@{
+            Receive = $receive
+            Mismatch = $mismatch
+            Ignored = $null
+            NextReceiveBoundarySequence = $nextReceiveBoundarySequence
+        }
+    }
+
+    [object[]]$ignoredEvents = @(
+        $chainEvents |
+        Where-Object {
+            $candidateWriterSequence =
+                Get-FileTransferEventInt64Field `
+                    -Event $_ `
+                    -Name 'log_writer_sequence' `
+                    -Default 0
+            $candidateWriterSequence -gt $mismatchWriterSequence -and
+                ($nextReceiveBoundarySequence -le 0 -or
+                    $candidateWriterSequence -lt $nextReceiveBoundarySequence) -and
+                (Test-FileTransferFileTunaV4DataPathIgnoredCompanionMatches `
+                    -Reference $receive `
+                    -Candidate $_)
+        })
+    if ($ignoredEvents.Count -ne 1) {
+        return $null
+    }
+
+    $ignored = $ignoredEvents[0]
+    [object[]]$terminalBoundaries = @(
+        Get-FileTransferFileTunaV4DataPathIndexedTerminalEvents `
+            -Index $DataPathIndex `
+            -Event $receive |
+        Where-Object {
+            [int64]$_.Sequence -gt [int64]$mismatch.Sequence -and
+            [int64]$_.Sequence -lt [int64]$ignored.Sequence
+        })
+    if ($terminalBoundaries.Count -gt 0) {
+        return $null
+    }
+
+    [object[]]$routeBoundaries = @(
+        Get-FileTransferFileTunaV4DataPathIndexedReceiverTransitions `
+            -Index $DataPathIndex `
+            -Event $receive `
+            -WriterId (Get-FileTransferEventField -Event $receive -Name 'log_writer_id' -Default '') |
+        Where-Object {
+            [int64]$_.Sequence -gt [int64]$mismatch.Sequence -and
+            [int64]$_.Sequence -lt [int64]$ignored.Sequence
+        })
+    if ($routeBoundaries.Count -gt 0) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Receive = $receive
+        Mismatch = $mismatch
+        Ignored = $ignored
+        NextReceiveBoundarySequence = $nextReceiveBoundarySequence
+    }
+}
+
 function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
     param(
         [Parameter(Mandatory = $true)]$Mismatch,
@@ -9376,139 +9623,35 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
         return $false
     }
 
-    [object[]]$writerWindow = @(
-        Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
-            -Index $DataPathIndex `
-            -WriterId $writerId `
-            -AfterSequence $writerSequence)
-    $nextReceiveBoundarySequence = 0L
-    foreach ($candidate in @($writerWindow | Sort-Object {
-                Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0
-            })) {
-        if (Test-FileTransferFileTunaV4DataPathSameReceiveTuple `
-                -Reference $Mismatch `
-                -Candidate $candidate) {
-            $nextReceiveBoundarySequence =
-                Get-FileTransferEventInt64Field `
-                    -Event $candidate `
-                    -Name 'log_writer_sequence' `
-                    -Default 0
-            break
-        }
-    }
-
-    $ignoredWindowAnchorSequence = $writerSequence
-    if ($Mismatch.EventName -eq 'filetransfer_data_path_receive_result') {
-        [object[]]$exactMismatchCompanions = @(
-            $writerWindow |
-            Where-Object {
-                $companion = $_
-                $companionWriterSequence =
-                    Get-FileTransferEventInt64Field `
-                        -Event $companion `
-                        -Name 'log_writer_sequence' `
-                        -Default 0
-                if ($companion.EventName -ne 'filetransfer_tuna_data_path_mismatch' -or
-                    (Get-FileTransferEventField -Event $companion -Name 'proof_direction' -Default '') -ne 'receive' -or
-                    (Get-FileTransferEventField -Event $companion -Name 'mismatch_reason' -Default '') -ne 'file_tuna_v4_resolved_to_regular_nkn' -or
-                    -not [string]::Equals(
-                        (Get-FileTransferEventField -Event $companion -Name 'log_writer_id' -Default ''),
-                        $writerId,
-                        [System.StringComparison]::OrdinalIgnoreCase) -or
-                    $companionWriterSequence -le $writerSequence -or
-                    $companionWriterSequence -gt ($writerSequence + 8) -or
-                    ($nextReceiveBoundarySequence -gt 0 -and
-                        $companionWriterSequence -ge $nextReceiveBoundarySequence) -or
-                    (Get-FileTransferEventField -Event $companion -Name 'actual_transport' -Default '') -ne 'regular_nkn' -or
-                    (Get-FileTransferEventField -Event $companion -Name 'delivery_transport' -Default '') -ne 'regular_nkn' -or
-                    (Get-FileTransferEventField -Event $companion -Name 'target_transport' -Default '') -ne 'tuna' -or
-                    (Get-FileTransferEventInt64Field -Event $companion -Name 'raw_payload_bytes' -Default 0) -ne
-                        (Get-FileTransferEventInt64Field -Event $Mismatch -Name 'raw_payload_bytes' -Default 0) -or
-                    (Get-FileTransferEventInt64Field -Event $companion -Name 'batch_chunk_count' -Default 0) -ne
-                        (Get-FileTransferEventInt64Field -Event $Mismatch -Name 'batch_chunk_count' -Default 0) -or
-                    -not (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $companion)) {
-                    return $false
-                }
-
-                foreach ($fieldName in @(
-                        'transfer_id',
-                        'session_id',
-                        'frame_type',
-                        'direction',
-                        'route',
-                        'protocol_version',
-                        'live_route_epoch',
-                        'runtime_generation',
-                        'terminal_generation',
-                        'leg_generation',
-                        'route_publication_generation',
-                        'route_commit_generation')) {
-                    $mismatchFieldValue = Get-FileTransferEventField `
-                        -Event $Mismatch `
-                        -Name $fieldName `
-                        -Default ''
-                    $companionFieldValue = Get-FileTransferEventField `
-                        -Event $companion `
-                        -Name $fieldName `
-                        -Default ''
-                    if ([string]::IsNullOrWhiteSpace($mismatchFieldValue) -or
-                        [string]::IsNullOrWhiteSpace($companionFieldValue)) {
-                        return $false
-                    }
-
-                    if (-not [string]::Equals(
-                            $mismatchFieldValue,
-                            $companionFieldValue,
-                            [System.StringComparison]::OrdinalIgnoreCase)) {
-                        return $false
-                    }
-                }
-
-                if (-not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Mismatch) -or
-                    -not (Test-FileTransferFileTunaV4DataPathHasRange -Event $companion)) {
-                    return $false
-                }
-
-                return $true
-            })
-        if ($exactMismatchCompanions.Count -ne 1) {
-            return $false
-        }
-
-        $ignoredWindowAnchorSequence = Get-FileTransferEventInt64Field `
-            -Event $exactMismatchCompanions[0] `
-            -Name 'log_writer_sequence' `
-            -Default 0
-    }
-
-    $mismatchSequence = if ($null -ne $Mismatch.PSObject.Properties['Sequence']) { [int64]$Mismatch.Sequence } else { 0L }
-    [object[]]$ignoredEvents = @(
-        Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
-            -Index $DataPathIndex `
-            -WriterId $writerId `
-            -AfterSequence $ignoredWindowAnchorSequence |
-        Where-Object {
-            $ignoredWriterSequence =
-                Get-FileTransferEventInt64Field `
-                    -Event $_ `
-                    -Name 'log_writer_sequence' `
-                    -Default 0
-            ($nextReceiveBoundarySequence -le 0 -or
-                $ignoredWriterSequence -lt $nextReceiveBoundarySequence) -and
-                (Test-FileTransferFileTunaV4DataPathIgnoredCompanionMatches `
-                    -Reference $Mismatch `
-                    -Candidate $_)
-        })
-    if ($ignoredEvents.Count -ne 1) {
+    $rejectedReceiveChain =
+        Get-FileTransferFileTunaV4DataPathRejectedReceiveChain `
+            -Reference $Mismatch `
+            -DataPathIndex $DataPathIndex
+    if ($null -eq $rejectedReceiveChain) {
         return $false
     }
+
+    $receive = $rejectedReceiveChain.Receive
+    $explicitMismatch = $rejectedReceiveChain.Mismatch
+    $ignoredWindowAnchorSequence =
+        Get-FileTransferEventInt64Field `
+            -Event $explicitMismatch `
+            -Name 'log_writer_sequence' `
+            -Default 0
+    $mismatchSequence =
+        if ($null -ne $receive.PSObject.Properties['Sequence']) {
+            [int64]$receive.Sequence
+        }
+        else {
+            0L
+        }
+    [object[]]$ignoredEvents = @($rejectedReceiveChain.Ignored)
 
     foreach ($ignored in @($ignoredEvents)) {
         $ignoredWriterId = Get-FileTransferEventField -Event $ignored -Name 'log_writer_id' -Default ''
         $ignoredWriterSequence = Get-FileTransferEventInt64Field -Event $ignored -Name 'log_writer_sequence' -Default 0
         if (-not [string]::Equals($writerId, $ignoredWriterId, [System.StringComparison]::OrdinalIgnoreCase) -or
-            $ignoredWriterSequence -le $ignoredWindowAnchorSequence -or
-            $ignoredWriterSequence -gt ($ignoredWindowAnchorSequence + 8)) {
+            $ignoredWriterSequence -le $ignoredWindowAnchorSequence) {
             continue
         }
 
@@ -14426,50 +14569,19 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
                 continue
             }
 
-            [object[]]$mismatches = @(
-                Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
-                    -Index $DataPathIndex `
-                    -WriterId $receiveWriterId `
-                    -AfterSequence $receiveWriterSequence |
-                Where-Object {
-                    $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -and
-                    (Get-FileTransferEventField -Event $_ -Name 'proof_direction' -Default '') -eq 'receive' -and
-                    (Get-FileTransferEventField -Event $_ -Name 'mismatch_reason' -Default '') -eq 'file_tuna_v4_resolved_to_regular_nkn' -and
-                    [string]::Equals(
-                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
-                        $receiveWriterId,
-                        [System.StringComparison]::OrdinalIgnoreCase) -and
-                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $receiveWriterSequence -and
-                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -le ($receiveWriterSequence + 8) -and
-                    (Test-ExactOldRouteWritePayloadMatch -Send $Send -Receive $_)
-                })
-            if ($mismatches.Count -ne 1) {
+            $rejectedReceiveChain =
+                Get-FileTransferFileTunaV4DataPathRejectedReceiveChain `
+                    -Reference $receive `
+                    -DataPathIndex $DataPathIndex
+            if ($null -eq $rejectedReceiveChain) {
                 continue
             }
 
-            $mismatch = $mismatches[0]
-            $mismatchWriterSequence = Get-FileTransferEventInt64Field `
-                -Event $mismatch `
-                -Name 'log_writer_sequence' `
-                -Default 0
-            [object[]]$ignoredEvents = @(
-                Get-FileTransferFileTunaV4DataPathIndexedWriterWindow `
-                    -Index $DataPathIndex `
-                    -WriterId $receiveWriterId `
-                    -AfterSequence $mismatchWriterSequence |
-                Where-Object {
-                    $_.EventName -eq 'filetransfer_data_frame_ignored' -and
-                    (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'file_tuna_v4_payload_requires_tuna' -and
-                    [string]::Equals(
-                        (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default ''),
-                        $receiveWriterId,
-                        [System.StringComparison]::OrdinalIgnoreCase) -and
-                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -gt $mismatchWriterSequence -and
-                    (Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_sequence' -Default 0) -le ($mismatchWriterSequence + 8) -and
-                    (Test-OldRouteWriteIdentityMatch -Left $Send -Right $_) -and
-                    (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Send -Actual $_)
-                })
-            if ($ignoredEvents.Count -ne 1) {
+            $mismatch = $rejectedReceiveChain.Mismatch
+            $ignored = $rejectedReceiveChain.Ignored
+            if (-not (Test-ExactOldRouteWritePayloadMatch -Send $Send -Receive $mismatch) -or
+                -not (Test-OldRouteWriteIdentityMatch -Left $Send -Right $ignored) -or
+                -not (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Send -Actual $ignored)) {
                 continue
             }
 
@@ -14829,6 +14941,54 @@ function Get-FileTransferRuntimeUnlockRegularV4RouteCommitSendDrainCorrelation {
     }
 }
 
+function Get-FileTransferFileTunaV4DataPathMismatchCandidateKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $proofDirection =
+        Get-FileTransferEventField -Event $Event -Name 'proof_direction' -Default ''
+    $candidateKind =
+        if ($Event.EventName -eq 'filetransfer_data_path_receive_result' -or
+            $proofDirection -eq 'receive') {
+            'receive'
+        }
+        else {
+            'send'
+        }
+    $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add($candidateKind) | Out-Null
+    foreach ($fieldName in @(
+            'log_writer_id',
+            'log_writer_sequence',
+            'session_id',
+            'transfer_id',
+            'direction',
+            'frame_type',
+            'lane',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'route_publication_generation',
+            'route_commit_generation',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'actual_transport',
+            'delivery_transport',
+            'target_transport',
+            'raw_payload_bytes',
+            'batch_chunk_count')) {
+        $parts.Add(
+            (Get-FileTransferEventField -Event $Event -Name $fieldName -Default '').ToLowerInvariant()) |
+            Out-Null
+    }
+
+    $parts.Add([string](Get-FileTransferFileTunaV4DataPathRangeStart -Event $Event)) |
+        Out-Null
+    $parts.Add([string](Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Event)) |
+        Out-Null
+    return [string]::Join('|', $parts)
+}
+
 function Get-FileTransferFileTunaV4DataPathMismatchProof {
     param(
         [object[]]$Events = @(),
@@ -14869,10 +15029,72 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
                 -DataPathIndex $DataPathIndex)
         })
 
+    $attachedMismatchSequences =
+        New-Object 'System.Collections.Generic.HashSet[int64]'
+    foreach ($explicitMismatch in @($rawMismatchEvents | Where-Object {
+                $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -and
+                (Get-FileTransferEventField -Event $_ -Name 'proof_direction' -Default '') -eq 'receive'
+            })) {
+        $companionChain =
+            Get-FileTransferFileTunaV4DataPathRejectedReceiveChain `
+                -Reference $explicitMismatch `
+                -DataPathIndex $DataPathIndex `
+                -ReturnBeforeIgnore
+        if ($null -ne $companionChain) {
+            [void]$attachedMismatchSequences.Add([int64]$explicitMismatch.Sequence)
+        }
+    }
+
+    [object[]]$rawCandidateEvents = @($rawMismatchEvents | Where-Object {
+            $_.EventName -in @(
+                'filetransfer_data_path_receive_result',
+                'filetransfer_data_path_send_result') -or
+            -not $attachedMismatchSequences.Contains([int64]$_.Sequence)
+        })
+    $candidateRecordsByKey = @{}
+    foreach ($candidate in @($rawCandidateEvents)) {
+        $candidateKey =
+            Get-FileTransferFileTunaV4DataPathMismatchCandidateKey -Event $candidate
+        if ([string]::IsNullOrWhiteSpace($candidateKey)) {
+            continue
+        }
+
+        $recovered =
+            $corroboratingMismatchSequences.Contains([int64]$candidate.Sequence) -or
+            (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed `
+                -Mismatch $candidate `
+                -Events $orderedEvents `
+                -DataPathIndex $DataPathIndex)
+        if (-not $candidateRecordsByKey.ContainsKey($candidateKey)) {
+            $candidateRecordsByKey[$candidateKey] = [pscustomobject]@{
+                Event = $candidate
+                DistinctKey = $candidateKey
+                Recovered = [bool]$recovered
+            }
+        }
+        elseif ($recovered) {
+            $candidateRecordsByKey[$candidateKey].Recovered = $true
+        }
+    }
+    [object[]]$distinctCandidateRecords = @($candidateRecordsByKey.Values)
+    [object[]]$recoveredCandidateRecords = @(
+        $distinctCandidateRecords | Where-Object { $_.Recovered })
+    [object[]]$unresolvedCandidateRecords = @(
+        $distinctCandidateRecords | Where-Object { -not $_.Recovered })
+
     return [pscustomobject]@{
         RawCount = [int]$rawMismatchEvents.Count
         EffectiveCount = [int]$effectiveMismatchEvents.Count
         EffectiveEvents = $effectiveMismatchEvents
+        RawCandidateCount = [int]$rawCandidateEvents.Count
+        DistinctCount = [int]$distinctCandidateRecords.Count
+        RecoveredCount = [int]$recoveredCandidateRecords.Count
+        UnresolvedCount = [int]$unresolvedCandidateRecords.Count
+        RawCandidateEvents = $rawCandidateEvents
+        CandidateEvents = @($distinctCandidateRecords | ForEach-Object { $_.Event })
+        CandidateRecords = $distinctCandidateRecords
+        RecoveredCandidateEvents = @($recoveredCandidateRecords | ForEach-Object { $_.Event })
+        UnresolvedCandidateEvents = @($unresolvedCandidateRecords | ForEach-Object { $_.Event })
         DataPathIndexBuildVisitCount =
             [int64]$DataPathIndex.Statistics.build_visit_count
         DataPathIndexLookupVisitCount =
@@ -15137,6 +15359,10 @@ function Get-FileTransferFileTunaV4DataPathProof {
         ActualTunaSendCount = [int]$tunaActualEvents.Count
         ActualRegularNknSendCount = [int]$mismatchEvents.Count
         MismatchCount = [int]$mismatchEvents.Count
+        MismatchRawCandidateCount = [int]$mismatchProof.RawCandidateCount
+        MismatchDistinctCount = [int]$mismatchProof.DistinctCount
+        MismatchRecoveredCount = [int]$mismatchProof.RecoveredCount
+        MismatchUnresolvedCount = [int]$mismatchProof.UnresolvedCount
         MissingActualProofCount = [int]$missingActualProofCount
         PeerVisiblePayloadBytes = [long]$peerVisiblePayloadBytes
         Findings = $findings
@@ -16353,6 +16579,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("file_tuna_v4_tuna_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualTunaSendCount)) | Out-Null
     $lines.Add(("file_tuna_v4_regular_nkn_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualRegularNknSendCount)) | Out-Null
     $lines.Add(("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathProof.MismatchCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_mismatch_raw_count={0}" -f $fileTunaV4DataPathProof.MismatchRawCandidateCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_mismatch_distinct_count={0}" -f $fileTunaV4DataPathProof.MismatchDistinctCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_mismatch_recovered_count={0}" -f $fileTunaV4DataPathProof.MismatchRecoveredCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathProof.MismatchUnresolvedCount)) | Out-Null
     $lines.Add(("file_tuna_v4_data_path_missing_actual_proof_count={0}" -f $fileTunaV4DataPathProof.MissingActualProofCount)) | Out-Null
     $lines.Add(("file_tuna_v4_peer_visible_tuna_payload_bytes={0}" -f $fileTunaV4DataPathProof.PeerVisiblePayloadBytes)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
@@ -56850,9 +57080,15 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             }
             $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
             if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+                $stallStart = Get-FileTransferEventField -Event $deferred -Name 'utc' -Default ''
+            }
+            if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
                 $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
             }
-            $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|none|0|none|none|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
+            $wakeGeneration = Get-FileTransferEventField -Event $deferred -Name 'wake_generation' -Default '0'
+            $wakeDeadline = Get-FileTransferEventField -Event $deferred -Name 'wake_deadline_utc' -Default ''
+            $checkpointGeneration = Get-FileTransferEventField -Event $deferred -Name 'checkpoint_generation' -Default '0'
+            $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$wakeGeneration|$wakeDeadline|$checkpointGeneration|none|0|none|none|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
             if (-not $incidents.Contains($key)) {
                 $incidents[$key] = [pscustomobject]@{
                     Key = $key
@@ -56966,9 +57202,15 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
 
         $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
         if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+            $stallStart = Get-FileTransferEventField -Event $deferred -Name 'utc' -Default ''
+        }
+        if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
             $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
         }
-        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$authority|$repairGeneration|$repairKey|$rangeFingerprint|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
+        $wakeGeneration = Get-FileTransferEventField -Event $deferred -Name 'wake_generation' -Default '0'
+        $wakeDeadline = Get-FileTransferEventField -Event $deferred -Name 'wake_deadline_utc' -Default ''
+        $checkpointGeneration = Get-FileTransferEventField -Event $deferred -Name 'checkpoint_generation' -Default '0'
+        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$wakeGeneration|$wakeDeadline|$checkpointGeneration|$authority|$repairGeneration|$repairKey|$rangeFingerprint|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
         if (-not $incidents.Contains($key)) {
             $incidents[$key] = [pscustomobject]@{
                 Key = $key
@@ -57040,9 +57282,15 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         $dataSessionGeneration = Get-FileTransferEventField -Event $currentDataSession[0] -Name 'data_session_generation' -Default '0'
         $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
         if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+            $stallStart = Get-FileTransferEventField -Event $deferred -Name 'utc' -Default ''
+        }
+        if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
             $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
         }
-        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|source|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
+        $wakeGeneration = Get-FileTransferEventField -Event $deferred -Name 'wake_generation' -Default '0'
+        $wakeDeadline = Get-FileTransferEventField -Event $deferred -Name 'wake_deadline_utc' -Default ''
+        $checkpointGeneration = Get-FileTransferEventField -Event $deferred -Name 'checkpoint_generation' -Default '0'
+        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$wakeGeneration|$wakeDeadline|$checkpointGeneration|source|$dataSessionIdentity|$dataSessionGeneration".ToLowerInvariant()
         $incident = [pscustomobject]@{
             Key = $key
             Event = $deferred
@@ -57102,8 +57350,17 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         $frontier = Get-FileTransferEventInt64Field -Event $deferred -Name 'frontier_chunk_index' -Default -1
         $highest = Get-FileTransferEventInt64Field -Event $deferred -Name 'highest_received_chunk_index' -Default -1
         $graceMs = Get-FileTransferEventInt64Field -Event $deferred -Name 'stall_grace_ms' -Default 0
-        $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
-        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|retained-source".ToLowerInvariant()
+        $stallStart = Get-FileTransferEventField -Event $deferred -Name 'stall_started_utc' -Default ''
+        if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+            $stallStart = Get-FileTransferEventField -Event $deferred -Name 'utc' -Default ''
+        }
+        if ([string]::IsNullOrWhiteSpace($stallStart) -or $stallStart -in @('(none)', 'none')) {
+            $stallStart = ([DateTimeOffset]$deferred.TimestampUtc).ToString('O')
+        }
+        $wakeGeneration = Get-FileTransferEventField -Event $deferred -Name 'wake_generation' -Default '0'
+        $wakeDeadline = Get-FileTransferEventField -Event $deferred -Name 'wake_deadline_utc' -Default ''
+        $checkpointGeneration = Get-FileTransferEventField -Event $deferred -Name 'checkpoint_generation' -Default '0'
+        $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$wakeGeneration|$wakeDeadline|$checkpointGeneration|retained-source".ToLowerInvariant()
         $incident = [pscustomobject]@{
             Key = $key; Event = $deferred; Progress = $sourcePublication
             ScopeFields = @(
@@ -57148,15 +57405,88 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             return $true
         }
 
-        [object[]]$sourceEndedBeforeDeadline = @($terminalEvents | Where-Object {
-                $eventTicks = Get-FileTransferEventInt64Field -Event $_ -Name 'log_writer_attempt_utc_ticks' -Default 0
-                (($deadlineTicks -gt 0 -and $eventTicks -gt $candidateTicks -and $eventTicks -le $deadlineTicks) -or
-                    ($deadlineTicks -eq 0 -and $null -ne $_.TimestampUtc -and
-                        $_.TimestampUtc -gt $candidateUtc -and $_.TimestampUtc -le $deadlineUtc)) -and
-                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
-                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
-                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer
-            })
+        $stallScopeFields = @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+            'protocol_version', 'live_route_epoch', 'runtime_generation',
+            'terminal_generation', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'bridge_decision_generation',
+            'checkpoint_request_id', 'checkpoint_generation',
+            'route_publication_generation', 'route_commit_generation',
+            'data_session_identity', 'data_session_generation')
+        $sameStallScope = {
+            param($event)
+            foreach ($field in $stallScopeFields) {
+                $expected = Get-FileTransferEventField -Event $candidate -Name $field -Default ''
+                $actual = Get-FileTransferEventField -Event $event -Name $field -Default ''
+                if ([string]::IsNullOrWhiteSpace($expected) -or
+                    [string]::IsNullOrWhiteSpace($actual) -or $actual -ne $expected) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $isBeforeDeadline = {
+            param($event)
+            $eventTicks = Get-FileTransferEventInt64Field -Event $event -Name 'log_writer_attempt_utc_ticks' -Default 0
+            return (($deadlineTicks -gt 0 -and $eventTicks -gt $candidateTicks -and $eventTicks -le $deadlineTicks) -or
+                ($deadlineTicks -eq 0 -and $null -ne $event.TimestampUtc -and
+                    $event.TimestampUtc -gt $candidateUtc -and $event.TimestampUtc -le $deadlineUtc))
+        }
+        $sameTransfer = {
+            param($event)
+            return (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
+                (Get-FileTransferEventField -Event $event -Name 'session_id' -Default '') -eq $incident.Session -and
+                (Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default '') -eq $incident.Transfer
+        }
+
+        $isRouteMutation = {
+            param($event)
+            if (-not (& $sameTransfer $event)) { return $false }
+            $eventRoute = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+            if ([string]::IsNullOrWhiteSpace($eventRoute)) {
+                $eventRoute = Get-FileTransferEventField -Event $event -Name 'target_route' -Default ''
+            }
+            $eventProtocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+            if ([string]::IsNullOrWhiteSpace($eventProtocol)) {
+                $eventProtocol = Get-FileTransferEventField -Event $event -Name 'target_protocol_version' -Default ''
+            }
+            if ([string]::IsNullOrWhiteSpace($eventRoute) -or [string]::IsNullOrWhiteSpace($eventProtocol)) {
+                return $true
+            }
+            if ($eventRoute -ne (Get-FileTransferEventField -Event $progress -Name 'route' -Default '') -or
+                $eventProtocol -ne (Get-FileTransferEventField -Event $progress -Name 'protocol_version' -Default '')) {
+                return $true
+            }
+            foreach ($field in @(
+                    'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+                    'route_publication_generation', 'route_commit_generation')) {
+                $actual = Get-FileTransferEventField -Event $event -Name $field -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($actual) -and
+                    $actual -ne (Get-FileTransferEventField -Event $progress -Name $field -Default '')) {
+                    return $true
+                }
+            }
+            return $false
+        }
+
+        $isDataSessionMutation = {
+            param($event)
+            if (-not (& $sameTransfer $event)) { return $false }
+            return $event.EventName -eq 'filetransfer_data_session_removed' -or
+                (Get-FileTransferEventField -Event $event -Name 'data_session_identity' -Default '') -ne
+                    $incident.DataSessionIdentity -or
+                (Get-FileTransferEventField -Event $event -Name 'data_session_generation' -Default '0') -ne
+                    $incident.DataSessionGeneration
+        }
+
+        [object[]]$sourceEndedBeforeDeadline = @(
+            @($terminalEvents | Where-Object { (& $isBeforeDeadline $_) -and (& $sameTransfer $_) }) +
+            @($routePublicationEvents | Where-Object { (& $isBeforeDeadline $_) -and (& $isRouteMutation $_) }) +
+            @($dataSessionMutationEvents | Where-Object { (& $isBeforeDeadline $_) -and (& $isDataSessionMutation $_) }) +
+            @($receiverStateEvents | Where-Object {
+                    (& $isBeforeDeadline $_) -and (& $sameTransfer $_) -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_paused' -Default '0') -eq '1'
+                }))
         if ($sourceEndedBeforeDeadline.Count -gt 0) { continue }
 
         [object[]]$naturalProgress = @(@($receiverStateEvents + $sparseWriteEvents) | Where-Object {
@@ -57175,6 +57505,58 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                     }) -gt $incident.Frontier
             } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
 
+        $candidateWakeGeneration = Get-FileTransferEventInt64Field -Event $candidate -Name 'wake_generation' -Default 0
+        $candidateWakeDeadline = Get-FileTransferEventField -Event $candidate -Name 'wake_deadline_utc' -Default ''
+        $candidateStallStart = Get-FileTransferEventField -Event $candidate -Name 'stall_started_utc' -Default ''
+        [DateTimeOffset]$candidateStallStartUtc = [DateTimeOffset]::MinValue
+        $candidateStallStartValid = [DateTimeOffset]::TryParse($candidateStallStart, [ref]$candidateStallStartUtc)
+        [object[]]$matchingRechecks = @($stallGraceRecheckEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                (& $sameStallScope $_) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -eq $incident.Frontier -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'highest_received_chunk_index' -Default -1) -eq $incident.Highest -and
+                (Get-FileTransferEventField -Event $_ -Name 'stall_started_utc' -Default '') -eq $candidateStallStart -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'wake_generation' -Default 0) -eq $candidateWakeGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'wake_deadline_utc' -Default '') -eq $candidateWakeDeadline
+            } | Sort-Object Sequence, LineNumber)
+        [string[]]$matchingRecheckDecisions = @($matchingRechecks | ForEach-Object {
+                @(
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default ''),
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default ''),
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_effect' -Default '')) -join '|'
+            } | Sort-Object -Unique)
+        $matchingRecheckConflict = $matchingRecheckDecisions.Count -gt 1
+        $knownSupersessionRecheck = $matchingRecheckDecisions.Count -eq 1 -and
+            $matchingRecheckDecisions[0] -in @(
+                'stale|wake_generation_replaced|none',
+                'stale|frontier_scope_changed|none')
+        $unknownMatchingRecheck = $matchingRecheckDecisions.Count -eq 1 -and
+            -not $knownSupersessionRecheck -and
+            $matchingRecheckDecisions[0] -ne 'stale|route_scope_changed|none'
+
+        [object[]]$naturalSuccessorDeferrals = @()
+        if ($candidateWakeGeneration -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($candidateWakeDeadline) -and
+            $candidateStallStartValid -and
+            -not $matchingRecheckConflict -and -not $unknownMatchingRecheck) {
+            $naturalSuccessorDeferrals = @($deferredEvents | Where-Object {
+                    if ([int64]$_.Sequence -le [int64]$candidate.Sequence -or
+                        -not (& $isBeforeDeadline $_) -or -not (& $sameStallScope $_) -or
+                        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -ne 'chunk_batch_committed' -or
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'elapsed_ms' -Default -1) -ne 0 -or
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -le $incident.Frontier -or
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'highest_received_chunk_index' -Default -1) -lt $incident.Highest -or
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'wake_generation' -Default 0) -le $candidateWakeGeneration) {
+                        return $false
+                    }
+                    [DateTimeOffset]$successorStallStartUtc = [DateTimeOffset]::MinValue
+                    return [DateTimeOffset]::TryParse(
+                        (Get-FileTransferEventField -Event $_ -Name 'stall_started_utc' -Default ''),
+                        [ref]$successorStallStartUtc) -and
+                        $successorStallStartUtc -gt $candidateStallStartUtc
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        }
+
         [object[]]$successorGrant = @()
         [object[]]$successorDelivery = @()
         [object[]]$successorDispatch = @()
@@ -57184,8 +57566,97 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         [object[]]$successorSettlement = @()
         [object[]]$successorRecheck = @()
         [object[]]$completedTerminal = @()
-        $recoveryEvent = $null
-        if ($naturalProgress.Count -eq 0) {
+        $recoveryEvent = if ($naturalSuccessorDeferrals.Count -eq 1) {
+            $naturalSuccessorDeferrals[0]
+        }
+        else { $null }
+
+        if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent -and
+            -not $matchingRecheckConflict -and
+            $matchingRecheckDecisions.Count -eq 1 -and
+            $matchingRecheckDecisions[0] -eq 'stale|route_scope_changed|none') {
+            $routeScopeRecheck = $matchingRechecks[0]
+            [object[]]$freshGrants = @($repairGrantedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$routeScopeRecheck.Sequence -and
+                    (& $sameScope $_) -and
+                    (Get-FileTransferEventField -Event $_ -Name 'source_kind' -Default '') -eq 'ReceiverRequest' -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -eq $incident.Frontier -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'durable_received_highest_chunk_index' -Default -1) -eq $incident.Highest -and
+                    ([string]::IsNullOrWhiteSpace($incident.Authority) -or
+                        (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '') -eq $incident.Authority)
+                } | Sort-Object Sequence, LineNumber)
+            if ($freshGrants.Count -gt 0) {
+                $firstFreshGrantSequence = [int64]$freshGrants[0].Sequence
+                $freshGrants = @($freshGrants | Where-Object {
+                        [int64]$_.Sequence -eq $firstFreshGrantSequence
+                    })
+            }
+            [string[]]$freshGrantKeys = @($freshGrants | ForEach-Object {
+                    @(
+                        (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default ''),
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_generation' -Default '0'),
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default ''),
+                        (Get-FileTransferEventField -Event $_ -Name 'range_fingerprint' -Default ''),
+                        (Get-FileTransferEventField -Event $_ -Name 'primary_protocol_repair_request_id' -Default ''),
+                        (Get-FileTransferEventField -Event $_ -Name 'primary_request_correlation_id' -Default '')) -join '|'
+                } | Sort-Object -Unique)
+            if ($freshGrantKeys.Count -ne 1) { $freshGrants = @() }
+            foreach ($freshGrant in $freshGrants) {
+                $freshAuthority = Get-FileTransferEventField -Event $freshGrant -Name 'authority_id' -Default ''
+                $freshGeneration = Get-FileTransferEventInt64Field -Event $freshGrant -Name 'repair_generation' -Default 0
+                $freshRepairKey = Get-FileTransferEventField -Event $freshGrant -Name 'repair_request_key' -Default ''
+                $freshFingerprint = Get-FileTransferEventField -Event $freshGrant -Name 'range_fingerprint' -Default ''
+                $freshRequestId = Get-FileTransferEventField -Event $freshGrant -Name 'primary_protocol_repair_request_id' -Default ''
+                $freshCorrelationId = Get-FileTransferEventField -Event $freshGrant -Name 'primary_request_correlation_id' -Default ''
+                if ([string]::IsNullOrWhiteSpace($freshAuthority) -or $freshGeneration -le 0 -or
+                    [string]::IsNullOrWhiteSpace($freshRepairKey) -or
+                    [string]::IsNullOrWhiteSpace($freshFingerprint) -or
+                    [string]::IsNullOrWhiteSpace($freshRequestId) -or
+                    [string]::IsNullOrWhiteSpace($freshCorrelationId)) {
+                    continue
+                }
+                $sameFreshAuthority = {
+                    param($event)
+                    return (& $sameScope $event) -and
+                        (Get-FileTransferEventField -Event $event -Name 'authority_id' -Default '') -eq $freshAuthority -and
+                        (Get-FileTransferEventInt64Field -Event $event -Name 'repair_generation' -Default 0) -eq $freshGeneration -and
+                        (Get-FileTransferEventField -Event $event -Name 'repair_request_key' -Default '') -eq $freshRepairKey -and
+                        (Get-FileTransferEventField -Event $event -Name 'range_fingerprint' -Default '') -eq $freshFingerprint
+                }
+                [object[]]$freshDeliveries = @($deliveryEvents | Where-Object {
+                        [int64]$_.Sequence -gt [int64]$freshGrant.Sequence -and
+                        (& $sameTransfer $_) -and
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default '') -eq $freshRequestId -and
+                        (Get-FileTransferEventField -Event $_ -Name 'request_correlation_id' -Default '') -eq $freshCorrelationId -and
+                        (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq $freshRepairKey -and
+                        (Get-FileTransferEventField -Event $_ -Name 'range_fingerprint' -Default '') -eq $freshFingerprint -and
+                        (Get-FileTransferEventField -Event $_ -Name 'peer_visible_any' -Default '0') -eq '1' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'accepted_any' -Default '0') -eq '1'
+                    } | Sort-Object Sequence, LineNumber)
+                foreach ($freshDelivery in $freshDeliveries) {
+                    [object[]]$freshDispatches = @($repairDispatchedEvents | Where-Object {
+                            [int64]$_.Sequence -gt [int64]$freshDelivery.Sequence -and
+                            (& $sameFreshAuthority $_) -and
+                            (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '0') -eq '1'
+                        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($freshDispatches.Count -ne 1) { continue }
+                    [object[]]$freshSends = @($requestSentEvents | Where-Object {
+                            [int64]$_.Sequence -gt [int64]$freshDispatches[0].Sequence -and
+                            (& $sameFreshAuthority $_) -and
+                            (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default '') -eq $freshRequestId -and
+                            (Get-FileTransferEventField -Event $_ -Name 'request_correlation_id' -Default '') -eq $freshCorrelationId -and
+                            (Get-FileTransferEventInt64Field -Event $_ -Name 'frontier_chunk_index' -Default -1) -eq $incident.Frontier
+                        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+                    if ($freshSends.Count -eq 1) {
+                        $recoveryEvent = $freshSends[0]
+                        break
+                    }
+                }
+                if ($null -ne $recoveryEvent) { break }
+            }
+        }
+
+        if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent) {
             [object[]]$successfulProgressCandidates = @($repairProgressEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
                     (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
@@ -57387,28 +57858,24 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
                     (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
                     (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer
                 })
-            [object[]]$routeMutation = @()
-            if ($completedTerminal.Count -eq 1) { $routeMutation = @($routePublicationEvents | Where-Object {
+            [object[]]$routeMutation = @($routePublicationEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
                     [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
-                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
-                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
-                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
-                    -not (& $sameScope $_)
-                }) }
-            [object[]]$dataSessionMutation = @()
-            if ($completedTerminal.Count -eq 1) { $dataSessionMutation = @($dataSessionMutationEvents | Where-Object {
+                    (& $isRouteMutation $_)
+                })
+            [object[]]$dataSessionMutation = @($dataSessionMutationEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
                     [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
-                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $incident.Writer -and
-                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $incident.Session -and
-                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $incident.Transfer -and
-                    ($_.EventName -eq 'filetransfer_data_session_removed' -or
-                        (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -ne $incident.DataSessionIdentity -or
-                        (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '0') -ne $incident.DataSessionGeneration)
-                }) }
+                    (& $isDataSessionMutation $_)
+                })
+            [object[]]$pause = @($receiverStateEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                    [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and
+                    (& $sameTransfer $_) -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_paused' -Default '0') -eq '1'
+                })
             $recovered = $poison.Count -eq 0 -and $routeMutation.Count -eq 0 -and
-                $dataSessionMutation.Count -eq 0
+                $dataSessionMutation.Count -eq 0 -and $pause.Count -eq 0
         }
 
         $record = [pscustomobject]@{
@@ -67485,6 +67952,10 @@ function New-FileTransferInvariantLedgerObject {
         file_tuna_v4_tuna_send_result_count = [string]$fileTunaV4DataPathProof.ActualTunaSendCount
         file_tuna_v4_regular_nkn_send_result_count = [string]$fileTunaV4DataPathProof.ActualRegularNknSendCount
         file_tuna_v4_data_path_mismatch_count = [string]$fileTunaV4DataPathProof.MismatchCount
+        file_tuna_v4_data_path_mismatch_raw_count = [string]$fileTunaV4DataPathProof.MismatchRawCandidateCount
+        file_tuna_v4_data_path_mismatch_distinct_count = [string]$fileTunaV4DataPathProof.MismatchDistinctCount
+        file_tuna_v4_data_path_mismatch_recovered_count = [string]$fileTunaV4DataPathProof.MismatchRecoveredCount
+        file_tuna_v4_data_path_mismatch_unresolved_count = [string]$fileTunaV4DataPathProof.MismatchUnresolvedCount
         file_tuna_v4_data_path_missing_actual_proof_count = [string]$fileTunaV4DataPathProof.MissingActualProofCount
         file_tuna_v4_peer_visible_tuna_payload_bytes = [string]$fileTunaV4DataPathProof.PeerVisiblePayloadBytes
         invariant_failure_class = $combinedInvariant.FailureClass
@@ -68698,6 +69169,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("file_tuna_v4_tuna_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualTunaSendCount),
         ("file_tuna_v4_regular_nkn_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualRegularNknSendCount),
         ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathProof.MismatchCount),
+        ("file_tuna_v4_data_path_mismatch_raw_count={0}" -f $fileTunaV4DataPathProof.MismatchRawCandidateCount),
+        ("file_tuna_v4_data_path_mismatch_distinct_count={0}" -f $fileTunaV4DataPathProof.MismatchDistinctCount),
+        ("file_tuna_v4_data_path_mismatch_recovered_count={0}" -f $fileTunaV4DataPathProof.MismatchRecoveredCount),
+        ("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathProof.MismatchUnresolvedCount),
         ("file_tuna_v4_data_path_missing_actual_proof_count={0}" -f $fileTunaV4DataPathProof.MissingActualProofCount),
         ("file_tuna_v4_peer_visible_tuna_payload_bytes={0}" -f $fileTunaV4DataPathProof.PeerVisiblePayloadBytes),
         ("invariant_failure_class={0}" -f $combinedInvariant.FailureClass),

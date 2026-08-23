@@ -4437,6 +4437,96 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Theory]
+    [InlineData(false, "successor_deferral", true)]
+    [InlineData(true, "successor_deferral", true)]
+    [InlineData(false, "route_scope_recheck", true)]
+    [InlineData(true, "route_scope_recheck", true)]
+    [InlineData(false, "unknown_stale_reason", false)]
+    [InlineData(true, "unknown_stale_reason", false)]
+    [InlineData(false, "late_successor", false)]
+    [InlineData(true, "late_successor", false)]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    public async Task AnalyzeRetained_PostFallbackFrontierStallGraceSupersession_HasFullCompactParity(
+        bool compact,
+        string closure,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_supersession";
+        const string predecessorAuthority = "fta2-repair_replay-stall-predecessor";
+        const string successorAuthority = "fta2-repair_replay-stall-successor";
+        const string scope = "direction=inbound; session_id=sess_stall; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; " +
+            "bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); " +
+            "route_publication_generation=3; route_commit_generation=0; log_writer_id=writer_stall";
+        const string stallScope = scope + "; checkpoint_generation=1; data_session_identity=data-session-stall; data_session_generation=1";
+        var predecessor = $"authority_schema=2; authority_id={predecessorAuthority}; predecessor_authority_id=(none); {scope}; " +
+            "repair_generation=4; repair_request_key=fallback-frontier:40:1:predecessor; range_fingerprint=predecessor; " +
+            "frontier_chunk_index=40; durable_received_highest_chunk_index=60; range_count=1; requested_chunk_count=1; " +
+            "source_kind=ReceiverRequest; primary_protocol_repair_request_id=v6-frontier:40:4; " +
+            "primary_request_correlation_id=frq-stall-predecessor; target_transport=regular_nkn";
+        var successor = $"authority_schema=2; authority_id={successorAuthority}; predecessor_authority_id={predecessorAuthority}; {scope}; " +
+            "repair_generation=5; repair_request_key=fallback-frontier:41:1:successor; range_fingerprint=successor; " +
+            "frontier_chunk_index=41; durable_received_highest_chunk_index=60; range_count=1; requested_chunk_count=1; " +
+            "source_kind=ReceiverRequest; primary_protocol_repair_request_id=v6-frontier:41:5; " +
+            "primary_request_correlation_id=frq-stall-successor; target_transport=regular_nkn";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; transfer_id={transferId}; {scope}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {predecessor}"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {predecessor}; settlement_outcome=ProgressObserved; dispatch_observed=1"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; transfer_id={transferId}; {predecessor}; previous_frontier_chunk_index=40; current_frontier_chunk_index=41"),
+            LogLine($"event=filetransfer_v6_fallback_frontier_repair_progress_state_forced; transfer_id={transferId}; {predecessor}; previous_frontier_chunk_index=40; current_frontier_chunk_index=41; receiver_state_epoch=7; data_session_identity=data-session-stall; data_session_generation=1; decision_status=Accepted"),
+            LogLine($"event=filetransfer_v6_receiver_state_sent; transfer_id={transferId}; {scope}; epoch=7; contiguous_committed_chunk_index=41; durable_received_highest_chunk_index=60; transfer_paused=0; log_writer_attempt_utc_ticks=639000000000000000"),
+            LogLine($"event=filetransfer_v6_frontier_request_deferred; transfer_id={transferId}; {stallScope}; frontier_chunk_index=41; highest_received_chunk_index=60; elapsed_ms=0; stall_grace_ms=750; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; reason=chunk_batch_committed; authority_effect=none; log_writer_attempt_utc_ticks=639000000001000000", secondsOffset: 1)
+        };
+
+        if (closure is "successor_deferral" or "unknown_stale_reason" or "late_successor")
+        {
+            var successorTicks = closure == "late_successor"
+                ? "639000000009000000"
+                : "639000000007000000";
+            var successorStall = closure == "late_successor"
+                ? "2026-04-26T11:17:59.8000000+00:00"
+                : "2026-04-26T11:17:59.6000000+00:00";
+            lines.Add(LogLine($"event=filetransfer_v6_frontier_request_deferred; transfer_id={transferId}; {stallScope}; frontier_chunk_index=44; highest_received_chunk_index=65; elapsed_ms=0; stall_grace_ms=750; stall_started_utc={successorStall}; wake_generation=9; wake_deadline_utc=2026-04-26T11:18:00.3500000+00:00; reason=chunk_batch_committed; authority_effect=none; log_writer_attempt_utc_ticks={successorTicks}", secondsOffset: 2));
+            var staleReason = closure == "unknown_stale_reason" ? "unexpected_stale_reason" : "wake_generation_replaced";
+            lines.Add(LogLine($"event=filetransfer_v6_frontier_stall_grace_recheck_decided; transfer_id={transferId}; {stallScope}; frontier_chunk_index=41; highest_received_chunk_index=60; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; decision_status=stale; decision_reason={staleReason}; authority_effect=none; log_writer_attempt_utc_ticks=639000000010000000", secondsOffset: 3));
+            lines.Add(LogLine($"event=file_transfer_inbound_terminal; direction=inbound; session_id=sess_stall; transfer_id={transferId}; state=Failed; error_code=fixture_end; saved_path=(none); log_writer_id=writer_stall; log_writer_attempt_utc_ticks=639000000011000000", secondsOffset: 4));
+        }
+        else
+        {
+            lines.Add(LogLine($"event=filetransfer_v6_frontier_stall_grace_recheck_decided; transfer_id={transferId}; {stallScope}; frontier_chunk_index=41; highest_received_chunk_index=60; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; decision_status=stale; decision_reason=route_scope_changed; authority_effect=none; log_writer_attempt_utc_ticks=639000000009000000", secondsOffset: 2));
+            lines.Add(LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {successor}", secondsOffset: 3));
+            lines.Add(LogLine($"event=filetransfer_control_plane_delivery_observed; direction=inbound; session_id=sess_stall; transfer_id={transferId}; log_writer_id=writer_stall; kind=frontier_request; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; checkpoint_request_id=(none); reason=retry; repair_request_id=v6-frontier:41:5; request_correlation_id=frq-stall-successor; repair_request_key=fallback-frontier:41:1:successor; range_fingerprint=successor; peer_visible_any=1; accepted_any=1", secondsOffset: 4));
+            lines.Add(LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; transfer_id={transferId}; {successor}; dispatch_observed=1", secondsOffset: 5));
+            lines.Add(LogLine($"event=filetransfer_v6_frontier_request_sent; transfer_id={transferId}; {successor}; repair_request_id=v6-frontier:41:5; request_correlation_id=frq-stall-successor; reason=retry", secondsOffset: 6));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Superseded stall-grace analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            closure == "route_scope_recheck" ? "1" : "2",
+            verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count"]);
+        Assert.Equal(recovered ? "pass" : "fail", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict"]);
+    }
+
+    [Theory]
     [InlineData(false, "complete", true)]
     [InlineData(true, "complete", true)]
     [InlineData(false, "missing_finalize", false)]

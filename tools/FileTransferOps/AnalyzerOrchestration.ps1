@@ -3971,6 +3971,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
         ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
+        ("file_tuna_v4_data_path_mismatch_raw_count={0}" -f $fileTunaV4DataPathMismatchProof.RawCandidateCount),
+        ("file_tuna_v4_data_path_mismatch_distinct_count={0}" -f $fileTunaV4DataPathMismatchProof.DistinctCount),
+        ("file_tuna_v4_data_path_mismatch_recovered_count={0}" -f $fileTunaV4DataPathMismatchProof.RecoveredCount),
+        ("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathMismatchProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount),
@@ -4478,6 +4482,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
         ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
+        ("file_tuna_v4_data_path_mismatch_raw_count={0}" -f $fileTunaV4DataPathMismatchProof.RawCandidateCount),
+        ("file_tuna_v4_data_path_mismatch_distinct_count={0}" -f $fileTunaV4DataPathMismatchProof.DistinctCount),
+        ("file_tuna_v4_data_path_mismatch_recovered_count={0}" -f $fileTunaV4DataPathMismatchProof.RecoveredCount),
+        ("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathMismatchProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
@@ -4906,6 +4914,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
         ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
+        ("file_tuna_v4_data_path_mismatch_raw_count={0}" -f $fileTunaV4DataPathMismatchProof.RawCandidateCount),
+        ("file_tuna_v4_data_path_mismatch_distinct_count={0}" -f $fileTunaV4DataPathMismatchProof.DistinctCount),
+        ("file_tuna_v4_data_path_mismatch_recovered_count={0}" -f $fileTunaV4DataPathMismatchProof.RecoveredCount),
+        ("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathMismatchProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
@@ -5313,6 +5325,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount),
         ("runtime_unlock_regular_v4_route_commit_send_drain_verdict={0}" -f $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict),
         ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathMismatchProof.EffectiveCount),
+        ("file_tuna_v4_data_path_mismatch_raw_count={0}" -f $fileTunaV4DataPathMismatchProof.RawCandidateCount),
+        ("file_tuna_v4_data_path_mismatch_distinct_count={0}" -f $fileTunaV4DataPathMismatchProof.DistinctCount),
+        ("file_tuna_v4_data_path_mismatch_recovered_count={0}" -f $fileTunaV4DataPathMismatchProof.RecoveredCount),
+        ("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathMismatchProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_decision_staged_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount),
         ("runtime_unlock_retry_dispatch_install_receipt_issued_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount),
@@ -5761,6 +5777,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_regular_v4_route_commit_send_drain_missing_unresolved_count = $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount
         runtime_unlock_regular_v4_route_commit_send_drain_verdict = $runtimeUnlockRegularV4RouteCommitSendDrainProof.Verdict
         file_tuna_v4_data_path_mismatch_count = $fileTunaV4DataPathMismatchProof.EffectiveCount
+        file_tuna_v4_data_path_mismatch_raw_count = $fileTunaV4DataPathMismatchProof.RawCandidateCount
+        file_tuna_v4_data_path_mismatch_distinct_count = $fileTunaV4DataPathMismatchProof.DistinctCount
+        file_tuna_v4_data_path_mismatch_recovered_count = $fileTunaV4DataPathMismatchProof.RecoveredCount
+        file_tuna_v4_data_path_mismatch_unresolved_count = $fileTunaV4DataPathMismatchProof.UnresolvedCount
         runtime_unlock_retry_dispatch_authority_granted_raw_count = $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount
         runtime_unlock_retry_dispatch_decision_staged_count = $runtimeUnlockRetryDispatchInstallProof.DecisionStagedCount
         runtime_unlock_retry_dispatch_install_receipt_issued_count = $runtimeUnlockRetryDispatchInstallProof.ReceiptIssuedCount

@@ -1240,6 +1240,40 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_FileTunaV4ReceiveSideFailClosedCompanionsAllowUnboundedUnrelatedTelemetry(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_receive_sidecar_interleaving";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4RejectedReceiveFixture(
+                transferId,
+                unrelatedCompanionRecords: 12),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["file_tuna_v4_data_path_mismatch_count"]);
+        Assert.Equal("1", verdict["file_tuna_v4_data_path_mismatch_raw_count"]);
+        Assert.Equal("1", verdict["file_tuna_v4_data_path_mismatch_distinct_count"]);
+        Assert.Equal("1", verdict["file_tuna_v4_data_path_mismatch_recovered_count"]);
+        Assert.Equal("0", verdict["file_tuna_v4_data_path_mismatch_unresolved_count"]);
+        Assert.NotEqual("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
     public async Task AnalyzeRetained_FileTunaV4AdjacentLateRegularRejections_CloseIndependently(
         bool compact)
     {
@@ -4823,7 +4857,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         bool includeOutboundTransition = true,
         bool secondTunaCycle = false,
         int adjacentRejectedReceiveCopies = 1,
-        bool omitFirstAdjacentIgnore = false)
+        bool omitFirstAdjacentIgnore = false,
+        int unrelatedCompanionRecords = 0)
     {
         const string sourceWriterId = "writer_source_regular";
         const string writerId = "writer_receive_regular_rejected";
@@ -4875,11 +4910,12 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             mismatch = mismatch.Replace(range, string.Empty, StringComparison.Ordinal);
         }
 
+        var baseIgnoredSequence = 21 + unrelatedCompanionRecords;
         var ignored =
             $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}; session_id=sess_a; " +
             "frame_type=filetransfer.chunk_batch.v4; chunk_index=0-1; lane=bulk; " +
             "reason=file_tuna_v4_payload_requires_tuna; actual_transport=regular_nkn; target_transport=tuna; " +
-            $"route=file_tuna_v4; protocol_version=4; log_writer_id={writerId}; log_writer_sequence=21";
+            $"route=file_tuna_v4; protocol_version=4; log_writer_id={writerId}; log_writer_sequence={baseIgnoredSequence}";
         var messages = new List<string>
         {
             sourceSend
@@ -4919,6 +4955,12 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         {
             messages.Add(receive);
             messages.Add(mismatch);
+            for (var index = 0; index < unrelatedCompanionRecords; index++)
+            {
+                messages.Add(
+                    $"event=tuna_dialer_sidecar_stderr; line_len={100 + index}; " +
+                    $"log_writer_id={writerId}; log_writer_sequence={15 + index}");
+            }
             messages.Add(ignored);
         }
         else
@@ -4939,7 +4981,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                 if (copy != 0 || !omitFirstAdjacentIgnore)
                 {
                     messages.Add(ignored.Replace(
-                        "log_writer_sequence=21",
+                        $"log_writer_sequence={baseIgnoredSequence}",
                         $"log_writer_sequence={ignoredSequence}",
                         StringComparison.Ordinal));
                 }
