@@ -1585,6 +1585,11 @@ function New-RouteAcceptanceRunResult {
         efficiencyPostYieldScopedRecoveryDistinctOperationCount = 0L
         efficiencyPostYieldExactWindowCount = 0L
         efficiencyPostYieldScopedPressureEffectCount = 0L
+        efficiencyPostYieldFrontierEpisodeCount = 0L
+        efficiencyPostYieldFrontierProgressClosedEpisodeCount = 0L
+        efficiencyPostYieldFrontierUnresolvedEpisodeCount = 0L
+        efficiencyPostYieldMaxNoProgressFrontierEffectCount = 0L
+        efficiencyPostYieldMaxNoProgressRepeatedTupleCount = 0L
         efficiencyDuplicateStateReplayAuthorityCount = 0L
         fallbackTailEfficiencyTreadmillRawCount = 0L
         fallbackTailEfficiencyTreadmillDistinctCount = 0L
@@ -4154,6 +4159,11 @@ function Assert-Phase4EfficiencySummary {
     $scopedRecoveryOperationText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_scoped_recovery_distinct_operation_count' -DefaultValue ''
     $exactWindowText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_exact_window_count' -DefaultValue ''
     $scopedPressureEffectText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_scoped_pressure_effect_count' -DefaultValue ''
+    $frontierEpisodeText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_frontier_episode_count' -DefaultValue ''
+    $frontierProgressClosedEpisodeText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_frontier_progress_closed_episode_count' -DefaultValue ''
+    $frontierUnresolvedEpisodeText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_frontier_unresolved_episode_count' -DefaultValue ''
+    $maxNoProgressFrontierEffectText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_max_no_progress_frontier_effect_count' -DefaultValue ''
+    $maxNoProgressRepeatedTupleText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_yield_max_no_progress_repeated_tuple_count' -DefaultValue ''
     $duplicateReplayText = Get-RouteAcceptanceReportValue -Report $summary -Name 'post_tuna_fallback_duplicate_state_replay_authority_count' -DefaultValue ''
     $treadmillRawText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_raw_count' -DefaultValue ''
     $treadmillDistinctText = Get-RouteAcceptanceReportValue -Report $summary -Name 'fallback_tail_efficiency_treadmill_distinct_count' -DefaultValue ''
@@ -4170,6 +4180,11 @@ function Assert-Phase4EfficiencySummary {
         scoped_recovery_operation = $scopedRecoveryOperationText
         exact_window = $exactWindowText
         scoped_pressure_effect = $scopedPressureEffectText
+        frontier_episode = $frontierEpisodeText
+        frontier_progress_closed_episode = $frontierProgressClosedEpisodeText
+        frontier_unresolved_episode = $frontierUnresolvedEpisodeText
+        max_no_progress_frontier_effect = $maxNoProgressFrontierEffectText
+        max_no_progress_repeated_tuple = $maxNoProgressRepeatedTupleText
         duplicate_replay = $duplicateReplayText
         treadmill_raw = $treadmillRawText
         treadmill_distinct = $treadmillDistinctText
@@ -4203,12 +4218,16 @@ function Assert-Phase4EfficiencySummary {
     }
     $treadmillQuartetValid = $false
     $structuralVerdictValid = $false
+    $episodeCountsValid = $false
     if ($numericFieldsValid) {
         $treadmillRaw = [long]$numericValues.treadmill_raw
         $treadmillDistinct = [long]$numericValues.treadmill_distinct
         $treadmillRecovered = [long]$numericValues.treadmill_recovered
         $treadmillUnresolved = [long]$numericValues.treadmill_unresolved
         $duplicateReplay = [long]$numericValues.duplicate_replay
+        $episodeCountsValid = [long]$numericValues.frontier_episode -eq
+            ([long]$numericValues.frontier_progress_closed_episode +
+                [long]$numericValues.frontier_unresolved_episode)
         $treadmillQuartetValid = $treadmillRaw -ge $treadmillDistinct -and
             $treadmillDistinct -eq ($treadmillRecovered + $treadmillUnresolved) -and
             $treadmillVerdict -in @('none', 'pass', 'fail') -and
@@ -4233,6 +4252,7 @@ function Assert-Phase4EfficiencySummary {
     $isMalformed = $verdict -notin $validVerdicts -or
         -not $failureClassMatchesVerdict -or
         -not $numericFieldsValid -or
+        -not $episodeCountsValid -or
         -not $treadmillQuartetValid -or
         -not $structuralVerdictValid
     if ($isMalformed) {
@@ -4251,6 +4271,11 @@ function Assert-Phase4EfficiencySummary {
     $Result.efficiencyPostYieldScopedRecoveryDistinctOperationCount = [long]$numericValues.scoped_recovery_operation
     $Result.efficiencyPostYieldExactWindowCount = [long]$numericValues.exact_window
     $Result.efficiencyPostYieldScopedPressureEffectCount = [long]$numericValues.scoped_pressure_effect
+    $Result.efficiencyPostYieldFrontierEpisodeCount = [long]$numericValues.frontier_episode
+    $Result.efficiencyPostYieldFrontierProgressClosedEpisodeCount = [long]$numericValues.frontier_progress_closed_episode
+    $Result.efficiencyPostYieldFrontierUnresolvedEpisodeCount = [long]$numericValues.frontier_unresolved_episode
+    $Result.efficiencyPostYieldMaxNoProgressFrontierEffectCount = [long]$numericValues.max_no_progress_frontier_effect
+    $Result.efficiencyPostYieldMaxNoProgressRepeatedTupleCount = [long]$numericValues.max_no_progress_repeated_tuple
     $Result.efficiencyDuplicateStateReplayAuthorityCount = [long]$numericValues.duplicate_replay
     $Result.fallbackTailEfficiencyTreadmillRawCount = [long]$numericValues.treadmill_raw
     $Result.fallbackTailEfficiencyTreadmillDistinctCount = [long]$numericValues.treadmill_distinct
@@ -8212,6 +8237,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         'post_yield_scoped_recovery_distinct_operation_count=0',
         'post_yield_exact_window_count=0',
         'post_yield_scoped_pressure_effect_count=0',
+        'post_yield_frontier_episode_count=0',
+        'post_yield_frontier_progress_closed_episode_count=0',
+        'post_yield_frontier_unresolved_episode_count=0',
+        'post_yield_max_no_progress_frontier_effect_count=0',
+        'post_yield_max_no_progress_repeated_tuple_count=0',
         'post_tuna_fallback_duplicate_state_replay_authority_count=0',
         'fallback_tail_efficiency_treadmill_raw_count=0',
         'fallback_tail_efficiency_treadmill_distinct_count=0',
@@ -8318,6 +8348,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         postYieldScopedRecoveryDistinctOperationCount = 0
         postYieldExactWindowCount = 0
         postYieldScopedPressureEffectCount = 0
+        postYieldFrontierEpisodeCount = 0
+        postYieldFrontierProgressClosedEpisodeCount = 0
+        postYieldFrontierUnresolvedEpisodeCount = 0
+        postYieldMaxNoProgressFrontierEffectCount = 0
+        postYieldMaxNoProgressRepeatedTupleCount = 0
         postTunaFallbackDuplicateStateReplayAuthorityCount = 0
         fallbackTailEfficiencyTreadmillRawCount = 0
         fallbackTailEfficiencyTreadmillDistinctCount = 0
@@ -10511,6 +10546,11 @@ function New-RouteAcceptanceSummaryRunDto {
         postYieldScopedRecoveryDistinctOperationCount = [long]$Result.efficiencyPostYieldScopedRecoveryDistinctOperationCount
         postYieldExactWindowCount = [long]$Result.efficiencyPostYieldExactWindowCount
         postYieldScopedPressureEffectCount = [long]$Result.efficiencyPostYieldScopedPressureEffectCount
+        postYieldFrontierEpisodeCount = [long]$Result.efficiencyPostYieldFrontierEpisodeCount
+        postYieldFrontierProgressClosedEpisodeCount = [long]$Result.efficiencyPostYieldFrontierProgressClosedEpisodeCount
+        postYieldFrontierUnresolvedEpisodeCount = [long]$Result.efficiencyPostYieldFrontierUnresolvedEpisodeCount
+        postYieldMaxNoProgressFrontierEffectCount = [long]$Result.efficiencyPostYieldMaxNoProgressFrontierEffectCount
+        postYieldMaxNoProgressRepeatedTupleCount = [long]$Result.efficiencyPostYieldMaxNoProgressRepeatedTupleCount
         postTunaFallbackDuplicateStateReplayAuthorityCount = [long]$Result.efficiencyDuplicateStateReplayAuthorityCount
         fallbackTailEfficiencyTreadmillRawCount = [long]$Result.fallbackTailEfficiencyTreadmillRawCount
         fallbackTailEfficiencyTreadmillDistinctCount = [long]$Result.fallbackTailEfficiencyTreadmillDistinctCount
@@ -10646,6 +10686,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $efficiencyPostYieldScopedRecoveryDistinctOperationCount = [long](($runDtos | Measure-Object -Property postYieldScopedRecoveryDistinctOperationCount -Sum).Sum)
     $efficiencyPostYieldExactWindowCount = [long](($runDtos | Measure-Object -Property postYieldExactWindowCount -Sum).Sum)
     $efficiencyPostYieldScopedPressureEffectCount = [long](($runDtos | Measure-Object -Property postYieldScopedPressureEffectCount -Sum).Sum)
+    $efficiencyPostYieldFrontierEpisodeCount = [long](($runDtos | Measure-Object -Property postYieldFrontierEpisodeCount -Sum).Sum)
+    $efficiencyPostYieldFrontierProgressClosedEpisodeCount = [long](($runDtos | Measure-Object -Property postYieldFrontierProgressClosedEpisodeCount -Sum).Sum)
+    $efficiencyPostYieldFrontierUnresolvedEpisodeCount = [long](($runDtos | Measure-Object -Property postYieldFrontierUnresolvedEpisodeCount -Sum).Sum)
+    $efficiencyPostYieldMaxNoProgressFrontierEffectCount = [long](($runDtos | Measure-Object -Property postYieldMaxNoProgressFrontierEffectCount -Maximum).Maximum)
+    $efficiencyPostYieldMaxNoProgressRepeatedTupleCount = [long](($runDtos | Measure-Object -Property postYieldMaxNoProgressRepeatedTupleCount -Maximum).Maximum)
     $efficiencyDuplicateStateReplayAuthorityCount = [long](($runDtos | Measure-Object -Property postTunaFallbackDuplicateStateReplayAuthorityCount -Sum).Sum)
     $fallbackTailEfficiencyTreadmillRawCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillRawCount -Sum).Sum)
     $fallbackTailEfficiencyTreadmillDistinctCount = [long](($runDtos | Measure-Object -Property fallbackTailEfficiencyTreadmillDistinctCount -Sum).Sum)
@@ -11680,6 +11725,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("post_yield_scoped_recovery_distinct_operation_count={0}" -f $efficiencyPostYieldScopedRecoveryDistinctOperationCount),
         ("post_yield_exact_window_count={0}" -f $efficiencyPostYieldExactWindowCount),
         ("post_yield_scoped_pressure_effect_count={0}" -f $efficiencyPostYieldScopedPressureEffectCount),
+        ("post_yield_frontier_episode_count={0}" -f $efficiencyPostYieldFrontierEpisodeCount),
+        ("post_yield_frontier_progress_closed_episode_count={0}" -f $efficiencyPostYieldFrontierProgressClosedEpisodeCount),
+        ("post_yield_frontier_unresolved_episode_count={0}" -f $efficiencyPostYieldFrontierUnresolvedEpisodeCount),
+        ("post_yield_max_no_progress_frontier_effect_count={0}" -f $efficiencyPostYieldMaxNoProgressFrontierEffectCount),
+        ("post_yield_max_no_progress_repeated_tuple_count={0}" -f $efficiencyPostYieldMaxNoProgressRepeatedTupleCount),
         ("post_tuna_fallback_duplicate_state_replay_authority_count={0}" -f $efficiencyDuplicateStateReplayAuthorityCount),
         ("fallback_tail_efficiency_treadmill_raw_count={0}" -f $fallbackTailEfficiencyTreadmillRawCount),
         ("fallback_tail_efficiency_treadmill_distinct_count={0}" -f $fallbackTailEfficiencyTreadmillDistinctCount),
@@ -12379,6 +12429,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.post_yield_scoped_recovery_distinct_operation_count={1}" -f $prefix, $result.postYieldScopedRecoveryDistinctOperationCount)
         $textLines += ("{0}.post_yield_exact_window_count={1}" -f $prefix, $result.postYieldExactWindowCount)
         $textLines += ("{0}.post_yield_scoped_pressure_effect_count={1}" -f $prefix, $result.postYieldScopedPressureEffectCount)
+        $textLines += ("{0}.post_yield_frontier_episode_count={1}" -f $prefix, $result.postYieldFrontierEpisodeCount)
+        $textLines += ("{0}.post_yield_frontier_progress_closed_episode_count={1}" -f $prefix, $result.postYieldFrontierProgressClosedEpisodeCount)
+        $textLines += ("{0}.post_yield_frontier_unresolved_episode_count={1}" -f $prefix, $result.postYieldFrontierUnresolvedEpisodeCount)
+        $textLines += ("{0}.post_yield_max_no_progress_frontier_effect_count={1}" -f $prefix, $result.postYieldMaxNoProgressFrontierEffectCount)
+        $textLines += ("{0}.post_yield_max_no_progress_repeated_tuple_count={1}" -f $prefix, $result.postYieldMaxNoProgressRepeatedTupleCount)
         $textLines += ("{0}.post_tuna_fallback_duplicate_state_replay_authority_count={1}" -f $prefix, $result.postTunaFallbackDuplicateStateReplayAuthorityCount)
         $textLines += ("{0}.fallback_tail_efficiency_treadmill_raw_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillRawCount)
         $textLines += ("{0}.fallback_tail_efficiency_treadmill_distinct_count={1}" -f $prefix, $result.fallbackTailEfficiencyTreadmillDistinctCount)
@@ -12534,6 +12589,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         postYieldScopedRecoveryDistinctOperationCount = $efficiencyPostYieldScopedRecoveryDistinctOperationCount
         postYieldExactWindowCount = $efficiencyPostYieldExactWindowCount
         postYieldScopedPressureEffectCount = $efficiencyPostYieldScopedPressureEffectCount
+        postYieldFrontierEpisodeCount = $efficiencyPostYieldFrontierEpisodeCount
+        postYieldFrontierProgressClosedEpisodeCount = $efficiencyPostYieldFrontierProgressClosedEpisodeCount
+        postYieldFrontierUnresolvedEpisodeCount = $efficiencyPostYieldFrontierUnresolvedEpisodeCount
+        postYieldMaxNoProgressFrontierEffectCount = $efficiencyPostYieldMaxNoProgressFrontierEffectCount
+        postYieldMaxNoProgressRepeatedTupleCount = $efficiencyPostYieldMaxNoProgressRepeatedTupleCount
         postTunaFallbackDuplicateStateReplayAuthorityCount = $efficiencyDuplicateStateReplayAuthorityCount
         fallbackTailEfficiencyTreadmillRawCount = $fallbackTailEfficiencyTreadmillRawCount
         fallbackTailEfficiencyTreadmillDistinctCount = $fallbackTailEfficiencyTreadmillDistinctCount

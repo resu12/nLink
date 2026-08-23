@@ -6333,6 +6333,8 @@ function Get-FileTransferEfficiencySemanticEventsFromIndex {
             'filetransfer_v4_state_sent',
             'filetransfer_v4_state_received',
             'filetransfer_fallback_frontier_repair_authority_granted',
+            'filetransfer_fallback_frontier_repair_contract_settled',
+            'filetransfer_fallback_frontier_repair_progress_observed',
             'filetransfer_transport_rebind_safety_replay_started',
             'filetransfer_post_tuna_fallback_rebind_state_replay_suppressed',
             'filetransfer_data_path_send_result',
@@ -7977,6 +7979,423 @@ function Get-FileTransferEfficiencyRepeatedTupleEffectIdentity {
     }
 }
 
+function Get-FileTransferEfficiencyIntegerField {
+    param(
+        $Event,
+        [string[]]$Names,
+        [int]$Default = -1
+    )
+
+    foreach ($name in $Names) {
+        $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+        $parsed = 0
+        if (-not [string]::IsNullOrWhiteSpace($value) -and
+            [int]::TryParse(
+                $value,
+                [System.Globalization.NumberStyles]::Integer,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [ref]$parsed)) {
+            return $parsed
+        }
+    }
+
+    return $Default
+}
+
+function Get-FileTransferEfficiencyFrontierEffectBinding {
+    param(
+        $Window,
+        [object[]]$WindowEvents,
+        $Effect
+    )
+
+    $kind = Get-FileTransferEventField -Event $Effect -Name 'kind' -Default ''
+    if ($kind -notin @('receiver_state', 'frontier_request')) {
+        return $null
+    }
+
+    $effectSequence = [int]$Effect.Sequence
+    [object[]]$nextSameKindDeliveries = @(
+        $WindowEvents |
+            Where-Object {
+                [int]$_.Sequence -gt $effectSequence -and
+                $_.EventName -eq 'filetransfer_control_plane_delivery_result' -and
+                (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq $kind
+            } |
+            Sort-Object Sequence, LineNumber
+    )
+    $upperSequence = if ($nextSameKindDeliveries.Count -gt 0) {
+        [int]$nextSameKindDeliveries[0].Sequence
+    }
+    else {
+        [int]$Window.EndSequence
+    }
+
+    if ($kind -eq 'frontier_request') {
+        $frontier = Get-FileTransferEfficiencyIntegerField `
+            -Event $Effect `
+            -Names @('first_start_chunk_index', 'frontier_chunk_index', 'start_chunk_index')
+        $requestId = Get-FileTransferEfficiencyFirstNonEmptyField `
+            -Event $Effect `
+            -Names @('repair_request_id', 'protocol_repair_request_id')
+        $correlationId = Get-FileTransferEventField `
+            -Event $Effect `
+            -Name 'request_correlation_id' `
+            -Default ''
+        [object[]]$companions = @(
+            $WindowEvents |
+                Where-Object {
+                    [int]$_.Sequence -gt $effectSequence -and
+                    [int]$_.Sequence -lt $upperSequence -and
+                    $_.EventName -eq 'filetransfer_v6_frontier_request_sent' -and
+                    (Test-FileTransferEfficiencyWindowDirectScopeMatch -Window $Window -Event $_) -and
+                    (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                        'frontier_stall_repair_due' -and
+                    ([string]::IsNullOrWhiteSpace($requestId) -or
+                        $requestId -eq (Get-FileTransferEfficiencyFirstNonEmptyField `
+                            -Event $_ `
+                            -Names @('repair_request_id', 'protocol_repair_request_id'))) -and
+                    ([string]::IsNullOrWhiteSpace($correlationId) -or
+                        $correlationId -eq (Get-FileTransferEventField `
+                            -Event $_ `
+                            -Name 'request_correlation_id' `
+                            -Default ''))
+                }
+        )
+        if ($frontier -lt 0 -or $companions.Count -ne 1) {
+            return $null
+        }
+
+        return [pscustomobject]@{
+            Frontier = $frontier
+            Sequence = $effectSequence
+            Companion = $companions[0]
+        }
+    }
+
+    [object[]]$stateCompanions = @(
+        $WindowEvents |
+            Where-Object {
+                [int]$_.Sequence -gt $effectSequence -and
+                [int]$_.Sequence -lt $upperSequence -and
+                $_.EventName -eq 'filetransfer_v6_receiver_state_sent' -and
+                (Test-FileTransferEfficiencyWindowRootMatch `
+                    -Window $Window `
+                    -Event $_ `
+                    -AllowMissingDirection) -and
+                (Test-FileTransferEfficiencyWindowSparseScopeCompatible -Window $Window -Event $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                    'frontier_stall_repair_due'
+            }
+    )
+    if ($stateCompanions.Count -ne 1) {
+        return $null
+    }
+
+    $stateFrontier = Get-FileTransferEfficiencyIntegerField `
+        -Event $stateCompanions[0] `
+        -Names @('contiguous_committed_chunk_index', 'current_committed_chunk_index')
+    if ($stateFrontier -lt 0) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Frontier = $stateFrontier
+        Sequence = $effectSequence
+        Companion = $stateCompanions[0]
+    }
+}
+
+function Get-FileTransferEfficiencyFrontierProgressClosures {
+    param(
+        $Window,
+        [object[]]$WindowEvents
+    )
+
+    $closuresByIdentity = @{}
+    [object[]]$progressEvents = @(
+        $WindowEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and
+                (Test-FileTransferEfficiencyWindowDirectScopeMatch -Window $Window -Event $_)
+            } |
+            Sort-Object Sequence, LineNumber
+    )
+    foreach ($progress in $progressEvents) {
+        $previousFrontier = Get-FileTransferEfficiencyIntegerField `
+            -Event $progress `
+            -Names @('previous_frontier_chunk_index', 'frontier_chunk_index')
+        $currentFrontier = Get-FileTransferEfficiencyIntegerField `
+            -Event $progress `
+            -Names @('current_frontier_chunk_index')
+        if ($previousFrontier -lt 0 -or $currentFrontier -le $previousFrontier) {
+            continue
+        }
+
+        $authorityId = Get-FileTransferEventField -Event $progress -Name 'authority_id' -Default ''
+        $repairGeneration = Get-FileTransferEventField -Event $progress -Name 'repair_generation' -Default ''
+        $repairKey = Get-FileTransferEventField -Event $progress -Name 'repair_request_key' -Default ''
+        $requestCorrelationId = Get-FileTransferEventField `
+            -Event $progress `
+            -Name 'request_correlation_id' `
+            -Default ''
+        [object[]]$settlements = @(
+            $WindowEvents |
+                Where-Object {
+                    [int]$_.Sequence -lt [int]$progress.Sequence -and
+                    $_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+                    (Test-FileTransferEfficiencyWindowDirectScopeMatch -Window $Window -Event $_) -and
+                    (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
+                        'ProgressObserved' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $authorityId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'repair_generation' -Default '') -eq $repairGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'repair_request_key' -Default '') -eq $repairKey -and
+                    (Get-FileTransferEventField -Event $_ -Name 'request_correlation_id' -Default '') -eq
+                        $requestCorrelationId
+                }
+        )
+        if ($settlements.Count -ne 1) {
+            continue
+        }
+
+        [object[]]$commits = @(
+            $WindowEvents |
+                Where-Object {
+                    [int]$_.Sequence -gt [int]$progress.Sequence -and
+                    $_.EventName -eq 'filetransfer_v6_sparse_write_committed' -and
+                    (Test-FileTransferEfficiencyWindowRootMatch `
+                        -Window $Window `
+                        -Event $_ `
+                        -AllowMissingDirection) -and
+                    (Get-FileTransferEfficiencyIntegerField -Event $_ -Names @('next_chunk_index')) -eq
+                        $currentFrontier
+                } |
+                Sort-Object Sequence, LineNumber
+        )
+        if ($commits.Count -eq 0) {
+            continue
+        }
+
+        $commit = $commits[0]
+        $identity = '{0}|{1}|{2}' -f $previousFrontier, $currentFrontier, [int]$commit.Sequence
+        $closuresByIdentity[$identity] = [pscustomobject]@{
+            PreviousFrontier = $previousFrontier
+            CurrentFrontier = $currentFrontier
+            Sequence = [int]$commit.Sequence
+            AuthorityLinked = $true
+        }
+    }
+
+    [object[]]$sparseCommits = @(
+        $WindowEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_v6_sparse_write_committed' -and
+                (Test-FileTransferEfficiencyWindowRootMatch `
+                    -Window $Window `
+                    -Event $_ `
+                    -AllowMissingDirection) -and
+                (Get-FileTransferEfficiencyIntegerField `
+                    -Event $_ `
+                    -Names @('contiguous_chunks_committed') `
+                    -Default 0) -gt 0
+            } |
+            Sort-Object Sequence, LineNumber
+    )
+    foreach ($commit in $sparseCommits) {
+        $currentFrontier = Get-FileTransferEfficiencyIntegerField -Event $commit -Names @('next_chunk_index')
+        $committedChunks = Get-FileTransferEfficiencyIntegerField `
+            -Event $commit `
+            -Names @('contiguous_chunks_committed') `
+            -Default 0
+        $previousFrontier = $currentFrontier - $committedChunks
+        if ($previousFrontier -lt 0 -or $currentFrontier -le $previousFrontier) {
+            continue
+        }
+        if (@($closuresByIdentity.Values | Where-Object {
+                    $_.PreviousFrontier -eq $previousFrontier -and
+                    $_.CurrentFrontier -eq $currentFrontier -and
+                    $_.Sequence -eq [int]$commit.Sequence
+                }).Count -gt 0) {
+            continue
+        }
+
+        [object[]]$publications = @(
+            $WindowEvents |
+                Where-Object {
+                    [int]$_.Sequence -gt [int]$commit.Sequence -and
+                    $_.EventName -eq 'filetransfer_v6_receiver_state_sent' -and
+                    (Test-FileTransferEfficiencyWindowRootMatch `
+                        -Window $Window `
+                        -Event $_ `
+                        -AllowMissingDirection) -and
+                    (Get-FileTransferEfficiencyIntegerField `
+                        -Event $_ `
+                        -Names @('contiguous_committed_chunk_index')) -eq $currentFrontier
+                } |
+                Sort-Object Sequence, LineNumber
+        )
+        if ($publications.Count -eq 0) {
+            continue
+        }
+
+        $identity = '{0}|{1}|{2}' -f $previousFrontier, $currentFrontier, [int]$commit.Sequence
+        $closuresByIdentity[$identity] = [pscustomobject]@{
+            PreviousFrontier = $previousFrontier
+            CurrentFrontier = $currentFrontier
+            Sequence = [int]$commit.Sequence
+            AuthorityLinked = $false
+        }
+    }
+
+    return @($closuresByIdentity.Values | Sort-Object Sequence, PreviousFrontier, CurrentFrontier)
+}
+
+function Get-FileTransferEfficiencyFrontierEpisodeMetrics {
+    param(
+        $Window,
+        [object[]]$WindowEvents,
+        [object[]]$FrontierEffects,
+        [object[]]$TupleEvents
+    )
+
+    $items = New-Object System.Collections.Generic.List[object]
+    $unboundEffectKeys = New-Object System.Collections.Generic.List[string]
+    foreach ($effectState in @($FrontierEffects)) {
+        $binding = Get-FileTransferEfficiencyFrontierEffectBinding `
+            -Window $Window `
+            -WindowEvents $WindowEvents `
+            -Effect $effectState.Event
+        if ($null -eq $binding) {
+            $unboundEffectKeys.Add([string]$effectState.Key) | Out-Null
+            continue
+        }
+        $items.Add([pscustomobject]@{
+                Sequence = [int]$binding.Sequence
+                Frontier = [int]$binding.Frontier
+                EffectKey = [string]$effectState.Key
+                TupleEvent = $null
+            }) | Out-Null
+    }
+    foreach ($tupleEvent in @($TupleEvents)) {
+        $frontier = Get-FileTransferEfficiencyIntegerField `
+            -Event $tupleEvent `
+            -Names @(
+                'frontier_chunk_index',
+                'current_committed_chunk_index',
+                'contiguous_committed_chunk_index',
+                'next_chunk_index',
+                'previous_committed_chunk_index')
+        if ($frontier -lt 0) {
+            continue
+        }
+        $items.Add([pscustomobject]@{
+                Sequence = [int]$tupleEvent.Sequence
+                Frontier = $frontier
+                EffectKey = ''
+                TupleEvent = $tupleEvent
+            }) | Out-Null
+    }
+
+    [object[]]$orderedItems = @($items.ToArray() | Sort-Object Sequence, Frontier, EffectKey)
+    if ($orderedItems.Count -eq 0) {
+        return [pscustomobject]@{
+            EpisodeCount = 0
+            ProgressClosedEpisodeCount = 0
+            UnresolvedEpisodeCount = 0
+            MaxEffectCount = 0
+            MaxRepeatedTupleCount = 0
+            UnboundEffectKeys = $unboundEffectKeys.ToArray()
+        }
+    }
+
+    [object[]]$closures = @(
+        Get-FileTransferEfficiencyFrontierProgressClosures `
+            -Window $Window `
+            -WindowEvents $WindowEvents
+    )
+    $episodes = New-Object System.Collections.Generic.List[object]
+    $current = $null
+    foreach ($item in $orderedItems) {
+        if ($null -eq $current) {
+            $current = [pscustomobject]@{
+                Frontier = [int]$item.Frontier
+                StartSequence = [int]$item.Sequence
+                LastSequence = [int]$item.Sequence
+                Closed = $false
+                EffectKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+                TupleEvents = New-Object System.Collections.Generic.List[object]
+            }
+        }
+        elseif ([int]$item.Frontier -gt [int]$current.Frontier) {
+            [object[]]$matchingClosures = @(
+                $closures |
+                    Where-Object {
+                        $_.PreviousFrontier -eq [int]$current.Frontier -and
+                        $_.CurrentFrontier -le [int]$item.Frontier -and
+                        $_.Sequence -gt [int]$current.StartSequence -and
+                        $_.Sequence -lt [int]$item.Sequence
+                    }
+            )
+            if ($matchingClosures.Count -eq 1) {
+                $current.Closed = $true
+                $episodes.Add($current) | Out-Null
+                $current = [pscustomobject]@{
+                    Frontier = [int]$item.Frontier
+                    StartSequence = [int]$item.Sequence
+                    LastSequence = [int]$item.Sequence
+                    Closed = $false
+                    EffectKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+                    TupleEvents = New-Object System.Collections.Generic.List[object]
+                }
+            }
+        }
+
+        $current.LastSequence = [int]$item.Sequence
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.EffectKey)) {
+            $current.EffectKeys.Add([string]$item.EffectKey) | Out-Null
+        }
+        if ($null -ne $item.TupleEvent) {
+            $current.TupleEvents.Add($item.TupleEvent) | Out-Null
+        }
+    }
+
+    [object[]]$closingAfterLastItem = @(
+        $closures |
+            Where-Object {
+                $_.PreviousFrontier -eq [int]$current.Frontier -and
+                $_.Sequence -gt [int]$current.LastSequence -and
+                $_.Sequence -lt [int]$Window.EndSequence
+            }
+    )
+    if ($closingAfterLastItem.Count -eq 1) {
+        $current.Closed = $true
+    }
+    $episodes.Add($current) | Out-Null
+
+    $maxEffectCount = 0
+    $maxRepeatedTupleCount = 0
+    $progressClosedEpisodeCount = 0
+    foreach ($episode in $episodes.ToArray()) {
+        $maxEffectCount = [Math]::Max($maxEffectCount, $episode.EffectKeys.Count)
+        $maxRepeatedTupleCount = [Math]::Max(
+            $maxRepeatedTupleCount,
+            (Get-FileTransferEfficiencyRepeatedFrontierTupleCount `
+                -Events $episode.TupleEvents.ToArray()))
+        if ($episode.Closed) {
+            $progressClosedEpisodeCount++
+        }
+    }
+
+    return [pscustomobject]@{
+        EpisodeCount = $episodes.Count
+        ProgressClosedEpisodeCount = $progressClosedEpisodeCount
+        UnresolvedEpisodeCount = $episodes.Count - $progressClosedEpisodeCount
+        MaxEffectCount = $maxEffectCount
+        MaxRepeatedTupleCount = $maxRepeatedTupleCount
+        UnboundEffectKeys = $unboundEffectKeys.ToArray()
+    }
+}
+
 function Get-FileTransferEfficiencyExactWindowMetrics {
     param(
         [object[]]$Events,
@@ -7987,14 +8406,21 @@ function Get-FileTransferEfficiencyExactWindowMetrics {
     $scopedPressureEffectKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $distinctOperationKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $windowDistinctOperationKeys = @{}
+    $windowExceptionalOperationKeys = @{}
+    $windowFrontierEffects = @{}
     $windowPressureCounts = @{}
     $windowRepeatedTupleCounts = @{}
+    $windowTupleEventsByKey = @{}
     $windowRecords = New-Object System.Collections.Generic.List[object]
     foreach ($window in @($Windows)) {
         $windowDistinctOperationKeys[$window.SourceKey] =
             New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        $windowExceptionalOperationKeys[$window.SourceKey] =
+            New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        $windowFrontierEffects[$window.SourceKey] = @{}
         $windowPressureCounts[$window.SourceKey] = 0
         $windowRepeatedTupleCounts[$window.SourceKey] = 0
+        $windowTupleEventsByKey[$window.SourceKey] = @()
         foreach ($event in @($Events)) {
             if ([int]$event.Sequence -le $window.StartSequence -or
                 [int]$event.Sequence -ge $window.EndSequence) {
@@ -8065,6 +8491,7 @@ function Get-FileTransferEfficiencyExactWindowMetrics {
         )
         $windowRepeatedTupleCounts[$window.SourceKey] =
             Get-FileTransferEfficiencyRepeatedFrontierTupleCount -Events $tupleEvents
+        $windowTupleEventsByKey[$window.SourceKey] = $tupleEvents
     }
 
     foreach ($record in $windowRecords.ToArray()) {
@@ -8121,6 +8548,22 @@ function Get-FileTransferEfficiencyExactWindowMetrics {
         $scopedEffectKeys.Add($operationKey) | Out-Null
         $distinctOperationKeys.Add($operationKey) | Out-Null
         $windowDistinctOperationKeys[$window.SourceKey].Add($operationKey) | Out-Null
+        $isFrontierControlEffect = $name -in @(
+                'filetransfer_control_plane_delivery_result',
+                'filetransfer_control_plane_delivery_observed') -and
+            (Get-FileTransferEventField -Event $event -Name 'reason' -Default '') -eq
+                'frontier_stall_repair_due' -and
+            (Get-FileTransferEventField -Event $event -Name 'kind' -Default '') -in @(
+                'receiver_state',
+                'frontier_request')
+        if ($isFrontierControlEffect) {
+            if (-not $windowFrontierEffects[$window.SourceKey].ContainsKey($operationKey)) {
+                $windowFrontierEffects[$window.SourceKey][$operationKey] = $event
+            }
+        }
+        else {
+            $windowExceptionalOperationKeys[$window.SourceKey].Add($operationKey) | Out-Null
+        }
         if ($name -eq 'filetransfer_post_tuna_fallback_control_plane_pressure_marked') {
             if ($scopedPressureEffectKeys.Add($operationKey)) {
                 $windowPressureCounts[$window.SourceKey]++
@@ -8280,6 +8723,7 @@ function Get-FileTransferEfficiencyExactWindowMetrics {
         $distinctOperationKeys.Add($stateOperationKey) | Out-Null
         foreach ($windowKey in $state.WindowKeys) {
             $windowDistinctOperationKeys[$windowKey].Add($stateOperationKey) | Out-Null
+            $windowExceptionalOperationKeys[$windowKey].Add($stateOperationKey) | Out-Null
         }
     }
 
@@ -8397,17 +8841,53 @@ function Get-FileTransferEfficiencyExactWindowMetrics {
         $scopedEffectKeys.Add($bridgeOperationKey) | Out-Null
         $distinctOperationKeys.Add($bridgeOperationKey) | Out-Null
         $windowDistinctOperationKeys[$state.WindowKey].Add($bridgeOperationKey) | Out-Null
+        $windowExceptionalOperationKeys[$state.WindowKey].Add($bridgeOperationKey) | Out-Null
     }
 
     $failingWindowKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $failingPairKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $postYieldRepeatedTupleCount = 0
+    $frontierEpisodeCount = 0
+    $frontierProgressClosedEpisodeCount = 0
+    $frontierUnresolvedEpisodeCount = 0
+    $maxNoProgressFrontierEffectCount = 0
+    $maxNoProgressRepeatedTupleCount = 0
     foreach ($window in @($Windows)) {
-        $distinctCount = $windowDistinctOperationKeys[$window.SourceKey].Count
+        [object[]]$windowEvents = @(
+            $windowRecords.ToArray() |
+                Where-Object { $_.Window.SourceKey -eq $window.SourceKey } |
+                ForEach-Object { $_.Event } |
+                Sort-Object Sequence, LineNumber
+        )
+        [object[]]$windowTupleEvents = @($windowTupleEventsByKey[$window.SourceKey])
+        $episodeMetrics = Get-FileTransferEfficiencyFrontierEpisodeMetrics `
+            -Window $window `
+            -WindowEvents $windowEvents `
+            -FrontierEffects @($windowFrontierEffects[$window.SourceKey].GetEnumerator() | ForEach-Object {
+                    [pscustomobject]@{ Key = [string]$_.Key; Event = $_.Value }
+                }) `
+            -TupleEvents $windowTupleEvents
+        foreach ($unboundKey in @($episodeMetrics.UnboundEffectKeys)) {
+            $windowExceptionalOperationKeys[$window.SourceKey].Add([string]$unboundKey) | Out-Null
+        }
+
+        $exceptionalDistinctCount = $windowExceptionalOperationKeys[$window.SourceKey].Count
         $pressureCount = [int]$windowPressureCounts[$window.SourceKey]
         $repeatedTupleCount = [int]$windowRepeatedTupleCounts[$window.SourceKey]
         $postYieldRepeatedTupleCount += $repeatedTupleCount
-        if ($distinctCount -gt 50 -or $pressureCount -gt 0 -or $repeatedTupleCount -gt 50) {
+        $frontierEpisodeCount += [int]$episodeMetrics.EpisodeCount
+        $frontierProgressClosedEpisodeCount += [int]$episodeMetrics.ProgressClosedEpisodeCount
+        $frontierUnresolvedEpisodeCount += [int]$episodeMetrics.UnresolvedEpisodeCount
+        $maxNoProgressFrontierEffectCount = [Math]::Max(
+            $maxNoProgressFrontierEffectCount,
+            [int]$episodeMetrics.MaxEffectCount)
+        $maxNoProgressRepeatedTupleCount = [Math]::Max(
+            $maxNoProgressRepeatedTupleCount,
+            [int]$episodeMetrics.MaxRepeatedTupleCount)
+        if ($exceptionalDistinctCount -gt 50 -or
+            $pressureCount -gt 0 -or
+            [int]$episodeMetrics.MaxEffectCount -gt 50 -or
+            [int]$episodeMetrics.MaxRepeatedTupleCount -gt 50) {
             $failingWindowKeys.Add($window.SourceKey) | Out-Null
             $failingPairKeys.Add($window.PairSourceKey) | Out-Null
         }
@@ -8419,6 +8899,11 @@ function Get-FileTransferEfficiencyExactWindowMetrics {
         ExactWindowCount = @($Windows).Count
         ScopedPressureEffectCount = $scopedPressureEffectKeys.Count
         RepeatedUnchangedFrontierTupleCount = $postYieldRepeatedTupleCount
+        FrontierEpisodeCount = $frontierEpisodeCount
+        FrontierProgressClosedEpisodeCount = $frontierProgressClosedEpisodeCount
+        FrontierUnresolvedEpisodeCount = $frontierUnresolvedEpisodeCount
+        MaxNoProgressFrontierEffectCount = $maxNoProgressFrontierEffectCount
+        MaxNoProgressRepeatedTupleCount = $maxNoProgressRepeatedTupleCount
         FailureRawCount = $failingWindowKeys.Count
         FailureDistinctCount = $failingPairKeys.Count
         FailureRecoveredCount = 0
@@ -8814,6 +9299,11 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         post_yield_scoped_recovery_distinct_operation_count = $exactWindowMetrics.DistinctOperationCount
         post_yield_exact_window_count = $exactWindowMetrics.ExactWindowCount
         post_yield_scoped_pressure_effect_count = $exactWindowMetrics.ScopedPressureEffectCount
+        post_yield_frontier_episode_count = $exactWindowMetrics.FrontierEpisodeCount
+        post_yield_frontier_progress_closed_episode_count = $exactWindowMetrics.FrontierProgressClosedEpisodeCount
+        post_yield_frontier_unresolved_episode_count = $exactWindowMetrics.FrontierUnresolvedEpisodeCount
+        post_yield_max_no_progress_frontier_effect_count = $exactWindowMetrics.MaxNoProgressFrontierEffectCount
+        post_yield_max_no_progress_repeated_tuple_count = $exactWindowMetrics.MaxNoProgressRepeatedTupleCount
         post_yield_liveness_activity_count = $postYieldLivenessActivityCount
         repeated_unchanged_frontier_tuple_count = $repeatedUnchangedFrontierTupleCount
         post_yield_repeated_unchanged_frontier_tuple_count = $postYieldRepeatedUnchangedFrontierTupleCount

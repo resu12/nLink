@@ -481,6 +481,133 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     [InlineData(true)]
     [Trait("RetainedFallbackSuite", "Efficiency")]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_ProductiveFrontierEpisodesDoNotAggregateIntoTreadmill(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_productive_frontier_episodes";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        var operation = 0;
+        foreach (var episode in new[]
+                 {
+                     (Frontier: 4174, NextFrontier: 4177, EffectCount: 31),
+                     (Frontier: 4177, NextFrontier: 4201, EffectCount: 30),
+                     (Frontier: 4201, NextFrontier: 6249, EffectCount: 31),
+                     (Frontier: 6249, NextFrontier: 6250, EffectCount: 30)
+                 })
+        {
+            for (var index = 0; index < episode.EffectCount; index++)
+            {
+                AppendEfficiencyFrontierStallDeliveryEffect(
+                    lines,
+                    transferId,
+                    operation++,
+                    episode.Frontier,
+                    secondsOffset: 8 + operation);
+            }
+
+            AppendEfficiencyFrontierProgressClosure(
+                lines,
+                transferId,
+                episode.Frontier,
+                episode.NextFrontier,
+                operation,
+                secondsOffset: 8 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 200);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Productive frontier-episode analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("244", efficiency["post_yield_recovery_activity_count"]);
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 122,
+            distinctOperationCount: 122,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 0,
+            distinctFailureCount: 0,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 0,
+            verdict: "warning",
+            failureClass: "efficiency_warning",
+            frontierEpisodeCount: 4,
+            progressClosedEpisodeCount: 4,
+            unresolvedEpisodeCount: 0,
+            maxNoProgressEffectCount: 31);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_OneNoProgressFrontierEpisodeStillTripsThreshold(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_single_frontier_episode";
+        var lines = BuildExactPairedYieldEfficiencyPrefix(transferId);
+        for (var operation = 0; operation < 51; operation++)
+        {
+            AppendEfficiencyFrontierStallDeliveryEffect(
+                lines,
+                transferId,
+                operation,
+                frontier: 4174,
+                secondsOffset: 8 + operation);
+        }
+        AppendEfficiencyCompletedTerminalLines(lines, transferId, secondsOffset: 70);
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Single no-progress frontier-episode analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        AssertExactTreadmillSummary(
+            efficiency,
+            scopedEffectCount: 51,
+            distinctOperationCount: 51,
+            exactWindowCount: 1,
+            pressureEffectCount: 0,
+            rawFailureCount: 1,
+            distinctFailureCount: 1,
+            recoveredFailureCount: 0,
+            unresolvedFailureCount: 1,
+            verdict: "fail",
+            failureClass: "fallback_tail_efficiency_treadmill",
+            frontierEpisodeCount: 1,
+            progressClosedEpisodeCount: 0,
+            unresolvedEpisodeCount: 1,
+            maxNoProgressEffectCount: 51);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_DeduplicatesMirroredDeliveryAndStateRefreshLifecycle(
         bool compact)
     {
@@ -8644,6 +8771,69 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
             secondsOffset));
     }
 
+    private static void AppendEfficiencyFrontierStallDeliveryEffect(
+        List<string> lines,
+        string transferId,
+        int operation,
+        int frontier,
+        int secondsOffset)
+    {
+        var directScope = ExactYieldDirectScope(transferId);
+        var effect =
+            $"{directScope}; kind=receiver_state; authority_schema=2; " +
+            $"authority_id=fta2-frontier-state-{operation:D24}; control_plane_generation={operation + 1}; " +
+            "reason=frontier_stall_repair_due; frame_type=filetransfer.receiver_state.v6; " +
+            "accepted_any=1; peer_visible_any=1; local_only_rejected=0; authority_effect=positive; " +
+            "decision_status=Accepted; log_writer_id=writer_efficiency_exact";
+        lines.Add(LogLine($"event=filetransfer_control_plane_delivery_result; {effect}", secondsOffset));
+        lines.Add(LogLine($"event=filetransfer_control_plane_delivery_observed; {effect}", secondsOffset));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_receiver_state_sent; {directScope}; " +
+            $"contiguous_committed_chunk_index={frontier}; highest_received_chunk_index={frontier + 64}; " +
+            $"receiver_state_epoch={operation + 1}; reason=frontier_stall_repair_due; " +
+            "decision_status=Accepted; authority_effect=positive; log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+    }
+
+    private static void AppendEfficiencyFrontierProgressClosure(
+        List<string> lines,
+        string transferId,
+        int previousFrontier,
+        int currentFrontier,
+        int operation,
+        int secondsOffset)
+    {
+        var directScope = ExactYieldDirectScope(transferId);
+        var authorityId = $"fta2-frontier-progress-{operation:D24}";
+        var repairGeneration = operation + 1;
+        var repairKey = $"v6-frontier:{previousFrontier}:{repairGeneration}";
+        var correlationId = $"frontier-progress-{operation}";
+        var repairIdentity =
+            $"authority_id={authorityId}; repair_generation={repairGeneration}; " +
+            $"repair_request_key={repairKey}; request_correlation_id={correlationId}";
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_frontier_repair_contract_settled; {directScope}; {repairIdentity}; " +
+            "settlement_outcome=ProgressObserved; decision_status=Accepted; authority_effect=positive; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+        lines.Add(LogLine(
+            $"event=filetransfer_fallback_frontier_repair_progress_observed; {directScope}; {repairIdentity}; " +
+            $"previous_frontier_chunk_index={previousFrontier}; current_frontier_chunk_index={currentFrontier}; " +
+            "decision_status=Accepted; authority_effect=positive; log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_sparse_write_committed; {directScope}; " +
+            $"next_chunk_index={currentFrontier}; contiguous_chunks_committed={currentFrontier - previousFrontier}; " +
+            "decision_status=Accepted; authority_effect=positive; log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+        lines.Add(LogLine(
+            $"event=filetransfer_v6_receiver_state_sent; {directScope}; " +
+            $"contiguous_committed_chunk_index={currentFrontier}; highest_received_chunk_index={currentFrontier}; " +
+            "reason=chunk_batch_committed; decision_status=Accepted; authority_effect=positive; " +
+            "log_writer_id=writer_efficiency_exact",
+            secondsOffset));
+    }
+
     private static void AppendEfficiencyStateRefreshLifecycle(
         List<string> lines,
         string transferId,
@@ -8695,7 +8885,12 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         int recoveredFailureCount,
         int unresolvedFailureCount,
         string verdict,
-        string failureClass)
+        string failureClass,
+        int? frontierEpisodeCount = null,
+        int? progressClosedEpisodeCount = null,
+        int? unresolvedEpisodeCount = null,
+        int? maxNoProgressEffectCount = null,
+        int? maxNoProgressRepeatedTupleCount = null)
     {
         Assert.Equal(scopedEffectCount.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_scoped_recovery_effect_count"]);
         Assert.Equal(distinctOperationCount.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_scoped_recovery_distinct_operation_count"]);
@@ -8705,6 +8900,26 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal(distinctFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_distinct_count"]);
         Assert.Equal(recoveredFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_recovered_count"]);
         Assert.Equal(unresolvedFailureCount.ToString(CultureInfo.InvariantCulture), efficiency["fallback_tail_efficiency_treadmill_unresolved_count"]);
+        if (frontierEpisodeCount.HasValue)
+        {
+            Assert.Equal(frontierEpisodeCount.Value.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_frontier_episode_count"]);
+        }
+        if (progressClosedEpisodeCount.HasValue)
+        {
+            Assert.Equal(progressClosedEpisodeCount.Value.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_frontier_progress_closed_episode_count"]);
+        }
+        if (unresolvedEpisodeCount.HasValue)
+        {
+            Assert.Equal(unresolvedEpisodeCount.Value.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_frontier_unresolved_episode_count"]);
+        }
+        if (maxNoProgressEffectCount.HasValue)
+        {
+            Assert.Equal(maxNoProgressEffectCount.Value.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_max_no_progress_frontier_effect_count"]);
+        }
+        if (maxNoProgressRepeatedTupleCount.HasValue)
+        {
+            Assert.Equal(maxNoProgressRepeatedTupleCount.Value.ToString(CultureInfo.InvariantCulture), efficiency["post_yield_max_no_progress_repeated_tuple_count"]);
+        }
         Assert.Equal(verdict, efficiency["efficiency_verdict"]);
         Assert.Equal(failureClass, efficiency["efficiency_failure_class"]);
     }

@@ -98,6 +98,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     efficiencyPostYieldScopedRecoveryDistinctOperationCount = 0L
                     efficiencyPostYieldExactWindowCount = 0L
                     efficiencyPostYieldScopedPressureEffectCount = 0L
+                    efficiencyPostYieldFrontierEpisodeCount = 0L
+                    efficiencyPostYieldFrontierProgressClosedEpisodeCount = 0L
+                    efficiencyPostYieldFrontierUnresolvedEpisodeCount = 0L
+                    efficiencyPostYieldMaxNoProgressFrontierEffectCount = 0L
+                    efficiencyPostYieldMaxNoProgressRepeatedTupleCount = 0L
                     efficiencyDuplicateStateReplayAuthorityCount = 0L
                     fallbackTailEfficiencyTreadmillRawCount = 0L
                     fallbackTailEfficiencyTreadmillDistinctCount = 0L
@@ -130,6 +135,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     'post_yield_scoped_recovery_distinct_operation_count=2',
                     'post_yield_exact_window_count=1',
                     "post_yield_scoped_pressure_effect_count=$treadmillEffect",
+                    'post_yield_frontier_episode_count=3',
+                    'post_yield_frontier_progress_closed_episode_count=2',
+                    'post_yield_frontier_unresolved_episode_count=1',
+                    'post_yield_max_no_progress_frontier_effect_count=31',
+                    'post_yield_max_no_progress_repeated_tuple_count=7',
                     "post_tuna_fallback_duplicate_state_replay_authority_count=$DuplicateReplayCount",
                     "fallback_tail_efficiency_treadmill_raw_count=$treadmillEffect",
                     "fallback_tail_efficiency_treadmill_distinct_count=$treadmillEffect",
@@ -177,6 +187,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                         recovery = $result.efficiencyPostYieldRecoveryActivityCount
                         scopedRecovery = $result.efficiencyPostYieldScopedRecoveryEffectCount
                         exactWindowCount = $result.efficiencyPostYieldExactWindowCount
+                        frontierEpisodeCount = $result.efficiencyPostYieldFrontierEpisodeCount
+                        frontierProgressClosedEpisodeCount = $result.efficiencyPostYieldFrontierProgressClosedEpisodeCount
+                        frontierUnresolvedEpisodeCount = $result.efficiencyPostYieldFrontierUnresolvedEpisodeCount
+                        maxNoProgressFrontierEffectCount = $result.efficiencyPostYieldMaxNoProgressFrontierEffectCount
+                        maxNoProgressRepeatedTupleCount = $result.efficiencyPostYieldMaxNoProgressRepeatedTupleCount
                         treadmillUnresolved = $result.fallbackTailEfficiencyTreadmillUnresolvedCount
                         treadmillVerdict = $result.fallbackTailEfficiencyTreadmillVerdict
                         failureCount = $result.failures.Count
@@ -239,6 +254,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         Assert.Equal(75L, cases["fail"].GetProperty("recovery").GetInt64());
         Assert.Equal(75L, cases["fail"].GetProperty("scopedRecovery").GetInt64());
         Assert.Equal(1L, cases["fail"].GetProperty("exactWindowCount").GetInt64());
+        Assert.Equal(3L, cases["fail"].GetProperty("frontierEpisodeCount").GetInt64());
+        Assert.Equal(2L, cases["fail"].GetProperty("frontierProgressClosedEpisodeCount").GetInt64());
+        Assert.Equal(1L, cases["fail"].GetProperty("frontierUnresolvedEpisodeCount").GetInt64());
+        Assert.Equal(31L, cases["fail"].GetProperty("maxNoProgressFrontierEffectCount").GetInt64());
+        Assert.Equal(7L, cases["fail"].GetProperty("maxNoProgressRepeatedTupleCount").GetInt64());
         Assert.Equal(1L, cases["fail"].GetProperty("treadmillUnresolved").GetInt64());
         Assert.Equal("fail", cases["fail"].GetProperty("treadmillVerdict").GetString());
         Assert.Equal(1, cases["fail"].GetProperty("performanceFailureCount").GetInt32());
@@ -558,6 +578,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 "post_yield_scoped_recovery_distinct_operation_count",
                 "post_yield_exact_window_count",
                 "post_yield_scoped_pressure_effect_count",
+                "post_yield_frontier_episode_count",
+                "post_yield_frontier_progress_closed_episode_count",
+                "post_yield_frontier_unresolved_episode_count",
+                "post_yield_max_no_progress_frontier_effect_count",
+                "post_yield_max_no_progress_repeated_tuple_count",
                 "post_tuna_fallback_duplicate_state_replay_authority_count",
                 "fallback_tail_efficiency_treadmill_raw_count",
                 "fallback_tail_efficiency_treadmill_distinct_count",
@@ -802,6 +827,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                     "postYieldScopedRecoveryDistinctOperationCount",
                     "postYieldExactWindowCount",
                     "postYieldScopedPressureEffectCount",
+                    "postYieldFrontierEpisodeCount",
+                    "postYieldFrontierProgressClosedEpisodeCount",
+                    "postYieldFrontierUnresolvedEpisodeCount",
+                    "postYieldMaxNoProgressFrontierEffectCount",
+                    "postYieldMaxNoProgressRepeatedTupleCount",
                     "postTunaFallbackDuplicateStateReplayAuthorityCount",
                     "fallbackTailEfficiencyTreadmillRawCount",
                     "fallbackTailEfficiencyTreadmillDistinctCount",
