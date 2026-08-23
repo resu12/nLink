@@ -10700,22 +10700,23 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public void RetainedAnalysisCompletedProofsReapLingeringAnalyzerProcess()
+    public void RetainedAnalysisRequiresExactExitAndTerminalReceiptBeforeManifestProof()
     {
         var repoRoot = FindRepoRoot();
         var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
         var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var evidenceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferSoak", "RetainedAnalysisEvidence.ps1"));
         var analyzerText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
 
         Assert.Contains("Test-TunaGuiRetainedAnalysisCompletedProofArtifacts", wrapperText, StringComparison.Ordinal);
-        Assert.Contains("Stop-TunaGuiRetainedAnalysisProcess", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts", routeAcceptanceText, StringComparison.Ordinal);
-        Assert.Contains("Stop-RouteAcceptanceRetainedAnalysisProcess", routeAcceptanceText, StringComparison.Ordinal);
 
         foreach (var scriptText in new[] { wrapperText, routeAcceptanceText })
         {
-            Assert.Contains("filetransfer-retained-analysis-completed-process-reaped.json", scriptText, StringComparison.Ordinal);
-            Assert.Contains("completed_artifacts_observed_while_process_alive", scriptText, StringComparison.Ordinal);
+            Assert.Contains("Write-FileTransferRetainedAnalysisAttemptReceipt", scriptText, StringComparison.Ordinal);
+            Assert.Contains("-ExitCodeAvailable $true", scriptText, StringComparison.Ordinal);
+            Assert.Contains("-CompletedProofArtifacts $completedProofArtifacts", scriptText, StringComparison.Ordinal);
+            Assert.DoesNotContain("completed_artifacts_observed_while_process_alive", scriptText, StringComparison.Ordinal);
             Assert.Contains("stability-gates-summary.txt", scriptText, StringComparison.Ordinal);
             Assert.Contains("hard_failure_count", scriptText, StringComparison.Ordinal);
             Assert.Contains("gate_status", scriptText, StringComparison.Ordinal);
@@ -10725,8 +10726,154 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Assert.Contains("$Process.WaitForExit(5000)", scriptText, StringComparison.Ordinal);
         }
 
+        Assert.Contains("retained_analysis_attempt_receipt_already_terminal", evidenceText, StringComparison.Ordinal);
+        Assert.Contains("analyzerInputUnchanged", evidenceText, StringComparison.Ordinal);
+        Assert.Contains("exitCodeAvailable", evidenceText, StringComparison.Ordinal);
+        Assert.Contains("Update-FileTransferTunaDirectEvidenceManifestFromReceipt", evidenceText, StringComparison.Ordinal);
+        Assert.Contains("Write-FileTransferTunaDirectEvidenceManifestProjection", evidenceText, StringComparison.Ordinal);
+        Assert.Contains("$retainedAnalysisOwner = 'RouteAcceptance'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$compactRequested = $true", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$childExitCode -ne 0", routeAcceptanceText, StringComparison.Ordinal);
+        var tunaRun = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Invoke-TunaRouteAcceptanceRun",
+            "New-Phase4RouteAcceptanceScenario");
+        var childFailureCheck = tunaRun.IndexOf("if ($childExitCode -ne 0)", StringComparison.Ordinal);
+        var parentAnalysis = tunaRun.IndexOf("Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir", StringComparison.Ordinal);
+        Assert.True(childFailureCheck >= 0 && parentAnalysis > childFailureCheck);
+
         Assert.Contains("'stability-gates-summary.txt'", analyzerText, StringComparison.Ordinal);
         Assert.Contains("\"hard_failure_count={0}\" -f $hardFailureCount", analyzerText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetainedAnalysisAttemptReceipt_IsSingleOwnerAndInputBound()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferSoak", "RetainedAnalysisEvidence.ps1");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath.Replace("'", "''", StringComparison.Ordinal)}}'
+            $root = Join-Path ([IO.Path]::GetTempPath()) ('nlink-analysis-receipt-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            try {
+                $log = Join-Path $root 'filetransfer-retained-log-slice.log'
+                [IO.File]::WriteAllText($log, "event=proof`n", [Text.UTF8Encoding]::new($false))
+                foreach ($name in @(
+                    'filetransfer-retained-analysis.stdout.txt',
+                    'filetransfer-retained-analysis.stderr.txt',
+                    'filetransfer-retained-analysis-diagnostics.json',
+                    'filetransfer-retained-analysis-stage-diagnostics.json',
+                    'filetransfer-retained-compact-summary.json',
+                    'filetransfer-route-consistency-summary.txt',
+                    'filetransfer-operator-verdict.txt',
+                    'stability-gates-summary.txt')) {
+                    [IO.File]::WriteAllText((Join-Path $root $name), 'proof', [Text.UTF8Encoding]::new($false))
+                }
+                $sha = Get-FileTransferEvidenceSha256 -Path $log
+                $lines = Get-FileTransferEvidenceLineCount -Path $log
+                Write-FileTransferRetainedAnalysisAttemptReceipt `
+                    -ArtifactDir $root -Owner RouteAcceptance -AttemptId attempt-a `
+                    -AcceptanceRunId run-a -ScenarioRunId scenario-a -LogPath $log `
+                    -InputSha256Before $sha -InputLineCountBefore $lines `
+                    -LiveRouteProofMode RegularActivationCycle -CompactRequested $true `
+                    -ProcessId 123 -StartedUtc 2026-08-23T00:00:00Z -EndedUtc 2026-08-23T00:00:01Z `
+                    -TimedOut $false -ExitCodeAvailable $true -ExitCode 0 -CompletedProofArtifacts $true | Out-Null
+                $receiptPath = Join-Path $root 'filetransfer-retained-analysis-attempt-receipt.json'
+                $receipt = Get-Content -Raw $receiptPath | ConvertFrom-Json
+                if (-not (Test-FileTransferRetainedAnalysisAttemptReceipt `
+                        -Receipt $receipt -ArtifactDir $root -ExpectedOwner RouteAcceptance `
+                        -AcceptanceRunId run-a -ScenarioRunId scenario-a -LogPath $log `
+                        -LiveRouteProofMode RegularActivationCycle -CompactRequired $true)) {
+                    throw 'valid exact receipt was rejected'
+                }
+                $duplicateRejected = $false
+                try {
+                    Write-FileTransferRetainedAnalysisAttemptReceipt `
+                        -ArtifactDir $root -Owner RouteAcceptance -AttemptId attempt-b `
+                        -LogPath $log -InputSha256Before $sha -InputLineCountBefore $lines `
+                        -LiveRouteProofMode RegularActivationCycle -CompactRequested $true `
+                        -ProcessId 124 -StartedUtc 2026-08-23T00:00:02Z -EndedUtc 2026-08-23T00:00:03Z `
+                        -TimedOut $false -ExitCodeAvailable $true -ExitCode 0 -CompletedProofArtifacts $true | Out-Null
+                }
+                catch { $duplicateRejected = $_.Exception.Message -like 'retained_analysis_attempt_receipt_already_terminal:*' }
+                if (-not $duplicateRejected) { throw 'terminal receipt was overwritten' }
+                $routeSummary = Join-Path $root 'filetransfer-route-consistency-summary.txt'
+                [IO.File]::WriteAllText($routeSummary, 'mutated', [Text.UTF8Encoding]::new($false))
+                if (Test-FileTransferRetainedAnalysisAttemptReceipt `
+                        -Receipt $receipt -ArtifactDir $root -ExpectedOwner RouteAcceptance `
+                        -AcceptanceRunId run-a -ScenarioRunId scenario-a -LogPath $log `
+                        -LiveRouteProofMode RegularActivationCycle -CompactRequired $true) {
+                    throw 'mutated analyzer output retained authority'
+                }
+                [IO.File]::WriteAllText($routeSummary, 'proof', [Text.UTF8Encoding]::new($false))
+                Add-Content -LiteralPath $log -Value 'event=mutation'
+                if (Test-FileTransferRetainedAnalysisAttemptReceipt `
+                        -Receipt $receipt -ArtifactDir $root -ExpectedOwner RouteAcceptance `
+                        -AcceptanceRunId run-a -ScenarioRunId scenario-a -LogPath $log `
+                        -LiveRouteProofMode RegularActivationCycle -CompactRequired $true) {
+                    throw 'mutated analyzer input retained authority'
+                }
+                $manifestPath = Join-Path $root 'atomic-manifest.json'
+                $stopPath = Join-Path $root 'atomic-reader.stop'
+                $projection = [pscustomobject]@{
+                    schemaVersion = 1
+                    event = 'filetransfer_tuna_gui_direct_evidence_manifest'
+                    generatedAtUtc = 'initial'
+                }
+                Write-FileTransferTunaDirectEvidenceManifestProjection -Path $manifestPath -Source $projection | Out-Null
+                $reader = Start-Job -ArgumentList $manifestPath, $stopPath -ScriptBlock {
+                    param($manifestPath, $stopPath)
+                    while (-not (Test-Path -LiteralPath $stopPath)) {
+                        try {
+                            $stream = [IO.File]::Open(
+                                $manifestPath,
+                                [IO.FileMode]::Open,
+                                [IO.FileAccess]::Read,
+                                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                            try {
+                                $reader = [IO.StreamReader]::new($stream)
+                                try { $json = $reader.ReadToEnd() }
+                                finally { $reader.Dispose() }
+                            }
+                            finally { $stream.Dispose() }
+                            $document = $json | ConvertFrom-Json
+                            if ([int]$document.schemaVersion -ne 1) { throw 'partial manifest' }
+                        }
+                        catch { Write-Output $_.Exception.Message; return }
+                    }
+                    Write-Output 'atomic-reader-ok'
+                }
+                foreach ($generation in 1..50) {
+                    $projection.generatedAtUtc = [string]$generation
+                    Write-FileTransferTunaDirectEvidenceManifestProjection -Path $manifestPath -Source $projection | Out-Null
+                }
+                [IO.File]::WriteAllText($stopPath, 'stop', [Text.UTF8Encoding]::new($false))
+                $completedReader = Wait-Job $reader -Timeout 10
+                if ($null -eq $completedReader -or $reader.State -ne 'Completed') {
+                    Stop-Job $reader
+                    throw 'atomic reader did not complete'
+                }
+                $readerOutput = @(Receive-Job $reader)
+                Remove-Job $reader -Force
+                if ($readerOutput -notcontains 'atomic-reader-ok') { throw ('atomic reader failed: ' + ($readerOutput -join ';')) }
+                if (@(Get-ChildItem $root -File | Where-Object { $_.Name -match '\.(tmp|bak)$' }).Count -ne 0) {
+                    throw 'atomic receipt write left temporary files'
+                }
+                Write-Output 'analysis-receipt-ok'
+            }
+            finally {
+                if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"Analysis receipt test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("analysis-receipt-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

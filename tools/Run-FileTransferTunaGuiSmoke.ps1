@@ -16,6 +16,8 @@ param(
     [int]$ProgressTimeoutSeconds = 180,
     [string]$ArtifactDir = "",
     [string]$ExePath = ".\artifacts\portable\nLink\win-x64\nLink.exe",
+    [ValidateSet("Wrapper", "RouteAcceptance")]
+    [string]$RetainedAnalysisOwner = "Wrapper",
     [switch]$Mixed,
     [switch]$ExercisePause,
     [switch]$Build
@@ -23,6 +25,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'FileTransferSoak\RetainedAnalysisEvidence.ps1')
 
 function ConvertTo-TunaGuiProcessArgument {
     param([AllowEmptyString()][string]$Value)
@@ -1053,26 +1057,12 @@ function Test-TunaGuiRetainedAnalysisCompletedProofArtifacts {
         [string]$LiveRouteProofMode = 'None'
     )
 
-    $artifactDir = Split-Path -Parent $LogPath
-    $guiSummaryPath = Join-Path $artifactDir 'filetransfer-tuna-gui-summary.json'
     $routeSummaryPath = Join-Path $AnalysisDir 'filetransfer-route-consistency-summary.txt'
     $operatorVerdictPath = Join-Path $AnalysisDir 'filetransfer-operator-verdict.txt'
     $stabilitySummaryPath = Join-Path $AnalysisDir 'stability-gates-summary.txt'
-    if (-not (Test-Path -LiteralPath $guiSummaryPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) -or
+    if (-not (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf)) {
-        return $false
-    }
-
-    try {
-        $summary = Get-Content -LiteralPath $guiSummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if (-not [string]::Equals([string]$summary.completed, 'True', [System.StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$summary.integrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $false
-        }
-    }
-    catch {
         return $false
     }
 
@@ -1148,6 +1138,10 @@ function Invoke-TunaGuiRetainedAnalysis {
 
     New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
 
+    $attemptId = [guid]::NewGuid().ToString('N')
+    $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $LogPath
+    $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $LogPath
+
     $stdoutPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stdout.txt'
     $stderrPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stderr.txt'
     $diagnosticsPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis-diagnostics.json'
@@ -1179,6 +1173,10 @@ function Invoke-TunaGuiRetainedAnalysis {
         }) -join ' '
     $startInfo.WorkingDirectory = $RepoRoot
     $startInfo.UseShellExecute = $false
+    $compactRequested = $LiveRouteProofMode -ne 'None' -or $RouteMode -like 'live-*'
+    if ($compactRequested) {
+        $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
+    }
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
@@ -1193,22 +1191,6 @@ function Invoke-TunaGuiRetainedAnalysis {
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)
         while (-not $process.WaitForExit(5000)) {
-            if (Test-TunaGuiRetainedAnalysisCompletedProofArtifacts -AnalysisDir $AnalysisDir -LogPath $LogPath -LiveRouteProofMode $LiveRouteProofMode) {
-                Stop-TunaGuiRetainedAnalysisProcess -Process $process
-                $diagnostics = [ordered]@{
-                    completed_artifacts_observed_while_process_alive = 1
-                    timed_out = 0
-                    process_id = $process.Id
-                    started_utc = $startedUtc.ToString('O')
-                    ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
-                    artifact_dir = $AnalysisDir
-                    log_path = $LogPath
-                    live_route_proof_mode = $LiveRouteProofMode
-                }
-                $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $AnalysisDir 'filetransfer-retained-analysis-completed-process-reaped.json') -Encoding UTF8
-                return
-            }
-
             if ([DateTimeOffset]::UtcNow -lt $deadlineUtc) {
                 continue
             }
@@ -1233,6 +1215,25 @@ function Invoke-TunaGuiRetainedAnalysis {
                 -StartedUtc $startedUtc.ToString('O') `
                 -LiveRouteProofMode $LiveRouteProofMode | Out-Null
 
+            Write-FileTransferRetainedAnalysisAttemptReceipt `
+                -ArtifactDir $AnalysisDir `
+                -Owner 'Wrapper' `
+                -AttemptId $attemptId `
+                -AcceptanceRunId ([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID) `
+                -ScenarioRunId ([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID) `
+                -LogPath $LogPath `
+                -InputSha256Before $inputSha256Before `
+                -InputLineCountBefore $inputLineCountBefore `
+                -LiveRouteProofMode $LiveRouteProofMode `
+                -CompactRequested $compactRequested `
+                -ProcessId $process.Id `
+                -StartedUtc $startedUtc.ToString('O') `
+                -EndedUtc ([DateTimeOffset]::UtcNow.ToString('O')) `
+                -TimedOut $true `
+                -ExitCodeAvailable $false `
+                -ExitCode -1 `
+                -CompletedProofArtifacts $false | Out-Null
+
             throw "Retained analysis timed out after ${analysisTimeoutSeconds}s. Artifacts: $AnalysisDir"
         }
 
@@ -1254,8 +1255,34 @@ function Invoke-TunaGuiRetainedAnalysis {
         }
         $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticsPath -Encoding UTF8
 
+        $completedProofArtifacts = Test-TunaGuiRetainedAnalysisCompletedProofArtifacts `
+            -AnalysisDir $AnalysisDir `
+            -LogPath $LogPath `
+            -LiveRouteProofMode $LiveRouteProofMode
+        Write-FileTransferRetainedAnalysisAttemptReceipt `
+            -ArtifactDir $AnalysisDir `
+            -Owner 'Wrapper' `
+            -AttemptId $attemptId `
+            -AcceptanceRunId ([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID) `
+            -ScenarioRunId ([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID) `
+            -LogPath $LogPath `
+            -InputSha256Before $inputSha256Before `
+            -InputLineCountBefore $inputLineCountBefore `
+            -LiveRouteProofMode $LiveRouteProofMode `
+            -CompactRequested $compactRequested `
+            -ProcessId $process.Id `
+            -StartedUtc $startedUtc.ToString('O') `
+            -EndedUtc ([DateTimeOffset]::UtcNow.ToString('O')) `
+            -TimedOut $false `
+            -ExitCodeAvailable $true `
+            -ExitCode $process.ExitCode `
+            -CompletedProofArtifacts $completedProofArtifacts | Out-Null
+
         if ($process.ExitCode -ne 0) {
             throw "Retained analysis failed with exit code $($process.ExitCode). Artifacts: $AnalysisDir"
+        }
+        if (-not $completedProofArtifacts) {
+            throw "Retained analysis exited successfully without complete proof artifacts. Artifacts: $AnalysisDir"
         }
     }
     finally {
@@ -2037,7 +2064,10 @@ function Write-TunaGuiDirectEvidenceManifest {
         $analyzerInputMatches
     $cursorPass = $null -ne $ledger -and [string]$ledger.cursorIntegrityVerdict -eq 'pass'
     $writerPass = $null -ne $ledger -and [int]$ledger.writerEvidenceVersion -eq 3 -and [string]$ledger.writerIntegrityVerdict -eq 'pass'
-    $analysisDirs = if ($RouteMode -eq 'v4-restart-v6-fallback') {
+    $analysisDirs = if ($RetainedAnalysisOwner -eq 'RouteAcceptance') {
+        @($ArtifactDir)
+    }
+    elseif ($RouteMode -eq 'v4-restart-v6-fallback') {
         @((Join-Path $ArtifactDir 'measured-fallback-analysis'))
     }
     elseif ($RouteMode -eq 'live-reactivation-second-transfer') {
@@ -2046,42 +2076,38 @@ function Write-TunaGuiDirectEvidenceManifest {
     else {
         @($ArtifactDir)
     }
+    $analysisReceiptPaths = @()
+    $analysisReceiptValid = $true
     $analysisStatuses = @(
         foreach ($analysisDir in $analysisDirs) {
-            $timeoutSummaryPath = Join-Path $analysisDir 'filetransfer-retained-analysis-timeout-summary.json'
-            $completedReapedPath = Join-Path $analysisDir 'filetransfer-retained-analysis-completed-process-reaped.json'
-            $diagnosticsPath = Join-Path $analysisDir 'filetransfer-retained-analysis-diagnostics.json'
-            if (Test-Path -LiteralPath $timeoutSummaryPath -PathType Leaf) {
-                'timed_out'
-                continue
-            }
-            if (Test-Path -LiteralPath $completedReapedPath -PathType Leaf) {
-                'completed'
-                continue
-            }
-            if (-not (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf)) {
-                'not_started'
+            $receiptPath = Join-Path $analysisDir 'filetransfer-retained-analysis-attempt-receipt.json'
+            $analysisReceiptPaths += $receiptPath
+            if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+                $analysisReceiptValid = $false
+                $(if ($RetainedAnalysisOwner -eq 'RouteAcceptance') { 'delegated_pending' } else { 'not_started' })
                 continue
             }
 
             try {
-                $analysisDiagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json
-                if ($analysisDiagnostics.PSObject.Properties.Name -contains 'timed_out' -and
-                    [int]$analysisDiagnostics.timed_out -ne 0) {
-                    'timed_out'
+                $analysisReceipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+                $analysisLogPath = if ([string]::Equals([System.IO.Path]::GetFullPath($analysisDir), [System.IO.Path]::GetFullPath($ArtifactDir), [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $analyzerInputPath
                 }
-                elseif ($analysisDiagnostics.PSObject.Properties.Name -contains 'exit_code' -and
-                    [int]$analysisDiagnostics.exit_code -eq 0) {
-                    'completed'
-                }
-                elseif ($analysisDiagnostics.PSObject.Properties.Name -contains 'exit_code') {
-                    'failed'
-                }
-                else {
-                    'in_progress'
-                }
+                else { Join-Path $analysisDir 'filetransfer-retained-log-slice.log' }
+                $receiptCurrent = Test-FileTransferRetainedAnalysisAttemptReceipt `
+                    -Receipt $analysisReceipt `
+                    -ArtifactDir $analysisDir `
+                    -ExpectedOwner $RetainedAnalysisOwner `
+                    -AcceptanceRunId ([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID) `
+                    -ScenarioRunId ([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID) `
+                    -LogPath $analysisLogPath `
+                    -LiveRouteProofMode $(if ($analysisDir -eq $ArtifactDir) { $(if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'RegularActivationCycle' } else { 'None' }) } else { 'None' }) `
+                    -CompactRequired ($RetainedAnalysisOwner -eq 'RouteAcceptance')
+                if (-not $receiptCurrent) { $analysisReceiptValid = $false }
+                [string]$analysisReceipt.status
             }
             catch {
+                $analysisReceiptValid = $false
                 'failed'
             }
         }
@@ -2095,6 +2121,9 @@ function Write-TunaGuiDirectEvidenceManifest {
     elseif ($analysisStatuses.Count -gt 0 -and @($analysisStatuses | Where-Object { $_ -ne 'completed' }).Count -eq 0) {
         'completed'
     }
+    elseif ($analysisStatuses -contains 'delegated_pending') {
+        'delegated_pending'
+    }
     elseif ($analysisStatuses -contains 'completed' -or $analysisStatuses -contains 'in_progress') {
         'in_progress'
     }
@@ -2102,6 +2131,22 @@ function Write-TunaGuiDirectEvidenceManifest {
         'not_started'
     }
     $retainedAnalysisCompleted = $retainedAnalysisStatus -eq 'completed'
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    $summaryValid = $false
+    try {
+        $summary = Get-Content -LiteralPath $summaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $summaryValid = [string]::Equals([string]$summary.event, 'filetransfer_tuna_gui_handoff_fallback_summary', [System.StringComparison]::Ordinal) -and
+            [string]::Equals([string]$summary.routeMode, $RouteMode, [System.StringComparison]::Ordinal) -and
+            [bool]$summary.completed -and [bool]$summary.integrityOk
+    }
+    catch {}
+    $acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+    $scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+    $identityMatches = $null -ne $state -and $null -ne $ledger -and
+        [string]::Equals([string]$state.acceptanceRunId, $acceptanceRunId, [System.StringComparison]::Ordinal) -and
+        [string]::Equals([string]$state.scenarioRunId, $scenarioRunId, [System.StringComparison]::Ordinal) -and
+        [string]::Equals([string]$ledger.acceptanceRunId, $acceptanceRunId, [System.StringComparison]::Ordinal) -and
+        [string]::Equals([string]$ledger.scenarioRunId, $scenarioRunId, [System.StringComparison]::Ordinal)
     $sourceCommit = ''
     $sourceDirty = $true
     try {
@@ -2113,6 +2158,11 @@ function Write-TunaGuiDirectEvidenceManifest {
         $cursorPass -and
         $writerPass -and
         $retainedAnalysisCompleted -and
+        $analysisReceiptValid -and
+        $GuiExitCodeAvailable -and
+        $GuiExitCode -eq 0 -and
+        $summaryValid -and
+        $identityMatches -and
         -not $sourceDirty
 
     $hashFile = {
@@ -2123,8 +2173,8 @@ function Write-TunaGuiDirectEvidenceManifest {
     $manifest = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_tuna_gui_direct_evidence_manifest'
-        acceptanceRunId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
-        scenarioRunId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+        acceptanceRunId = $acceptanceRunId
+        scenarioRunId = $scenarioRunId
         sourceCommit = $sourceCommit.Trim()
         sourceDirty = $sourceDirty
         guiExitCode = $GuiExitCode
@@ -2159,11 +2209,17 @@ function Write-TunaGuiDirectEvidenceManifest {
         writerEvidenceVersion = $(if ($null -ne $ledger) { [int]$ledger.writerEvidenceVersion } else { 0 })
         writerIntegrityVerdict = $(if ($writerPass) { 'pass' } else { 'fail' })
         currentRuntimeProof = $currentRuntimeProof
+        retainedAnalysisOwner = $RetainedAnalysisOwner
+        retainedAnalysisReceiptPaths = $analysisReceiptPaths
+        retainedAnalysisReceiptSha256 = $(if ($analysisReceiptPaths.Count -eq 1) { & $hashFile $analysisReceiptPaths[0] } else { '' })
+        retainedAnalysisReceiptValid = $analysisReceiptValid
         retainedAnalysisCompleted = $retainedAnalysisCompleted
         retainedAnalysisStatus = $retainedAnalysisStatus
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
     }
-    Write-TunaGuiAtomicJson -Path (Join-Path $ArtifactDir 'filetransfer-tuna-gui-evidence-manifest.json') -Value $manifest
+    Write-FileTransferTunaDirectEvidenceManifestProjection `
+        -Path (Join-Path $ArtifactDir 'filetransfer-tuna-gui-evidence-manifest.json') `
+        -Source ([pscustomobject]$manifest) | Out-Null
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -2343,37 +2399,25 @@ try {
     }
 
     if ($guiSmokeExitCode -ne 0) {
-        if ($RouteMode -eq 'v4-restart-v6-fallback') {
-            Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
-        }
-        else {
-            Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
-        }
-
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
     }
 
     if (-not $summaryCurrentValid) {
-        if ($RouteMode -eq 'v4-restart-v6-fallback') {
-            Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
-        }
-        else {
-            Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
-        }
-
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"
     }
 
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
         $slices = Select-TunaGuiControlledRestartLogSlices -ArtifactDir $resolvedArtifactDir
-        if (-not [string]::IsNullOrWhiteSpace([string]$slices.SetupPath)) {
-            Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $repoRoot -AnalysisDir (Join-Path $resolvedArtifactDir 'setup-analysis') -LogPath $slices.SetupPath
-        }
+        if ($RetainedAnalysisOwner -eq 'Wrapper') {
+            if (-not [string]::IsNullOrWhiteSpace([string]$slices.SetupPath)) {
+                Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $repoRoot -AnalysisDir (Join-Path $resolvedArtifactDir 'setup-analysis') -LogPath $slices.SetupPath
+            }
 
-        Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
+            Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
+        }
         Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
     }
-    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle') {
+    elseif ($RetainedAnalysisOwner -eq 'Wrapper' -and ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle')) {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
         $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'RegularActivationCycle' } else { 'None' }
         Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $resolvedArtifactDir
