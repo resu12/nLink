@@ -16928,6 +16928,9 @@ public sealed partial class SessionFileTransferService :
                 operation.Decision.YieldGeneration,
                 reason);
         }
+        TryRecheckInboundPostFallbackPairedAdmissionLocked(
+            context,
+            "fallback_tail_pairing_committed");
         TryQueueFallbackPairedTailYieldRuntimeUnlockRetryDispatchLocked(
             context,
             pairedRelease,
@@ -23110,6 +23113,27 @@ public sealed partial class SessionFileTransferService :
         FileTransferRuntimeUnlockPreCommitProbeAckFrame?
             CompletedCommitConfirmation = null);
 
+    private sealed class RuntimeUnlockPostFallbackPairedAdmissionRecheck
+    {
+        public required long RecheckGeneration { get; init; }
+
+        public required string RequestSource { get; init; }
+
+        public required string RequestReason { get; init; }
+
+        public required FallbackTailYieldDecision YieldDecision { get; init; }
+
+        public required FileTransferFallbackTailYieldScope SourceScope { get; init; }
+
+        public required IFileTransferDataSession DataSession { get; init; }
+
+        public FileTransferFallbackTailPairedReleaseReceipt? PairedRelease { get; set; }
+
+        public RuntimeUnlockFallbackSurvivalState LastEvaluatedSurvivalState { get; set; }
+
+        public string LastDecisionReason { get; set; } = string.Empty;
+    }
+
     private sealed record OutboundSparsePumpInstall(
         long InstallGeneration,
         long PredecessorInstallGeneration,
@@ -24454,6 +24478,11 @@ public sealed partial class SessionFileTransferService :
         public RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbe { get; set; }
 
         public int LastRuntimeUnlockPendingPreCommitProbeGeneration { get; set; }
+
+        public long LastRuntimeUnlockPostFallbackPairedAdmissionRecheckGeneration { get; set; }
+
+        public RuntimeUnlockPostFallbackPairedAdmissionRecheck?
+            RuntimeUnlockPostFallbackPairedAdmissionRecheck { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 

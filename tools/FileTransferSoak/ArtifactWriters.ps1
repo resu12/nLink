@@ -25583,16 +25583,16 @@ function Get-FileTransferRuntimeUnlockInitialActivationAnswerPeerDeliveryCorrela
             (Get-AnswerDeliveryIdentityValue $_ @('bridge_decision_generation')) -eq
                 $bridgeDecisionGeneration
         } | Select-Object -First 1)
-        [object[]]$pairedClassification = if ($dispatch.Count -eq 1) {
-            @($pairedRetryOfferClassifications | Where-Object {
-                [int64]$_.Sequence -lt [int64]$request.Sequence -and
-                (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer -and
-                (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
-                (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @(
-                    '', $payerDecisionId)
-            } | Select-Object -First 1)
-        }
-        else { @() }
+        [object[]]$pairedClassification = @(if ($dispatch.Count -eq 1) {
+                @($pairedRetryOfferClassifications | Where-Object {
+                    [int64]$_.Sequence -lt [int64]$request.Sequence -and
+                    (Get-AnswerDeliveryIdentityValue $_ @('log_writer_id')) -ne $writer -and
+                    (Get-AnswerDeliveryIdentityValue $_ @('session_id')) -eq $sessionId -and
+                    (Get-AnswerDeliveryIdentityValue $_ @('payer_decision_id')) -in @(
+                        '', $payerDecisionId)
+                } | Select-Object -First 1)
+            }
+            else { @() })
         [object[]]$acceptedAnswer = @($answerSends | Where-Object {
             $pairedClassification.Count -eq 1 -and
             [int64]$_.Sequence -gt [int64]$pairedClassification[0].Sequence -and
@@ -59929,6 +59929,10 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
             (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
                 'fallback_tail_paired_yield'
         })
+    [object[]]$inboundPairedYieldGrantedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_paired_yield_granted' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
+        })
     [object[]]$retryAuthorityQueuedEvents = @($ordered | Where-Object {
             $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_request_queued' -and
             (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
@@ -60015,6 +60019,37 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
                 @('Accepted', 'Idempotent') -and
             (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq
                 'DispatchObserved'
+        })
+    [object[]]$pairedOfferBindingEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'runtime_unlock_post_fallback_paired_retry_offer_binding_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
+        })
+    [object[]]$pairedAdmissionRecheckEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_runtime_unlock_post_fallback_paired_admission_recheck_decided'
+        })
+    [object[]]$runtimeUnlockAdmissionGrantedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_runtime_unlock_admission_granted' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
+        })
+    [object[]]$pairedRetryDispatchEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'runtime_unlock_retry_dispatch_observed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'retry_reason' -Default '') -eq
+                'fallback_paired_tail_yield'
+        })
+    [object[]]$pairedRetryOfferQueuedEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'tuna_acceleration_offer_queued' -and
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq
+                'fallback_paired_tail_yield' -and
+            (Get-FileTransferEventField -Event $_ -Name 'queue_local_only' -Default '1') -eq '0'
+        })
+    [object[]]$responderConvergenceEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'runtime_unlock_responder_answer_probe_convergence_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
+        })
+    [object[]]$responderHandoffEvents = @($ordered | Where-Object {
+            $_.EventName -eq 'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound'
         })
 
     function Test-FallbackTailNoYieldEventBefore {
@@ -61679,6 +61714,185 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
         }
     }
 
+    foreach ($bindingRejection in @($pairedOfferBindingEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+                    'runtime_unlock_peer_precommit_answer_acceptance_scope_not_current' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'admission_generation' -Default -1) -eq 0 -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                    'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6
+            })) {
+        $writer = Get-FileTransferEventField -Event $bindingRejection -Name 'log_writer_id' -Default ''
+        $session = Get-FileTransferEventField -Event $bindingRejection -Name 'session_id' -Default ''
+        $transfer = Get-FileTransferEventField -Event $bindingRejection -Name 'transfer_id' -Default ''
+        $payer = Get-FileTransferEventField -Event $bindingRejection -Name 'payer_decision_id' -Default ''
+        if ($writer -eq '' -or $session -eq '' -or $transfer -eq '' -or
+            $payer -notmatch '^[1-9][0-9]*$') {
+            continue
+        }
+
+        [object[]]$pairings = @($pairingEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$bindingRejection.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'pairing_state' -Default '') -eq 'Paired' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent') -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'route' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'protocol_version' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'live_route_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'runtime_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'terminal_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'leg_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'route_publication_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'route_publication_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'transport_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'bridge_recovery_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'bridge_recovery_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'data_session_identity' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $bindingRejection -Name 'data_session_generation' -Default '')
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($pairings.Count -ne 1) { continue }
+        $pairing = $pairings[0]
+
+        [object[]]$pairedGrants = @($inboundPairedYieldGrantedEvents | Where-Object {
+                [int64]$_.Sequence -ge [int64]$pairing.Sequence -and
+                [int64]$_.Sequence -lt [int64]$bindingRejection.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'authority_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'yield_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'pair_key' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'pair_key' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'route' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'protocol_version' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'live_route_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'runtime_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'terminal_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'leg_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transport_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'transport_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'bridge_recovery_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'bridge_recovery_generation' -Default '')
+            } | Sort-Object Sequence, LineNumber | Select-Object -First 2)
+        if ($pairedGrants.Count -ne 1) { continue }
+
+        [object[]]$denials = @($admissionDeniedEvents | Where-Object {
+                [int64]$_.Sequence -lt [int64]$pairing.Sequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'live_route_epoch' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'runtime_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'terminal_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'leg_generation' -Default '')
+            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
+        if ($denials.Count -ne 1) { continue }
+
+        $pairKey = Get-FileTransferEventField -Event $pairing -Name 'pair_key' -Default ''
+        [object[]]$peerPairings = @($pairingEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -ne $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'peer_direction' -Default '') -eq 'inbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'pair_key' -Default '') -eq $pairKey -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+            })
+        if ($peerPairings.Count -ne 1) { continue }
+        $peerPairing = $peerPairings[0]
+        $peerWriter = Get-FileTransferEventField -Event $peerPairing -Name 'log_writer_id' -Default ''
+        $peerAuthority = Get-FileTransferEventField -Event $peerPairing -Name 'authority_id' -Default ''
+        $peerYieldGeneration = Get-FileTransferEventField -Event $peerPairing -Name 'yield_generation' -Default ''
+
+        [object[]]$dispatches = @($pairedRetryDispatchEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $peerWriter -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_authority_id' -Default '') -eq $peerAuthority -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_generation' -Default '') -eq $peerYieldGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq
+                    (Get-FileTransferEventField -Event $pairing -Name 'live_route_epoch' -Default '')
+            })
+        if ($dispatches.Count -ne 1) { continue }
+        $dispatch = $dispatches[0]
+        [object[]]$offers = @($pairedRetryOfferQueuedEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $peerWriter -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                (Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '') -eq $payer -and
+                (Get-FileTransferEventField -Event $_ -Name 'generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $dispatch -Name 'offer_generation' -Default '')
+            })
+        if ($offers.Count -ne 1) { continue }
+
+        $key = ((@(
+            $writer, $peerWriter, $session, $transfer,
+            (Get-FileTransferEventField -Event $pairing -Name 'authority_id' -Default ''),
+            (Get-FileTransferEventField -Event $pairing -Name 'yield_generation' -Default ''),
+            (Get-FileTransferEventField -Event $pairing -Name 'pairing_generation' -Default ''),
+            $pairKey, $peerAuthority, $peerYieldGeneration,
+            (Get-FileTransferEventField -Event $dispatch -Name 'authority_id' -Default ''),
+            (Get-FileTransferEventField -Event $dispatch -Name 'install_generation' -Default ''),
+            $payer,
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'inbound_msg_id' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'source_fingerprint' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'route_publication_generation' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'runtime_generation' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'terminal_generation' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'leg_generation' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'transport_epoch' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'bridge_recovery_generation' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'checkpoint_request_id' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'data_session_identity' -Default ''),
+            (Get-FileTransferEventField -Event $bindingRejection -Name 'data_session_generation' -Default '')
+        )) -join '|').ToLowerInvariant()
+        $rawEvents.Add($bindingRejection) | Out-Null
+        if (-not $recordsByKey.ContainsKey($key)) {
+            $recordsByKey[$key] = [pscustomobject]@{
+                Event = $bindingRejection
+                LastEvent = $bindingRejection
+                AdmissionDeniedEvent = $denials[0]
+                PairingEvent = $pairing
+                PeerPairingEvent = $peerPairing
+                RetryDispatchEvent = $dispatch
+                RetryOfferEvent = $offers[0]
+                Reason = 'fallback_paired_tail_yield_admission_not_rechecked_after_pairing_before_retry_offer_binding'
+                Variant = 'paired_yield_admission_not_rechecked_after_pairing'
+                DistinctKey = $key
+                Recovered = $false
+            }
+        }
+        else {
+            $recordsByKey[$key].LastEvent = $bindingRejection
+        }
+    }
+
     [object[]]$effectiveInstallGrantEvents = @()
     if (@($recordsByKey.Values | Where-Object {
                 $_.Variant -in @(
@@ -61704,6 +61918,102 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
     }
 
     foreach ($record in @($recordsByKey.Values)) {
+        if ($record.Variant -eq 'paired_yield_admission_not_rechecked_after_pairing') {
+            $candidate = $record.Event
+            $pairing = $record.PairingEvent
+            $writer = Get-FileTransferEventField -Event $candidate -Name 'log_writer_id' -Default ''
+            $session = Get-FileTransferEventField -Event $candidate -Name 'session_id' -Default ''
+            $transfer = Get-FileTransferEventField -Event $candidate -Name 'transfer_id' -Default ''
+            $payer = Get-FileTransferEventField -Event $candidate -Name 'payer_decision_id' -Default ''
+            [object[]]$rechecks = @($pairedAdmissionRecheckEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Granted', 'Idempotent') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $pairing -Name 'authority_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $pairing -Name 'yield_generation' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'pairing_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $pairing -Name 'pairing_generation' -Default '')
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($rechecks.Count -ne 1) { continue }
+            $admissionGeneration = Get-FileTransferEventField -Event $rechecks[0] -Name 'admission_generation' -Default ''
+            [object[]]$admissions = @($runtimeUnlockAdmissionGrantedEvents | Where-Object {
+                    [int64]$_.Sequence -ge [int64]$rechecks[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'admission_generation' -Default '') -eq $admissionGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'admission_reason' -Default '') -eq 'fallback_quiescent'
+                } | Select-Object -First 1)
+            if ($admissions.Count -ne 1) { continue }
+            [object[]]$bindings = @($pairedOfferBindingEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$rechecks[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '') -eq $payer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'admission_generation' -Default '') -eq $admissionGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'release_authority_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $pairing -Name 'authority_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'release_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $pairing -Name 'yield_generation' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'pairing_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $pairing -Name 'pairing_generation' -Default '')
+                } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($bindings.Count -ne 1) { continue }
+            $binding = $bindings[0]
+            $transaction = Get-FileTransferEventField -Event $binding -Name 'current_transaction_generation' -Default ''
+            $offer = Get-FileTransferEventField -Event $binding -Name 'current_offer_generation' -Default ''
+            $lease = Get-FileTransferEventField -Event $binding -Name 'current_tuna_path_lease_generation' -Default ''
+            if ($transaction -notmatch '^[1-9][0-9]*$' -or $offer -notmatch '^[1-9][0-9]*$' -or
+                $lease -notmatch '^[1-9][0-9]*$' -or
+                ($transaction -eq (Get-FileTransferEventField -Event $binding -Name 'previous_transaction_generation' -Default '') -and
+                 $offer -eq (Get-FileTransferEventField -Event $binding -Name 'previous_offer_generation' -Default '') -and
+                 $lease -eq (Get-FileTransferEventField -Event $binding -Name 'previous_tuna_path_lease_generation' -Default ''))) {
+                continue
+            }
+            [object[]]$convergence = @($responderConvergenceEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$binding.Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $transaction -and
+                    (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq $lease -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Accepted'
+                } | Select-Object -First 1)
+            [object[]]$handoffs = @($responderHandoffEvents | Where-Object {
+                    $convergence.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$convergence[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $transaction -and
+                    (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq $lease -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$prepared = @($preparedEvents | Where-Object {
+                    $handoffs.Count -eq 1 -and [int64]$_.Sequence -gt [int64]$handoffs[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $transaction -and
+                    (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq $lease -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Prepared'
+                } | Select-Object -First 1)
+            if ($convergence.Count -eq 1 -and $handoffs.Count -eq 1 -and $prepared.Count -eq 1) {
+                $record.Recovered = $true
+            }
+            continue
+        }
+
         if ($record.Variant -in @(
                 'paired_yield_retry_intent_blocked_by_preexisting_initial_activation',
                 'paired_yield_retry_intent_not_rechecked_after_runtime_unlock_eligibility_restored')) {

@@ -14,6 +14,96 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_PairedAdmissionNotRecheckedAfterPairing_ClassifiesInFullAndCompact(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_paired_admission";
+        const string transferId = "transfer_paired_admission";
+        const string sender = "writer_sender";
+        const string responder = "writer_responder";
+        const string senderYield = "sender-yield-1";
+        const string responderYield = "responder-yield-1";
+        var ownerKey = $"{sessionId}|{transferId}|post_tuna_fallback_v6|6|2|3|1|1|(none)";
+        var pairKey = $"{sessionId}|{transferId}|post_tuna_fallback_v6|6|2|1|(none)";
+        var senderProof = $"{sessionId}:{transferId}:outbound:{senderYield}:1:sender-frame";
+        var responderProof = $"{sessionId}:{transferId}:inbound:{responderYield}:1:responder-frame";
+        const string scope =
+            "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; " +
+            "route_publication_generation=3; route_commit_generation=0; runtime_generation=3; " +
+            "terminal_generation=0; leg_generation=3; transport_epoch=1; " +
+            "bridge_recovery_generation=1; checkpoint_request_id=(none); checkpoint_generation=1; " +
+            "data_session_identity=data-session-1; data_session_generation=1";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; authority_schema=2; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; raw_pair_key={pairKey}; canonical_pair_key={pairKey}; pair_key_format=canonical_7; {scope}; log_writer_id={responder}", 0),
+            LogLine($"event=filetransfer_runtime_unlock_admission_denied; session_id={sessionId}; transfer_id={transferId}; direction=inbound; source=route_hint; reason=fallback_tail_quiescent; admission_generation=0; admission_reason=paired_fallback_tail_yield_missing; {scope}; log_writer_id={responder}; log_writer_sequence=1", 0),
+            LogLine($"event=filetransfer_fallback_tail_yield_proof_sent; authority_schema=2; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; raw_pair_key={pairKey}; canonical_pair_key={pairKey}; pair_key_format=canonical_7; accepted_any=1; {scope}; log_writer_id={responder}", 1),
+            LogLine($"event=filetransfer_fallback_tail_yield_issued; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={senderYield}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=YieldIssued; decision_status=Accepted; {scope}; log_writer_id={sender}; log_writer_sequence=1", 1),
+            LogLine($"event=filetransfer_fallback_tail_local_proof_receipt_decided; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={senderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; local_proof_identity={senderProof}; local_frame_fingerprint=sender-frame; decision_status=Accepted; {scope}; log_writer_id={sender}; log_writer_sequence=2", 2),
+            LogLine($"event=filetransfer_fallback_tail_yield_issued; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=YieldIssued; decision_status=Accepted; {scope}; log_writer_id={responder}; log_writer_sequence=2", 3),
+            LogLine($"event=filetransfer_fallback_tail_local_proof_receipt_decided; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; local_proof_identity={responderProof}; local_frame_fingerprint=responder-frame; decision_status=Accepted; {scope}; log_writer_id={responder}; log_writer_sequence=3", 4),
+            LogLine($"event=filetransfer_fallback_tail_peer_proof_receipt_decided; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={senderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; peer_authority_id={responderYield}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_live_route_epoch=2; peer_leg_generation=3; peer_bridge_recovery_generation=1; peer_transport_epoch=1; peer_checkpoint_request_id=(none); peer_observation_identity={responderProof}; peer_frame_fingerprint=responder-frame; decision_status=Accepted; {scope}; log_writer_id={sender}; log_writer_sequence=3", 5),
+            LogLine($"event=filetransfer_fallback_tail_peer_proof_receipt_decided; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; peer_authority_id={senderYield}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=outbound; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_live_route_epoch=2; peer_leg_generation=3; peer_bridge_recovery_generation=1; peer_transport_epoch=1; peer_checkpoint_request_id=(none); peer_observation_identity={senderProof}; peer_frame_fingerprint=sender-frame; decision_status=Accepted; {scope}; log_writer_id={responder}; log_writer_sequence=4", 6),
+            LogLine($"event=filetransfer_fallback_tail_yield_proof_received; authority_schema=2; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={senderYield}; predecessor_authority_id=(none); yield_generation=1; peer_direction=outbound; peer_live_route_epoch=2; peer_leg_generation=3; peer_transport_epoch=1; peer_bridge_recovery_generation=1; peer_checkpoint_request_id=(none); owner_key={ownerKey}; pair_key={pairKey}; raw_pair_key={pairKey}; canonical_pair_key={pairKey}; pair_key_format=canonical_7; {scope}; log_writer_id={responder}", 6),
+            LogLine($"event=filetransfer_fallback_tail_pairing_committed; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=Paired; pairing_generation=1; local_proof_identity={responderProof}; local_frame_fingerprint=responder-frame; peer_authority_id={senderYield}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=outbound; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_live_route_epoch=2; peer_leg_generation=3; peer_bridge_recovery_generation=1; peer_transport_epoch=1; peer_checkpoint_request_id=(none); peer_observation_identity={senderProof}; peer_frame_fingerprint=sender-frame; decision_status=Accepted; {scope}; log_writer_id={responder}; log_writer_sequence=5", 7),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; authority_schema=1; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; predecessor_authority_id=(none); yield_generation=1; owner_key={ownerKey}; pair_key={pairKey}; raw_pair_key={pairKey}; canonical_pair_key={pairKey}; pair_key_format=canonical_7; peer_authority_id={senderYield}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=outbound; peer_live_route_epoch=2; peer_leg_generation=3; peer_transport_epoch=1; peer_bridge_recovery_generation=1; peer_checkpoint_request_id=(none); peer_owner_key={ownerKey}; peer_raw_pair_key={pairKey}; peer_canonical_pair_key={pairKey}; peer_pair_key_format=canonical_7; reason=fallback_tail_peer_yield; {scope}; log_writer_id={responder}; log_writer_sequence=6", 8),
+            LogLine($"event=filetransfer_fallback_tail_pairing_committed; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={senderYield}; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key={ownerKey}; pair_key={pairKey}; pairing_state=Paired; pairing_generation=1; local_proof_identity={senderProof}; local_frame_fingerprint=sender-frame; peer_authority_id={responderYield}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key={ownerKey}; peer_pair_key={pairKey}; peer_live_route_epoch=2; peer_leg_generation=3; peer_bridge_recovery_generation=1; peer_transport_epoch=1; peer_checkpoint_request_id=(none); peer_observation_identity={responderProof}; peer_frame_fingerprint=responder-frame; decision_status=Accepted; {scope}; log_writer_id={sender}; log_writer_sequence=4", 9),
+            LogLine($"event=runtime_unlock_retry_dispatch_observed; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id=retry-authority-1; install_generation=1; retry_reason=fallback_paired_tail_yield; release_authority_id={senderYield}; release_generation=1; offer_generation=2; {scope}; log_writer_id={sender}; log_writer_sequence=5", 10),
+            LogLine($"event=tuna_acceleration_offer_queued; session_id={sessionId}; reason=fallback_paired_tail_yield; payer_decision_id=5; generation=2; queue_local_only=0; log_writer_id={sender}; log_writer_sequence=6", 11),
+            LogLine($"event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; decision_status=Rejected; session_id={sessionId}; transfer_id={transferId}; direction=inbound; payer_decision_id=5; inbound_msg_id=offer-message-1; source_fingerprint=offer-fingerprint-1; admission_generation=0; previous_transaction_generation=1; previous_offer_generation=6; previous_tuna_path_lease_generation=1; current_transaction_generation=1; current_offer_generation=6; current_tuna_path_lease_generation=1; authority_effect=none; decision_reason=runtime_unlock_peer_precommit_answer_acceptance_scope_not_current; {scope}; log_writer_id={responder}; log_writer_sequence=7", 12)
+        };
+        if (recovered)
+        {
+            lines.AddRange(
+            [
+                LogLine($"event=filetransfer_runtime_unlock_post_fallback_paired_admission_recheck_decided; decision_status=Granted; session_id={sessionId}; transfer_id={transferId}; direction=inbound; authority_id={responderYield}; yield_generation=1; pairing_generation=1; admission_generation=1; authority_effect=none; {scope}; log_writer_id={responder}; log_writer_sequence=8", 13),
+                LogLine($"event=filetransfer_runtime_unlock_admission_granted; session_id={sessionId}; transfer_id={transferId}; direction=inbound; admission_generation=1; admission_reason=fallback_quiescent; {scope}; log_writer_id={responder}; log_writer_sequence=9", 14),
+                LogLine($"event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; decision_status=Accepted; session_id={sessionId}; transfer_id={transferId}; direction=inbound; payer_decision_id=5; admission_generation=1; release_authority_id={responderYield}; release_generation=1; pairing_generation=1; previous_transaction_generation=1; previous_offer_generation=6; previous_tuna_path_lease_generation=1; current_transaction_generation=2; current_offer_generation=9; current_tuna_path_lease_generation=5; {scope}; log_writer_id={responder}; log_writer_sequence=10", 15),
+                LogLine($"event=runtime_unlock_responder_answer_probe_convergence_decided; decision_status=Accepted; session_id={sessionId}; transfer_id={transferId}; direction=inbound; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; {scope}; log_writer_id={responder}; log_writer_sequence=11", 16),
+                LogLine($"event=filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided; decision_status=Accepted; session_id={sessionId}; transfer_id={transferId}; direction=inbound; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; {scope}; log_writer_id={responder}; log_writer_sequence=12", 17),
+                LogLine($"event=filetransfer_route_transition_prepared; decision_status=Prepared; transition_kind=PostTunaFallbackV6ToTunaV4; session_id={sessionId}; transfer_id={transferId}; direction=inbound; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; {scope}; log_writer_id={responder}; log_writer_sequence=13", 18)
+            ]);
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            [],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_raw_count"]);
+        Assert.Equal("1", verdict["paired_fallback_tail_yield_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["paired_fallback_tail_yield_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["paired_fallback_tail_yield_missing_unresolved_count"]);
+        if (!recovered)
+        {
+            Assert.Equal("paired_fallback_tail_yield_missing", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("runtime_unlock_post_fallback_paired_retry_offer_binding_decided", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal(
+                "fallback_paired_tail_yield_admission_not_rechecked_after_pairing_before_retry_offer_binding",
+                verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("paired_yield_admission_not_rechecked_after_pairing", verdict["failure_variant"]);
+            Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, "runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch")]
     [InlineData(true, "runtime_unlock_peer_precommit_answer_acceptance_probe_mismatch")]
     [InlineData(false, "runtime_unlock_peer_precommit_answer_acceptance_scope_mismatch")]

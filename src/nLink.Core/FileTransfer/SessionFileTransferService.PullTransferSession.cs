@@ -2171,7 +2171,331 @@ public sealed partial class SessionFileTransferService
             reason,
             admission,
             admissionScope);
+        UpdateInboundPostFallbackPairedAdmissionRecheckLocked(
+            context,
+            source,
+            reason,
+            admission);
         return admission;
+    }
+
+    private static void UpdateInboundPostFallbackPairedAdmissionRecheckLocked(
+        InboundTransferContext context,
+        string source,
+        string reason,
+        RuntimeUnlockAdmissionDecision admission)
+    {
+        var pending = context.RuntimeUnlockPostFallbackPairedAdmissionRecheck;
+        if (admission.Granted)
+        {
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+            return;
+        }
+
+        if (context.IsTerminal ||
+            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            context.DataSession is null)
+        {
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+            return;
+        }
+
+        if (admission.Status == RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner &&
+            string.Equals(
+                admission.Reason,
+                "paired_fallback_tail_yield_missing",
+                StringComparison.Ordinal))
+        {
+            if (GetCurrentFallbackTailYieldOperation(context) is not
+                {
+                    Decision.IsDefault: false,
+                    Scope.HasCompleteExecutionScope: true,
+                } operation ||
+                operation.PairingState == FileTransferFallbackTailYieldPairingState.Paired ||
+                !string.Equals(
+                    operation.Scope.DataSessionIdentity,
+                    CreateReceiveRecoveryDataSessionIdentity(
+                        context.TransferId,
+                        context.DataSession,
+                        context.DataSessionGeneration),
+                    StringComparison.Ordinal) ||
+                operation.Scope.DataSessionGeneration != context.DataSessionGeneration)
+            {
+                ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+                return;
+            }
+
+            if (pending is null ||
+                pending.YieldDecision != operation.Decision ||
+                pending.SourceScope != operation.Scope ||
+                !ReferenceEquals(pending.DataSession, context.DataSession) ||
+                !string.Equals(pending.RequestSource, source, StringComparison.Ordinal) ||
+                !string.Equals(pending.RequestReason, reason, StringComparison.Ordinal))
+            {
+                pending = new RuntimeUnlockPostFallbackPairedAdmissionRecheck
+                {
+                    RecheckGeneration = Math.Max(
+                        1,
+                        context.LastRuntimeUnlockPostFallbackPairedAdmissionRecheckGeneration + 1),
+                    RequestSource = source,
+                    RequestReason = reason,
+                    YieldDecision = operation.Decision,
+                    SourceScope = operation.Scope,
+                    DataSession = context.DataSession,
+                    LastEvaluatedSurvivalState = admission.FallbackSurvivalState,
+                    LastDecisionReason = admission.Reason,
+                };
+                context.LastRuntimeUnlockPostFallbackPairedAdmissionRecheckGeneration =
+                    pending.RecheckGeneration;
+                context.RuntimeUnlockPostFallbackPairedAdmissionRecheck = pending;
+            }
+            else
+            {
+                pending.LastEvaluatedSurvivalState = admission.FallbackSurvivalState;
+                pending.LastDecisionReason = admission.Reason;
+            }
+
+            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                context,
+                reason,
+                FormatRuntimeUnlockFallbackAdmissionRejection(
+                    FileTransferDirection.Inbound,
+                    admission));
+            return;
+        }
+
+        if (pending is not null &&
+            admission.Status == RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner)
+        {
+            pending.LastEvaluatedSurvivalState = admission.FallbackSurvivalState;
+            pending.LastDecisionReason = admission.Reason;
+            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                context,
+                pending.RequestReason,
+                FormatRuntimeUnlockFallbackAdmissionRejection(
+                    FileTransferDirection.Inbound,
+                    admission));
+            return;
+        }
+
+        ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+    }
+
+    private static void ClearInboundPostFallbackPairedAdmissionRecheckLocked(
+        InboundTransferContext context,
+        RuntimeUnlockPostFallbackPairedAdmissionRecheck? pending)
+    {
+        if (pending is null ||
+            !ReferenceEquals(
+                context.RuntimeUnlockPostFallbackPairedAdmissionRecheck,
+                pending))
+        {
+            return;
+        }
+
+        context.RuntimeUnlockPostFallbackPairedAdmissionRecheck = null;
+        if (context.RuntimeUnlockWaitingForFallbackSurvival &&
+            string.Equals(
+                context.RuntimeUnlockWaitingForFallbackSurvivalReason,
+                pending.RequestReason,
+                StringComparison.Ordinal))
+        {
+            context.RuntimeUnlockWaitingForFallbackSurvival = false;
+            context.RuntimeUnlockWaitingForFallbackSurvivalReason = null;
+            context.RuntimeUnlockWaitingForFallbackSurvivalUtc = null;
+        }
+    }
+
+    private static void TryRecheckInboundPostFallbackPairedAdmissionLocked(
+        InboundTransferContext context,
+        string trigger)
+    {
+        var pending = context.RuntimeUnlockPostFallbackPairedAdmissionRecheck;
+        if (pending is null)
+        {
+            return;
+        }
+
+        if (!TryGetCurrentInboundPostFallbackPairedAdmissionScopeLocked(
+                context,
+                pending,
+                out _,
+                out var pairedRelease,
+                out var staleReason))
+        {
+            LogInboundPostFallbackPairedAdmissionRecheckDecision(
+                context,
+                pending,
+                pending.PairedRelease,
+                "Stale",
+                trigger,
+                staleReason,
+                admissionGeneration: 0);
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+            return;
+        }
+
+        if (pending.PairedRelease is { } priorRelease && priorRelease != pairedRelease)
+        {
+            LogInboundPostFallbackPairedAdmissionRecheckDecision(
+                context,
+                pending,
+                priorRelease,
+                "Stale",
+                trigger,
+                "paired_release_replaced",
+                admissionGeneration: 0);
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+            return;
+        }
+
+        pending.PairedRelease = pairedRelease;
+        if (HasCurrentRuntimeUnlockAdmissionLocked(context))
+        {
+            var admissionGeneration = context.RuntimeUnlockAdmissionToken?.AdmissionGeneration ?? 0;
+            LogInboundPostFallbackPairedAdmissionRecheckDecision(
+                context,
+                pending,
+                pairedRelease,
+                "Idempotent",
+                trigger,
+                "paired_admission_already_current",
+                admissionGeneration);
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+            return;
+        }
+
+        var currentSurvival = BuildRuntimeUnlockFallbackSurvivalStateLocked(context) with
+        {
+            PairedFallbackYieldGranted = true,
+        };
+        if (pending.LastEvaluatedSurvivalState == currentSurvival &&
+            !string.Equals(
+                pending.LastDecisionReason,
+                "paired_fallback_tail_yield_missing",
+                StringComparison.Ordinal))
+        {
+            LogInboundPostFallbackPairedAdmissionRecheckDecision(
+                context,
+                pending,
+                pairedRelease,
+                "Held",
+                trigger,
+                pending.LastDecisionReason,
+                admissionGeneration: 0);
+            return;
+        }
+
+        var admission = RequestRuntimeUnlockAdmissionLocked(
+            context,
+            "paired_fallback_tail_yield_admission_recheck",
+            pending.RequestReason);
+        var status = admission.Granted
+            ? "Granted"
+            : admission.Status == RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner
+                ? "Held"
+                : "Stale";
+        LogInboundPostFallbackPairedAdmissionRecheckDecision(
+            context,
+            pending,
+            pairedRelease,
+            status,
+            trigger,
+            admission.Reason,
+            admission.AdmissionToken?.AdmissionGeneration ?? 0);
+
+        if (admission.Granted)
+        {
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+        }
+        else if (admission.Status != RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner)
+        {
+            ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
+        }
+    }
+
+    private static bool TryGetCurrentInboundPostFallbackPairedAdmissionScopeLocked(
+        InboundTransferContext context,
+        RuntimeUnlockPostFallbackPairedAdmissionRecheck pending,
+        out FileTransferFallbackTailYieldOperation operation,
+        out FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
+        out string reason)
+    {
+        operation = default;
+        pairedRelease = default;
+        reason = "paired_admission_source_not_current";
+        if (context.IsTerminal ||
+            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            context.CurrentTransferLeg is not { } leg ||
+            context.CurrentRuntimeOwner is not { } owner ||
+            context.CurrentRoutePublicationToken is not { } publication ||
+            context.DataSession is null ||
+            !ReferenceEquals(context.DataSession, pending.DataSession))
+        {
+            return false;
+        }
+
+        if (GetCurrentFallbackTailYieldOperation(context) is not
+            {
+                PairingState: FileTransferFallbackTailYieldPairingState.Paired,
+                PairedRelease: { IsDefault: false } currentPairedRelease,
+            } currentOperation ||
+            currentOperation.Decision != pending.YieldDecision ||
+            currentOperation.Scope != pending.SourceScope)
+        {
+            reason = "paired_admission_pairing_not_current";
+            return false;
+        }
+
+        var scope = pending.SourceScope;
+        if (scope.RuntimeOwner != owner ||
+            scope.RoutePublication != publication ||
+            scope.TerminalGeneration != context.TerminalGeneration ||
+            scope.LegGeneration != leg.Generation ||
+            scope.TransportEpoch != leg.TransportEpochId ||
+            scope.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration ||
+            scope.CheckpointGeneration != leg.CheckpointGeneration ||
+            !string.Equals(
+                scope.CheckpointRequestIdSnapshot,
+                leg.CheckpointRequestId ?? "(none)",
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                scope.DataSessionIdentity,
+                CreateReceiveRecoveryDataSessionIdentity(
+                    context.TransferId,
+                    context.DataSession,
+                    context.DataSessionGeneration),
+                StringComparison.Ordinal) ||
+            scope.DataSessionGeneration != context.DataSessionGeneration)
+        {
+            reason = "paired_admission_scope_mutated";
+            return false;
+        }
+
+        operation = currentOperation;
+        pairedRelease = currentPairedRelease;
+        reason = "paired_admission_scope_current";
+        return true;
+    }
+
+    private static void LogInboundPostFallbackPairedAdmissionRecheckDecision(
+        InboundTransferContext context,
+        RuntimeUnlockPostFallbackPairedAdmissionRecheck pending,
+        FileTransferFallbackTailPairedReleaseReceipt? pairedRelease,
+        string status,
+        string trigger,
+        string reason,
+        int admissionGeneration)
+    {
+        var scope = pending.SourceScope;
+        var release = pairedRelease.GetValueOrDefault();
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_unlock_post_fallback_paired_admission_recheck_decided; decision_status={FormatProtocolLogValue(status)}; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; pending_recheck_generation={pending.RecheckGeneration}; request_source={FormatProtocolLogValue(pending.RequestSource)}; request_reason={FormatProtocolLogValue(pending.RequestReason)}; admission_generation={admissionGeneration}; authority_id={FormatProtocolLogValue(pending.YieldDecision.AuthorityId.ToString())}; yield_generation={pending.YieldDecision.YieldGeneration}; owner_key={FormatProtocolLogValue(scope.OwnerKey)}; pair_key={FormatProtocolLogValue(scope.PairKey)}; release_authority_id={FormatProtocolLogValue(release.IsDefault ? "(none)" : release.ReleaseAuthorityId.ToString())}; release_generation={(release.IsDefault ? 0 : release.ReleaseGeneration)}; pairing_generation={(release.IsDefault ? 0 : release.PairingGeneration)}; local_proof_identity={FormatProtocolLogValue(release.IsDefault ? "(none)" : release.LocalProof.ProofIdentity)}; peer_observation_identity={FormatProtocolLogValue(release.IsDefault ? "(none)" : release.PeerProof.ObservationIdentity)}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; route_publication_generation={scope.RoutePublication?.PublicationGeneration ?? 0}; route_commit_generation={scope.RoutePublication?.RouteCommitGeneration ?? 0}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot)}; checkpoint_generation={scope.CheckpointGeneration}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity ?? "(none)")}; data_session_generation={scope.DataSessionGeneration}; trigger={FormatProtocolLogValue(trigger)}; authority_effect=none; decision_reason={FormatProtocolLogValue(reason)}");
     }
 
     private static FileTransferCoordinatorEvent RuntimeUnlockCoordinatorEvent(
@@ -3370,6 +3694,8 @@ public sealed partial class SessionFileTransferService
                 "pressure_rejected_precommit_probe_rollback");
         }
 
+        TryRecheckInboundPostFallbackPairedAdmissionLocked(context, reason);
+
         if (GetCurrentFallbackTailYieldOperation(context)?.PairedRelease is
             not { } pairedRelease)
         {
@@ -3504,6 +3830,7 @@ public sealed partial class SessionFileTransferService
         context.RuntimeUnlockActivationWindowGrantedUtc = null;
         context.RuntimeUnlockAdmissionToken = null;
         context.RuntimeUnlockPendingPreCommitProbe = null;
+        context.RuntimeUnlockPostFallbackPairedAdmissionRecheck = null;
     }
 
     private static void LogRuntimeUnlockWaitingForFallbackSurvival(

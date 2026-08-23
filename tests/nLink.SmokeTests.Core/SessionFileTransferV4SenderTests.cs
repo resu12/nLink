@@ -21016,6 +21016,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(currentOwnerKey, pairedOperation.PeerProof?.Proof.OwnerKey);
         Assert.NotNull(pairedOperation.LocalProof);
         Assert.NotNull(pairedOperation.PairedRelease);
+        Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.Null(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPostFallbackPairedAdmissionRecheck"));
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains(
             "event=filetransfer_fallback_tail_peer_proof_receipt_decided;",
@@ -21132,11 +21137,25 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
         SetPrivateProperty(context, "V6PostTunaFallbackProofReplayReceiverStatePending", false);
         SetPrivateProperty(context, "V6PostTunaFallbackProofReplayFrontierRequestPending", false);
-        SetPrivateProperty(context, "PostTunaFallbackControlPlanePressureTuple", "pressure|current");
-        SetPrivateProperty(context, "RuntimeUnlockWaitingForFallbackSurvival", true);
-
         var (_, yieldDecision) =
             SeedLocalFallbackTailYieldForTest(context, leg);
+        var admissionMethod = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "RequestRuntimeUnlockAdmissionLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        var denied = Assert.IsType<RuntimeUnlockAdmissionDecision>(
+            admissionMethod.Invoke(
+                null,
+                [context, "route_hint", "fallback_tail_quiescent", false]));
+        Assert.False(denied.Granted);
+        Assert.Equal("paired_fallback_tail_yield_missing", denied.Reason);
+        Assert.NotNull(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPostFallbackPairedAdmissionRecheck"));
+        SetPrivateProperty(context, "PostTunaFallbackControlPlanePressureTuple", "pressure|current");
+        SetPrivateProperty(context, "RuntimeUnlockWaitingForFallbackSurvival", true);
         var peerYield = new FileTransferFallbackTailYieldFrameV6
         {
             AuthoritySchema = FileTransferAuthoritySchema.Current,
@@ -21167,10 +21186,124 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         Assert.True(HasPairedFallbackTailYieldInAggregate(context));
         Assert.Null(GetPrivatePropertyValue(context, "PostTunaFallbackControlPlanePressureTuple"));
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.True(admission.AdmissionGeneration > 0);
+        Assert.Null(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPostFallbackPairedAdmissionRecheck"));
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_fallback_tail_paired_yield_granted; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_post_fallback_paired_admission_recheck_decided; decision_status=Granted;",
+            log,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("admission_reason=fallback_control_plane_pressure_pending", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void PostFallbackPairedRetryOffer_AdmissionDeniedBeforePair_PairingRechecksExactInboundAdmission()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_fallback_paired_admission_recheck";
+        var context = CreatePostTunaFallbackV6InboundContext(transferId);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        leg.State = FileTransferLegState.Active;
+        leg.CanSendData = true;
+        leg.CheckpointRequestId = null;
+        leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        SetPrivateProperty(context, "V6PostTunaFallbackProofReplayReceiverStatePending", false);
+        SetPrivateProperty(context, "V6PostTunaFallbackProofReplayFrontierRequestPending", false);
+        SetPrivateProperty(context, "PostTunaFallbackControlPlanePressureTuple", null);
+
+        var (_, yieldDecision) = SeedLocalFallbackTailYieldForTest(context, leg);
+        var admissionMethod = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "RequestRuntimeUnlockAdmissionLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        var denied = Assert.IsType<RuntimeUnlockAdmissionDecision>(
+            admissionMethod.Invoke(
+                null,
+                [context, "route_hint", "fallback_tail_quiescent", false]));
+        Assert.False(denied.Granted);
+        Assert.Equal(
+            RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+            denied.Status);
+        Assert.Equal("paired_fallback_tail_yield_missing", denied.Reason);
+        Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+        Assert.NotNull(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPostFallbackPairedAdmissionRecheck"));
+
+        var peerYield = new FileTransferFallbackTailYieldFrameV6
+        {
+            AuthoritySchema = FileTransferAuthoritySchema.Current,
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = leg.TransportEpochId,
+            OwnerKey = yieldDecision.OwnerKey,
+            PairKey = yieldDecision.PairKey,
+            Direction = "outbound",
+            YieldGeneration = 1,
+            AuthorityId = CreatePeerFallbackTailYieldAuthorityId(transferId),
+            LiveRouteEpoch = leg.LiveRouteEpochId,
+            FallbackLegGeneration = leg.Generation,
+            BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+            CommittedChunkIndex = leg.ProvenCommittedChunkIndex,
+            HighestObservedChunkIndex = leg.ProvenHighestObservedChunkIndex,
+            RecoveryMode = "fallback_tail_yield",
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ApplyInboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, peerYield]);
+
+        Assert.True(HasPairedFallbackTailYieldInAggregate(context));
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.True(admission.AdmissionGeneration > 0);
+        Assert.Equal("fallback_quiescent", admission.Reason);
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+        Assert.Null(
+            GetPrivatePropertyValue(
+                context,
+                "RuntimeUnlockPostFallbackPairedAdmissionRecheck"));
+        var admissionGeneration = admission.AdmissionGeneration;
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_post_fallback_paired_admission_recheck_decided; decision_status=Granted;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_admission_granted; direction=inbound;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_runtime_unlock_activation_window_granted; direction=inbound;",
+            log,
+            StringComparison.Ordinal);
+
+        serviceType
+            .GetMethod("ApplyInboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, peerYield]);
+        var duplicateAdmission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.Equal(admissionGeneration, duplicateAdmission.AdmissionGeneration);
     }
 
     [Fact]
