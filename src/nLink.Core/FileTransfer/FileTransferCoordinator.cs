@@ -844,6 +844,8 @@ internal sealed record FileTransferFallbackTailYieldSubstate(
         PendingReauthorizationPeerProof = null,
     FileTransferFallbackTailPeerProofReceipt?
         PendingPeerProofBeforeLocalYield = null,
+    FileTransferFallbackTailPeerProofReceipt?
+        PendingRetryCycleSuccessorPeerProof = null,
     RuntimeUnlockRetryDispatchAuthorityRequest?
         PendingRetryRecheckRequest = null,
     FileTransferFallbackTailYieldRetryDispatchHold?
@@ -10430,6 +10432,12 @@ internal static class FileTransferCoordinator
                     pendingInitial.ObservationScope.RoutePublication == token
                         ? pendingInitial
                         : null,
+                PendingRetryCycleSuccessorPeerProof =
+                    fallbackTail.PendingRetryCycleSuccessorPeerProof is
+                        { } pendingRetryCycle &&
+                    pendingRetryCycle.ObservationScope.RoutePublication == token
+                        ? pendingRetryCycle
+                        : null,
                 RetainedPredecessor =
                     pendingReauthorization is { } boundPending
                     ? boundPending.PredecessorDecision
@@ -10936,6 +10944,38 @@ internal static class FileTransferCoordinator
                 scopeRejectionReason);
         }
 
+        if (operation.PairedRelease is not null &&
+            receipt.ObservationScope == operation.Scope &&
+            IsFallbackTailRetryCycleSuccessorPeerProofExact(
+                operation,
+                receipt.Proof,
+                out _))
+        {
+            if (substate.PendingRetryCycleSuccessorPeerProof is { } pending)
+            {
+                return IsSameFallbackTailPeerProofReceiptIdentity(
+                        pending,
+                        receipt)
+                    ? FallbackTailYieldTransition(
+                        state,
+                        FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+                        "fallback_tail_retry_cycle_successor_peer_proof_idempotent")
+                    : FallbackTailYieldTransitionRejected(
+                        state,
+                        "fallback_tail_retry_cycle_successor_peer_proof_conflict");
+            }
+
+            return FallbackTailYieldTransition(
+                ApplyFallbackTailYieldSubstate(
+                    state,
+                    substate with
+                    {
+                        PendingRetryCycleSuccessorPeerProof = receipt,
+                    }),
+                FileTransferFallbackTailYieldTransitionStatus.Accepted,
+                "fallback_tail_retry_cycle_successor_peer_proof_retained");
+        }
+
         if (!IsFallbackTailPeerProofExactForOperation(
                 substate,
                 operation,
@@ -11041,6 +11081,36 @@ internal static class FileTransferCoordinator
                left.ObservationIdentity,
                right.ObservationIdentity,
                StringComparison.Ordinal);
+
+    private static bool IsFallbackTailRetryCycleSuccessorPeerProofExact(
+        FileTransferFallbackTailYieldOperation current,
+        FileTransferFallbackTailPeerProof proof,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (current.PairedRelease is null ||
+            current.PeerProof is not { } predecessorPeerReceipt ||
+            proof.IsDefault ||
+            proof.PredecessorAuthorityId !=
+                predecessorPeerReceipt.Proof.AuthorityId ||
+            proof.YieldGeneration <=
+                predecessorPeerReceipt.Proof.YieldGeneration ||
+            !IsFallbackTailPeerProofExactForSharedPairScope(
+                current.Scope,
+                proof,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason =
+                    "fallback_tail_retry_cycle_successor_peer_proof_lineage_mismatch";
+            }
+
+            return false;
+        }
+
+        return true;
+    }
 
     private static bool IsInitialFallbackTailPeerProofExactForScope(
         FileTransferFallbackTailYieldScope scope,
@@ -11657,10 +11727,14 @@ internal static class FileTransferCoordinator
                    InvalidationReason: { } invalidationReason,
                } &&
                terminalDecision == predecessor &&
-               string.Equals(
-                   invalidationReason,
-                   "pressure_rejected_precommit_probe_rollback",
-                   StringComparison.Ordinal);
+               (string.Equals(
+                    invalidationReason,
+                    "pressure_rejected_precommit_probe_rollback",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    invalidationReason,
+                    "sidecar_failed_precommit_probe_rollback",
+                    StringComparison.Ordinal));
     }
 
     private static bool IsFallbackTailPairedReleaseConsumedByInstall(
@@ -12505,6 +12579,7 @@ internal static class FileTransferCoordinator
                 PendingReauthorization = null,
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
+                PendingRetryCycleSuccessorPeerProof = null,
                 PendingRetryRecheckRequest = null,
                 CurrentRetryDispatchHold = null,
                 PendingRetryDispatchRecheckCommand = null,
@@ -12579,9 +12654,19 @@ internal static class FileTransferCoordinator
                  StringComparison.Ordinal) ||
              pendingInitial.ObservationScope.DataSessionGeneration !=
                  state.CurrentDataSessionGeneration);
+        var pendingRetryCycleDataSessionChanged =
+            fallbackTail.PendingRetryCycleSuccessorPeerProof is
+                { } pendingRetryCycle &&
+            (!string.Equals(
+                 pendingRetryCycle.ObservationScope.DataSessionIdentity,
+                 state.CurrentDataSessionIdentity,
+                 StringComparison.Ordinal) ||
+             pendingRetryCycle.ObservationScope.DataSessionGeneration !=
+                 state.CurrentDataSessionGeneration);
         return operationDataSessionChanged ||
                pendingDataSessionChanged ||
-               pendingInitialDataSessionChanged
+               pendingInitialDataSessionChanged ||
+               pendingRetryCycleDataSessionChanged
             ? InvalidateFallbackTailYieldSubstate(
                 state,
                 "data_session_replaced")
@@ -12749,6 +12834,15 @@ internal static class FileTransferCoordinator
             sourceReauthorization is null
                 ? substate.PendingPeerProofBeforeLocalYield
                 : null;
+        var pendingRetryCyclePeerProof =
+            sourceReauthorization is null &&
+            decision.PredecessorAuthorityId is { IsDefault: false } &&
+            (substate.RetainedPredecessor?.AuthorityId ==
+                 decision.PredecessorAuthorityId ||
+             substate.CurrentOperation?.Decision.AuthorityId ==
+                 decision.PredecessorAuthorityId)
+                ? substate.PendingRetryCycleSuccessorPeerProof
+                : null;
         var candidateOperation =
             new FileTransferFallbackTailYieldOperation(
                 decision,
@@ -12769,6 +12863,17 @@ internal static class FileTransferCoordinator
         {
             pendingPeerProof = initialPeer;
         }
+        if (pendingPeerProof is null &&
+            pendingRetryCyclePeerProof is { } retryCyclePeer &&
+            retryCyclePeer.ObservationScope == candidateOperation.Scope &&
+            IsFallbackTailPeerProofExactForOperation(
+                substate,
+                candidateOperation,
+                retryCyclePeer.Proof,
+                out _))
+        {
+            pendingPeerProof = retryCyclePeer;
+        }
         return ApplyFallbackTailYieldSubstate(
             state,
             substate with
@@ -12787,6 +12892,7 @@ internal static class FileTransferCoordinator
                 PendingReauthorization = null,
                 PendingReauthorizationPeerProof = null,
                 PendingPeerProofBeforeLocalYield = null,
+                PendingRetryCycleSuccessorPeerProof = null,
                 CurrentReservation = null,
                 LastTerminalOperation = lastTerminal,
                 LastYieldGeneration = Math.Max(

@@ -14148,6 +14148,53 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.NotEqual("runtime_unlock_tuna_probe_recovery_authority_lost", verdict["first_proof_chain_failure_class"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostFallbackDispatchObservedProbeSidecarFailureWithoutPairRetirement_IsUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string writer = "writer-probe-sidecar";
+        const string sessionId = "sess_postfallback_probe_sidecar";
+        const string transferId = "transfer_postfallback_probe_sidecar";
+        const string retryAuthority = "fta2-runtime_unlock_retry_dispatch-sidecar";
+        const string releaseAuthority = "fta2-fallback_tail_yield-sidecar";
+        const string transitionAuthority = "fta2-filetransfer_route_transition-sidecar";
+        const string probeId = "runtime-unlock-precommit:1:2:sidecar";
+        var lines = new[]
+        {
+            LogLine($"event=runtime_unlock_retry_dispatch_contract_settled; log_writer_id={writer}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={retryAuthority}; install_generation=1; route=post_tuna_fallback_v6; protocol_version=6; release_kind=FallbackPairedTailYield; release_authority_id={releaseAuthority}; release_generation=1; offer_generation=2; settlement_outcome=DispatchObserved; dispatch_observed=1", 0),
+            LogLine($"event=filetransfer_route_transition_prepared; log_writer_id={writer}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={transitionAuthority}; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; retry_install_generation=1; decision_status=Prepared", 1),
+            LogLine($"event=filetransfer_route_transition_draining; log_writer_id={writer}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; authority_id={transitionAuthority}; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; decision_status=Draining", 2),
+            LogLine($"event=runtime_unlock_precommit_probe_sent; log_writer_id={writer}; session_id={sessionId}; transfer_id={transferId}; direction=outbound; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; launch_generation=4; probe_id={probeId}", 3),
+            LogLine($"event=runtime_unlock_transaction_path_probe_failed; log_writer_id={writer}; session_id={sessionId}; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; path_probe_id={probeId}; path_probe_failure_reason=runtime_unlock_tuna_probe_sidecar_closed; failure_reason=runtime_unlock_tuna_probe_sidecar_closed; reason=runtime_unlock_tuna_probe_sidecar_closed", 4),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1",
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_probe_recovery_authority_lost_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_probe_recovery_authority_verdict"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryPhase2ReportAndLegacyReleaseWithoutDecision_RemainsMissingSettlement()

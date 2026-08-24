@@ -3870,6 +3870,66 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-retry-cycle-successor-index-ok", result.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GuiSmokeFailureClassification_PostFallbackProbeSidecarFailureUsesIndexedProofBeforeDeadline()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-probe-sidecar-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'log_writer_id=sender; session_id=sess; transfer_id=transfer; direction=outbound'
+                @(
+                    "event=runtime_unlock_retry_dispatch_contract_settled; $scope; authority_id=retry-a; install_generation=1; route=post_tuna_fallback_v6; protocol_version=6; release_kind=FallbackPairedTailYield; release_authority_id=yield-a; release_generation=1; offer_generation=2; settlement_outcome=DispatchObserved; dispatch_observed=1",
+                    "event=filetransfer_route_transition_prepared; $scope; authority_id=transition-a; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; retry_install_generation=1; decision_status=Prepared",
+                    "event=filetransfer_route_transition_draining; $scope; authority_id=transition-a; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; decision_status=Draining",
+                    "event=runtime_unlock_precommit_probe_sent; $scope; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; probe_id=probe-a",
+                    'event=runtime_unlock_transaction_path_probe_failed; log_writer_id=sender; session_id=sess; transaction_generation=1; offer_generation=2; tuna_path_lease_generation=2; path_probe_id=probe-a; path_probe_failure_reason=runtime_unlock_tuna_probe_sidecar_closed; failure_reason=runtime_unlock_tuna_probe_sidecar_closed; reason=runtime_unlock_tuna_probe_sidecar_closed',
+                    "event=file_transfer_outbound_terminal; $scope; state=Failed; error_code=route_cycle_missing"
+                ) | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($result.Phase -ne 'runtime_unlock_retry' -or
+                    $result.Reason -ne 'settled_post_fallback_retry_probe_sidecar_failure_not_propagated_to_coordinator_pair_supersession' -or
+                    $result.ClassificationSource -ne 'immutable_evidence_post_fallback_probe_sidecar_pair_recovery_index') {
+                    throw "probe-sidecar pair recovery fast path mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-probe-sidecar-pair-recovery-index-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Probe-sidecar pair recovery GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-probe-sidecar-pair-recovery-index-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

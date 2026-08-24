@@ -22206,7 +22206,18 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_fallback_frontier_repair_authority_granted;", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatched;", log, StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_v6_frontier_request_receive_dispatch_rejected;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "decision_reason=legacy_sender_repair_not_scheduled",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_v6_frontier_request_receive_dispatched;",
+            log,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_late_recovery_ignored_after_yield;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_replay_accepted_tail_preserved;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_handoff_epoch_reopened;", log, StringComparison.Ordinal);

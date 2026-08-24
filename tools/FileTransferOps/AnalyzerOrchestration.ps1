@@ -2887,7 +2887,56 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $postFallbackGenericPauseProof =
         Get-FileTransferPostTunaFallbackGenericActivationPauseCorrelation `
             -Events $postFallbackGenericPauseEvents
+    [string[]]$postFallbackProbeSidecarEventNames = @(
+        'runtime_unlock_retry_dispatch_contract_settled',
+        'filetransfer_route_transition_prepared',
+        'filetransfer_route_transition_draining',
+        'runtime_unlock_precommit_probe_sent',
+        'runtime_unlock_transaction_path_probe_failed',
+        'runtime_unlock_precommit_probe_acked',
+        'runtime_unlock_tuna_probe_ack_received',
+        'runtime_unlock_transaction_path_probe_acked',
+        'filetransfer_runtime_unlock_post_fallback_precommit_probe_sidecar_failure_decided',
+        'filetransfer_route_transition_invalidated',
+        'filetransfer_route_transition_disposition_applied',
+        'filetransfer_fallback_tail_retry_cycle_supersession_decided',
+        'filetransfer_fallback_tail_yield_issued',
+        'filetransfer_fallback_tail_pairing_committed',
+        'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided')
+    [object[]]$postFallbackProbeSidecarEvents = @(
+        Get-FileTransferCompactIndexEventsByNamesOrdered `
+            -Index $Index `
+            -Names $postFallbackProbeSidecarEventNames
+    )
+    $postFallbackProbeSidecarRecoveryClassification =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'runtime_unlock_post_fallback_probe_sidecar_pair_recovery' `
+            -InputCount $postFallbackProbeSidecarEvents.Count `
+            -Action {
+                $probeSummary = New-FileTransferRetainedSummary `
+                    -Events $postFallbackProbeSidecarEvents `
+                    -LogFiles @() `
+                    -AllTransfers
+                Get-FileTransferRecoveryFailureClassification `
+                    -Summary $probeSummary `
+                    -LiveRouteProofMode $LiveRouteProofMode
+            }
     $compactProofChainCandidates = New-Object System.Collections.Generic.List[object]
+    foreach ($candidateEvent in @(
+            $postFallbackProbeSidecarRecoveryClassification.
+                RuntimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents)) {
+        if ($candidateEvent.EventName -ne
+            'runtime_unlock_transaction_path_probe_failed') {
+            continue
+        }
+
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_tuna_probe_recovery_authority_lost'
+            Event = $candidateEvent
+            Reason = 'settled_post_fallback_retry_probe_sidecar_failure_not_propagated_to_coordinator_pair_supersession'
+            Variant = 'dispatch_observed_probe_close_left_consumed_pair_and_draining_transition_current'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($postFallbackGenericPauseProof.UnresolvedEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_fallback_separation_violation'
@@ -3805,6 +3854,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
                 'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
                 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
+                'runtime_unlock_tuna_probe_recovery_authority_lost',
                 'runtime_unlock_initial_activation_answer_peer_delivery_missing',
                 'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
@@ -3882,7 +3932,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_fallback_frontier_repair_successor_dispatch_missing',
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
             'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay',
-            'filetransfer_gui_live_reactivation_action_window_missed') -and
+            'filetransfer_gui_live_reactivation_action_window_missed',
+            'runtime_unlock_tuna_probe_recovery_authority_lost') -and
         $null -ne $firstCompactProofChainFailure.PSObject.Properties['Variant'] -and
         -not [string]::IsNullOrWhiteSpace([string]$firstCompactProofChainFailure.Variant)) {
         [string]$firstCompactProofChainFailure.Variant
@@ -3934,6 +3985,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_regular_v4_recovery_lease_closure_offer_timeout_handoff_missing',
             'runtime_unlock_initial_offer_retry_lifecycle_handoff_missing',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
+            'runtime_unlock_tuna_probe_recovery_authority_lost',
             'runtime_unlock_initial_activation_answer_peer_delivery_missing',
             'runtime_unlock_initial_offer_receive_recovery_hold_not_preserved',
             'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing',
@@ -4010,6 +4062,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("runtime_unlock_probe_recovery_authority_lost_raw_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRawCount),
+        ("runtime_unlock_probe_recovery_authority_lost_distinct_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount),
+        ("runtime_unlock_probe_recovery_authority_lost_recovered_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRecoveredCount),
+        ("runtime_unlock_probe_recovery_authority_lost_unresolved_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostUnresolvedCount),
+        ("runtime_unlock_probe_recovery_authority_verdict={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityVerdict),
         ("filetransfer_gui_live_fallback_fault_window_missed_raw_count={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.RawCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_distinct_count={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.DistinctCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count=0"),
@@ -5861,6 +5918,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
         first_proof_chain_failure_writer_sequence = $firstProofChainFailureWriterSequence
         semantic_failure_domain = $semanticFailureDomain
+        runtime_unlock_probe_recovery_authority_lost_raw_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRawCount
+        runtime_unlock_probe_recovery_authority_lost_distinct_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount
+        runtime_unlock_probe_recovery_authority_lost_recovered_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRecoveredCount
+        runtime_unlock_probe_recovery_authority_lost_unresolved_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostUnresolvedCount
+        runtime_unlock_probe_recovery_authority_verdict = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityVerdict
         filetransfer_gui_live_fallback_fault_window_missed_raw_count = $fileTransferGuiLiveFallbackFaultWindowProof.RawCount
         filetransfer_gui_live_fallback_fault_window_missed_distinct_count = $fileTransferGuiLiveFallbackFaultWindowProof.DistinctCount
         filetransfer_gui_live_fallback_fault_window_missed_recovered_count = 0

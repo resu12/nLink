@@ -482,6 +482,10 @@ public sealed partial class SessionFileTransferService :
         runtimeUnlockInitialActivationEnvelopeRefreshStage;
     private RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt?
         runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt;
+    private RuntimeUnlockPostFallbackPreCommitProbeFailureObservation?
+        lastOutboundRuntimeUnlockPostFallbackProbeFailureObservation;
+    private RuntimeUnlockPostFallbackPreCommitProbeFailureObservation?
+        lastInboundRuntimeUnlockPostFallbackProbeFailureObservation;
     private readonly object inboundLifecycleDispatchGate = new();
     private readonly object inboundControlDispatchGate = new();
     private readonly object inboundChunkDispatchGate = new();
@@ -793,6 +797,9 @@ public sealed partial class SessionFileTransferService :
             retryDispatchBridge
                     .RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested +=
                 OnRuntimeUnlockPostFallbackPairedRetryOfferBindingRequested;
+            retryDispatchBridge
+                    .RuntimeUnlockPostFallbackPreCommitProbeFailureObserved +=
+                OnRuntimeUnlockPostFallbackPreCommitProbeFailureObserved;
             retryDispatchBridge.RuntimeUnlockRetryDispatchInitialEvaluationRequested +=
                 OnRuntimeUnlockRetryDispatchInitialEvaluationRequested;
             retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested +=

@@ -9065,6 +9065,11 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_fallback_tail_peer_proof_receipt_decided',
         'filetransfer_fallback_tail_pairing_committed',
         'filetransfer_fallback_tail_paired_yield_granted',
+        'runtime_unlock_retry_dispatch_contract_settled',
+        'runtime_unlock_precommit_probe_sent',
+        'runtime_unlock_transaction_path_probe_failed',
+        'runtime_unlock_post_fallback_precommit_probe_sidecar_failure_observed',
+        'filetransfer_runtime_unlock_post_fallback_precommit_probe_sidecar_failure_decided',
         'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
         'runtime_unlock_precommit_responder_peer_probe_handoff_bound',
         'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided',
@@ -63572,7 +63577,11 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchAuthorityRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_rejected'
     })
-    $runtimeUnlockTransactionPathProbeSidecarClosedEvents = @($events | Where-Object {
+    # Transport probe failures are session-scoped and intentionally omit the
+    # transfer id. Correlate them from the retained all-event set, then bind
+    # the transfer through the exact InstalledRetry/transition tuple below.
+    $runtimeUnlockTransactionPathProbeSidecarClosedEvents = @(
+        @($Summary.AllEvents) | Where-Object {
         $_.EventName -eq 'runtime_unlock_transaction_path_probe_failed' -and
         (
             (Get-FileTransferEventField -Event $_ -Name 'path_probe_failure_reason' -Default '') -eq 'runtime_unlock_tuna_probe_sidecar_closed' -or
@@ -64884,24 +64893,311 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockProbeRecoveryAuthorityLostRawEvents.Add($rejection) | Out-Null
     }
 
+    # A completed paired retry remains exact evidence for a probe that has
+    # already started. A sidecar failure in Prepared/Draining must be followed
+    # by coordinator retirement of the consumed pair, never by listener rearm.
+    $postFallbackProbeSidecarCandidateBySequence = @{}
+    foreach ($failure in @($runtimeUnlockTransactionPathProbeSidecarClosedEvents | Sort-Object Sequence)) {
+        $failureSequence = [int64]$failure.Sequence
+        $writer = Get-FileTransferEventField -Event $failure -Name 'log_writer_id' -Default ''
+        $sessionId = Get-FileTransferEventField -Event $failure -Name 'session_id' -Default ''
+        $transactionGeneration = Get-FileTransferEventField -Event $failure -Name 'transaction_generation' -Default ''
+        $offerGeneration = Get-FileTransferEventField -Event $failure -Name 'offer_generation' -Default ''
+        $leaseGeneration = Get-FileTransferEventField -Event $failure -Name 'tuna_path_lease_generation' -Default ''
+        $probeId = Get-FileTransferEventField -Event $failure -Name 'path_probe_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($writer) -or
+            [string]::IsNullOrWhiteSpace($sessionId) -or
+            $transactionGeneration -notmatch '^[1-9][0-9]*$' -or
+            $offerGeneration -notmatch '^[1-9][0-9]*$' -or
+            $leaseGeneration -notmatch '^[1-9][0-9]*$' -or
+            [string]::IsNullOrWhiteSpace($probeId) -or
+            $probeId -in @('(none)', 'none')) {
+            continue
+        }
+
+        [object[]]$settled = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+                [int64]$_.Sequence -lt $failureSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $sessionId -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'release_kind' -Default '') -eq 'FallbackPairedTailYield' -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+                (Get-FileTransferEventField -Event $_ -Name 'dispatch_observed' -Default '') -eq '1' -and
+                (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offerGeneration
+            } | Sort-Object Sequence | Select-Object -Last 1)
+        if ($settled.Count -ne 1) { continue }
+
+        $transferId = Get-FileTransferEventField -Event $settled[0] -Name 'transfer_id' -Default ''
+        $settledInstallGeneration = Get-FileTransferEventField `
+            -Event $settled[0] `
+            -Name 'install_generation' `
+            -Default (Get-FileTransferEventField `
+                -Event $settled[0] `
+                -Name 'authority_generation' `
+                -Default '')
+        [object[]]$prepared = @($events | Where-Object {
+                [int64]$_.Sequence -gt [int64]$settled[0].Sequence -and
+                [int64]$_.Sequence -lt $failureSequence -and
+                $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $sessionId -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transferId -and
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'PostTunaFallbackV6ToTunaV4' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $transactionGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offerGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq $leaseGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'retry_install_generation' -Default '') -eq
+                    $settledInstallGeneration
+            } | Sort-Object Sequence | Select-Object -Last 1)
+        if ($prepared.Count -ne 1) { continue }
+
+        [object[]]$draining = @($events | Where-Object {
+                [int64]$_.Sequence -gt [int64]$prepared[0].Sequence -and
+                [int64]$_.Sequence -lt $failureSequence -and
+                $_.EventName -eq 'filetransfer_route_transition_draining' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                    (Get-FileTransferEventField -Event $prepared[0] -Name 'authority_id' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq
+                    (Get-FileTransferEventField -Event $prepared[0] -Name 'transition_generation' -Default '') -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Draining', 'Idempotent')
+            } | Select-Object -First 1)
+        [object[]]$probeSent = @($events | Where-Object {
+                [int64]$_.Sequence -gt [int64]$prepared[0].Sequence -and
+                [int64]$_.Sequence -lt $failureSequence -and
+                $_.EventName -eq 'runtime_unlock_precommit_probe_sent' -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $sessionId -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transferId -and
+                (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $transactionGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offerGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq $leaseGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'probe_id' -Default '') -eq $probeId
+            } | Select-Object -First 1)
+        if ($draining.Count -ne 1 -or $probeSent.Count -ne 1) { continue }
+
+        [object[]]$probeAccepted = @($events | Where-Object {
+                [int64]$_.Sequence -gt [int64]$probeSent[0].Sequence -and
+                [int64]$_.Sequence -lt $failureSequence -and
+                $_.EventName -in @(
+                    'runtime_unlock_precommit_probe_acked',
+                    'runtime_unlock_tuna_probe_ack_received',
+                    'runtime_unlock_transaction_path_probe_acked') -and
+                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $sessionId -and
+                (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $transactionGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $offerGeneration -and
+                (Get-FileTransferEventField -Event $_ -Name 'probe_id' -Default '') -eq $probeId
+            } | Select-Object -First 1)
+        if ($probeAccepted.Count -gt 0) { continue }
+
+        $candidateInfo = [pscustomobject]@{
+            Failure = $failure
+            Settled = $settled[0]
+            Prepared = $prepared[0]
+            Writer = $writer
+            SessionId = $sessionId
+            TransferId = $transferId
+            TransactionGeneration = $transactionGeneration
+            OfferGeneration = $offerGeneration
+            LeaseGeneration = $leaseGeneration
+            ProbeId = $probeId
+            RetryAuthorityId = Get-FileTransferEventField -Event $settled[0] -Name 'authority_id' -Default ''
+            InstallGeneration = $settledInstallGeneration
+            ReleaseAuthorityId = Get-FileTransferEventField -Event $settled[0] -Name 'release_authority_id' -Default ''
+            ReleaseGeneration = Get-FileTransferEventField -Event $settled[0] -Name 'release_generation' -Default ''
+            TransitionAuthorityId = Get-FileTransferEventField -Event $prepared[0] -Name 'authority_id' -Default ''
+            TransitionGeneration = Get-FileTransferEventField -Event $prepared[0] -Name 'transition_generation' -Default ''
+        }
+        $postFallbackProbeSidecarCandidateBySequence[[string]$failure.Sequence] = $candidateInfo
+        $runtimeUnlockProbeRecoveryAuthorityLostRawEvents.Add($failure) | Out-Null
+    }
+
     $runtimeUnlockProbeRecoveryAuthorityLostDistinctEvents = New-Object System.Collections.Generic.List[object]
     $runtimeUnlockProbeRecoveryAuthorityLostRecoveredEvents = New-Object System.Collections.Generic.List[object]
     $runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents = New-Object System.Collections.Generic.List[object]
     $probeRecoveryAuthorityLostKeys = @{}
     foreach ($rejection in @($runtimeUnlockProbeRecoveryAuthorityLostRawEvents.ToArray() | Sort-Object Sequence)) {
-        $key = (@(
+        $sidecarKey = [string]$rejection.Sequence
+        $postFallbackCandidate = if ($postFallbackProbeSidecarCandidateBySequence.ContainsKey($sidecarKey)) {
+            $postFallbackProbeSidecarCandidateBySequence[$sidecarKey]
+        }
+        else { $null }
+        $key = if ($null -ne $postFallbackCandidate) {
+            @(
+                $postFallbackCandidate.Writer,
+                $postFallbackCandidate.SessionId,
+                $postFallbackCandidate.TransferId,
+                $postFallbackCandidate.RetryAuthorityId,
+                $postFallbackCandidate.InstallGeneration,
+                $postFallbackCandidate.ReleaseAuthorityId,
+                $postFallbackCandidate.ReleaseGeneration,
+                $postFallbackCandidate.TransactionGeneration,
+                $postFallbackCandidate.OfferGeneration,
+                $postFallbackCandidate.LeaseGeneration,
+                $postFallbackCandidate.ProbeId,
+                $postFallbackCandidate.TransitionAuthorityId,
+                $postFallbackCandidate.TransitionGeneration) -join '|'
+        }
+        else {
+            (@(
                 'session_id',
                 'transfer_id',
                 'contract_generation',
                 'dispatch_attempt_generation',
                 'missing_dispatch_successor_generation') |
                 ForEach-Object { Get-FileTransferEventField -Event $rejection -Name $_ -Default '(missing)' }) -join '|'
+        }
         if ($probeRecoveryAuthorityLostKeys.ContainsKey($key)) {
             continue
         }
 
         $probeRecoveryAuthorityLostKeys[$key] = $true
         $runtimeUnlockProbeRecoveryAuthorityLostDistinctEvents.Add($rejection) | Out-Null
+        if ($null -ne $postFallbackCandidate) {
+            $failureSequence = [int64]$rejection.Sequence
+            [object[]]$senderDecision = @($events | Where-Object {
+                    [int64]$_.Sequence -gt $failureSequence -and
+                    $_.EventName -eq 'filetransfer_runtime_unlock_post_fallback_precommit_probe_sidecar_failure_decided' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'role' -Default '') -eq 'initiator' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq $postFallbackCandidate.TransactionGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq $postFallbackCandidate.OfferGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq $postFallbackCandidate.LeaseGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'probe_id' -Default '') -eq $postFallbackCandidate.ProbeId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$transitionInvalidated = @($events | Where-Object {
+                    $senderDecision.Count -eq 1 -and
+                    [int64]$_.Sequence -gt $failureSequence -and
+                    $_.EventName -eq 'filetransfer_route_transition_invalidated' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $postFallbackCandidate.TransitionAuthorityId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq $postFallbackCandidate.TransitionGeneration
+                } | Select-Object -First 1)
+            [object[]]$transitionDisposition = @($events | Where-Object {
+                    $transitionInvalidated.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$transitionInvalidated[0].Sequence -and
+                    $_.EventName -eq 'filetransfer_route_transition_disposition_applied' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq $postFallbackCandidate.TransitionAuthorityId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -eq $postFallbackCandidate.TransitionGeneration -and
+                    ((Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Applied', 'Idempotent') -or
+                     (Get-FileTransferEventField -Event $_ -Name 'apply_status' -Default '') -eq 'applied')
+                } | Select-Object -First 1)
+            [object[]]$initiatorSupersession = @($events | Where-Object {
+                    $senderDecision.Count -eq 1 -and
+                    [int64]$_.Sequence -gt $failureSequence -and
+                    $_.EventName -eq 'filetransfer_fallback_tail_retry_cycle_supersession_decided' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'role' -Default '') -eq 'initiator' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'sidecar_failed_precommit_probe_rollback' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$responderSupersession = @($events | Where-Object {
+                    $senderDecision.Count -eq 1 -and
+                    [int64]$_.Sequence -gt $failureSequence -and
+                    $_.EventName -eq 'filetransfer_fallback_tail_retry_cycle_supersession_decided' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'role' -Default '') -eq 'responder' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'sidecar_failed_precommit_probe_rollback' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$successor = @($events | Where-Object {
+                    $initiatorSupersession.Count -eq 1 -and
+                    $responderSupersession.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$initiatorSupersession[0].Sequence -and
+                    $_.EventName -eq 'filetransfer_fallback_tail_yield_issued' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $initiatorSupersession[0] -Name 'authority_id' -Default '')
+                } | Select-Object -First 1)
+            [object[]]$successorPairing = @($events | Where-Object {
+                    $successor.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$successor[0].Sequence -and
+                    $_.EventName -eq 'filetransfer_fallback_tail_pairing_committed' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
+                        (Get-FileTransferEventField -Event $successor[0] -Name 'authority_id' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $successor[0] -Name 'yield_generation' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$freshDispatch = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+                    $successorPairing.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$successorPairing[0].Sequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'DispatchObserved' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -ne $postFallbackCandidate.RetryAuthorityId
+                } | Select-Object -First 1)
+            [object[]]$freshPrepared = @($events | Where-Object {
+                    $freshDispatch.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$freshDispatch[0].Sequence -and
+                    $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transition_kind' -Default '') -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transition_generation' -Default '') -ne $postFallbackCandidate.TransitionGeneration
+                } | Select-Object -First 1)
+            [object[]]$freshProbeAck = @($events | Where-Object {
+                    $freshPrepared.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$freshPrepared[0].Sequence -and
+                    $_.EventName -eq 'runtime_unlock_precommit_probe_acked' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $postFallbackCandidate.Writer -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transaction_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $freshPrepared[0] -Name 'transaction_generation' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'offer_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $freshPrepared[0] -Name 'offer_generation' -Default '') -and
+                    (Get-FileTransferEventField -Event $_ -Name 'tuna_path_lease_generation' -Default '') -eq
+                        (Get-FileTransferEventField -Event $freshPrepared[0] -Name 'tuna_path_lease_generation' -Default '')
+                } | Select-Object -First 1)
+            [object[]]$freshResponderHandoff = @($events | Where-Object {
+                    $freshPrepared.Count -eq 1 -and
+                    [int64]$_.Sequence -gt [int64]$freshPrepared[0].Sequence -and
+                    $_.EventName -eq 'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $postFallbackCandidate.SessionId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $postFallbackCandidate.TransferId -and
+                    (Get-FileTransferEventField -Event $_ -Name 'responder_transition_mode' -Default '') -eq 'post_fallback_v6_paired' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            if ($senderDecision.Count -eq 1 -and
+                $transitionInvalidated.Count -eq 1 -and
+                $transitionDisposition.Count -eq 1 -and
+                $initiatorSupersession.Count -eq 1 -and
+                $responderSupersession.Count -eq 1 -and
+                $successor.Count -eq 1 -and
+                $successorPairing.Count -eq 1 -and
+                $freshDispatch.Count -eq 1 -and
+                $freshPrepared.Count -eq 1 -and
+                $freshProbeAck.Count -eq 1 -and
+                $freshResponderHandoff.Count -eq 1) {
+                $runtimeUnlockProbeRecoveryAuthorityLostRecoveredEvents.Add($rejection) | Out-Null
+            }
+            else {
+                $runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents.Add($rejection) | Out-Null
+            }
+            continue
+        }
+
         $rejectionSequence = [int64]$rejection.Sequence
         $sessionId = Get-FileTransferEventField -Event $rejection -Name 'session_id' -Default ''
         $transferId = Get-FileTransferEventField -Event $rejection -Name 'transfer_id' -Default ''
@@ -66652,7 +66948,17 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_tuna_probe_recovery_authority_lost' `
-        -Events @($runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents.ToArray())
+        -Events @($runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents.ToArray() | Where-Object {
+            $_.EventName -ne 'runtime_unlock_transaction_path_probe_failed'
+        })
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_tuna_probe_recovery_authority_lost' `
+        -Events @($runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents.ToArray() | Where-Object {
+            $_.EventName -eq 'runtime_unlock_transaction_path_probe_failed'
+        }) `
+        -DefaultReason 'settled_post_fallback_retry_probe_sidecar_failure_not_propagated_to_coordinator_pair_supersession' `
+        -UseDefaultReason
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_successor_attempt_mismatch' `
@@ -68167,6 +68473,14 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($null -ne $firstProofChainFailure -and
         [string]$firstProofChainFailure.Class -eq
+            'runtime_unlock_tuna_probe_recovery_authority_lost' -and
+        [string]$firstProofChainFailure.Event -eq
+            'runtime_unlock_transaction_path_probe_failed') {
+        $failureVariant =
+            'dispatch_observed_probe_close_left_consumed_pair_and_draining_transition_current'
+    }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing') {
         $matchingVariantRecord = @(
             $runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCandidateRecords |
@@ -68697,6 +69011,8 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount = $runtimeUnlockProbeRecoveryAuthorityLostDistinctEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostRecoveredCount = $runtimeUnlockProbeRecoveryAuthorityLostRecoveredEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostUnresolvedCount = $runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents.Count
+        RuntimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents = @(
+            $runtimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents.ToArray())
         RuntimeUnlockProbeRecoveryAuthorityVerdict = $runtimeUnlockProbeRecoveryAuthorityVerdict
         RuntimeUnlockRetryDispatchAuthorityHeldCount = $runtimeUnlockRetryDispatchAuthorityHeldEvents.Count
         RuntimeUnlockRetryDispatchAuthorityHoldPreservedCount = $runtimeUnlockRetryDispatchAuthorityHoldPreservedEvents.Count

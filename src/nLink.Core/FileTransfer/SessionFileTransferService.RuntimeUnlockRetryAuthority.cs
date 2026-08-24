@@ -7,6 +7,310 @@ public sealed partial class SessionFileTransferService
     private const string RuntimeUnlockRetryMissingSuccessorLimitExhaustedReason =
         "retry_dispatch_missing_successor_limit_exhausted";
 
+    private void OnRuntimeUnlockPostFallbackPreCommitProbeFailureObserved(
+        object? sender,
+        RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs args)
+    {
+        if (sender is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
+        {
+            return;
+        }
+
+        var observation = args.Observation;
+        RuntimeUnlockPostFallbackPreCommitProbeFailureDecision decision;
+        if (observation is null || observation.IsDefault)
+        {
+            decision = new(
+                RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected,
+                "post_fallback_precommit_probe_failure_observation_invalid");
+        }
+        else if (observation.Role ==
+                 RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Initiator)
+        {
+            decision = ObserveOutboundRuntimeUnlockPostFallbackProbeFailure(
+                bridge,
+                observation);
+        }
+        else
+        {
+            decision = ObserveInboundRuntimeUnlockPostFallbackProbeFailure(
+                bridge,
+                observation);
+        }
+
+        args.Decision = decision;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_unlock_post_fallback_precommit_probe_sidecar_failure_decided; session_id={FormatProtocolLogValue(observation?.SessionId ?? "(none)")}; transfer_id={FormatProtocolLogValue(observation?.TransferId ?? "(none)")}; direction={observation?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; role={observation?.Role.ToString().ToLowerInvariant() ?? "unknown"}; transaction_generation={observation?.Probe.TransactionGeneration ?? 0}; offer_generation={observation?.Probe.OfferGeneration ?? 0}; tuna_path_lease_generation={observation?.Probe.TunaPathLeaseGeneration ?? 0}; launch_generation={observation?.Probe.LaunchGeneration ?? 0}; probe_id={FormatProtocolLogValue(observation?.Probe.PathProbeId ?? "(none)")}; retry_authority_id={FormatProtocolLogValue(observation?.InstallReceipt?.Authority.AuthorityId.ToString() ?? "(none)")}; install_generation={observation?.InstallReceipt?.InstallGeneration ?? 0}; paired_release_authority_id={FormatProtocolLogValue(observation?.BindingReceipt?.PairedRelease.ReleaseAuthorityId.ToString() ?? "(none)")}; pairing_generation={observation?.BindingReceipt?.PairedRelease.PairingGeneration ?? 0}; route={FormatProtocolLogValue(observation?.SourceScope.PublicationAuthority.RouteToken ?? "(none)")}; protocol_version={observation?.SourceScope.PublicationAuthority.ProtocolVersion ?? 0}; live_route_epoch={observation?.SourceScope.PublicationAuthority.LiveRouteEpoch ?? 0}; runtime_generation={observation?.SourceScope.PublicationAuthority.RuntimeGeneration ?? 0}; terminal_generation={observation?.SourceScope.PublicationAuthority.TerminalGeneration ?? 0}; leg_generation={observation?.SourceScope.PublicationAuthority.LegGeneration ?? 0}; route_publication_generation={observation?.SourceScope.PublicationAuthority.RoutePublicationGeneration ?? 0}; route_commit_generation={observation?.SourceScope.PublicationAuthority.RouteCommitGeneration ?? 0}; transport_epoch={observation?.SourceScope.TransportEpoch ?? 0}; bridge_recovery_generation={observation?.SourceScope.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(observation?.SourceScope.CheckpointRequestId ?? "(none)")}; data_session_identity={FormatProtocolLogValue(observation?.SourceScope.DataSessionIdentity ?? "(none)")}; data_session_generation={observation?.SourceScope.DataSessionGeneration ?? 0}; decision_status={FormatProtocolLogValue(decision.Status.ToString())}; decision_reason={FormatProtocolLogValue(decision.Reason)}; authority_effect=none");
+    }
+
+    private RuntimeUnlockPostFallbackPreCommitProbeFailureDecision
+        ObserveOutboundRuntimeUnlockPostFallbackProbeFailure(
+            IRuntimeUnlockRetryDispatchAuthorityBridge bridge,
+            RuntimeUnlockPostFallbackPreCommitProbeFailureObservation observation)
+    {
+        RuntimeUnlockRetryDispatchInstallReceipt installReceipt;
+        lock (gate)
+        {
+            if (transport is not IRuntimeUnlockRetryDispatchAuthorityBridge current ||
+                !ReferenceEquals(current, bridge) ||
+                observation.InstallReceipt is not { IsDefault: false } installed ||
+                outboundTransfer is not { IsTerminal: false } outbound ||
+                !outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+                !string.Equals(
+                    outbound.SessionId,
+                    observation.SessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    outbound.TransferId,
+                    observation.TransferId,
+                    StringComparison.Ordinal) ||
+                outbound.CurrentRoutePublicationToken is not { } publication ||
+                !FileTransferCoordinator.MatchesRoutePublicationAuthority(
+                    installed.Request.SourcePublicationAuthority,
+                    publication) ||
+                outbound.FileTransferRouteTransitionExecution is not
+                {
+                    Authority.ProofBoundary:
+                        FileTransferTunaActivationTransitionProofBoundary
+                            activation,
+                } execution ||
+                activation.AcceptedLaunchBoundary.TransactionGeneration !=
+                    observation.Probe.TransactionGeneration ||
+                activation.AcceptedLaunchBoundary.OfferGeneration !=
+                    observation.Probe.OfferGeneration ||
+                activation.AcceptedLaunchBoundary.TunaPathLeaseGeneration !=
+                    observation.Probe.TunaPathLeaseGeneration ||
+                activation.LaunchGeneration !=
+                    observation.Probe.LaunchGeneration)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Stale,
+                    "post_fallback_precommit_probe_failure_source_not_current");
+            }
+
+            if (lastOutboundRuntimeUnlockPostFallbackProbeFailureObservation ==
+                observation)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Idempotent,
+                    "post_fallback_precommit_probe_failure_idempotent");
+            }
+
+            var tail = FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                CreateCoordinatorStateLocked(outbound));
+            if (tail.CurrentOperation is not
+                {
+                    PairingState:
+                        FileTransferFallbackTailYieldPairingState.ReleaseConsumed,
+                    PairedRelease: { } release,
+                } operation ||
+                tail.LastConsumingInstallReceipt != installed ||
+                tail.LastConsumedReservation is not { } reservation ||
+                reservation.Release != release ||
+                reservation.RetryAuthority != installed.Authority ||
+                installed.Request.FallbackPairedTailYieldEvidence is not
+                    { } pairedEvidence ||
+                pairedEvidence.LocalDecision != operation.Decision ||
+                operation.Scope.RoutePublication is not { } pairedPublication ||
+                !FileTransferCoordinator.MatchesRoutePublicationAuthority(
+                    observation.SourceScope.PublicationAuthority,
+                    pairedPublication) ||
+                observation.SourceScope.TransportEpoch !=
+                    operation.Scope.TransportEpoch ||
+                observation.SourceScope.BridgeRecoveryGeneration !=
+                    operation.Scope.BridgeRecoveryGeneration ||
+                !string.Equals(
+                    observation.SourceScope.CheckpointRequestId,
+                    operation.Scope.CheckpointRequestIdSnapshot,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    observation.SourceScope.DataSessionIdentity,
+                    operation.Scope.DataSessionIdentity,
+                    StringComparison.Ordinal) ||
+                observation.SourceScope.DataSessionGeneration !=
+                    operation.Scope.DataSessionGeneration)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected,
+                    "post_fallback_precommit_probe_failure_pair_not_current");
+            }
+
+            installReceipt = installed;
+        }
+
+        LogRuntimeUnlockPreCommitProbeFailedForLaunch(
+            FileTransferDirection.Outbound,
+            observation.TransferId,
+            observation.SessionId,
+            observation.Probe.TransactionGeneration,
+            observation.Probe.OfferGeneration,
+            observation.Probe.TunaPathLeaseGeneration,
+            observation.Probe.PathProbeId!,
+            "runtime_unlock_tuna_probe_sidecar_closed",
+            observation.Probe.LaunchGeneration);
+        MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
+            FileTransferDirection.Outbound,
+            observation.SessionId,
+            observation.TransferId,
+            "runtime_unlock_tuna_probe_sidecar_closed");
+
+        lock (gate)
+        {
+            if (outboundTransfer is not { IsTerminal: false } outbound ||
+                !string.Equals(
+                    outbound.SessionId,
+                    observation.SessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    outbound.TransferId,
+                    observation.TransferId,
+                    StringComparison.Ordinal))
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Stale,
+                    "post_fallback_precommit_probe_failure_source_replaced");
+            }
+
+            var tail = FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                CreateCoordinatorStateLocked(outbound));
+            var predecessorId = installReceipt.Request
+                .FallbackPairedTailYieldEvidence?.LocalDecision.AuthorityId;
+            if (predecessorId is not { IsDefault: false } ||
+                tail.CurrentOperation?.Decision.PredecessorAuthorityId !=
+                    predecessorId)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected,
+                    "post_fallback_precommit_probe_failure_rollback_rejected");
+            }
+
+            lastOutboundRuntimeUnlockPostFallbackProbeFailureObservation =
+                observation;
+            return new(
+                RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted,
+                "post_fallback_precommit_probe_failure_rollback_accepted");
+        }
+    }
+
+    private RuntimeUnlockPostFallbackPreCommitProbeFailureDecision
+        ObserveInboundRuntimeUnlockPostFallbackProbeFailure(
+            IRuntimeUnlockRetryDispatchAuthorityBridge bridge,
+            RuntimeUnlockPostFallbackPreCommitProbeFailureObservation observation)
+    {
+        lock (gate)
+        {
+            if (transport is not IRuntimeUnlockRetryDispatchAuthorityBridge current ||
+                !ReferenceEquals(current, bridge) ||
+                observation.BindingReceipt is not { IsDefault: false } binding ||
+                runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt != binding ||
+                inboundTransfer is not { IsTerminal: false } inbound ||
+                !inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+                !string.Equals(
+                    inbound.SessionId,
+                    observation.SessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    inbound.TransferId,
+                    observation.TransferId,
+                    StringComparison.Ordinal) ||
+                inbound.CurrentRoutePublicationToken is not { } publication ||
+                !FileTransferCoordinator.MatchesRoutePublicationAuthority(
+                    binding.Request.PublicationAuthority,
+                    publication) ||
+                !TryCreateRuntimeUnlockPeerPreCommitAnswerAcceptanceScope(
+                    CreateCoordinatorStateLocked(inbound),
+                    out var acceptanceScope,
+                    out _) ||
+                acceptanceScope != binding.AcceptanceScope)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Stale,
+                    "post_fallback_precommit_probe_failure_source_not_current");
+            }
+
+            if (lastInboundRuntimeUnlockPostFallbackProbeFailureObservation ==
+                observation)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Idempotent,
+                    "post_fallback_precommit_probe_failure_idempotent");
+            }
+
+            var state = CreateCoordinatorStateLocked(inbound);
+            var operation = FileTransferCoordinator
+                .GetFallbackTailYieldSubstate(state)
+                .CurrentOperation;
+            if (operation is not
+                {
+                    PairingState: FileTransferFallbackTailYieldPairingState.Paired,
+                    PairedRelease: { } release,
+                } pairedOperation ||
+                release != binding.PairedRelease ||
+                FileTransferCoordinator.GetEffectiveFallbackTailYieldScope(
+                    pairedOperation) != binding.PairedScope)
+            {
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected,
+                    "post_fallback_precommit_probe_failure_pair_not_current");
+            }
+
+            var superseded = FileTransferCoordinator
+                .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                    state,
+                    FileTransferFallbackTailRetryCycleSupersessionRole.Responder,
+                    pairedOperation.Decision,
+                    release,
+                    expectedInstallReceipt: null,
+                    "sidecar_failed_precommit_probe_rollback");
+            if (!superseded.Accepted)
+            {
+                LogFallbackTailRetryCycleSupersessionDecision(
+                    FileTransferDirection.Inbound,
+                    inbound.SessionId,
+                    inbound.TransferId,
+                    pairedOperation,
+                    installReceipt: null,
+                    transitionAuthority: null,
+                    superseded.Status.ToString(),
+                    superseded.Reason,
+                    "runtime_unlock_tuna_probe_sidecar_closed",
+                    observation.Probe.TransactionGeneration,
+                    observation.Probe.OfferGeneration,
+                    observation.Probe.TunaPathLeaseGeneration,
+                    observation.Probe.PathProbeId);
+                return new(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected,
+                    superseded.Reason);
+            }
+
+            ApplyFallbackTailYieldTransitionToContextLocked(inbound, superseded);
+            LogFallbackTailRetryCycleSupersessionDecision(
+                FileTransferDirection.Inbound,
+                inbound.SessionId,
+                inbound.TransferId,
+                pairedOperation,
+                installReceipt: null,
+                transitionAuthority: null,
+                superseded.Status.ToString(),
+                superseded.Reason,
+                "runtime_unlock_tuna_probe_sidecar_closed",
+                observation.Probe.TransactionGeneration,
+                observation.Probe.OfferGeneration,
+                observation.Probe.TunaPathLeaseGeneration,
+                observation.Probe.PathProbeId);
+            runtimeUnlockPostFallbackPairedRetryOfferBindingReceipt = null;
+            ResolveInboundFallbackTailSurvivalLocked(
+                inbound,
+                "sidecar_failed_precommit_probe_rollback");
+            lastInboundRuntimeUnlockPostFallbackProbeFailureObservation =
+                observation;
+            return new(
+                RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted,
+                "post_fallback_precommit_probe_failure_rollback_accepted");
+        }
+    }
+
     private void OnRuntimeUnlockRetryDispatchSettlementReported(
         object? sender,
         RuntimeUnlockRetryDispatchSettlementReportedEventArgs args)

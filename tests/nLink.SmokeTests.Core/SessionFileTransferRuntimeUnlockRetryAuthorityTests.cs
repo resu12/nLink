@@ -23,6 +23,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(1, bridge.DeadlineEvaluationSubscriberCount);
         Assert.Equal(1, bridge.ExecutionObservationSubscriberCount);
         Assert.Equal(1, bridge.SuccessorEvaluationSubscriberCount);
+        Assert.Equal(1, bridge.PostFallbackProbeFailureSubscriberCount);
 
         service.DetachTransport();
 
@@ -31,6 +32,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(0, bridge.DeadlineEvaluationSubscriberCount);
         Assert.Equal(0, bridge.ExecutionObservationSubscriberCount);
         Assert.Equal(0, bridge.SuccessorEvaluationSubscriberCount);
+        Assert.Equal(0, bridge.PostFallbackProbeFailureSubscriberCount);
     }
 
     [Fact]
@@ -1684,6 +1686,9 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             executionObserved;
         private EventHandler<RuntimeUnlockRetryDispatchSuccessorEvaluationEventArgs>?
             successorEvaluationRequested;
+        private EventHandler<
+            RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>?
+            postFallbackProbeFailureObserved;
         private RuntimeUnlockRetryDispatchAuthorityRequest? pendingRequest;
         private RuntimeUnlockRetryDispatchDecision? pendingStage;
         private long pendingStageStagedUtcMs;
@@ -1743,6 +1748,14 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             remove => successorEvaluationRequested -= value;
         }
 
+        public event EventHandler<
+            RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>?
+            RuntimeUnlockPostFallbackPreCommitProbeFailureObserved
+        {
+            add => postFallbackProbeFailureObserved += value;
+            remove => postFallbackProbeFailureObserved -= value;
+        }
+
         public int AuthorityRequestSubscriberCount =>
             authorityRequested?.GetInvocationList().Length ?? 0;
 
@@ -1757,6 +1770,9 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
         public int SuccessorEvaluationSubscriberCount =>
             successorEvaluationRequested?.GetInvocationList().Length ?? 0;
+
+        public int PostFallbackProbeFailureSubscriberCount =>
+            postFallbackProbeFailureObserved?.GetInvocationList().Length ?? 0;
 
         public RuntimeUnlockRetryDispatchContract? InfraCurrentContract { get; private set; }
 

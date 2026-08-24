@@ -2190,10 +2190,131 @@ internal sealed class RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedE
         "paired_retry_offer_binding_subscriber_missing");
 }
 
+internal enum RuntimeUnlockPostFallbackPreCommitProbeFailureRole
+{
+    Initiator = 0,
+    Responder = 1,
+}
+
+internal enum RuntimeUnlockPostFallbackPreCommitProbeFailureStatus
+{
+    Rejected = 0,
+    Accepted = 1,
+    Idempotent = 2,
+    Stale = 3,
+}
+
+internal readonly record struct
+    RuntimeUnlockPostFallbackPreCommitProbeFailureSourceScope(
+        FileTransferRoutePublicationAuthority PublicationAuthority,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        string CheckpointRequestId,
+        string DataSessionIdentity,
+        long DataSessionGeneration)
+{
+    public bool IsDefault =>
+        PublicationAuthority is null ||
+        !string.Equals(
+            PublicationAuthority.RouteToken,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            StringComparison.Ordinal) ||
+        PublicationAuthority.ProtocolVersion !=
+            FileTransferProtocol.ProtocolVersionV6 ||
+        TransportEpoch <= 0 ||
+        BridgeRecoveryGeneration < 0 ||
+        string.IsNullOrWhiteSpace(CheckpointRequestId) ||
+        string.IsNullOrWhiteSpace(DataSessionIdentity) ||
+        DataSessionGeneration <= 0;
+}
+
+internal sealed record RuntimeUnlockPostFallbackPreCommitProbeFailureObservation(
+    RuntimeUnlockPostFallbackPreCommitProbeFailureRole Role,
+    RuntimeUnlockRouteCommitSnapshot Probe,
+    string SidecarReason,
+    RuntimeUnlockPostFallbackPreCommitProbeFailureSourceScope SourceScope,
+    RuntimeUnlockRetryDispatchInstallReceipt? InstallReceipt = null,
+    RuntimeUnlockPostFallbackPairedRetryOfferBindingReceipt? BindingReceipt = null)
+{
+    public string SessionId => Probe.SessionId;
+
+    public string TransferId => Probe.TransferId ?? string.Empty;
+
+    public FileTransferDirection Direction => Role ==
+        RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Initiator
+            ? FileTransferDirection.Outbound
+            : FileTransferDirection.Inbound;
+
+    public bool IsDefault =>
+        Probe is null ||
+        string.IsNullOrWhiteSpace(SessionId) ||
+        string.IsNullOrWhiteSpace(TransferId) ||
+        Probe.TransactionGeneration <= 0 ||
+        Probe.OfferGeneration <= 0 ||
+        Probe.TunaPathLeaseGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(Probe.TunaPathLeaseListenerRunId) ||
+        string.IsNullOrWhiteSpace(SidecarReason) ||
+        SourceScope.IsDefault ||
+        !string.Equals(
+            SourceScope.PublicationAuthority.SessionId,
+            SessionId,
+            StringComparison.Ordinal) ||
+        !string.Equals(
+            SourceScope.PublicationAuthority.TransferId,
+            TransferId,
+            StringComparison.Ordinal) ||
+        SourceScope.PublicationAuthority.Direction != Direction ||
+        Role switch
+        {
+            RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Initiator =>
+                InstallReceipt is not { IsDefault: false } ||
+                string.IsNullOrWhiteSpace(Probe.PathProbeId) ||
+                !string.Equals(
+                    Probe.PathProbeState,
+                    RuntimeUnlockPathProbeState.Started.ToString(),
+                    StringComparison.OrdinalIgnoreCase) ||
+                Probe.PathProbeTransport != FileTransferTransportKind.Tuna,
+            RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Responder =>
+                BindingReceipt is not { IsDefault: false },
+            _ => true,
+        };
+}
+
+internal readonly record struct RuntimeUnlockPostFallbackPreCommitProbeFailureDecision(
+    RuntimeUnlockPostFallbackPreCommitProbeFailureStatus Status,
+    string Reason)
+{
+    public bool Accepted => Status is
+        RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted or
+        RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Idempotent;
+}
+
+internal sealed class RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs(
+    RuntimeUnlockPostFallbackPreCommitProbeFailureObservation observation) : EventArgs
+{
+    public RuntimeUnlockPostFallbackPreCommitProbeFailureObservation Observation { get; } =
+        observation;
+
+    public RuntimeUnlockPostFallbackPreCommitProbeFailureDecision Decision
+    {
+        get;
+        set;
+    } = new(
+        RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Rejected,
+        "post_fallback_precommit_probe_failure_subscriber_missing");
+}
+
 internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 {
     event EventHandler<RuntimeUnlockPostFallbackPairedRetryOfferBindingRequestedEventArgs>?
         RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested
+    {
+        add { }
+        remove { }
+    }
+
+    event EventHandler<RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>?
+        RuntimeUnlockPostFallbackPreCommitProbeFailureObserved
     {
         add { }
         remove { }

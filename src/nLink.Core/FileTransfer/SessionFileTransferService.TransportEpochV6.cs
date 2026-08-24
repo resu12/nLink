@@ -4628,7 +4628,12 @@ public sealed partial class SessionFileTransferService
                 {
                     ResolveOutboundFallbackTailSurvivalLocked(
                         outbound,
-                        "pressure_rejected_precommit_probe_rollback");
+                        string.Equals(
+                            reason,
+                            "runtime_unlock_tuna_probe_sidecar_closed",
+                            StringComparison.Ordinal)
+                            ? "sidecar_failed_precommit_probe_rollback"
+                            : "pressure_rejected_precommit_probe_rollback");
                 }
             }
             else if (direction == FileTransferDirection.Inbound &&
@@ -4804,10 +4809,18 @@ public sealed partial class SessionFileTransferService
             var tailOperation = FileTransferCoordinator
                 .GetFallbackTailYieldSubstate(tailState)
                 .CurrentOperation;
-            if (string.Equals(
+            var supersessionReason = string.Equals(
                     reason,
                     "inbound_fallback_tail_not_yielded",
-                    StringComparison.Ordinal) &&
+                    StringComparison.Ordinal)
+                ? "pressure_rejected_precommit_probe_rollback"
+                : string.Equals(
+                    reason,
+                    "runtime_unlock_tuna_probe_sidecar_closed",
+                    StringComparison.Ordinal)
+                    ? "sidecar_failed_precommit_probe_rollback"
+                    : null;
+            if (supersessionReason is not null &&
                 tailOperation is
                 {
                     PairedRelease: { } pairedRelease,
@@ -4824,7 +4837,7 @@ public sealed partial class SessionFileTransferService
                         tailOperation.Value.Decision,
                         pairedRelease,
                         installReceipt,
-                        "pressure_rejected_precommit_probe_rollback");
+                        supersessionReason);
                 if (superseded.Accepted)
                 {
                     ApplyFallbackTailYieldTransitionToContextLocked(
@@ -4956,7 +4969,7 @@ public sealed partial class SessionFileTransferService
             .AcceptedLaunchBoundary;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_retry_cycle_supersession_decided; authority_schema={FileTransferAuthoritySchema.Current}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={direction.ToString().ToLowerInvariant()}; role={(direction == FileTransferDirection.Outbound ? "initiator" : "responder")}; trigger=pressure_rejected_precommit_probe_rollback; authority_id={FormatProtocolLogValue(operation.Decision.AuthorityId.ToString())}; yield_generation={operation.Decision.YieldGeneration}; peer_authority_id={FormatProtocolLogValue(peer?.AuthorityId.ToString() ?? "(none)")}; peer_yield_generation={peer?.YieldGeneration ?? 0}; pairing_generation={release?.PairingGeneration ?? 0}; release_generation={release?.ReleaseGeneration ?? 0}; install_generation={installReceipt?.InstallGeneration ?? 0}; transaction_generation={launch?.TransactionGeneration ?? transactionGeneration}; offer_generation={launch?.OfferGeneration ?? offerGeneration}; tuna_path_lease_generation={launch?.TunaPathLeaseGeneration ?? leaseGeneration}; probe_id={FormatProtocolLogValue(launch?.PathProbeId ?? probeId ?? "(none)")}; transition_authority_id={FormatProtocolLogValue(transition?.AuthorityId.ToString() ?? "(none)")}; transition_generation={transition?.TransitionGeneration ?? 0}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; route_publication_generation={scope.RoutePublication?.PublicationGeneration ?? 0}; route_commit_generation={scope.RoutePublication?.RouteCommitGeneration ?? 0}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_generation={scope.CheckpointGeneration}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot)}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity ?? "(none)")}; data_session_generation={scope.DataSessionGeneration}; successor_generation={operation.Decision.YieldGeneration + 1}; status={FormatProtocolLogValue(status)}; reason={FormatProtocolLogValue(decisionReason)}; trigger_reason={FormatProtocolLogValue(triggerReason)}; authority_effect={(string.Equals(status, "Accepted", StringComparison.Ordinal) ? "retired_exact_predecessor" : "none")}");
+            $"event=filetransfer_fallback_tail_retry_cycle_supersession_decided; authority_schema={FileTransferAuthoritySchema.Current}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={direction.ToString().ToLowerInvariant()}; role={(direction == FileTransferDirection.Outbound ? "initiator" : "responder")}; trigger={(string.Equals(triggerReason, "runtime_unlock_tuna_probe_sidecar_closed", StringComparison.Ordinal) ? "sidecar_failed_precommit_probe_rollback" : "pressure_rejected_precommit_probe_rollback")}; authority_id={FormatProtocolLogValue(operation.Decision.AuthorityId.ToString())}; yield_generation={operation.Decision.YieldGeneration}; peer_authority_id={FormatProtocolLogValue(peer?.AuthorityId.ToString() ?? "(none)")}; peer_yield_generation={peer?.YieldGeneration ?? 0}; pairing_generation={release?.PairingGeneration ?? 0}; release_generation={release?.ReleaseGeneration ?? 0}; install_generation={installReceipt?.InstallGeneration ?? 0}; transaction_generation={launch?.TransactionGeneration ?? transactionGeneration}; offer_generation={launch?.OfferGeneration ?? offerGeneration}; tuna_path_lease_generation={launch?.TunaPathLeaseGeneration ?? leaseGeneration}; probe_id={FormatProtocolLogValue(launch?.PathProbeId ?? probeId ?? "(none)")}; transition_authority_id={FormatProtocolLogValue(transition?.AuthorityId.ToString() ?? "(none)")}; transition_generation={transition?.TransitionGeneration ?? 0}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; route_publication_generation={scope.RoutePublication?.PublicationGeneration ?? 0}; route_commit_generation={scope.RoutePublication?.RouteCommitGeneration ?? 0}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_generation={scope.CheckpointGeneration}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot)}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity ?? "(none)")}; data_session_generation={scope.DataSessionGeneration}; successor_generation={operation.Decision.YieldGeneration + 1}; status={FormatProtocolLogValue(status)}; reason={FormatProtocolLogValue(decisionReason)}; trigger_reason={FormatProtocolLogValue(triggerReason)}; authority_effect={(string.Equals(status, "Accepted", StringComparison.Ordinal) ? "retired_exact_predecessor" : "none")}");
     }
 
     private static bool FileTransferRouteCommitProofMatchesSnapshot(

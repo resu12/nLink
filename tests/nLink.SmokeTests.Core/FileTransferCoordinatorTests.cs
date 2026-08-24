@@ -17688,6 +17688,85 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackTailYield_SidecarFailureCarriesEarlySuccessorPeerProofIntoExactNewCycle()
+    {
+        var (state, _, predecessor) =
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(state)
+                .CurrentOperation);
+        var release = Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
+            operation.PairedRelease);
+        var scope = FileTransferCoordinator.GetEffectiveFallbackTailYieldScope(
+            operation);
+        var peerProof = release.PeerProof.Proof with
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                "fta2-fallback_tail_yield-fedcba9876543210fedcba98"),
+            PredecessorAuthorityId = release.PeerProof.Proof.AuthorityId,
+            YieldGeneration = release.PeerProof.Proof.YieldGeneration + 1,
+        };
+        var earlyReceipt =
+            new FileTransferFallbackTailPeerProofReceipt(
+                peerProof,
+                scope,
+                "retry-cycle-successor-proof-before-local-supersession",
+                40_000);
+
+        var retained = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            state,
+            earlyReceipt);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            retained.Status);
+        Assert.Equal(
+            earlyReceipt,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(retained.State)
+                .PendingRetryCycleSuccessorPeerProof);
+        Assert.Equal(
+            operation,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(retained.State)
+                .CurrentOperation);
+
+        var superseded = FileTransferCoordinator
+            .SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+                retained.State,
+                FileTransferFallbackTailRetryCycleSupersessionRole.Responder,
+                predecessor,
+                release,
+                expectedInstallReceipt: null,
+                "sidecar_failed_precommit_probe_rollback");
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            superseded.Status);
+        Assert.True(
+            FileTransferCoordinator.IsFallbackTailRetryCycleSupersessionPending(
+                superseded.State));
+
+        var successor = MarkFallbackTailQuiescent(
+            superseded.State,
+            superseded.State.RouteSelection,
+            superseded.State.CurrentLeg!.TransportEpochId,
+            superseded.State.CurrentLeg.ProvenCommittedChunkIndex,
+            superseded.State.CurrentLeg.ProvenHighestObservedChunkIndex);
+        var successorOperation =
+            Assert.IsType<FileTransferFallbackTailYieldOperation>(
+                FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                        successor.State)
+                    .CurrentOperation);
+        Assert.Equal(
+            predecessor.AuthorityId,
+            successorOperation.Decision.PredecessorAuthorityId);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.PeerProofObserved,
+            successorOperation.PairingState);
+        Assert.Equal(earlyReceipt, successorOperation.PeerProof);
+        Assert.Null(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(successor.State)
+                .PendingRetryCycleSuccessorPeerProof);
+    }
+
+    [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     public void FileTransferRouteTransition_TunaFallbackCommitsAndAppliesRetainedFrameOnce()
     {

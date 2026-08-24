@@ -16934,6 +16934,274 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiPostFallbackProbeSidecarPairRecoveryFailure {
+        param([AllowEmptyCollection()][string[]]$Lines)
+
+        [object[]]$records = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                $line = [string]$Lines[$index]
+                [pscustomobject]@{
+                    Index = $index
+                    Line = $line
+                    Event = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+                }
+            }
+        )
+        $lookupCount = 0L
+        $field = {
+            param($record, [string]$name)
+            Get-TunaGuiLogLineFieldValue -Line $record.Line -Name $name
+        }
+        [object[]]$failures = @($records | Where-Object {
+                $_.Event -eq 'runtime_unlock_transaction_path_probe_failed' -and
+                ((& $field $_ 'path_probe_failure_reason') -eq
+                    'runtime_unlock_tuna_probe_sidecar_closed' -or
+                 (& $field $_ 'failure_reason') -eq
+                    'runtime_unlock_tuna_probe_sidecar_closed' -or
+                 (& $field $_ 'reason') -eq
+                    'runtime_unlock_tuna_probe_sidecar_closed')
+            })
+        foreach ($failure in @($failures)) {
+            $writer = & $field $failure 'log_writer_id'
+            $session = & $field $failure 'session_id'
+            $transaction = & $field $failure 'transaction_generation'
+            $offer = & $field $failure 'offer_generation'
+            $lease = & $field $failure 'tuna_path_lease_generation'
+            $probe = & $field $failure 'path_probe_id'
+            if ([string]::IsNullOrWhiteSpace($writer) -or
+                [string]::IsNullOrWhiteSpace($session) -or
+                $transaction -notmatch '^[1-9][0-9]*$' -or
+                $offer -notmatch '^[1-9][0-9]*$' -or
+                $lease -notmatch '^[1-9][0-9]*$' -or
+                [string]::IsNullOrWhiteSpace($probe)) {
+                continue
+            }
+
+            [object[]]$settled = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -lt $failure.Index -and
+                    $_.Event -eq 'runtime_unlock_retry_dispatch_contract_settled' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'direction') -eq 'outbound' -and
+                    (& $field $_ 'route') -eq 'post_tuna_fallback_v6' -and
+                    (& $field $_ 'protocol_version') -eq '6' -and
+                    (& $field $_ 'release_kind') -eq 'FallbackPairedTailYield' -and
+                    (& $field $_ 'settlement_outcome') -eq 'DispatchObserved' -and
+                    (& $field $_ 'offer_generation') -eq $offer
+                } | Select-Object -Last 1)
+            if ($settled.Count -ne 1) { continue }
+            $transfer = & $field $settled[0] 'transfer_id'
+            $retryAuthority = & $field $settled[0] 'authority_id'
+            $install = & $field $settled[0] 'install_generation'
+
+            [object[]]$prepared = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $settled[0].Index -and $_.Index -lt $failure.Index -and
+                    $_.Event -eq 'filetransfer_route_transition_prepared' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'direction') -eq 'outbound' -and
+                    (& $field $_ 'transition_kind') -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (& $field $_ 'source_route') -eq 'post_tuna_fallback_v6' -and
+                    (& $field $_ 'transaction_generation') -eq $transaction -and
+                    (& $field $_ 'offer_generation') -eq $offer -and
+                    (& $field $_ 'tuna_path_lease_generation') -eq $lease -and
+                    (& $field $_ 'retry_install_generation') -eq $install
+                } | Select-Object -Last 1)
+            if ($prepared.Count -ne 1) { continue }
+            $transitionAuthority = & $field $prepared[0] 'authority_id'
+            $transitionGeneration = & $field $prepared[0] 'transition_generation'
+            [object[]]$draining = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $prepared[0].Index -and $_.Index -lt $failure.Index -and
+                    $_.Event -eq 'filetransfer_route_transition_draining' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'authority_id') -eq $transitionAuthority -and
+                    (& $field $_ 'transition_generation') -eq $transitionGeneration
+                } | Select-Object -First 1)
+            [object[]]$probeSent = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $prepared[0].Index -and $_.Index -lt $failure.Index -and
+                    $_.Event -eq 'runtime_unlock_precommit_probe_sent' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'transaction_generation') -eq $transaction -and
+                    (& $field $_ 'offer_generation') -eq $offer -and
+                    (& $field $_ 'tuna_path_lease_generation') -eq $lease -and
+                    (& $field $_ 'probe_id') -eq $probe
+                } | Select-Object -First 1)
+            if ($draining.Count -ne 1 -or $probeSent.Count -ne 1) { continue }
+
+            [object[]]$probeAccepted = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $probeSent[0].Index -and $_.Index -lt $failure.Index -and
+                    $_.Event -in @(
+                        'runtime_unlock_precommit_probe_acked',
+                        'runtime_unlock_tuna_probe_ack_received',
+                        'runtime_unlock_transaction_path_probe_acked') -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transaction_generation') -eq $transaction -and
+                    (& $field $_ 'offer_generation') -eq $offer -and
+                    (& $field $_ 'probe_id') -eq $probe
+                } | Select-Object -First 1)
+            if ($probeAccepted.Count -gt 0) { continue }
+
+            [object[]]$decision = @($records | Where-Object {
+                    $lookupCount++
+                    $_.Index -gt $failure.Index -and
+                    $_.Event -eq 'filetransfer_runtime_unlock_post_fallback_precommit_probe_sidecar_failure_decided' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'role') -eq 'initiator' -and
+                    (& $field $_ 'transaction_generation') -eq $transaction -and
+                    (& $field $_ 'offer_generation') -eq $offer -and
+                    (& $field $_ 'tuna_path_lease_generation') -eq $lease -and
+                    (& $field $_ 'probe_id') -eq $probe -and
+                    (& $field $_ 'decision_status') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$invalidated = @($records | Where-Object {
+                    $lookupCount++
+                    $decision.Count -eq 1 -and $_.Index -gt $failure.Index -and
+                    $_.Event -eq 'filetransfer_route_transition_invalidated' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'authority_id') -eq $transitionAuthority -and
+                    (& $field $_ 'transition_generation') -eq $transitionGeneration
+                } | Select-Object -First 1)
+            [object[]]$disposition = @($records | Where-Object {
+                    $lookupCount++
+                    $invalidated.Count -eq 1 -and $_.Index -gt $invalidated[0].Index -and
+                    $_.Event -eq 'filetransfer_route_transition_disposition_applied' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'authority_id') -eq $transitionAuthority -and
+                    (& $field $_ 'transition_generation') -eq $transitionGeneration -and
+                    ((& $field $_ 'decision_status') -in @('Applied', 'Idempotent') -or
+                     (& $field $_ 'apply_status') -eq 'applied')
+                } | Select-Object -First 1)
+            [object[]]$initiator = @($records | Where-Object {
+                    $lookupCount++
+                    $decision.Count -eq 1 -and $_.Index -gt $failure.Index -and
+                    $_.Event -eq 'filetransfer_fallback_tail_retry_cycle_supersession_decided' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'role') -eq 'initiator' -and
+                    (& $field $_ 'trigger') -eq 'sidecar_failed_precommit_probe_rollback' -and
+                    (& $field $_ 'status') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$responder = @($records | Where-Object {
+                    $lookupCount++
+                    $decision.Count -eq 1 -and $_.Index -gt $failure.Index -and
+                    $_.Event -eq 'filetransfer_fallback_tail_retry_cycle_supersession_decided' -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'role') -eq 'responder' -and
+                    (& $field $_ 'trigger') -eq 'sidecar_failed_precommit_probe_rollback' -and
+                    (& $field $_ 'status') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$successor = @($records | Where-Object {
+                    $lookupCount++
+                    $initiator.Count -eq 1 -and $responder.Count -eq 1 -and
+                    $_.Index -gt [Math]::Max($initiator[0].Index, $responder[0].Index) -and
+                    $_.Event -eq 'filetransfer_fallback_tail_yield_issued' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'direction') -eq 'outbound' -and
+                    (& $field $_ 'predecessor_authority_id') -eq
+                        (& $field $initiator[0] 'authority_id')
+                } | Select-Object -First 1)
+            [object[]]$successorPairing = @($records | Where-Object {
+                    $lookupCount++
+                    $successor.Count -eq 1 -and $_.Index -gt $successor[0].Index -and
+                    $_.Event -eq 'filetransfer_fallback_tail_pairing_committed' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'authority_id') -eq
+                        (& $field $successor[0] 'authority_id') -and
+                    (& $field $_ 'yield_generation') -eq
+                        (& $field $successor[0] 'yield_generation') -and
+                    (& $field $_ 'decision_status') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            [object[]]$freshDispatch = @($records | Where-Object {
+                    $lookupCount++
+                    $successorPairing.Count -eq 1 -and
+                    $_.Index -gt $successorPairing[0].Index -and
+                    $_.Event -eq 'runtime_unlock_retry_dispatch_contract_settled' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'settlement_outcome') -eq 'DispatchObserved' -and
+                    (& $field $_ 'authority_id') -ne $retryAuthority
+                } | Select-Object -First 1)
+            [object[]]$freshPrepared = @($records | Where-Object {
+                    $lookupCount++
+                    $freshDispatch.Count -eq 1 -and $_.Index -gt $freshDispatch[0].Index -and
+                    $_.Event -eq 'filetransfer_route_transition_prepared' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'transition_kind') -eq 'PostTunaFallbackV6ToTunaV4' -and
+                    (& $field $_ 'transition_generation') -ne $transitionGeneration
+                } | Select-Object -First 1)
+            [object[]]$freshProbeAck = @($records | Where-Object {
+                    $lookupCount++
+                    $freshPrepared.Count -eq 1 -and $_.Index -gt $freshPrepared[0].Index -and
+                    $_.Event -eq 'runtime_unlock_precommit_probe_acked' -and
+                    (& $field $_ 'log_writer_id') -eq $writer -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'transaction_generation') -eq
+                        (& $field $freshPrepared[0] 'transaction_generation') -and
+                    (& $field $_ 'offer_generation') -eq
+                        (& $field $freshPrepared[0] 'offer_generation') -and
+                    (& $field $_ 'tuna_path_lease_generation') -eq
+                        (& $field $freshPrepared[0] 'tuna_path_lease_generation')
+                } | Select-Object -First 1)
+            [object[]]$freshResponderHandoff = @($records | Where-Object {
+                    $lookupCount++
+                    $freshPrepared.Count -eq 1 -and $_.Index -gt $freshPrepared[0].Index -and
+                    $_.Event -eq 'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided' -and
+                    (& $field $_ 'session_id') -eq $session -and
+                    (& $field $_ 'transfer_id') -eq $transfer -and
+                    (& $field $_ 'responder_transition_mode') -eq 'post_fallback_v6_paired' -and
+                    (& $field $_ 'decision_status') -in @('Accepted', 'Idempotent')
+                } | Select-Object -First 1)
+            if ($decision.Count -eq 1 -and $invalidated.Count -eq 1 -and
+                $disposition.Count -eq 1 -and
+                $initiator.Count -eq 1 -and $responder.Count -eq 1 -and
+                $successor.Count -eq 1 -and
+                $successorPairing.Count -eq 1 -and
+                $freshDispatch.Count -eq 1 -and $freshPrepared.Count -eq 1 -and
+                $freshProbeAck.Count -eq 1 -and
+                $freshResponderHandoff.Count -eq 1) {
+                continue
+            }
+
+            $sequence = & $field $failure 'gui_evidence_sequence'
+            return [pscustomobject]@{
+                Unresolved = $true
+                FirstSequence = if ($sequence -match '^[1-9][0-9]*$') {
+                    [long]$sequence
+                } else { [long]($failure.Index + 1) }
+                ParsedRecords = [long]$records.Count
+                LookupCount = $lookupCount
+            }
+        }
+
+        return [pscustomobject]@{
+            Unresolved = $false
+            FirstSequence = [long]::MaxValue
+            ParsedRecords = [long]$records.Count
+            LookupCount = $lookupCount
+        }
+    }
+
     function Get-TunaGuiInboundFallbackRetainedFrameDispositionFailure {
         param([AllowEmptyCollection()][string[]]$Lines)
 
@@ -17183,6 +17451,23 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_fallback_tail_retry_cycle_supersession_decided',
             'filetransfer_fallback_tail_yield_issued',
             'filetransfer_route_transition_prepared')
+        ProbeSidecarPairRecovery = @(
+            'runtime_unlock_retry_dispatch_contract_settled',
+            'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_draining',
+            'runtime_unlock_precommit_probe_sent',
+            'runtime_unlock_precommit_probe_acked',
+            'runtime_unlock_tuna_probe_ack_received',
+            'runtime_unlock_transaction_path_probe_acked',
+            'runtime_unlock_transaction_path_probe_failed',
+            'runtime_unlock_post_fallback_precommit_probe_sidecar_failure_observed',
+            'filetransfer_runtime_unlock_post_fallback_precommit_probe_sidecar_failure_decided',
+            'filetransfer_route_transition_invalidated',
+            'filetransfer_route_transition_disposition_applied',
+            'filetransfer_fallback_tail_retry_cycle_supersession_decided',
+            'filetransfer_fallback_tail_yield_issued',
+            'filetransfer_fallback_tail_pairing_committed',
+            'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided')
         LifecycleSplit = @(
             'filetransfer_regular_v4_frontier_repair_pressure_binding_committed',
             'filetransfer_regular_v4_frontier_repair_settlement_accepted',
@@ -19811,6 +20096,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $retryCycleSuccessorFastPath =
         Get-TunaGuiFallbackTailRetryCycleSuccessorFailure `
             -Lines ([string[]]$earlyPredicateLines.RetryCycleSuccessor.ToArray())
+    $probeSidecarPairRecoveryFastPath =
+        Get-TunaGuiPostFallbackProbeSidecarPairRecoveryFailure `
+            -Lines ([string[]]$earlyPredicateLines.ProbeSidecarPairRecovery.ToArray())
     $installedRetryRecoveryJoinFastPath =
         Get-TunaGuiInstalledRetryRecoveryJoinFailure `
             -Lines ([string[]]$earlyPredicateLines.InstalledRetryRecoveryJoin.ToArray())
@@ -19913,6 +20201,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{
                 Kind = 'RetryCycleSuccessor'
                 Result = $retryCycleSuccessorFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'ProbeSidecarPairRecovery'
+                Result = $probeSidecarPairRecoveryFastPath
             },
             [pscustomobject]@{
                 Kind = 'InstalledRetryRecoveryJoin'
@@ -20076,6 +20368,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $result.RuntimeUnlockRetryDispatchPairedYieldSuccessorMissingAfterProbeRollback = $true
         $result.FailureVariant = 'release_consumed_gen1_not_retired_for_fresh_quiescent_pair'
         return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'ProbeSidecarPairRecovery') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$probeSidecarPairRecoveryFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_post_fallback_probe_sidecar_pair_recovery_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'runtime_unlock_retry' `
+            -Reason 'settled_post_fallback_retry_probe_sidecar_failure_not_propagated_to_coordinator_pair_supersession' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_post_fallback_probe_sidecar_pair_recovery_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$probeSidecarPairRecoveryFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$probeSidecarPairRecoveryFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 
     if ($firstEarlyRouteRuntimeKind -eq 'RouteDrain') {

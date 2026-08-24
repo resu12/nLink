@@ -26026,6 +26026,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             FileTransferTransportKind.Unknown,
             0L,
             default(RuntimeUnlockPeerPreCommitAnswerAcceptanceScope),
+            null,
         ];
         return Activator.CreateInstance(convergenceType, arguments)!;
     }
@@ -33055,6 +33056,81 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 Assert.Equal(
                     "InitialActivation",
                     GetPrivateField(helper, "pendingAccelerationAnswerAckAuthorityMode")?.ToString());
+
+                RuntimeUnlockPostFallbackPreCommitProbeFailureObservation?
+                    observedFailure = null;
+                EventHandler<
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureObservedEventArgs>
+                    failureHandler = (_, args) =>
+                    {
+                        observedFailure = args.Observation;
+                        args.Decision = new(
+                            RuntimeUnlockPostFallbackPreCommitProbeFailureStatus.Accepted,
+                            "test_responder_sidecar_failure_accepted");
+                    };
+                bridge.RuntimeUnlockPostFallbackPreCommitProbeFailureObserved +=
+                    failureHandler;
+                var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var pendingGeneration = Assert.IsType<long>(GetPrivateField(
+                    helper,
+                    "pendingAccelerationAnswerAckGeneration"));
+                var authorityMode = GetPrivateField(
+                    helper,
+                    "pendingAccelerationAnswerAckAuthorityMode");
+                Assert.NotNull(authorityMode);
+                var semanticAck = new TransportAccelerationAnswerAckPayload
+                {
+                    SessionId = sessionId,
+                    Accepted = true,
+                    SupportedLanes = ["file"],
+                    SentAtUnixMs = nowUtcMs,
+                    ExpiresAtUnixMs = nowUtcMs + 60_000,
+                    Nonce = offer.Nonce,
+                    SidecarProtocolVersion = 1,
+                    PayerDecisionId = offer.PayerDecisionId,
+                };
+                var recordAck = typeof(NknSignalingTransport).GetMethod(
+                    "TryRecordRuntimeUnlockResponderSemanticAnswerAckUnsafe",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                object?[] recordAckArguments =
+                [
+                    semanticAck,
+                    "post-fallback-paired-offer-answer-ack",
+                    new string('a', 64),
+                    new string('b', 64),
+                    NknAccelerationLaneKind.File,
+                    authorityMode,
+                    pendingGeneration,
+                    null,
+                    null,
+                ];
+                lock (Assert.IsType<object>(
+                          GetPrivateField(helper, "accelerationGate")))
+                {
+                    Assert.True(Assert.IsType<bool>(
+                        recordAck.Invoke(helper, recordAckArguments)));
+                }
+                await WaitUntilAsync(
+                    () => GetPrivateField(
+                            helper,
+                            "runtimeUnlockResponderAnswerProbeConvergence") is not null,
+                    TimeSpan.FromSeconds(2));
+
+                await helperLane.StopAsync(
+                    "sidecar_remote_closed",
+                    cts.Token);
+
+                var exactFailure = Assert.IsType<
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureObservation>(
+                    observedFailure);
+                Assert.Equal(
+                    RuntimeUnlockPostFallbackPreCommitProbeFailureRole.Responder,
+                    exactFailure.Role);
+                Assert.Equal(transferId, exactFailure.TransferId);
+                Assert.NotNull(exactFailure.BindingReceipt);
+                Assert.Null(exactFailure.InstallReceipt);
+                bridge.RuntimeUnlockPostFallbackPreCommitProbeFailureObserved -=
+                    failureHandler;
             }
             else
             {
