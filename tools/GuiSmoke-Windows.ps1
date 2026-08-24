@@ -6199,6 +6199,31 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             param($candidate)
             if ($null -ne $candidate) { $candidateRecords.Add($candidate) | Out-Null }
         }
+        $isV4Payload = {
+            param($fields)
+
+            $rawPayloadBytes = 0L
+            $batchChunkCount = 0L
+            if (-not [long]::TryParse(
+                    (Get-GuiSmokeFieldValue -Fields $fields -Name 'raw_payload_bytes' -Default '0'),
+                    [ref]$rawPayloadBytes) -or
+                -not [long]::TryParse(
+                    (Get-GuiSmokeFieldValue -Fields $fields -Name 'batch_chunk_count' -Default '0'),
+                    [ref]$batchChunkCount) -or
+                $rawPayloadBytes -le 0 -or
+                $batchChunkCount -le 0) {
+                return $false
+            }
+
+            $frameType = Get-GuiSmokeFieldValue -Fields $fields -Name 'frame_type' -Default ''
+            if ($frameType -eq 'filetransfer.chunk_batch.v4') { return $true }
+            if (-not [string]::IsNullOrWhiteSpace($frameType)) { return $false }
+            $batchProfile = Get-GuiSmokeFieldValue -Fields $fields -Name 'batch_profile' -Default ''
+            return -not [string]::IsNullOrWhiteSpace($batchProfile) -and
+                $batchProfile.StartsWith(
+                    'v4_',
+                    [System.StringComparison]::OrdinalIgnoreCase)
+        }
 
         for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
             $lineVisits++
@@ -6284,7 +6309,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-GuiSmokeFieldValue -Fields $fields -Name 'route' -Default '') -ne 'file_tuna_v4' -or
                     (Get-GuiSmokeFieldValue -Fields $fields -Name 'protocol_version' -Default '') -ne '4' -or
                     (Get-GuiSmokeFieldValue -Fields $fields -Name 'actual_transport' -Default '') -ne 'regular_nkn' -or
-                    (Get-GuiSmokeFieldValue -Fields $fields -Name 'target_transport' -Default '') -ne 'tuna') {
+                    (Get-GuiSmokeFieldValue -Fields $fields -Name 'target_transport' -Default '') -ne 'tuna' -or
+                    -not (& $isV4Payload $fields)) {
                     continue
                 }
                 $payloadKey = & $getPayloadKey $fields
@@ -6361,6 +6387,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             UnresolvedCount = $unresolved.Count
             Unresolved = $unresolved.Count -gt 0
             Line = if ($unresolved.Count -gt 0) { $unresolved[0].Line } else { '' }
+            FirstSequence = if ($unresolved.Count -gt 0) {
+                [long]($unresolved[0].LineIndex + 1)
+            }
+            else { [long]::MaxValue }
             LineVisits = $lineVisits
         }
     }
@@ -10289,8 +10319,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             $candidate.TransferId -eq $transferId -and
                             $candidate.Direction -eq $direction -and
                             $candidate.FallbackEpoch -eq $fallbackEpoch -and
-                            $candidate.FrameKind -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind') -and
+                            ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound' -or
+                             $candidate.FrameKind -eq
+                                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'frame_kind')) -and
                             $candidate.TargetTransportEpoch -eq
                                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'target_transport_epoch')) {
                             $matchingCommand = $candidate
@@ -10353,10 +10384,23 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Accepted', 'Idempotent')) {
                 $command.PeerAccepted = $true
             }
-            elseif ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound' -and
-                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -in @('Bound', 'Idempotent') -and
-                (Get-TunaGuiLogLineFieldValue -Line $line -Name 'peer_proof_generation') -notin @('', '0')) {
-                $command.PeerBoundaryBound = $true
+            elseif ($eventName -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound') {
+                $boundaryStatus = Get-TunaGuiLogLineFieldValue `
+                    -Line $line -Name 'decision_status'
+                if ([string]::IsNullOrWhiteSpace($boundaryStatus)) {
+                    $boundaryStatus = Get-TunaGuiLogLineFieldValue `
+                        -Line $line -Name 'pairing_status'
+                }
+                $peerProofGeneration = Get-TunaGuiLogLineFieldValue `
+                    -Line $line -Name 'peer_proof_generation'
+                if ([string]::IsNullOrWhiteSpace($peerProofGeneration)) {
+                    $peerProofGeneration = Get-TunaGuiLogLineFieldValue `
+                        -Line $line -Name 'proof_generation'
+                }
+                if ($boundaryStatus -in @('Bound', 'Idempotent') -and
+                    $peerProofGeneration -notin @('', '0')) {
+                    $command.PeerBoundaryBound = $true
+                }
             }
         }
 
@@ -16890,6 +16934,246 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiInboundFallbackRetainedFrameDispositionFailure {
+        param([AllowEmptyCollection()][string[]]$Lines)
+
+        $states = @{}
+        $lineVisits = 0L
+        $lookupCount = 0L
+        $field = {
+            param($line, $name)
+            Get-TunaGuiLogLineFieldValue -Line $line -Name $name
+        }
+        $keyFor = {
+            param($line)
+            $parts = @(
+                (& $field $line 'log_writer_id'),
+                (& $field $line 'session_id'),
+                (& $field $line 'transfer_id'),
+                (& $field $line 'direction'),
+                (& $field $line 'authority_id'),
+                (& $field $line 'transition_generation'))
+            if (@($parts | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+                return ''
+            }
+            return ($parts -join '|').ToLowerInvariant()
+        }
+        $same = {
+            param($state, $line, [switch]$Target)
+            foreach ($name in @('log_writer_id', 'session_id', 'transfer_id', 'direction')) {
+                if (-not [string]::Equals(
+                        [string]$state.$name,
+                        (& $field $line $name),
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $false
+                }
+            }
+            if ($Target) {
+                foreach ($pair in @(
+                        @('target_route', 'route'),
+                        @('target_protocol_version', 'protocol_version'),
+                        @('target_live_route_epoch', 'live_route_epoch'),
+                        @('target_runtime_generation', 'runtime_generation'),
+                        @('target_terminal_generation', 'terminal_generation'),
+                        @('target_leg_generation', 'leg_generation'),
+                        @('target_route_publication_generation', 'route_publication_generation'))) {
+                    if (-not [string]::Equals(
+                            [string]$state.($pair[0]),
+                            (& $field $line $pair[1]),
+                            [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return $false
+                    }
+                }
+            }
+            return $true
+        }
+
+        for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
+            $lineVisits++
+            $line = [string]$Lines[$lineIndex]
+            $eventName = & $field $line 'event'
+            if ($eventName -notin @(
+                    'filetransfer_route_transition_prepared',
+                    'filetransfer_route_transition_pause_bound',
+                    'filetransfer_route_transition_draining',
+                    'filetransfer_route_transition_drain_receipt_decided',
+                    'filetransfer_route_transition_committed',
+                    'filetransfer_route_hint_authorized_publication_accepted',
+                    'filetransfer_route_transition_retained_frame_rejected',
+                    'filetransfer_route_transition_retained_frame_applied',
+                    'filetransfer_route_transition_disposition_applied',
+                    'filetransfer_live_route_epoch_recovered',
+                    'filetransfer_route_transition_supersession_decided',
+                    'filetransfer_route_transition_invalidated',
+                    'filetransfer_data_session_recreated',
+                    'filetransfer_data_session_removed',
+                    'filetransfer_runtime_terminalized',
+                    'filetransfer_live_route_epoch_terminal',
+                    'file_transfer_inbound_terminal',
+                    'transfer_terminal')) {
+                continue
+            }
+
+            if ($eventName -eq 'filetransfer_route_transition_prepared') {
+                if ((& $field $line 'direction') -ne 'inbound' -or
+                    (& $field $line 'source_route') -ne 'file_tuna_v4' -or
+                    (& $field $line 'source_protocol_version') -ne '4' -or
+                    (& $field $line 'target_route') -ne 'post_tuna_fallback_v6' -or
+                    (& $field $line 'target_protocol_version') -ne '6' -or
+                    (& $field $line 'decision_status') -notin @('Prepared', 'Idempotent')) {
+                    continue
+                }
+                $key = & $keyFor $line
+                if ([string]::IsNullOrWhiteSpace($key)) { continue }
+                $state = [ordered]@{
+                    log_writer_id = & $field $line 'log_writer_id'
+                    session_id = & $field $line 'session_id'
+                    transfer_id = & $field $line 'transfer_id'
+                    direction = & $field $line 'direction'
+                    authority_id = & $field $line 'authority_id'
+                    transition_generation = & $field $line 'transition_generation'
+                    retained_frame_type = & $field $line 'retained_frame_type'
+                    retained_frame_transport_epoch = & $field $line 'retained_frame_transport_epoch'
+                    retained_frame_fingerprint = & $field $line 'retained_frame_fingerprint'
+                    target_route = & $field $line 'target_route'
+                    target_protocol_version = & $field $line 'target_protocol_version'
+                    target_live_route_epoch = & $field $line 'target_live_route_epoch'
+                    target_runtime_generation = & $field $line 'target_runtime_generation'
+                    target_terminal_generation = & $field $line 'target_terminal_generation'
+                    target_leg_generation = & $field $line 'target_leg_generation'
+                    target_route_publication_generation = & $field $line 'target_route_publication_generation'
+                    Pause = $false; Draining = $false; Drain = $false
+                    Commit = $false; Publication = $false; Candidate = $false
+                    Applied = $false; BridgeDisposition = $false
+                    CoreDisposition = $false; Recovered = $false; Poisoned = $false
+                    CandidateSequence = [long]::MaxValue
+                }
+                $states[$key] = [pscustomobject]$state
+                continue
+            }
+
+            $key = & $keyFor $line
+            [object[]]$matches = @()
+            if (-not [string]::IsNullOrWhiteSpace($key) -and $states.ContainsKey($key)) {
+                $matches = @($states[$key])
+            }
+            else {
+                $matches = @($states.Values | Where-Object {
+                        & $same $_ $line -Target:($eventName -in @(
+                            'filetransfer_route_hint_authorized_publication_accepted',
+                            'filetransfer_live_route_epoch_recovered'))
+                    })
+            }
+            $lookupCount += [long]$matches.Count
+            foreach ($state in @($matches)) {
+                if ($state.Recovered -or $state.Poisoned) { continue }
+                switch ($eventName) {
+                    'filetransfer_route_transition_pause_bound' {
+                        if ((& $field $line 'decision_status') -in @('Installed', 'Idempotent')) {
+                            $state.Pause = $true
+                        }
+                    }
+                    'filetransfer_route_transition_draining' {
+                        if ($state.Pause -and (& $field $line 'decision_status') -in @('Draining', 'Idempotent')) {
+                            $state.Draining = $true
+                        }
+                    }
+                    'filetransfer_route_transition_drain_receipt_decided' {
+                        if ($state.Draining -and
+                            (& $field $line 'decision_status') -in @('Accepted', 'Idempotent') -and
+                            (& $field $line 'drain_outcome') -eq 'Completed') {
+                            $state.Drain = $true
+                        }
+                    }
+                    'filetransfer_route_transition_committed' {
+                        if ($state.Drain -and (& $field $line 'decision_status') -in @('Committed', 'Idempotent')) {
+                            $state.Commit = $true
+                            foreach ($name in @(
+                                    'retained_frame_type',
+                                    'retained_frame_transport_epoch',
+                                    'retained_frame_fingerprint',
+                                    'target_live_route_epoch',
+                                    'target_runtime_generation',
+                                    'target_terminal_generation',
+                                    'target_leg_generation',
+                                    'target_route_publication_generation')) {
+                                $state.$name = & $field $line $name
+                            }
+                        }
+                    }
+                    'filetransfer_route_hint_authorized_publication_accepted' {
+                        if ($state.Commit -and (& $same $state $line -Target)) {
+                            $state.Publication = $true
+                        }
+                    }
+                    'filetransfer_route_transition_retained_frame_rejected' {
+                        if ($state.Publication -and
+                            (& $field $line 'decision_reason') -eq
+                                'filetransfer_route_transition_retained_frame_response_failed' -and
+                            (& $field $line 'frame_type') -eq $state.retained_frame_type -and
+                            (& $field $line 'frame_transport_epoch') -eq
+                                $state.retained_frame_transport_epoch -and
+                            (& $field $line 'frame_fingerprint') -eq
+                                $state.retained_frame_fingerprint) {
+                            $state.Candidate = $true
+                            $sequence = & $field $line 'gui_evidence_sequence'
+                            $state.CandidateSequence = if ($sequence -match '^[1-9][0-9]*$') {
+                                [long]$sequence
+                            }
+                            else { [long]($lineIndex + 1) }
+                        }
+                    }
+                    'filetransfer_route_transition_retained_frame_applied' {
+                        if ($state.Candidate -and
+                            (& $field $line 'frame_type') -eq $state.retained_frame_type -and
+                            (& $field $line 'frame_transport_epoch') -eq
+                                $state.retained_frame_transport_epoch -and
+                            (& $field $line 'frame_fingerprint') -eq
+                                $state.retained_frame_fingerprint -and
+                            (& $field $line 'decision_status') -in @('Applied', 'Idempotent')) {
+                            $state.Applied = $true
+                        }
+                    }
+                    'filetransfer_route_transition_disposition_applied' {
+                        if ($state.Applied -and (& $field $line 'apply_status') -eq 'applied') {
+                            $state.BridgeDisposition = $true
+                        }
+                        if ($state.Applied -and
+                            (& $field $line 'decision_status') -in @('Applied', 'Idempotent')) {
+                            $state.CoreDisposition = $true
+                        }
+                    }
+                    'filetransfer_live_route_epoch_recovered' {
+                        if ($state.BridgeDisposition -and $state.CoreDisposition -and
+                            (& $same $state $line -Target)) {
+                            $state.Recovered = $true
+                        }
+                    }
+                    'filetransfer_route_transition_retained_frame_receive_dispatch_decided' {
+                        # Authority-neutral receive-loop arbitration is diagnostic only.
+                    }
+                    default {
+                        if ($state.Candidate) { $state.Poisoned = $true }
+                    }
+                }
+            }
+        }
+
+        [object[]]$unresolved = @($states.Values | Where-Object {
+                $_.Candidate -and -not ($_.Applied -and $_.BridgeDisposition -and
+                    $_.CoreDisposition -and $_.Recovered)
+            } | Sort-Object CandidateSequence)
+        return [pscustomobject]@{
+            Unresolved = $unresolved.Count -gt 0
+            FirstSequence = if ($unresolved.Count -gt 0) {
+                [long]$unresolved[0].CandidateSequence
+            }
+            else { [long]::MaxValue }
+            ParsedRecords = [long]$Lines.Count
+            LookupCount = $lookupCount
+        }
+    }
+
     $earlyPredicateEventNames = @{
         RetryCycleSuccessor = @(
             'filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested',
@@ -16936,6 +17220,36 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_data_session_recreated', 'filetransfer_runtime_terminalized',
             'filetransfer_live_route_epoch_terminal', 'filetransfer_v6_epoch_terminal',
             'file_transfer_inbound_terminal', 'transfer_terminal')
+        FallbackTransitionDisposition = @(
+            'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_pause_bound',
+            'filetransfer_route_transition_draining',
+            'filetransfer_route_transition_drain_receipt_decided',
+            'filetransfer_route_transition_committed',
+            'filetransfer_route_hint_authorized_publication_accepted',
+            'filetransfer_route_transition_retained_frame_rejected',
+            'filetransfer_route_transition_retained_frame_applied',
+            'filetransfer_route_transition_retained_frame_receive_dispatch_decided',
+            'filetransfer_route_transition_disposition_applied',
+            'filetransfer_live_route_epoch_recovered',
+            'filetransfer_route_transition_supersession_decided',
+            'filetransfer_route_transition_invalidated',
+            'filetransfer_data_session_recreated', 'filetransfer_data_session_removed',
+            'filetransfer_runtime_terminalized', 'filetransfer_live_route_epoch_terminal',
+            'file_transfer_inbound_terminal', 'transfer_terminal')
+        FileTunaDataPath = @(
+            'filetransfer_data_path_send_result',
+            'filetransfer_data_path_receive_result',
+            'filetransfer_data_path_transport_mismatch',
+            'filetransfer_data_path_frame_ignored',
+            'filetransfer_route_selected',
+            'filetransfer_live_route_epoch_recovered',
+            'filetransfer_runtime_owner_changed',
+            'filetransfer_runtime_terminalized',
+            'filetransfer_live_route_epoch_terminal',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'transfer_terminal')
         PrecommitTransition = @(
             'filetransfer_runtime_unlock_precommit_probe_launch_handoff_decided',
             'filetransfer_route_transition_prepared',
@@ -17290,10 +17604,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
     $earlyPredicateEventSets = @{}
     $earlyPredicateLines = @{}
+    $earlyPredicateNamesByEvent = @{}
     foreach ($predicateName in $earlyPredicateEventNames.Keys) {
         $eventSet = [System.Collections.Generic.HashSet[string]]::new(
             [System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($eventName in $earlyPredicateEventNames[$predicateName]) { [void]$eventSet.Add($eventName) }
+        foreach ($eventName in $earlyPredicateEventNames[$predicateName]) {
+            [void]$eventSet.Add($eventName)
+            if (-not $earlyPredicateNamesByEvent.ContainsKey($eventName)) {
+                $earlyPredicateNamesByEvent[$eventName] =
+                    [System.Collections.Generic.List[string]]::new()
+            }
+            $earlyPredicateNamesByEvent[$eventName].Add($predicateName)
+        }
         $earlyPredicateEventSets[$predicateName] = $eventSet
         $earlyPredicateLines[$predicateName] = [System.Collections.Generic.List[string]]::new()
     }
@@ -17309,6 +17631,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
         }
         return $false
+    }
+    function Get-TunaGuiLogLineEventNameFast {
+        param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
+
+        $marker = 'event='
+        $start = $Line.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($start -lt 0) { return '' }
+        $start += $marker.Length
+        $end = $Line.IndexOf(';', $start)
+        if ($end -lt 0) { $end = $Line.Length }
+        if ($end -le $start) { return '' }
+        return $Line.Substring($start, $end - $start).Trim()
     }
     function Get-TunaGuiPostFallbackRetryBlockedByGenericActivationFailure {
         param(
@@ -19407,11 +19741,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $earlyEvidenceLineVisitCount = 0L
     foreach ($line in $evidenceLines) {
         $earlyEvidenceLineVisitCount++
-        $eventName = Get-TunaGuiLogLineFieldValue -Line $line -Name 'event'
+        $eventName = Get-TunaGuiLogLineEventNameFast -Line $line
         if ([string]::IsNullOrWhiteSpace($eventName)) { continue }
         $indexedLine = "$line; gui_evidence_sequence=$earlyEvidenceLineVisitCount"
-        foreach ($predicateName in $earlyPredicateEventSets.Keys) {
-            if ($earlyPredicateEventSets[$predicateName].Contains($eventName)) {
+        if ($earlyPredicateNamesByEvent.ContainsKey($eventName)) {
+            foreach ($predicateName in $earlyPredicateNamesByEvent[$eventName]) {
                 $earlyPredicateLines[$predicateName].Add($indexedLine)
             }
         }
@@ -19501,6 +19835,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $routeTransitionPressureLocalLifecycleFastPath =
         Get-TunaGuiRouteTransitionPressureLocalLifecycleFailure `
             -Lines ([string[]]$earlyPredicateLines.LifecycleSplit.ToArray())
+    $inboundFallbackRetainedDispositionFastPath =
+        Get-TunaGuiInboundFallbackRetainedFrameDispositionFailure `
+            -Lines ([string[]]$earlyPredicateLines.FallbackTransitionDisposition.ToArray())
+    $fileTunaV4DataPathMismatchFastPath =
+        Get-TunaGuiFileTunaV4DataPathMismatchFailure `
+            -Lines ([string[]]$earlyPredicateLines.FileTunaDataPath.ToArray())
     $installedRetryPendingDialFirstSequence = [long]::MaxValue
     if ($installedRetryPendingDialFastPath) {
         $firstPendingDialCandidate = @($earlyPredicateLines.PendingDial | Where-Object {
@@ -19522,6 +19862,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{
                 Kind = 'LifecycleSplit'
                 Result = $routeTransitionPressureLocalLifecycleFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'FallbackTransitionDisposition'
+                Result = $inboundFallbackRetainedDispositionFastPath
+            },
+            [pscustomobject]@{
+                Kind = 'FileTunaDataPathMismatch'
+                Result = $fileTunaV4DataPathMismatchFastPath
             },
             [pscustomobject]@{ Kind = 'RouteDrain'; Result = $initialResponderDrainFastPath },
             [pscustomobject]@{
@@ -19630,6 +19978,44 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
             -EvidenceParsedRecordCount ([long]$routeTransitionPressureLocalLifecycleFastPath.ParsedRecords) `
             -EvidenceLookupCount ([long]$routeTransitionPressureLocalLifecycleFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'FallbackTransitionDisposition') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                [long]$inboundFallbackRetainedDispositionFastPath.LookupCount
+            $TestMetrics.classificationSource =
+                "${classificationSource}_inbound_fallback_retained_disposition_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_transition' `
+            -Reason 'committed_inbound_fallback_transition_retained_frame_response_failed_without_exact_disposition' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_inbound_fallback_retained_disposition_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$inboundFallbackRetainedDispositionFastPath.ParsedRecords) `
+            -EvidenceLookupCount ([long]$inboundFallbackRetainedDispositionFastPath.LookupCount) `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'FileTunaDataPathMismatch') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount =
+                [long]$fileTunaV4DataPathMismatchFastPath.LineVisits
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource =
+                "${classificationSource}_file_tuna_v4_data_path_mismatch_index"
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'route_runtime' `
+            -Reason 'file_tuna_data_path_mismatch' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_file_tuna_v4_data_path_mismatch_index" `
+            -EvidenceLineVisitCount ([long]$fileTunaV4DataPathMismatchFastPath.LineVisits) `
+            -EvidenceParsedRecordCount ([long]$fileTunaV4DataPathMismatchFastPath.DistinctCount) `
+            -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 
@@ -20242,26 +20628,6 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 
-    $fileTunaV4DataPathMismatchFastPath =
-        Get-TunaGuiFileTunaV4DataPathMismatchFailure -Lines ([string[]]$evidenceLines)
-    if ($fileTunaV4DataPathMismatchFastPath.Unresolved) {
-        if ($null -ne $TestMetrics) {
-            $TestMetrics.evidenceLineVisitCount =
-                [long]$fileTunaV4DataPathMismatchFastPath.LineVisits
-            $TestMetrics.evidenceLookupCount = 0L
-            $TestMetrics.classificationSource =
-                "${classificationSource}_file_tuna_v4_data_path_mismatch_index"
-        }
-        return New-TunaGuiFileTransferFailureClassificationResult `
-            -Phase 'route_runtime' `
-            -Reason 'file_tuna_data_path_mismatch' `
-            -RouteMode $RouteMode `
-            -ClassificationSource "${classificationSource}_file_tuna_v4_data_path_mismatch_index" `
-            -EvidenceLineVisitCount ([long]$fileTunaV4DataPathMismatchFastPath.LineVisits) `
-            -EvidenceParsedRecordCount ([long]$fileTunaV4DataPathMismatchFastPath.DistinctCount) `
-            -EvidenceLookupCount 0L `
-            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
-    }
     if ($null -ne $explicitResult -and
         $explicitResult.Reason -eq 'file_tuna_data_path_mismatch' -and
         $fileTunaV4DataPathMismatchFastPath.DistinctCount -gt 0 -and

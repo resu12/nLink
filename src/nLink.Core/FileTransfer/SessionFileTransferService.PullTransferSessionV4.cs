@@ -22237,13 +22237,46 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
+                var fallbackProofHandled = false;
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
                 {
-                    if (TryPromoteInboundFileTunaV4FallbackFromPeerV6Proof(context, frame, out var promotedSnapshot) &&
-                        promotedSnapshot is not null)
+                    fallbackProofHandled =
+                        TryPromoteInboundFileTunaV4FallbackFromPeerV6Proof(
+                            context,
+                            frame,
+                            out var promotedSnapshot);
+                    if (fallbackProofHandled && promotedSnapshot is not null)
                     {
                         RaiseTransferChanged(promotedSnapshot);
                     }
+
+                    if (fallbackProofHandled)
+                    {
+                        LogInboundFileTransferRouteTransitionRetainedFrameReceiveDispatchDecision(
+                            context,
+                            frame,
+                            "Claimed",
+                            "retained_frame_owned_by_route_transition");
+                        continue;
+                    }
+                }
+
+                var retainedDispatchDecision =
+                    GetInboundFileTransferRouteTransitionRetainedFrameReceiveDispatchDecision(
+                        context,
+                        frame);
+                if (retainedDispatchDecision is not
+                    InboundRetainedFrameReceiveDispatchDecision.None)
+                {
+                    LogInboundFileTransferRouteTransitionRetainedFrameReceiveDispatchDecision(
+                        context,
+                        frame,
+                        retainedDispatchDecision.ToString(),
+                        retainedDispatchDecision ==
+                            InboundRetainedFrameReceiveDispatchDecision.Coalesced
+                            ? "retained_frame_duplicate_coalesced"
+                            : "retained_frame_scope_not_current");
+                    continue;
                 }
 
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))

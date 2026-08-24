@@ -4,6 +4,13 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService
 {
+    private enum InboundRetainedFrameReceiveDispatchDecision
+    {
+        None,
+        Coalesced,
+        Stale,
+    }
+
     private readonly record struct
         OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding(
             FileTransferRouteTransitionAuthority Authority,
@@ -381,6 +388,88 @@ public sealed partial class SessionFileTransferService
            } &&
            retainedIdentity == candidateIdentity &&
            retainedIdentity.Matches(retainedFrame);
+
+    private InboundRetainedFrameReceiveDispatchDecision
+        GetInboundFileTransferRouteTransitionRetainedFrameReceiveDispatchDecision(
+            InboundTransferContext context,
+            FileTransferDataFrame frame)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.FileTransferRouteTransitionExecution is not
+                    {
+                        Authority: { } authority,
+                        RetainedPeerFrame: { } retainedFrame,
+                        RetainedFrameIdentity: { } identity,
+                    } execution ||
+                !identity.Matches(frame) ||
+                !identity.Matches(retainedFrame))
+            {
+                return InboundRetainedFrameReceiveDispatchDecision.None;
+            }
+
+            var current = !context.IsTerminal &&
+                ReferenceEquals(execution.SourceDataSession, context.DataSession) &&
+                execution.SourceDataSessionGeneration ==
+                    context.DataSessionGeneration &&
+                context.RouteSelection.Route ==
+                    FileTransferRoute.PostTunaFallbackV6 &&
+                context.NegotiatedDataProtocolVersion ==
+                    FileTransferProtocol.ProtocolVersionV6 &&
+                context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+                FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
+                        CreateCoordinatorStateLocked(context))
+                    .LastTerminalOperation is
+                    {
+                        State: FileTransferRouteTransitionState.Committed,
+                        Authority: var terminalAuthority,
+                        RetainedFrameApplyCommand: { } command,
+                        RetainedFrameApplyReceipt: null,
+                    } &&
+                terminalAuthority == authority &&
+                command.Authority == authority &&
+                command.FrameIdentity == identity &&
+                context.CurrentRuntimeOwner == command.TargetRuntimeOwner &&
+                context.CurrentRoutePublicationToken ==
+                    command.TargetRoutePublication;
+            return current
+                ? InboundRetainedFrameReceiveDispatchDecision.Coalesced
+                : InboundRetainedFrameReceiveDispatchDecision.Stale;
+        }
+    }
+
+    private void
+        LogInboundFileTransferRouteTransitionRetainedFrameReceiveDispatchDecision(
+            InboundTransferContext context,
+            FileTransferDataFrame frame,
+            string status,
+            string reason)
+    {
+        FileTransferRouteTransitionAuthority? authority;
+        PostTunaFallbackPeerProofFrameIdentity? identity = null;
+        long dataSessionGeneration;
+        lock (gate)
+        {
+            authority = ReferenceEquals(inboundTransfer, context)
+                ? context.FileTransferRouteTransitionExecution?.Authority
+                : null;
+            dataSessionGeneration = context.DataSessionGeneration;
+            if (PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                    frame,
+                    out var frameIdentity))
+            {
+                identity = frameIdentity;
+            }
+        }
+
+        var authorityFields = authority is { } value
+            ? FormatFileTransferRouteTransitionAuthorityFields(value)
+            : "; authority_schema=0; authority_id=(none); transition_generation=0; transition_kind=(none)";
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_route_transition_retained_frame_receive_dispatch_decided{authorityFields}; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; frame_type={FormatProtocolLogValue(identity?.FrameType ?? frame.Type)}; frame_transport_epoch={identity?.TransportEpoch ?? 0}; frame_fingerprint={FormatProtocolLogValue(identity?.Sha256 ?? "(none)")}; data_session_generation={dataSessionGeneration}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}; authority_effect=none");
+    }
 
     private static bool TryMergeFileTransferRouteTransitionEvidence(
         FileTransferRouteTransitionExecutionShadow? current,

@@ -6,6 +6,155 @@ namespace NLink.SmokeTests;
 
 public sealed partial class SessionFileTransferV4SenderTests
 {
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public async Task InboundFallbackRetainedFrame_CommittedDuringPromotion_IsNotDispatchedToSuccessorRuntime()
+    {
+        const string transferId =
+            "transfer_inbound_fallback_retained_frame_exclusive_dispatch";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(
+            $"session_{transferId}");
+        service.AttachTransport(transport);
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateFileTunaV4InboundContext(transferId);
+        SetPrivateProperty(context, "V4StateEpoch", 1);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var state = CreateCoordinatorStateForTest(context);
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var publication = state.CurrentRoutePublicationToken!.Value;
+        var leg = state.CurrentLeg!;
+        var createCheckpoint = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "CreateInboundFileTransferRouteTransitionCheckpoint" &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        var checkpoint = Assert.IsType<FileTransferRouteTransitionDurableCheckpoint>(
+            createCheckpoint.Invoke(null, [context, owner, publication, leg]));
+        var issued = FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+            state,
+            new FileTransferFallbackV6ProofBootstrapObservation(
+                state.SessionId,
+                state.TransferId,
+                FileTransferDirection.Inbound,
+                ObservationGeneration: 1,
+                FallbackEpoch: 1,
+                Source: "test_receive_loop_exclusive_dispatch",
+                ProofKind: "file_transfer_v4_frontier_request_received",
+                ObservedUtcMilliseconds: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                checkpoint));
+        var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(issued.Command);
+        SetPrivateProperty(context, "CoordinatorPersistentState", issued.State.PersistentState);
+
+        var localReceiverState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            Epoch = 2,
+            ContiguousCommittedChunkIndex = 100,
+            DurableReceivedHighestChunkIndex = 99,
+            CreditUntilChunkIndexExclusive = 100,
+            MissingRanges = [],
+            BytesCommitted = 100L * 21 * 1024,
+            TransferPaused = true,
+            TransferPauseReason = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+            TransportEpoch = command.TargetTransportEpoch,
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+        var deliveredReceipt = new FileTransferFallbackV6ProofBootstrapReceipt(
+            command,
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+            PostTunaFallbackPeerProofFrameIdentity.Create(localReceiverState),
+            "filetransfer_fallback_v6_proof_bootstrap_delivered");
+        var applyReceipt = serviceType.GetMethod(
+            "TryApplyFallbackV6ProofBootstrapReceiptLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        object?[] receiptArgs = [command, deliveredReceipt, null];
+        Assert.True(Assert.IsType<bool>(applyReceipt.Invoke(service, receiptArgs)));
+
+        var retainedRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            TransportEpoch = command.TargetTransportEpoch,
+            RequestCorrelationId =
+                FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                    command.BootstrapGeneration),
+            MissingRanges = [],
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+        var dataSession = new SingleFrameRecordingDataSession(
+            state.SessionId,
+            state.TransferId,
+            retainedRequest);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        var runtimeKindType = serviceType.GetNestedType(
+            "FileTransferSparseCreditRuntimeKind",
+            BindingFlags.NonPublic)!;
+        var runtimeKind = Enum.Parse(runtimeKindType, "PrimaryRegularNknV4");
+        var receiveLoop = serviceType.GetMethod(
+            "RunInboundSparseCreditReceiveLoopAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var sessionOpen = new FileTransferSessionOpenV2
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            FileTransferRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4).TelemetryToken,
+            ChunkSizeBytes = 21 * 1024,
+            InitialPipelineDepth = 1,
+        };
+        var logStart = GetOperationalLogLength();
+        var loopTask = Assert.IsAssignableFrom<Task>(
+            receiveLoop.Invoke(service, [context, sessionOpen, runtimeKind]));
+
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        string log;
+        do
+        {
+            await Task.Delay(20);
+            log = ReadOperationalLogTail(logStart);
+        }
+        while (!log.Contains(
+                   "event=filetransfer_route_transition_retained_frame_applied;",
+                   StringComparison.Ordinal) &&
+               DateTimeOffset.UtcNow < deadline);
+
+        Assert.True(
+            log.Contains(
+                "event=filetransfer_route_transition_retained_frame_applied;",
+                StringComparison.Ordinal),
+            log);
+        Assert.Contains(
+            "event=filetransfer_route_transition_disposition_applied;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "decision_status=Claimed; decision_reason=retained_frame_owned_by_route_transition; authority_effect=none",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_v6_regular_nkn_state_refresh_received;",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_route_transition_retained_frame_rejected;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Single(dataSession.SentFrames);
+
+        Assert.IsAssignableFrom<CancellationTokenSource>(
+                GetPrivatePropertyValue(context, "LifetimeCts"))
+            .Cancel();
+        await loopTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     [Theory]
     [InlineData(FileTransferDirection.Outbound)]
     [InlineData(FileTransferDirection.Inbound)]
@@ -1617,5 +1766,54 @@ public sealed partial class SessionFileTransferV4SenderTests
             method.Invoke(
                 service,
                 [context, authority, false, reason]));
+    }
+
+    private sealed class SingleFrameRecordingDataSession(
+        string sessionId,
+        string transferId,
+        FileTransferDataFrame receivedFrame) : IFileTransferDataSession
+    {
+        private readonly List<FileTransferDataFrame> sentFrames = [];
+        private int received;
+
+        public string SessionId { get; } = sessionId;
+        public string TransferId { get; } = transferId;
+        public bool IsAvailable => true;
+        public IReadOnlyList<FileTransferDataFrame> SentFrames => sentFrames.ToArray();
+
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
+            => (await ReceiveWithMetadataAsync(ct)).Frame;
+
+        public async ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(
+            CancellationToken ct)
+        {
+            if (Interlocked.Exchange(ref received, 1) == 0)
+            {
+                return new FileTransferReceivedDataFrame(
+                    receivedFrame,
+                    FileTransferTransportKind.Tuna,
+                    "file",
+                    DateTimeOffset.UtcNow);
+            }
+
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            throw new OperationCanceledException(ct);
+        }
+
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
+        {
+            sentFrames.Add(frame);
+            return Task.CompletedTask;
+        }
+
+        public void Dispose()
+        {
+        }
     }
 }
