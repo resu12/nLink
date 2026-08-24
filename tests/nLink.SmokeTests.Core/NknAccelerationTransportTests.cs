@@ -16158,6 +16158,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                                    .MissingDispatchSuccessorGeneration + 1;
                 },
                 TimeSpan.FromSeconds(5));
+            var successorOfferGeneration = Assert.IsType<long>(
+                GetPrivateField(host, "outboundAccelerationOfferGeneration"));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                successorOfferGeneration,
+                "test_exact_successor_observed")));
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_dispatch_observed;",
@@ -16165,11 +16173,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 TimeSpan.FromSeconds(5));
 
             var tail = ReadOperationalLogTail(logStart);
-            Assert.Single(
-                Regex.Matches(
-                    tail,
-                    "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided;",
-                    RegexOptions.CultureInvariant).Cast<Match>());
+            Assert.Contains(
+                "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided;",
+                tail,
+                StringComparison.Ordinal);
             Assert.Contains(
                 "cleanup_effect=predecessor_offer_retired",
                 tail,
@@ -16183,6 +16190,197 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         {
             NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
                 previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task RuntimeUnlockRetryDispatch_MissingDispatchOperationCompletionBeforeSettlementRetiresPredecessorAndWakesSuccessor()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay =
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousSuccessorIntentBarrier = NknSignalingTransport
+            .RuntimeUnlockRetryMissingDispatchSuccessorIntentBindingBarrierForTests;
+        var successorIntentBarrierEntered = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSuccessorIntentBinding = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+            TimeSpan.Zero;
+        NknSignalingTransport
+            .RuntimeUnlockRetryMissingDispatchSuccessorIntentBindingBarrierForTests =
+            () =>
+            {
+                successorIntentBarrierEntered.TrySetResult(null);
+                releaseSuccessorIntentBinding.Task.GetAwaiter().GetResult();
+            };
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                "host.runtime-unlock-missing-dispatch-completion-first.address");
+            var helperClient = new FakeNknClient(
+                "helper.runtime-unlock-missing-dispatch-completion-first.address");
+            var firstOfferEntered = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var releasePredecessorSends = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            hostClient.BeforeSendCoreAsync = async (_, payload, _, ct) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                    sent.Type == MsgType.TransportAccelerationOffer &&
+                    !releasePredecessorSends.Task.IsCompleted)
+                {
+                    firstOfferEntered.TrySetResult(null);
+                    await releasePredecessorSends.Task.WaitAsync(ct);
+                }
+            };
+            var hostLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0,
+                supportedLanes: NknAccelerationLaneKind.File);
+            var helperLane = new RetryableTunaAccelerationSession(
+                canListen: true,
+                failedDialAttemptsBeforeSuccess: 0,
+                supportedLanes: NknAccelerationLaneKind.File);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    "host-runtime-unlock-missing-dispatch-completion-first-id",
+                    hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    "helper-runtime-unlock-missing-dispatch-completion-first-id",
+                    helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId =
+                "transfer_runtime_unlock_missing_dispatch_completion_first";
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            hostLane.MarkCoordinatorScopedListenerAvailableForTests(
+                helperClient.Address);
+            var logStart = GetOperationalLogLength();
+
+            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(
+                host,
+                sessionId,
+                transferId,
+                "runtime_unlock_offer_send_not_observed",
+                "post_tuna_fallback_tail_unblocked");
+            await host
+                .DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await firstOfferEntered.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                cts.Token);
+
+            var predecessorReceipt = Assert.IsType<
+                RuntimeUnlockRetryDispatchInstallReceipt>(
+                GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
+            var predecessorOfferGeneration = Assert.IsType<long>(
+                GetPrivateField(host, "outboundAccelerationOfferGeneration"));
+            var settlementTask = Task.Run(
+                () => Assert.IsType<bool>(InvokePrivateMethod(
+                    host,
+                    "TrySettleRuntimeUnlockRetryDispatchMissingIfCurrent",
+                    sessionId,
+                    predecessorOfferGeneration,
+                    "test_missing_dispatch_after_operation_completion")));
+            await successorIntentBarrierEntered.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                cts.Token);
+            releasePredecessorSends.TrySetResult(null);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_recheck_decided; decision_status=Held;",
+                    StringComparison.Ordinal) &&
+                    ReadOperationalLogTail(logStart).Contains(
+                        "ordering=operation_completion",
+                        StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+
+            releaseSuccessorIntentBinding.TrySetResult(null);
+            Assert.True(await settlementTask.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                cts.Token));
+            await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () =>
+                {
+                    var current =
+                        GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(
+                            host);
+                    return current is { } receipt &&
+                           receipt.Authority.PredecessorAuthorityId ==
+                               predecessorReceipt.Authority.AuthorityId &&
+                           receipt.Authority.MissingDispatchSuccessorGeneration ==
+                               predecessorReceipt.Authority
+                                   .MissingDispatchSuccessorGeneration + 1;
+                },
+                TimeSpan.FromSeconds(5));
+            var successorOfferGeneration = Assert.IsType<long>(
+                GetPrivateField(host, "outboundAccelerationOfferGeneration"));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                successorOfferGeneration,
+                "test_exact_successor_observed")));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_observed;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "ordering=successor_intent_bound",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "cleanup_effect=predecessor_offer_retired",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "authority_mode=InitialActivation",
+                tail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseSuccessorIntentBinding.TrySetResult(null);
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests =
+                previousHelpeePriorityDelay;
+            NknSignalingTransport
+                .RuntimeUnlockRetryMissingDispatchSuccessorIntentBindingBarrierForTests =
+                previousSuccessorIntentBarrier;
             FakeNknClient.ResetNetwork();
         }
     }

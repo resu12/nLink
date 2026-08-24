@@ -3733,6 +3733,27 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     throw "missing-dispatch completion fast path mismatch: $($result | ConvertTo-Json -Compress)"
                 }
 
+                @(
+                    "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                    "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; settlement_outcome=MissingDispatch; decision_status=Accepted",
+                    "event=runtime_unlock_retry_missing_dispatch_successor_intent_created; $tuple; failed_offer_generation=2; intent_disposition=Created",
+                    "event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer",
+                    'event=runtime_unlock_retry_negotiation_slot_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; contract_generation=7; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; data_session_identity=session:1; data_session_generation=1; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_authority_backoff_pending',
+                    "event=tuna_acceleration_negotiation_scheduling_completed; $tuple; operation_generation=5; decision_reason=committed_authority_bound_to_current_offer",
+                    'event=runtime_unlock_retry_negotiation_slot_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; contract_generation=7; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; data_session_identity=session:1; data_session_generation=1; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy',
+                    'event=file_transfer_outbound_terminal; log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; state=Failed; error_code=peer_disconnected'
+                ) | Set-Content -LiteralPath $path
+                $completionFirst = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($completionFirst.Phase -ne 'runtime_unlock_retry' -or
+                    $completionFirst.Reason -ne 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor' -or
+                    $completionFirst.ClassificationSource -ne 'immutable_evidence_missing_dispatch_completion_index') {
+                    throw "completion-first MissingDispatch fast path mismatch: $($completionFirst | ConvertTo-Json -Compress)"
+                }
+
                 @("event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer") |
                     Set-Content -LiteralPath $path
                 $singleton = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)

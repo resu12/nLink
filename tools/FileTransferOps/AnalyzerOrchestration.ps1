@@ -2266,6 +2266,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_stale_callback_ignored') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_post_tuna_fallback_activation_disposition') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_negotiation_scheduling_completed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_recheck_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_outbound_offer_retired') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +

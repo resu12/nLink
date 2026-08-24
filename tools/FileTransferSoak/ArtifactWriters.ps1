@@ -29990,6 +29990,16 @@ function Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrela
         (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
             'retry_dispatch_negotiation_slot_busy'
     })
+    [object[]]$backoffSlots = @($ordered | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_negotiation_slot_decided' -and
+        (Get-FileTransferEventField -Event $_ -Name 'intent_kind' -Default '') -eq
+            'SuccessorEvaluation' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq
+            'Deferred' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'slot_generation' -Default -1) -eq 0 -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'retry_dispatch_authority_backoff_pending'
+    })
     [object[]]$completions = @($ordered | Where-Object {
         $_.EventName -eq 'runtime_unlock_post_tuna_fallback_activation_disposition' -and
         (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq 'completed' -and
@@ -30080,7 +30090,7 @@ function Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrela
             continue
         }
         $intent = $matchingIntent[0]
-        $matchingBusy = @($busySlots | Where-Object {
+        $matchingBusyBeforeCompletion = @($busySlots | Where-Object {
             [int64]$_.Sequence -gt [int64]$intent.Sequence -and
             [int64]$_.Sequence -lt [int64]$completion.Sequence -and
             (Test-MissingDispatchSlotScopeMatch -Settlement $settlement -Slot $_)
@@ -30094,8 +30104,33 @@ function Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrela
             (Get-FileTransferEventField -Event $_ -Name 'payer_decision_id' -Default '') -eq
                 (Get-FileTransferEventField -Event $completion -Name 'payer_decision_id' -Default '')
         } | Select-Object -First 1)
-        if ($matchingBusy.Count -ne 1 -or $matchingSchedulingCompletion.Count -ne 1) {
+        $matchingBusyAfterCompletion = @($busySlots | Where-Object {
+            $matchingSchedulingCompletion.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$matchingSchedulingCompletion[0].Sequence -and
+            (Test-MissingDispatchSlotScopeMatch -Settlement $settlement -Slot $_)
+        } | Select-Object -First 1)
+        $matchingBackoffAfterCompletion = @($backoffSlots | Where-Object {
+            $matchingBusyAfterCompletion.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$completion.Sequence -and
+            [int64]$_.Sequence -lt [int64]$matchingBusyAfterCompletion[0].Sequence -and
+            (Test-MissingDispatchSlotScopeMatch -Settlement $settlement -Slot $_)
+        } | Select-Object -First 1)
+        $busyBeforeCompletion =
+            $matchingBusyBeforeCompletion.Count -eq 1 -and
+            $matchingSchedulingCompletion.Count -eq 1
+        $completionBeforeBusy =
+            $matchingSchedulingCompletion.Count -eq 1 -and
+            $matchingBackoffAfterCompletion.Count -eq 1 -and
+            $matchingBusyAfterCompletion.Count -eq 1
+        if (-not $busyBeforeCompletion -and -not $completionBeforeBusy) {
             continue
+        }
+
+        $busyEvidence = if ($busyBeforeCompletion) {
+            $matchingBusyBeforeCompletion[0]
+        }
+        else {
+            $matchingBusyAfterCompletion[0]
         }
 
         $raw.Add($completion) | Out-Null
@@ -30112,7 +30147,9 @@ function Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrela
                 (Get-FileTransferEventField -Event $completion -Name 'operation_generation' -Default ''),
                 (Get-FileTransferEventField -Event $settlement -Name 'route_publication_generation' -Default ''),
                 (Get-FileTransferEventField -Event $settlement -Name 'transport_epoch' -Default ''),
-                (Get-FileTransferEventField -Event $settlement -Name 'bridge_recovery_generation' -Default ''))).ToLowerInvariant()
+                (Get-FileTransferEventField -Event $settlement -Name 'bridge_recovery_generation' -Default ''),
+                (Get-FileTransferEventField -Event $busyEvidence -Name 'data_session_identity' -Default ''),
+                (Get-FileTransferEventField -Event $busyEvidence -Name 'data_session_generation' -Default ''))).ToLowerInvariant()
         if ($seen.ContainsKey($key)) {
             continue
         }
@@ -30142,7 +30179,13 @@ function Get-FileTransferRuntimeUnlockRetryMissingDispatchOfferCompletionCorrela
             (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq
                 (Get-FileTransferEventField -Event $settlement -Name 'session_id' -Default '') -and
             (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '') -eq
-                $authorityId
+                $authorityId -and
+            $_.EventName -eq
+                'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided' -and
+            (Get-FileTransferEventField -Event $_ -Name 'data_session_identity' -Default '') -eq
+                (Get-FileTransferEventField -Event $busyEvidence -Name 'data_session_identity' -Default '') -and
+            (Get-FileTransferEventField -Event $_ -Name 'data_session_generation' -Default '') -eq
+                (Get-FileTransferEventField -Event $busyEvidence -Name 'data_session_generation' -Default '')
         } | Select-Object -First 1)
         $reserved = @($reservedSlots | Where-Object {
             $cleanup.Count -eq 1 -and

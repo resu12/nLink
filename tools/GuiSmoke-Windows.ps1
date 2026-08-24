@@ -18137,6 +18137,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'runtime_unlock_retry_dispatch_stale_callback_ignored',
             'runtime_unlock_post_tuna_fallback_activation_disposition',
             'tuna_acceleration_negotiation_scheduling_completed',
+            'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_recheck_decided',
             'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided',
             'tuna_acceleration_outbound_offer_retired',
             'runtime_unlock_retry_dispatch_observed',
@@ -20147,7 +20148,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (& $sameFullTuple $settlement[0] $_)
             } | Select-Object -First 1)
             if ($decision.Count -ne 1 -or $intent.Count -ne 1) { continue }
-            [object[]]$busy = @($records | Where-Object {
+            [object[]]$busyBeforeCompletion = @($records | Where-Object {
                 $_.Index -gt $intent[0].Index -and $_.Index -lt $completion.Index -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'runtime_unlock_retry_negotiation_slot_decided' -and
@@ -20161,14 +20162,58 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (& $sameSlotScope $settlement[0] $_)
             } | Select-Object -Last 1)
             [object[]]$scheduled = @($records | Where-Object {
-                $_.Index -ge $completion.Index -and $_.Index -le ($completion.Index + 1) -and
+                $_.Index -ge $completion.Index -and
+                $_.Index -le ($completion.Index + 2) -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'tuna_acceleration_negotiation_scheduling_completed' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -eq
                     (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'operation_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'payer_decision_id') -and
                 (& $sameFullTuple $settlement[0] $_)
             } | Select-Object -First 1)
-            if ($busy.Count -ne 1 -or $scheduled.Count -ne 1) { continue }
+            [object[]]$busyAfterCompletion = @($records | Where-Object {
+                $scheduled.Count -eq 1 -and $_.Index -gt $scheduled[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_negotiation_slot_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'intent_kind') -eq
+                    'SuccessorEvaluation' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Deferred' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'slot_generation') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                    'retry_dispatch_negotiation_slot_busy' -and
+                (& $sameSlotScope $settlement[0] $_)
+            } | Select-Object -First 1)
+            [object[]]$backoffAfterCompletion = @($records | Where-Object {
+                $busyAfterCompletion.Count -eq 1 -and
+                $_.Index -gt $completion.Index -and
+                $_.Index -lt $busyAfterCompletion[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_negotiation_slot_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'intent_kind') -eq
+                    'SuccessorEvaluation' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Deferred' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'slot_generation') -eq '0' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                    'retry_dispatch_authority_backoff_pending' -and
+                (& $sameSlotScope $settlement[0] $_)
+            } | Select-Object -First 1)
+            $existingOrdering =
+                $busyBeforeCompletion.Count -eq 1 -and $scheduled.Count -eq 1
+            $completionFirstOrdering =
+                $scheduled.Count -eq 1 -and
+                $backoffAfterCompletion.Count -eq 1 -and
+                $busyAfterCompletion.Count -eq 1
+            if (-not $existingOrdering -and -not $completionFirstOrdering) {
+                continue
+            }
+            $busyEvidence = if ($existingOrdering) {
+                $busyBeforeCompletion[0]
+            } else {
+                $busyAfterCompletion[0]
+            }
 
             [object[]]$cleanup = @($records | Where-Object {
                 $_.Index -gt $completion.Index -and
@@ -20176,7 +20221,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
-                    (Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'log_writer_id')
+                    (Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'log_writer_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'data_session_identity') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'data_session_identity') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'data_session_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'data_session_generation')
             } | Select-Object -First 1)
             [object[]]$reserved = @($records | Where-Object {
                 $cleanup.Count -eq 1 -and $_.Index -gt $cleanup[0].Index -and

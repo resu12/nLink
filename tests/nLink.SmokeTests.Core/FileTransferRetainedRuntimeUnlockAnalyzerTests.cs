@@ -7753,10 +7753,13 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
     public async Task AnalyzeRetained_NonzeroOfferMissingDispatchOperationCompletesWithoutRetirement_SelectsExactFirstEdge(
-        bool compact)
+        bool compact,
+        bool completionFirst)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -7783,53 +7786,72 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             "source_bridge_recovery_generation=3; source_checkpoint_request_id=(none); " +
             "data_session_identity=session:1; data_session_generation=1; authority_effect=none; " +
             "decision_reason=retry_dispatch_negotiation_slot_busy" + writer;
+        var backoff = slot.Replace(
+            "retry_dispatch_negotiation_slot_busy",
+            "retry_dispatch_authority_backoff_pending",
+            StringComparison.Ordinal);
+        var completion = Line(
+            "runtime_unlock_post_tuna_fallback_activation_disposition",
+            "; operation_generation=5; payer_decision_id=5; install_generation=1; " +
+            "disposition=completed; decision_reason=committed_authority_bound_to_current_offer");
+        var scheduling = Line(
+            "tuna_acceleration_negotiation_scheduling_completed",
+            "; operation_generation=5; payer_decision_id=5; install_generation=1; " +
+            "decision_reason=committed_authority_bound_to_current_offer");
+        var evidence = new List<string>
+        {
+            InstallLine(
+                "runtime_unlock_retry_dispatch_decision_staged",
+                "; stage_status=Staged; decision_status=Granted",
+                "retry_dispatch_decision_staged"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_install_receipt_issued",
+                "; decision_status=Granted",
+                "retry_dispatch_install_receipt_issued"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_install_committed",
+                "; install_status=Installed; decision_status=Granted",
+                "retry_dispatch_install_committed"),
+            InstallLine(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                "; install_status=Installed; decision_status=Granted",
+                "runtime_unlock_retry_dispatch_authority_granted"),
+            Line(
+                "runtime_unlock_retry_dispatch_contract_settled",
+                "; settlement_outcome=MissingDispatch; dispatch_observed=0; " +
+                "decision_reason=retry_dispatch_deadline_elapsed"),
+            Line(
+                "runtime_unlock_retry_dispatch_settlement_reported",
+                "; settlement_outcome=MissingDispatch; " +
+                "settlement_reason=retry_dispatch_deadline_elapsed; subscriber_present=1; " +
+                "decision_reason=reported_to_core"),
+            Line(
+                "runtime_unlock_retry_dispatch_settlement_decided",
+                "; settlement_outcome=MissingDispatch; " +
+                "settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted; " +
+                "decision_reason=retry_dispatch_settlement_accepted"),
+            Line(
+                "runtime_unlock_retry_missing_dispatch_successor_intent_created",
+                "; predecessor_settlement_outcome=MissingDispatch; failed_offer_generation=2; " +
+                "request_active_predecessor_supersession=0; intent_disposition=Created")
+        };
+        if (completionFirst)
+        {
+            evidence.Add(completion);
+            evidence.Add(backoff);
+            evidence.Add(scheduling);
+            evidence.Add(slot);
+        }
+        else
+        {
+            evidence.Add(slot);
+            evidence.Add(completion);
+            evidence.Add(scheduling);
+        }
+        evidence.Add(
+            $"event=file_transfer_outbound_terminal; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; state=Failed; error_code=peer_disconnected{writer}");
         var result = await RunAnalyzeFixtureAsync(
-            [
-                InstallLine(
-                    "runtime_unlock_retry_dispatch_decision_staged",
-                    "; stage_status=Staged; decision_status=Granted",
-                    "retry_dispatch_decision_staged"),
-                InstallLine(
-                    "runtime_unlock_retry_dispatch_install_receipt_issued",
-                    "; decision_status=Granted",
-                    "retry_dispatch_install_receipt_issued"),
-                InstallLine(
-                    "runtime_unlock_retry_dispatch_install_committed",
-                    "; install_status=Installed; decision_status=Granted",
-                    "retry_dispatch_install_committed"),
-                InstallLine(
-                    "runtime_unlock_retry_dispatch_authority_granted",
-                    "; install_status=Installed; decision_status=Granted",
-                    "runtime_unlock_retry_dispatch_authority_granted"),
-                Line(
-                    "runtime_unlock_retry_dispatch_contract_settled",
-                    "; settlement_outcome=MissingDispatch; dispatch_observed=0; " +
-                    "decision_reason=retry_dispatch_deadline_elapsed"),
-                Line(
-                    "runtime_unlock_retry_dispatch_settlement_reported",
-                    "; settlement_outcome=MissingDispatch; " +
-                    "settlement_reason=retry_dispatch_deadline_elapsed; subscriber_present=1; " +
-                    "decision_reason=reported_to_core"),
-                Line(
-                    "runtime_unlock_retry_dispatch_settlement_decided",
-                    "; settlement_outcome=MissingDispatch; " +
-                    "settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted; " +
-                    "decision_reason=retry_dispatch_settlement_accepted"),
-                Line(
-                    "runtime_unlock_retry_missing_dispatch_successor_intent_created",
-                    "; predecessor_settlement_outcome=MissingDispatch; failed_offer_generation=2; " +
-                    "request_active_predecessor_supersession=0; intent_disposition=Created"),
-                slot,
-                Line(
-                    "runtime_unlock_post_tuna_fallback_activation_disposition",
-                    "; operation_generation=5; payer_decision_id=5; install_generation=1; " +
-                    "disposition=completed; decision_reason=committed_authority_bound_to_current_offer"),
-                Line(
-                    "tuna_acceleration_negotiation_scheduling_completed",
-                    "; operation_generation=5; payer_decision_id=5; install_generation=1; " +
-                    "decision_reason=committed_authority_bound_to_current_offer"),
-                $"event=file_transfer_outbound_terminal; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; state=Failed; error_code=peer_disconnected{writer}"
-            ],
+            evidence,
             ["-LiveRouteProofMode", "None"],
             compact
                 ? new Dictionary<string, string>
