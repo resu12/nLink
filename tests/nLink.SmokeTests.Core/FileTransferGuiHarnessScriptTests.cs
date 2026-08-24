@@ -10725,6 +10725,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var scriptText = $$"""
             Set-StrictMode -Version Latest
             $ErrorActionPreference = 'Stop'
+            $repoRoot = $args[0]
+            . (Join-Path $repoRoot 'tools\FileTransferSoak\RetainedAnalysisEvidence.ps1')
+            . (Join-Path $repoRoot 'tools\FileTransferRouteAcceptanceEvidence.ps1')
             function Test-RouteAcceptanceEvidenceFinalizationTimedOut {
                 param([string]$ArtifactDir)
                 return Test-Path -LiteralPath (Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json') -PathType Leaf
@@ -10763,6 +10766,27 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tempRoot $Name) -Encoding UTF8
             }
 
+            function Write-TunaAttemptManifest {
+                param(
+                    [AllowNull()]$ReceiptPaths,
+                    [string]$Owner = 'RouteAcceptance',
+                    [string]$ReceiptSha256 = $script:receiptSha256)
+                [ordered]@{
+                    event = 'filetransfer_tuna_gui_direct_evidence_manifest'
+                    acceptanceRunId = $runId
+                    scenarioRunId = $scenarioRunId
+                    artifactFinalized = $true
+                    currentRuntimeProof = $true
+                    routeMode = 'live-regular-activation-cycle'
+                    analyzerInputPath = $script:logPath
+                    retainedAnalysisOwner = $Owner
+                    retainedAnalysisReceiptPaths = $ReceiptPaths
+                    retainedAnalysisReceiptSha256 = $ReceiptSha256
+                    retainedAnalysisReceiptValid = $true
+                    retainedAnalysisCompleted = $true
+                } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $tempRoot 'filetransfer-tuna-gui-evidence-manifest.json') -Encoding UTF8
+            }
+
             $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nlink-direct-finalization-' + [guid]::NewGuid().ToString('N'))
             $runId = 'run-identity'
             $scenarioRunId = 'run-identity:scenario:1'
@@ -10799,6 +10823,69 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $script:selectedCount = 0
                 $selected = TrySelect-RouteAcceptanceScenarioAttemptEvidence -ScenarioName 'scenario' -AttemptIndex 1 -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
                 if (-not $selected -or $script:selectedCount -ne 1) { throw 'valid direct claim was not selected exactly once' }
+
+                $script:logPath = Join-Path $tempRoot 'filetransfer-retained-log-slice.log'
+                [IO.File]::WriteAllText($script:logPath, "event=fixture`n")
+                foreach ($name in @(
+                    'filetransfer-retained-analysis.stdout.txt',
+                    'filetransfer-retained-analysis.stderr.txt',
+                    'filetransfer-retained-analysis-diagnostics.json',
+                    'filetransfer-retained-analysis-stage-diagnostics.json',
+                    'filetransfer-retained-compact-summary.json',
+                    'filetransfer-route-consistency-summary.txt',
+                    'filetransfer-operator-verdict.txt',
+                    'stability-gates-summary.txt')) {
+                    [IO.File]::WriteAllText((Join-Path $tempRoot $name), "fixture-$name`n")
+                }
+                $inputSha = Get-FileTransferEvidenceSha256 -Path $script:logPath
+                $inputLineCount = Get-FileTransferEvidenceLineCount -Path $script:logPath
+                $receipt = Write-FileTransferRetainedAnalysisAttemptReceipt `
+                    -ArtifactDir $tempRoot `
+                    -Owner 'RouteAcceptance' `
+                    -AttemptId 'attempt-1' `
+                    -AcceptanceRunId $runId `
+                    -ScenarioRunId $scenarioRunId `
+                    -LogPath $script:logPath `
+                    -InputSha256Before $inputSha `
+                    -InputLineCountBefore $inputLineCount `
+                    -LiveRouteProofMode 'RegularActivationCycle' `
+                    -CompactRequested $true `
+                    -ProcessId 123 `
+                    -StartedUtc '2026-08-24T14:00:00Z' `
+                    -EndedUtc '2026-08-24T14:01:00Z' `
+                    -TimedOut $false `
+                    -ExitCodeAvailable $true `
+                    -ExitCode 0 `
+                    -CompletedProofArtifacts $true
+                $receiptPath = Join-Path $tempRoot 'filetransfer-retained-analysis-attempt-receipt.json'
+                $script:receiptSha256 = Get-FileTransferEvidenceSha256 -Path $receiptPath
+
+                Write-TunaAttemptManifest -ReceiptPaths @($receiptPath)
+                Assert-Finalized $true 'singleton Tuna receipt array must finalize under strict mode'
+                $script:selectedCount = 0
+                $selected = TrySelect-RouteAcceptanceScenarioAttemptEvidence -ScenarioName 'scenario' -AttemptIndex 1 -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if (-not $selected -or $script:selectedCount -ne 1) { throw 'valid singleton Tuna receipt was not selected exactly once' }
+
+                Write-TunaAttemptManifest -ReceiptPaths @()
+                Assert-Finalized $false 'empty Tuna receipt array must fail closed'
+                Write-TunaAttemptManifest -ReceiptPaths $receiptPath
+                Assert-Finalized $false 'scalar Tuna receipt path must fail closed'
+                Write-TunaAttemptManifest -ReceiptPaths @($receiptPath, $receiptPath)
+                Assert-Finalized $false 'multiple Tuna receipt paths must fail closed'
+                Write-TunaAttemptManifest -ReceiptPaths @($receiptPath) -Owner 'Wrapper'
+                Assert-Finalized $false 'Route Acceptance must not trust a manifest-selected receipt owner'
+                Write-TunaAttemptManifest -ReceiptPaths @($receiptPath) -ReceiptSha256 ('0' * 64)
+                Assert-Finalized $false 'Tuna receipt hash mismatch must fail closed'
+                [IO.File]::WriteAllText(
+                    (Join-Path $tempRoot 'filetransfer-tuna-gui-evidence-manifest.json'),
+                    '{ malformed')
+                $malformed = Get-RouteAcceptanceAttemptFinalization -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if ($malformed.IsFinalized -or
+                    @($malformed.FailureReasons) -notcontains 'attempt_finalization_validation_exception' -or
+                    [string]::IsNullOrWhiteSpace([string]$malformed.ValidationExceptionType) -or
+                    [string]::IsNullOrWhiteSpace([string]$malformed.ValidationExceptionMessage)) {
+                    throw 'malformed Tuna manifest did not preserve fail-closed exception diagnostics'
+                }
                 Write-Output 'direct-attempt-finalization-ok'
             }
             finally {
@@ -10806,7 +10893,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        var result = await RunPowerShellScriptTextAsync(scriptText, [repoRoot]);
 
         Assert.True(result.ExitCode == 0, $"Direct attempt finalization test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("direct-attempt-finalization-ok", result.Stdout, StringComparison.Ordinal);

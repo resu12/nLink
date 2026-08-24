@@ -613,6 +613,14 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary["manifest_present"]);
             Assert.Matches("^[0-9a-f]{64}$", summary["manifest_sha256"]);
             Assert.Equal("0", summary["current_runtime_proof"]);
+            Assert.Equal("pass", summary["finalized_attempt_selection_verdict"]);
+            Assert.Equal("none", summary["finalized_attempt_selection_failure_class"]);
+            Assert.Equal("0", summary["filetransfer_route_acceptance_finalized_attempt_selection_missing_raw_count"]);
+            Assert.Equal("0", summary["filetransfer_route_acceptance_finalized_attempt_selection_missing_distinct_count"]);
+            Assert.Equal("0", summary["filetransfer_route_acceptance_finalized_attempt_selection_missing_recovered_count"]);
+            Assert.Equal("0", summary["filetransfer_route_acceptance_finalized_attempt_selection_missing_unresolved_count"]);
+            Assert.Equal("pass", summary[scenarioPrefix + "finalized_attempt_selection_verdict"]);
+            Assert.Equal("0", summary[scenarioPrefix + "filetransfer_route_acceptance_finalized_attempt_selection_missing_unresolved_count"]);
             Assert.Equal("pass", summary["cursor_integrity_verdict"]);
             Assert.Equal("complete", summary["transfer_evidence_status"]);
             Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
@@ -774,7 +782,10 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
                 Assert.Equal("fake", manifest.RootElement.GetProperty("executionMode").GetString());
                 Assert.False(manifest.RootElement.GetProperty("validation").GetProperty("currentRuntimeProof").GetBoolean());
-                Assert.Single(manifest.RootElement.GetProperty("scenarioAttempts").EnumerateArray());
+                var attempt = Assert.Single(manifest.RootElement.GetProperty("scenarioAttempts").EnumerateArray());
+                Assert.Equal(
+                    "filetransfer_route_acceptance_attempt_finalization_decided",
+                    attempt.GetProperty("finalizationValidation").GetProperty("event").GetString());
             }
             var summaryJsonPath = Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json");
             Assert.True(File.Exists(summaryJsonPath), "Expected Phase 5 JSON summary.");
@@ -782,6 +793,12 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             using (var summaryJson = await JsonDocument.ParseAsync(summaryJsonStream))
             {
                 var root = summaryJson.RootElement;
+                Assert.Equal("pass", root.GetProperty("finalizedAttemptSelectionVerdict").GetString());
+                Assert.Equal("none", root.GetProperty("finalizedAttemptSelectionFailureClass").GetString());
+                Assert.Equal(0, root.GetProperty("finalizedAttemptSelectionRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("finalizedAttemptSelectionDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("finalizedAttemptSelectionRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("finalizedAttemptSelectionUnresolvedCount").GetInt32());
                 Assert.Equal("none", root.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
                 Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());

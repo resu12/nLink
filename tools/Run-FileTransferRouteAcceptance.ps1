@@ -766,7 +766,52 @@ function Set-RouteAcceptanceResultEvidence {
             $resultArtifactDir,
             [System.StringComparison]::OrdinalIgnoreCase)
     } | Select-Object -First 1)
+    $finalizedAttemptSelectionDefaults = [ordered]@{
+        finalizedAttemptSelectionVerdict = 'none'
+        finalizedAttemptSelectionFailureClass = 'none'
+        finalizedAttemptSelectionReason = '(none)'
+        finalizedAttemptSelectionVariant = '(none)'
+        finalizedAttemptSelectionRawCount = 0L
+        finalizedAttemptSelectionDistinctCount = 0L
+        finalizedAttemptSelectionRecoveredCount = 0L
+        finalizedAttemptSelectionUnresolvedCount = 0L
+    }
+    foreach ($entry in $finalizedAttemptSelectionDefaults.GetEnumerator()) {
+        if ($null -eq $Result.PSObject.Properties[$entry.Key]) {
+            $Result | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+        else {
+            $Result.($entry.Key) = $entry.Value
+        }
+    }
     if ($selectedAttempt.Count -gt 0) {
+        $attemptFinalization = $selectedAttempt[0].finalizationValidation
+        if ([bool]$selectedAttempt[0].selected -and [bool]$attemptFinalization.isFinalized) {
+            $Result.finalizedAttemptSelectionVerdict = 'pass'
+        }
+        elseif ([string]::Equals(
+                [string]$selectedAttempt[0].selectionDisposition,
+                'rejected_finalization_evidence',
+                [System.StringComparison]::Ordinal)) {
+            $Result.finalizedAttemptSelectionVerdict = 'fail'
+            $Result.finalizedAttemptSelectionFailureClass = 'filetransfer_route_acceptance_finalized_attempt_selection_missing'
+            $Result.finalizedAttemptSelectionReason = if (
+                [string]$attemptFinalization.exceptionMessage -match "property 'Count'.*cannot be found") {
+                'valid_singleton_retained_analysis_receipt_not_admitted_as_finalized_attempt'
+            }
+            else {
+                $attemptFailureReasons = @($attemptFinalization.failureReasons)
+                if ($attemptFailureReasons.Count -gt 0) { [string]$attemptFailureReasons[0] } else { 'attempt_finalization_evidence_rejected' }
+            }
+            $Result.finalizedAttemptSelectionVariant = if (
+                [string]$attemptFinalization.exceptionMessage -match "property 'Count'.*cannot be found") {
+                'singleton_receipt_array_collapsed_before_strict_count'
+            }
+            else { '(none)' }
+            $Result.finalizedAttemptSelectionRawCount = 1L
+            $Result.finalizedAttemptSelectionDistinctCount = 1L
+            $Result.finalizedAttemptSelectionUnresolvedCount = 1L
+        }
         $Result.cursorIntegrityVerdict = ([string]$selectedAttempt[0].logLedger.cursorIntegrityVerdict).ToLowerInvariant()
         $Result.writerEvidenceVersion = [long]$selectedAttempt[0].logLedger.writerEvidenceVersion
         $Result.writerIntegrityVerdict = ([string]$selectedAttempt[0].logLedger.writerIntegrityVerdict).ToLowerInvariant()
@@ -1001,6 +1046,11 @@ function Complete-RouteAcceptanceRunEvidence {
                 elseif ($artifactFinalized) {
                     'historical_finalized_attempt'
                 }
+                elseif ([bool]$attemptFinalization.ArtifactFinalized -or
+                    [bool]$attemptFinalization.CurrentRuntimeProof -or
+                    -not [string]::IsNullOrWhiteSpace([string]$attemptFinalization.ValidationExceptionType)) {
+                    'rejected_finalization_evidence'
+                }
                 else {
                     'historical_unfinalized_attempt'
                 }
@@ -1017,7 +1067,8 @@ function Complete-RouteAcceptanceRunEvidence {
                     -AnalyzerDiagnosticsPath $diagnosticsPath `
                     -AnalyzerInputPath $analyzerInputPath `
                     -DirectManifestPath ([string]$attemptFinalization.ManifestPath) `
-                    -DirectManifestSha256 $directManifestSha256
+                    -DirectManifestSha256 $directManifestSha256 `
+                    -AttemptFinalization $attemptFinalization
             }
         )
 
@@ -1634,6 +1685,14 @@ function New-RouteAcceptanceRunResult {
         writerChronologyVerdict = 'missing'
         currentRuntimeProof = $false
         currentRuntimeProofReasons = @('manifest_missing')
+        finalizedAttemptSelectionVerdict = 'none'
+        finalizedAttemptSelectionFailureClass = 'none'
+        finalizedAttemptSelectionReason = '(none)'
+        finalizedAttemptSelectionVariant = '(none)'
+        finalizedAttemptSelectionRawCount = 0L
+        finalizedAttemptSelectionDistinctCount = 0L
+        finalizedAttemptSelectionRecoveredCount = 0L
+        finalizedAttemptSelectionUnresolvedCount = 0L
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
         runtimeFailureCandidate = '(none)'
@@ -8815,15 +8874,29 @@ function Get-RouteAcceptanceAttemptFinalization {
         ArtifactFinalized = $false
         CurrentRuntimeProof = $false
         RetainedAnalysisReceiptValid = $false
+        RetainedAnalysisOwnerMatches = $false
+        ReceiptPathShapeValid = $false
+        ReceiptPathMatches = $false
+        ReceiptContentValid = $false
+        ReceiptHashMatches = $false
         IdentityMatches = $false
         IsFinalized = $false
+        FailureReasons = @()
+        ValidationExceptionType = ''
+        ValidationExceptionMessage = ''
+        ValidationExceptionHResult = 0
     }
-    if ([string]::IsNullOrWhiteSpace($manifestPath) -or
-        (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $ArtifactDir)) {
+    if ([string]::IsNullOrWhiteSpace($manifestPath)) {
+        $result.FailureReasons = @('direct_manifest_missing')
+        return [pscustomobject]$result
+    }
+    if (Test-RouteAcceptanceEvidenceFinalizationTimedOut -ArtifactDir $ArtifactDir) {
+        $result.FailureReasons = @('evidence_finalization_timed_out')
         return [pscustomobject]$result
     }
 
     try {
+        $failureReasons = New-Object System.Collections.Generic.List[string]
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         $artifactFinalizedProperty = $manifest.PSObject.Properties['artifactFinalized']
         $currentRuntimeProofProperty = $manifest.PSObject.Properties['currentRuntimeProof']
@@ -8847,16 +8920,30 @@ function Get-RouteAcceptanceAttemptFinalization {
             $receiptShaProperty = $manifest.PSObject.Properties['retainedAnalysisReceiptSha256']
             $receiptValidProperty = $manifest.PSObject.Properties['retainedAnalysisReceiptValid']
             $retainedCompletedProperty = $manifest.PSObject.Properties['retainedAnalysisCompleted']
-            $receiptPaths = if ($null -ne $receiptPathsProperty) { @($receiptPathsProperty.Value) } else { @() }
+            [object[]]$receiptPaths = @()
+            if ($null -ne $receiptPathsProperty -and $receiptPathsProperty.Value -is [System.Array]) {
+                $receiptPaths = @($receiptPathsProperty.Value)
+            }
+            $result.ReceiptPathShapeValid = $null -ne $receiptPathsProperty -and
+                $receiptPathsProperty.Value -is [System.Array] -and
+                $receiptPaths.Count -eq 1 -and
+                -not [string]::IsNullOrWhiteSpace([string]$receiptPaths[0])
             $receiptPath = if ($receiptPaths.Count -eq 1) { [string]$receiptPaths[0] } else { '' }
             $expectedReceiptPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-attempt-receipt.json'
             $receiptContentValid = $false
-            if ($receiptPaths.Count -eq 1 -and
+            $result.ReceiptPathMatches = $result.ReceiptPathShapeValid -and
+                [string]::Equals(
+                    [System.IO.Path]::GetFullPath($receiptPath),
+                    [System.IO.Path]::GetFullPath($expectedReceiptPath),
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            $result.RetainedAnalysisOwnerMatches = [string]::Equals(
+                [string]$manifest.retainedAnalysisOwner,
+                'RouteAcceptance',
+                [System.StringComparison]::Ordinal)
+            if ($result.ReceiptPathMatches -and
                 -not [string]::IsNullOrWhiteSpace($receiptPath) -and
-                [string]::Equals([System.IO.Path]::GetFullPath($receiptPath), [System.IO.Path]::GetFullPath($expectedReceiptPath), [System.StringComparison]::OrdinalIgnoreCase) -and
                 (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
                 $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                $expectedOwner = [string]$manifest.retainedAnalysisOwner
                 $liveRouteProofMode = if ([string]$manifest.routeMode -eq 'live-v4-switch-off') {
                     'SwitchOff'
                 }
@@ -8872,22 +8959,27 @@ function Get-RouteAcceptanceAttemptFinalization {
                 $receiptContentValid = Test-FileTransferRetainedAnalysisAttemptReceipt `
                     -Receipt $receipt `
                     -ArtifactDir $ArtifactDir `
-                    -ExpectedOwner $expectedOwner `
+                    -ExpectedOwner 'RouteAcceptance' `
                     -AcceptanceRunId $AcceptanceRunId `
                     -ScenarioRunId $ScenarioRunId `
                     -LogPath ([string]$manifest.analyzerInputPath) `
                     -LiveRouteProofMode $liveRouteProofMode `
-                    -CompactRequired ([string]::Equals($expectedOwner, 'RouteAcceptance', [System.StringComparison]::Ordinal))
+                    -CompactRequired $true
             }
-            $result.RetainedAnalysisReceiptValid = $receiptPaths.Count -eq 1 -and
+            $result.ReceiptContentValid = $receiptContentValid
+            $result.ReceiptHashMatches = $result.ReceiptPathMatches -and
                 -not [string]::IsNullOrWhiteSpace($receiptPath) -and
                 (Test-Path -LiteralPath $receiptPath -PathType Leaf) -and
-                $receiptContentValid -and
                 $null -ne $receiptShaProperty -and
                 [string]::Equals(
                     (Get-RouteAcceptanceEvidenceSha256 -Path $receiptPath),
                     [string]$receiptShaProperty.Value,
-                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            $result.RetainedAnalysisReceiptValid = $result.RetainedAnalysisOwnerMatches -and
+                $result.ReceiptPathShapeValid -and
+                $result.ReceiptPathMatches -and
+                $result.ReceiptContentValid -and
+                $result.ReceiptHashMatches -and
                 $null -ne $receiptValidProperty -and
                 $receiptValidProperty.Value -is [bool] -and
                 $receiptValidProperty.Value -eq $true -and
@@ -8897,14 +8989,37 @@ function Get-RouteAcceptanceAttemptFinalization {
         }
         else {
             $result.RetainedAnalysisReceiptValid = $true
+            $result.RetainedAnalysisOwnerMatches = $true
+            $result.ReceiptPathShapeValid = $true
+            $result.ReceiptPathMatches = $true
+            $result.ReceiptContentValid = $true
+            $result.ReceiptHashMatches = $true
         }
         $result.IsFinalized = $result.ArtifactFinalized -and
             $result.CurrentRuntimeProof -and
             $result.RetainedAnalysisReceiptValid -and
             $result.IdentityMatches
+        if (-not $result.ArtifactFinalized) { $failureReasons.Add('artifact_not_finalized') | Out-Null }
+        if (-not $result.CurrentRuntimeProof) { $failureReasons.Add('current_runtime_proof_missing') | Out-Null }
+        if (-not $result.IdentityMatches) { $failureReasons.Add('attempt_identity_mismatch') | Out-Null }
+        if ($isTunaManifest) {
+            if (-not $result.RetainedAnalysisOwnerMatches) { $failureReasons.Add('retained_analysis_owner_mismatch') | Out-Null }
+            if (-not $result.ReceiptPathShapeValid) { $failureReasons.Add('retained_analysis_receipt_path_shape_invalid') | Out-Null }
+            elseif (-not $result.ReceiptPathMatches) { $failureReasons.Add('retained_analysis_receipt_path_mismatch') | Out-Null }
+            if (-not $result.ReceiptContentValid) { $failureReasons.Add('retained_analysis_receipt_content_invalid') | Out-Null }
+            if (-not $result.ReceiptHashMatches) { $failureReasons.Add('retained_analysis_receipt_hash_mismatch') | Out-Null }
+            if (-not $result.RetainedAnalysisReceiptValid -and $failureReasons.Count -eq 0) {
+                $failureReasons.Add('retained_analysis_receipt_manifest_claim_invalid') | Out-Null
+            }
+        }
+        $result.FailureReasons = @($failureReasons.ToArray())
     }
     catch {
         $result.IsFinalized = $false
+        $result.FailureReasons = @('attempt_finalization_validation_exception')
+        $result.ValidationExceptionType = $_.Exception.GetType().FullName
+        $result.ValidationExceptionMessage = $_.Exception.Message
+        $result.ValidationExceptionHResult = $_.Exception.HResult
     }
 
     return [pscustomobject]$result
@@ -9717,6 +9832,16 @@ function Get-RouteAcceptanceResultFailureClass {
         -FailurePhase ([string]$Result.guiReportedFailurePhase) `
         -FailureReason ([string]$Result.guiReportedFailureReason) `
         -ErrorMessage ([string]$Result.guiReportedFailureError)
+    $finalizedAttemptSelectionVerdictProperty = $Result.PSObject.Properties['finalizedAttemptSelectionVerdict']
+    if ($AcceptancePhase -eq 'phase5' -and
+        $null -ne $finalizedAttemptSelectionVerdictProperty -and
+        [string]::Equals(
+            [string]$finalizedAttemptSelectionVerdictProperty.Value,
+            'fail',
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        $failureClassProperty = $Result.PSObject.Properties['finalizedAttemptSelectionFailureClass']
+        return if ($null -ne $failureClassProperty) { [string]$failureClassProperty.Value } else { 'filetransfer_route_acceptance_finalized_attempt_selection_missing' }
+    }
     if ($AcceptancePhase -eq 'phase5' -and $script:RouteAcceptanceExecutionMode -ne 'fake') {
         if (-not [bool]$Result.currentRuntimeProof -or
             -not [string]::Equals([string]$Result.manifestValidationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -10460,6 +10585,14 @@ function New-RouteAcceptanceSummaryRunDto {
         writerChronologyVerdict = [string]$Result.writerChronologyVerdict
         currentRuntimeProof = [bool]$Result.currentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.currentRuntimeProofReasons -Limit 32)
+        finalizedAttemptSelectionVerdict = [string]$Result.finalizedAttemptSelectionVerdict
+        finalizedAttemptSelectionFailureClass = [string]$Result.finalizedAttemptSelectionFailureClass
+        finalizedAttemptSelectionReason = [string]$Result.finalizedAttemptSelectionReason
+        finalizedAttemptSelectionVariant = [string]$Result.finalizedAttemptSelectionVariant
+        finalizedAttemptSelectionRawCount = [long]$Result.finalizedAttemptSelectionRawCount
+        finalizedAttemptSelectionDistinctCount = [long]$Result.finalizedAttemptSelectionDistinctCount
+        finalizedAttemptSelectionRecoveredCount = [long]$Result.finalizedAttemptSelectionRecoveredCount
+        finalizedAttemptSelectionUnresolvedCount = [long]$Result.finalizedAttemptSelectionUnresolvedCount
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
         runtimeCorrectnessVerdict = [string]$Result.runtimeCorrectnessVerdict
         runtimeFailureCandidate = [string]$Result.runtimeFailureCandidate
@@ -10936,6 +11069,23 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $writerDrainMissingCount = [long](($runDtos | Measure-Object -Property writerDrainMissingCount -Sum).Sum)
     $writerRecoveryVerdict = if ($runDtos.Count -eq 0) { 'missing' } elseif (@($runDtos | Where-Object { $_.writerRecoveryVerdict -ne 'pass' }).Count -gt 0) { 'fail' } else { 'pass' }
     $writerChronologyVerdict = if ($runDtos.Count -eq 0) { 'missing' } elseif (@($runDtos | Where-Object { $_.writerChronologyVerdict -ne 'pass' }).Count -gt 0) { 'fail' } else { 'pass' }
+    $finalizedAttemptSelectionRawCount = [long](($runDtos | Measure-Object -Property finalizedAttemptSelectionRawCount -Sum).Sum)
+    $finalizedAttemptSelectionDistinctCount = [long](($runDtos | Measure-Object -Property finalizedAttemptSelectionDistinctCount -Sum).Sum)
+    $finalizedAttemptSelectionRecoveredCount = [long](($runDtos | Measure-Object -Property finalizedAttemptSelectionRecoveredCount -Sum).Sum)
+    $finalizedAttemptSelectionUnresolvedCount = [long](($runDtos | Measure-Object -Property finalizedAttemptSelectionUnresolvedCount -Sum).Sum)
+    $finalizedAttemptSelectionFailureDtos = @($runDtos | Where-Object {
+            [string]::Equals([string]$_.finalizedAttemptSelectionVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase)
+        })
+    $finalizedAttemptSelectionVerdict = if ($finalizedAttemptSelectionUnresolvedCount -gt 0) {
+        'fail'
+    }
+    elseif (@($runDtos | Where-Object { [string]$_.finalizedAttemptSelectionVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else { 'none' }
+    $finalizedAttemptSelectionFailureClass = if ($finalizedAttemptSelectionFailureDtos.Count -gt 0) { [string]$finalizedAttemptSelectionFailureDtos[0].finalizedAttemptSelectionFailureClass } else { 'none' }
+    $finalizedAttemptSelectionReason = if ($finalizedAttemptSelectionFailureDtos.Count -gt 0) { [string]$finalizedAttemptSelectionFailureDtos[0].finalizedAttemptSelectionReason } else { '(none)' }
+    $finalizedAttemptSelectionVariant = if ($finalizedAttemptSelectionFailureDtos.Count -gt 0) { [string]$finalizedAttemptSelectionFailureDtos[0].finalizedAttemptSelectionVariant } else { '(none)' }
     $runtimeCandidateDtos = @($runDtos | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.runtimeFailureCandidate) -and
         [string]$_.runtimeFailureCandidate -notin @('(none)', 'none')
@@ -10949,11 +11099,17 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $failureVariant = if ($runtimeCandidateDtos.Count -gt 0) {
         [string]$runtimeCandidateDtos[0].failureVariant
     }
+    elseif ($finalizedAttemptSelectionFailureDtos.Count -gt 0) {
+        $finalizedAttemptSelectionVariant
+    }
     else {
         '(none)'
     }
     $acceptanceFailureClass = if ($runtimeCandidateDtos.Count -gt 0) {
         [string]$runtimeCandidateDtos[0].acceptanceFailureClass
+    }
+    elseif ($finalizedAttemptSelectionFailureDtos.Count -gt 0) {
+        $finalizedAttemptSelectionFailureClass
     }
     else {
         '(none)'
@@ -10964,7 +11120,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $firstProofChainFailureSequence = if ($runtimeCandidateDtos.Count -gt 0) { [long]$runtimeCandidateDtos[0].firstProofChainFailureSequence } else { 0L }
     $firstProofChainFailureSource = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureSource } else { '(none)' }
     $firstProofChainFailureWriterSequence = if ($runtimeCandidateDtos.Count -gt 0) { [long]$runtimeCandidateDtos[0].firstProofChainFailureWriterSequence } else { 0L }
-    $semanticFailureDomain = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].semanticFailureDomain } else { '(none)' }
+    $semanticFailureDomain = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].semanticFailureDomain } elseif ($finalizedAttemptSelectionFailureDtos.Count -gt 0) { 'evidence_harness' } else { '(none)' }
     $fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
@@ -11894,6 +12050,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("provenance_failure_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $evidence.ProvenanceFailureReasons)),
         ("current_runtime_proof={0}" -f ($(if ([bool]$evidence.CurrentRuntimeProof) { 1 } else { 0 }))),
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $evidence.CurrentRuntimeProofReasons)),
+        ("finalized_attempt_selection_verdict={0}" -f $finalizedAttemptSelectionVerdict),
+        ("finalized_attempt_selection_failure_class={0}" -f $finalizedAttemptSelectionFailureClass),
+        ("finalized_attempt_selection_reason={0}" -f $finalizedAttemptSelectionReason),
+        ("finalized_attempt_selection_variant={0}" -f $finalizedAttemptSelectionVariant),
+        ("filetransfer_route_acceptance_finalized_attempt_selection_missing_raw_count={0}" -f $finalizedAttemptSelectionRawCount),
+        ("filetransfer_route_acceptance_finalized_attempt_selection_missing_distinct_count={0}" -f $finalizedAttemptSelectionDistinctCount),
+        ("filetransfer_route_acceptance_finalized_attempt_selection_missing_recovered_count={0}" -f $finalizedAttemptSelectionRecoveredCount),
+        ("filetransfer_route_acceptance_finalized_attempt_selection_missing_unresolved_count={0}" -f $finalizedAttemptSelectionUnresolvedCount),
         ("cursor_integrity_verdict={0}" -f $cursorIntegrityVerdict),
         ("writer_evidence_version={0}" -f $writerEvidenceVersion),
         ("writer_integrity_verdict={0}" -f $writerIntegrityVerdict),
@@ -12389,6 +12553,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.writer_chronology_verdict={1}" -f $prefix, $result.writerChronologyVerdict)
         $textLines += ("{0}.current_runtime_proof={1}" -f $prefix, ($(if ($result.currentRuntimeProof) { 1 } else { 0 })))
         $textLines += ("{0}.current_runtime_proof_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.currentRuntimeProofReasons))
+        $textLines += ("{0}.finalized_attempt_selection_verdict={1}" -f $prefix, $result.finalizedAttemptSelectionVerdict)
+        $textLines += ("{0}.finalized_attempt_selection_failure_class={1}" -f $prefix, $result.finalizedAttemptSelectionFailureClass)
+        $textLines += ("{0}.finalized_attempt_selection_reason={1}" -f $prefix, $result.finalizedAttemptSelectionReason)
+        $textLines += ("{0}.finalized_attempt_selection_variant={1}" -f $prefix, $result.finalizedAttemptSelectionVariant)
+        $textLines += ("{0}.filetransfer_route_acceptance_finalized_attempt_selection_missing_raw_count={1}" -f $prefix, $result.finalizedAttemptSelectionRawCount)
+        $textLines += ("{0}.filetransfer_route_acceptance_finalized_attempt_selection_missing_distinct_count={1}" -f $prefix, $result.finalizedAttemptSelectionDistinctCount)
+        $textLines += ("{0}.filetransfer_route_acceptance_finalized_attempt_selection_missing_recovered_count={1}" -f $prefix, $result.finalizedAttemptSelectionRecoveredCount)
+        $textLines += ("{0}.filetransfer_route_acceptance_finalized_attempt_selection_missing_unresolved_count={1}" -f $prefix, $result.finalizedAttemptSelectionUnresolvedCount)
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
         $textLines += ("{0}.runtime_correctness_verdict={1}" -f $prefix, $result.runtimeCorrectnessVerdict)
         $textLines += ("{0}.runtime_failure_candidate={1}" -f $prefix, $result.runtimeFailureCandidate)
@@ -12776,6 +12948,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         provenanceFailureReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $evidence.ProvenanceFailureReasons -Limit 32)
         currentRuntimeProof = [bool]$evidence.CurrentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $evidence.CurrentRuntimeProofReasons -Limit 32)
+        finalizedAttemptSelectionVerdict = $finalizedAttemptSelectionVerdict
+        finalizedAttemptSelectionFailureClass = $finalizedAttemptSelectionFailureClass
+        finalizedAttemptSelectionReason = $finalizedAttemptSelectionReason
+        finalizedAttemptSelectionVariant = $finalizedAttemptSelectionVariant
+        finalizedAttemptSelectionRawCount = $finalizedAttemptSelectionRawCount
+        finalizedAttemptSelectionDistinctCount = $finalizedAttemptSelectionDistinctCount
+        finalizedAttemptSelectionRecoveredCount = $finalizedAttemptSelectionRecoveredCount
+        finalizedAttemptSelectionUnresolvedCount = $finalizedAttemptSelectionUnresolvedCount
         cursorIntegrityVerdict = $cursorIntegrityVerdict
         writerEvidenceVersion = $writerEvidenceVersion
         writerIntegrityVerdict = $writerIntegrityVerdict

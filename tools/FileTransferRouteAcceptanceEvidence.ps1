@@ -1540,6 +1540,7 @@ function Get-RouteAcceptanceScenarioEvidence {
         [Parameter(Mandatory = $true)][string]$AnalyzerInputPath,
         [AllowEmptyString()][string]$DirectManifestPath = '',
         [AllowEmptyString()][string]$DirectManifestSha256 = '',
+        [AllowNull()]$AttemptFinalization = $null,
         [bool]$Selected = $true,
         [string]$SelectionDisposition = 'selected_finalized_attempt'
     )
@@ -1693,6 +1694,44 @@ function Get-RouteAcceptanceScenarioEvidence {
         artifactFinalized = $ArtifactFinalized
         selected = $Selected
         selectionDisposition = $SelectionDisposition
+        finalizationValidation = if ($null -eq $AttemptFinalization) {
+            [pscustomobject][ordered]@{
+                event = 'filetransfer_route_acceptance_attempt_finalization_decided'
+                isFinalized = $ArtifactFinalized
+                artifactFinalizedClaim = $ArtifactFinalized
+                currentRuntimeProofClaim = $false
+                retainedAnalysisReceiptValid = $false
+                retainedAnalysisOwnerMatches = $false
+                receiptPathShapeValid = $false
+                receiptPathMatches = $false
+                receiptContentValid = $false
+                receiptHashMatches = $false
+                identityMatches = $false
+                failureReasons = @('attempt_finalization_diagnostics_missing')
+                exceptionType = ''
+                exceptionMessage = ''
+                exceptionHResult = 0
+            }
+        }
+        else {
+            [pscustomobject][ordered]@{
+                event = 'filetransfer_route_acceptance_attempt_finalization_decided'
+                isFinalized = [bool]$AttemptFinalization.IsFinalized
+                artifactFinalizedClaim = [bool]$AttemptFinalization.ArtifactFinalized
+                currentRuntimeProofClaim = [bool]$AttemptFinalization.CurrentRuntimeProof
+                retainedAnalysisReceiptValid = [bool]$AttemptFinalization.RetainedAnalysisReceiptValid
+                retainedAnalysisOwnerMatches = [bool]$AttemptFinalization.RetainedAnalysisOwnerMatches
+                receiptPathShapeValid = [bool]$AttemptFinalization.ReceiptPathShapeValid
+                receiptPathMatches = [bool]$AttemptFinalization.ReceiptPathMatches
+                receiptContentValid = [bool]$AttemptFinalization.ReceiptContentValid
+                receiptHashMatches = [bool]$AttemptFinalization.ReceiptHashMatches
+                identityMatches = [bool]$AttemptFinalization.IdentityMatches
+                failureReasons = @($AttemptFinalization.FailureReasons)
+                exceptionType = [string]$AttemptFinalization.ValidationExceptionType
+                exceptionMessage = [string]$AttemptFinalization.ValidationExceptionMessage
+                exceptionHResult = [int]$AttemptFinalization.ValidationExceptionHResult
+            }
+        }
         finalizationTimeout = [pscustomobject][ordered]@{
             path = [System.IO.Path]::GetFullPath($timeoutMarkerPath)
             exists = $timeoutMarkerExists
