@@ -16158,14 +16158,26 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                                    .MissingDispatchSuccessorGeneration + 1;
                 },
                 TimeSpan.FromSeconds(5));
-            var successorOfferGeneration = Assert.IsType<long>(
-                GetPrivateField(host, "outboundAccelerationOfferGeneration"));
-            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
-                host,
-                "MarkRuntimeUnlockRecoveryContractRetryObserved",
-                sessionId,
-                successorOfferGeneration,
-                "test_exact_successor_observed")));
+            var successorOfferGeneration = 0L;
+            await WaitUntilAsync(
+                () =>
+                {
+                    successorOfferGeneration = Assert.IsType<long>(
+                        GetPrivateField(
+                            host,
+                            "outboundAccelerationOfferGeneration"));
+                    return successorOfferGeneration >
+                        predecessorOfferGeneration;
+                },
+                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(InvokePrivateMethod(
+                    host,
+                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                    sessionId,
+                    successorOfferGeneration,
+                    "test_exact_successor_observed")),
+                TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_dispatch_observed;",
@@ -16341,14 +16353,26 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                                    .MissingDispatchSuccessorGeneration + 1;
                 },
                 TimeSpan.FromSeconds(5));
-            var successorOfferGeneration = Assert.IsType<long>(
-                GetPrivateField(host, "outboundAccelerationOfferGeneration"));
-            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
-                host,
-                "MarkRuntimeUnlockRecoveryContractRetryObserved",
-                sessionId,
-                successorOfferGeneration,
-                "test_exact_successor_observed")));
+            var successorOfferGeneration = 0L;
+            await WaitUntilAsync(
+                () =>
+                {
+                    successorOfferGeneration = Assert.IsType<long>(
+                        GetPrivateField(
+                            host,
+                            "outboundAccelerationOfferGeneration"));
+                    return successorOfferGeneration >
+                        predecessorOfferGeneration;
+                },
+                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(InvokePrivateMethod(
+                    host,
+                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                    sessionId,
+                    successorOfferGeneration,
+                    "test_exact_successor_observed")),
+                TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_dispatch_observed;",
@@ -16633,6 +16657,26 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             {
                 throw new TimeoutException(ReadOperationalLogTail(logStart), ex);
             }
+            var successorOfferGeneration = 0L;
+            await WaitUntilAsync(
+                () =>
+                {
+                    successorOfferGeneration = Assert.IsType<long>(
+                        GetPrivateField(
+                            host,
+                            "outboundAccelerationOfferGeneration"));
+                    return successorOfferGeneration >
+                        predecessorOfferGeneration;
+                },
+                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => Assert.IsType<bool>(InvokePrivateMethod(
+                    host,
+                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                    sessionId,
+                    successorOfferGeneration,
+                    "test_exact_successor_observed_after_recovery_proof")),
+                TimeSpan.FromSeconds(5));
             try
             {
                 await WaitUntilAsync(
@@ -16748,6 +16792,29 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             await WaitUntilAsync(
                 () => GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host) is not null,
                 TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(
+                () =>
+                {
+                    if (ReadOperationalLogTail(logStart).Contains(
+                            "event=runtime_unlock_retry_dispatch_observed;",
+                            StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+
+                    var offerGeneration = Assert.IsType<long>(
+                        GetPrivateField(
+                            host,
+                            "outboundAccelerationOfferGeneration"));
+                    return offerGeneration > 0 &&
+                        Assert.IsType<bool>(InvokePrivateMethod(
+                            host,
+                            "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                            sessionId,
+                            offerGeneration,
+                            "test_exact_unlocked_retry_observed"));
+                },
+                TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_dispatch_observed;",
