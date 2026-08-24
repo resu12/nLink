@@ -5409,6 +5409,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         FallbackFrontierCheckpointAcceptanceRecheckMissing = $false
         CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $false
         FallbackFrontierStallGraceRecheckMissing = $false
+        FallbackFrontierRecentProgressGraceRecheckMissing = $false
         PostTunaFallbackDuplicateStateReplayAmplification = $false
         PostTunaFallbackExactFrontierRepairPreemption = $false
         FallbackTailFailedYieldQuiescentSuccessorMissing = $false
@@ -5557,6 +5558,12 @@ function Get-TunaGuiExplicitFailureClassification {
                 return [pscustomobject]@{
                     Phase = 'fallback_frontier_repair'
                     Reason = 'post_tuna_fallback_frontier_stall_grace_expired_without_exact_receiver_request_recheck'
+                }
+            }
+            'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing' {
+                return [pscustomobject]@{
+                    Phase = 'fallback_frontier_repair'
+                    Reason = 'post_tuna_fallback_frontier_recent_progress_grace_expired_without_exact_stall_recheck'
                 }
             }
             'filetransfer_fallback_frontier_repair_successor_dispatch_missing' {
@@ -5983,6 +5990,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $explicitResult.FallbackFrontierStallGraceRecheckMissing = $true
             $explicitResult.FailureVariant =
                 'settled_frontier_progress_successor_not_rechecked_after_stall_grace'
+        }
+        if ($ErrorMessage.IndexOf(
+                'failure_class=filetransfer_fallback_frontier_recent_progress_grace_recheck_missing',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $explicitResult.FallbackFrontierRecentProgressGraceRecheckMissing = $true
+            $explicitResult.FailureVariant =
+                'settled_frontier_progress_successor_not_rechecked_after_recent_progress_grace'
         }
         if ($ErrorMessage.IndexOf(
                 'failure_class=filetransfer_fallback_frontier_repair_successor_dispatch_missing',
@@ -14305,6 +14319,371 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure {
+        param(
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+        )
+
+        $records = [System.Collections.Generic.List[object]]::new()
+        $visits = 0L
+        foreach ($line in $Lines) {
+            $visits++
+            $fields = @{}
+            foreach ($match in [regex]::Matches($line, '(?i)(?<name>[a-z0-9_]+)=(?<value>[^;\r\n]+)')) {
+                $fields[$match.Groups['name'].Value] = $match.Groups['value'].Value.Trim()
+            }
+            $eventName = [string]$fields['event']
+            if ([string]::IsNullOrWhiteSpace($eventName)) { continue }
+            $sequence = $visits
+            if ([string]$fields['gui_evidence_sequence'] -match '^[1-9][0-9]*$') {
+                $sequence = [long]$fields['gui_evidence_sequence']
+            }
+            $timestamp = $null
+            $timestampMatch = [regex]::Match($line, '^\[(?<timestamp>[^\]]+)\]')
+            if ($timestampMatch.Success) {
+                $parsedTimestamp = [DateTimeOffset]::MinValue
+                if ([DateTimeOffset]::TryParse(
+                        $timestampMatch.Groups['timestamp'].Value,
+                        [System.Globalization.CultureInfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::AssumeUniversal,
+                        [ref]$parsedTimestamp)) {
+                    $timestamp = $parsedTimestamp
+                }
+            }
+            $records.Add([pscustomobject]@{
+                    Event = $eventName
+                    Sequence = $sequence
+                    Timestamp = $timestamp
+                    Fields = $fields
+                })
+        }
+        function Get-GuiRecentField([object]$Record, [string]$Name, [string]$Default = '') {
+            if ($Record.Fields.ContainsKey($Name)) { return [string]$Record.Fields[$Name] }
+            return $Default
+        }
+        function Get-GuiRecentInt([object]$Record, [string]$Name, [long]$Default = -1) {
+            $text = Get-GuiRecentField $Record $Name ''
+            $value = 0L
+            if ([long]::TryParse($text, [ref]$value)) { return $value }
+            return $Default
+        }
+        [object[]]$progress = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and
+                (Get-GuiRecentField $_ 'direction') -eq 'inbound' -and
+                (Get-GuiRecentField $_ 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-GuiRecentField $_ 'protocol_version') -eq '6' -and
+                (Get-GuiRecentField $_ 'source_kind') -eq 'ReceiverRequest'
+            })
+        [object[]]$sparseProgress = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_v6_sparse_write_committed' -and
+                (Get-GuiRecentInt $_ 'contiguous_chunks_committed') -gt 0
+            })
+        [object[]]$deferrals = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_v6_receiver_state_deferred' -and
+                (Get-GuiRecentField $_ 'route') -eq 'post_tuna_fallback_v6' -and
+                (Get-GuiRecentField $_ 'protocol_version') -eq '6' -and
+                (Get-GuiRecentField $_ 'reason') -eq 'frontier_stalled'
+            })
+        [object[]]$stallDeferrals = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_v6_frontier_request_deferred' -and
+                (Get-GuiRecentInt $_ 'elapsed_ms') -eq 0
+            })
+        [object[]]$recentRechecks = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' -and
+                (Get-GuiRecentField $_ 'decision_status').ToLowerInvariant() -eq 'rechecked'
+            })
+        [object[]]$grants = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+                (Get-GuiRecentField $_ 'source_kind') -eq 'ReceiverRequest'
+            })
+        [object[]]$settlements = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+                (Get-GuiRecentField $_ 'settlement_outcome').ToLowerInvariant() -eq 'progressobserved'
+            })
+        [object[]]$deliveries = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_control_plane_delivery_observed' -and
+                (Get-GuiRecentField $_ 'kind') -eq 'frontier_request'
+            })
+        [object[]]$dispatches = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_fallback_frontier_repair_dispatched' -and
+                (Get-GuiRecentField $_ 'dispatch_observed') -eq '1'
+            })
+        [object[]]$requests = @($records | Where-Object { $_.Event -eq 'filetransfer_v6_frontier_request_sent' })
+        [object[]]$forcedStates = @($records | Where-Object {
+                $_.Event -eq 'filetransfer_v6_fallback_frontier_repair_progress_state_forced' -and
+                (Get-GuiRecentField $_ 'decision_status').ToLowerInvariant() -in @('accepted', 'idempotent')
+            })
+        [object[]]$receiverStates = @($records | Where-Object { $_.Event -eq 'filetransfer_v6_receiver_state_sent' })
+
+        $episodes = @{}
+        foreach ($deferred in $deferrals) {
+            $writer = Get-GuiRecentField $deferred 'log_writer_id'
+            $session = Get-GuiRecentField $deferred 'session_id'
+            $transfer = Get-GuiRecentField $deferred 'transfer_id'
+            $frontier = Get-GuiRecentInt $deferred 'next_chunk_index'
+            $highest = Get-GuiRecentInt $deferred 'highest_received_chunk_index'
+            if ($deferred.Timestamp -eq $null -or $frontier -lt 0 -or $highest -lt $frontier) { continue }
+            [object[]]$predecessor = @($progress | Where-Object {
+                    $_.Sequence -lt $deferred.Sequence -and
+                    (Get-GuiRecentField $_ 'log_writer_id') -eq $writer -and
+                    (Get-GuiRecentField $_ 'session_id') -eq $session -and
+                    (Get-GuiRecentField $_ 'transfer_id') -eq $transfer -and
+                    (Get-GuiRecentInt $_ 'current_frontier_chunk_index') -eq $frontier
+                } | Sort-Object Sequence | Select-Object -Last 1)
+            if ($predecessor.Count -ne 1 -or $predecessor[0].Timestamp -eq $null) { continue }
+            $due = ([DateTimeOffset]$predecessor[0].Timestamp).AddMilliseconds(1000)
+            $progressTicks = Get-GuiRecentInt $predecessor[0] 'log_writer_attempt_utc_ticks' 0
+            $deferredTicks = Get-GuiRecentInt $deferred 'log_writer_attempt_utc_ticks' 0
+            $dueTicks = if ($progressTicks -gt 0 -and $progressTicks -le ([long]::MaxValue - 10000000L)) {
+                $progressTicks + 10000000L
+            }
+            else { 0L }
+            $inProgressGrace = if ($dueTicks -gt 0) {
+                $deferredTicks -gt $progressTicks -and $deferredTicks -lt $dueTicks
+            }
+            else {
+                [DateTimeOffset]$deferred.Timestamp -lt $due
+            }
+            $authority = Get-GuiRecentField $predecessor[0] 'authority_id'
+            $repairGeneration = Get-GuiRecentField $predecessor[0] 'repair_generation'
+            $repairKey = Get-GuiRecentField $predecessor[0] 'repair_request_key'
+            $fingerprint = Get-GuiRecentField $predecessor[0] 'range_fingerprint'
+            $requestId = Get-GuiRecentField $predecessor[0] 'primary_protocol_repair_request_id'
+            $correlationId = Get-GuiRecentField $predecessor[0] 'primary_request_correlation_id'
+            $previousFrontier = Get-GuiRecentInt $predecessor[0] 'previous_frontier_chunk_index'
+            if ([string]::IsNullOrWhiteSpace($authority) -or $repairGeneration -notmatch '^[1-9][0-9]*$' -or
+                [string]::IsNullOrWhiteSpace($repairKey) -or [string]::IsNullOrWhiteSpace($fingerprint) -or
+                [string]::IsNullOrWhiteSpace($requestId) -or [string]::IsNullOrWhiteSpace($correlationId) -or
+                $previousFrontier -ge $frontier) { continue }
+            $sameTransfer = {
+                param($record)
+                return (Get-GuiRecentField $record 'log_writer_id') -eq $writer -and
+                    (Get-GuiRecentField $record 'session_id') -eq $session -and
+                    (Get-GuiRecentField $record 'transfer_id') -eq $transfer
+            }
+            $scopeFields = @(
+                'direction', 'route', 'protocol_version', 'live_route_epoch',
+                'route_publication_generation', 'route_commit_generation', 'runtime_generation',
+                'terminal_generation', 'leg_generation', 'transport_epoch',
+                'bridge_recovery_generation', 'bridge_decision_generation',
+                'checkpoint_request_id', 'checkpoint_generation')
+            $sameProgressScope = {
+                param($record)
+                foreach ($field in $scopeFields) {
+                    if ((Get-GuiRecentField $record $field) -ne (Get-GuiRecentField $predecessor[0] $field)) {
+                        return $false
+                    }
+                }
+                return $true
+            }
+            $sameAuthority = {
+                param($record)
+                return (& $sameTransfer $record) -and (& $sameProgressScope $record) -and
+                    (Get-GuiRecentField $record 'authority_id') -eq $authority -and
+                    (Get-GuiRecentField $record 'repair_generation') -eq $repairGeneration -and
+                    (Get-GuiRecentField $record 'repair_request_key') -eq $repairKey -and
+                    (Get-GuiRecentField $record 'range_fingerprint') -eq $fingerprint
+            }
+            [object[]]$settlement = @($settlements | Where-Object {
+                    $_.Sequence -lt $predecessor[0].Sequence -and (& $sameAuthority $_)
+                } | Select-Object -Last 1)
+            [object[]]$grant = @($grants | Where-Object {
+                    $_.Sequence -lt $predecessor[0].Sequence -and (& $sameAuthority $_) -and
+                    (Get-GuiRecentField $_ 'primary_protocol_repair_request_id') -eq $requestId -and
+                    (Get-GuiRecentField $_ 'primary_request_correlation_id') -eq $correlationId
+                } | Select-Object -Last 1)
+            [object[]]$delivery = @($deliveries | Where-Object {
+                    $_.Sequence -lt $predecessor[0].Sequence -and (& $sameTransfer $_) -and
+                    (Get-GuiRecentField $_ 'route') -eq (Get-GuiRecentField $predecessor[0] 'route') -and
+                    (Get-GuiRecentField $_ 'protocol_version') -eq (Get-GuiRecentField $predecessor[0] 'protocol_version') -and
+                    (Get-GuiRecentField $_ 'live_route_epoch') -eq (Get-GuiRecentField $predecessor[0] 'live_route_epoch') -and
+                    (Get-GuiRecentField $_ 'repair_request_id') -eq $requestId -and
+                    (Get-GuiRecentField $_ 'request_correlation_id') -eq $correlationId -and
+                    (Get-GuiRecentField $_ 'repair_request_key') -eq $repairKey -and
+                    (Get-GuiRecentField $_ 'range_fingerprint') -eq $fingerprint -and
+                    (Get-GuiRecentField $_ 'peer_visible_any') -eq '1' -and
+                    (Get-GuiRecentField $_ 'accepted_any') -eq '1'
+                } | Select-Object -Last 1)
+            [object[]]$dispatch = @($dispatches | Where-Object {
+                    $_.Sequence -lt $predecessor[0].Sequence -and (& $sameAuthority $_)
+                } | Select-Object -Last 1)
+            [object[]]$request = @($requests | Where-Object {
+                    $_.Sequence -lt $predecessor[0].Sequence -and (& $sameAuthority $_) -and
+                    (Get-GuiRecentField $_ 'repair_request_id') -eq $requestId -and
+                    (Get-GuiRecentField $_ 'request_correlation_id') -eq $correlationId
+                } | Select-Object -Last 1)
+            [object[]]$forced = @($forcedStates | Where-Object {
+                    $_.Sequence -gt $predecessor[0].Sequence -and $_.Sequence -lt $deferred.Sequence -and
+                    (& $sameAuthority $_) -and (Get-GuiRecentInt $_ 'current_frontier_chunk_index') -eq $frontier
+                } | Select-Object -First 1)
+            if ($settlement.Count -ne 1 -or $grant.Count -ne 1 -or $delivery.Count -ne 1 -or
+                $dispatch.Count -ne 1 -or $request.Count -ne 1 -or $forced.Count -ne 1) { continue }
+            $dataSessionIdentity = Get-GuiRecentField $forced[0] 'data_session_identity'
+            $dataSessionGeneration = Get-GuiRecentField $forced[0] 'data_session_generation'
+            $stateEpoch = Get-GuiRecentField $forced[0] 'receiver_state_epoch'
+            [object[]]$state = @($receiverStates | Where-Object {
+                    $_.Sequence -gt $forced[0].Sequence -and $_.Sequence -lt $deferred.Sequence -and
+                    (& $sameTransfer $_) -and
+                    (Get-GuiRecentField $_ 'transport_epoch') -eq (Get-GuiRecentField $predecessor[0] 'transport_epoch') -and
+                    (Get-GuiRecentField $_ 'epoch') -eq $stateEpoch -and
+                    (Get-GuiRecentInt $_ 'contiguous_committed_chunk_index') -eq $frontier
+                } | Select-Object -First 1)
+            if ($state.Count -ne 1 -or [string]::IsNullOrWhiteSpace($dataSessionIdentity) -or
+                $dataSessionGeneration -notmatch '^[1-9][0-9]*$') { continue }
+            $scopeConflict = $false
+            foreach ($field in $scopeFields) {
+                $candidateValue = Get-GuiRecentField $deferred $field
+                $sourceValue = Get-GuiRecentField $predecessor[0] $field
+                if (-not [string]::IsNullOrWhiteSpace($candidateValue) -and $candidateValue -ne $sourceValue) {
+                    $scopeConflict = $true
+                    break
+                }
+            }
+            if ($scopeConflict -or
+                ((Get-GuiRecentField $deferred 'data_session_identity') -notin @('', $dataSessionIdentity)) -or
+                ((Get-GuiRecentField $deferred 'data_session_generation') -notin @('', $dataSessionGeneration))) { continue }
+            $progressBoundary = if ($progressTicks -gt 0) { [string]$progressTicks } else { [string]$predecessor[0].Timestamp }
+            $key = "$writer|$session|$transfer|$authority|$repairGeneration|$repairKey|$fingerprint|$requestId|$correlationId|$previousFrontier|$frontier|$stateEpoch|$dataSessionIdentity|$dataSessionGeneration|$progressBoundary".ToLowerInvariant()
+            if (-not $inProgressGrace -and -not $episodes.ContainsKey($key)) { continue }
+            if (-not $episodes.ContainsKey($key)) {
+                $episodes[$key] = [pscustomobject]@{
+                    Event = $deferred; Progress = $predecessor[0]; Writer = $writer; Session = $session
+                    Transfer = $transfer; Frontier = $frontier; Highest = $highest; Due = $due; DueTicks = $dueTicks
+                    RequestId = $requestId; CorrelationId = $correlationId
+                    DataSessionIdentity = $dataSessionIdentity; DataSessionGeneration = $dataSessionGeneration
+                }
+            }
+            elseif ($highest -lt [long]$episodes[$key].Highest) {
+                $episodes[$key] | Add-Member -NotePropertyName HighestRegressed -NotePropertyValue $true -Force
+            }
+            elseif ($highest -gt [long]$episodes[$key].Highest) {
+                $episodes[$key].Highest = $highest
+            }
+        }
+
+        $unresolved = [System.Collections.Generic.List[object]]::new()
+        foreach ($episode in $episodes.Values) {
+            $sameSource = {
+                param($record)
+                if ((Get-GuiRecentField $record 'log_writer_id') -ne $episode.Writer -or
+                    (Get-GuiRecentField $record 'session_id') -ne $episode.Session -or
+                    (Get-GuiRecentField $record 'transfer_id') -ne $episode.Transfer) { return $false }
+                foreach ($field in @(
+                        'route', 'protocol_version', 'live_route_epoch', 'route_publication_generation',
+                        'route_commit_generation', 'runtime_generation', 'terminal_generation', 'leg_generation',
+                        'transport_epoch', 'bridge_recovery_generation', 'bridge_decision_generation',
+                        'checkpoint_request_id', 'checkpoint_generation')) {
+                    $expected = Get-GuiRecentField $episode.Progress $field
+                    if (-not [string]::IsNullOrWhiteSpace($expected) -and
+                        (Get-GuiRecentField $record $field) -ne $expected) {
+                        return $false
+                    }
+                }
+                return $true
+            }
+            [object[]]$natural = @(@($progress) + @($sparseProgress) | Where-Object {
+                    $eventTicks = Get-GuiRecentInt $_ 'log_writer_attempt_utc_ticks' 0
+                    $_.Sequence -gt $episode.Event.Sequence -and $_.Timestamp -ne $null -and
+                    $(if ($episode.DueTicks -gt 0) {
+                            $eventTicks -gt 0 -and $eventTicks -le $episode.DueTicks
+                        }
+                        else {
+                            [DateTimeOffset]$_.Timestamp -le $episode.Due
+                    }) -and
+                    $(if ($_.Event -eq 'filetransfer_v6_sparse_write_committed') {
+                            (Get-GuiRecentField $_ 'log_writer_id') -eq $episode.Writer -and
+                            (Get-GuiRecentField $_ 'session_id') -eq $episode.Session -and
+                            (Get-GuiRecentField $_ 'transfer_id') -eq $episode.Transfer -and
+                            (Get-GuiRecentInt $_ 'next_chunk_index') -gt $episode.Frontier
+                        }
+                        else {
+                            (& $sameSource $_) -and
+                            (Get-GuiRecentInt $_ 'current_frontier_chunk_index') -gt $episode.Frontier
+                        })
+                } | Select-Object -First 1)
+            $recovered = $natural.Count -eq 1
+            if (-not $recovered) {
+                [object[]]$recheck = @($recentRechecks | Where-Object {
+                        $_.Sequence -gt $episode.Event.Sequence -and (& $sameSource $_) -and
+                        (Get-GuiRecentInt $_ 'frontier_chunk_index') -eq $episode.Frontier -and
+                        (Get-GuiRecentField $_ 'decision_reason') -in @('stall_grace_armed', 'exact_receiver_request_dispatched')
+                    } | Select-Object -First 1)
+                [object[]]$stall = @($stallDeferrals | Where-Object {
+                        $eventTicks = Get-GuiRecentInt $_ 'log_writer_attempt_utc_ticks' 0
+                        $_.Sequence -gt $episode.Event.Sequence -and $_.Timestamp -ne $null -and
+                        $(if ($episode.DueTicks -gt 0) {
+                                $eventTicks -ge $episode.DueTicks
+                            }
+                            else {
+                                [DateTimeOffset]$_.Timestamp -ge $episode.Due
+                            }) -and (& $sameSource $_) -and
+                        (Get-GuiRecentInt $_ 'frontier_chunk_index') -eq $episode.Frontier
+                    } | Select-Object -First 1)
+                $boundary = if ($recheck.Count -eq 1) { $recheck[0].Sequence } elseif ($stall.Count -eq 1) { $stall[0].Sequence } else { 0L }
+                [object[]]$grant = @($grants | Where-Object {
+                        $candidateGrant = $_
+                        $candidateAuthority = Get-GuiRecentField $candidateGrant 'authority_id'
+                        $candidateGrant.Sequence -gt $boundary -and $boundary -gt 0 -and (& $sameSource $candidateGrant) -and
+                        (Get-GuiRecentInt $candidateGrant 'frontier_chunk_index') -eq $episode.Frontier -and
+                        @($progress | Where-Object {
+                                $_.Sequence -gt $candidateGrant.Sequence -and (& $sameSource $_) -and
+                                (Get-GuiRecentField $_ 'authority_id') -eq $candidateAuthority -and
+                                (Get-GuiRecentInt $_ 'current_frontier_chunk_index') -gt $episode.Frontier
+                            } | Select-Object -First 1).Count -eq 1
+                    } | Select-Object -First 1)
+                if ($grant.Count -eq 1) {
+                    $successorAuthority = Get-GuiRecentField $grant[0] 'authority_id'
+                    $successorRequestId = Get-GuiRecentField $grant[0] 'primary_protocol_repair_request_id'
+                    $successorCorrelationId = Get-GuiRecentField $grant[0] 'primary_request_correlation_id'
+                    [object[]]$delivery = @($deliveries | Where-Object {
+                            $_.Sequence -gt $grant[0].Sequence -and
+                            (Get-GuiRecentField $_ 'log_writer_id') -eq $episode.Writer -and
+                            (Get-GuiRecentField $_ 'session_id') -eq $episode.Session -and
+                            (Get-GuiRecentField $_ 'transfer_id') -eq $episode.Transfer -and
+                            (Get-GuiRecentField $_ 'route') -eq (Get-GuiRecentField $episode.Progress 'route') -and
+                            (Get-GuiRecentField $_ 'live_route_epoch') -eq (Get-GuiRecentField $episode.Progress 'live_route_epoch') -and
+                            (Get-GuiRecentField $_ 'repair_request_id') -eq $successorRequestId -and
+                            (Get-GuiRecentField $_ 'request_correlation_id') -eq $successorCorrelationId -and
+                            (Get-GuiRecentField $_ 'peer_visible_any') -eq '1' -and
+                            (Get-GuiRecentField $_ 'accepted_any') -eq '1'
+                        } | Select-Object -First 1)
+                    [object[]]$dispatch = @($dispatches | Where-Object {
+                            $_.Sequence -gt $grant[0].Sequence -and (& $sameSource $_) -and
+                            (Get-GuiRecentField $_ 'authority_id') -eq $successorAuthority
+                        } | Select-Object -First 1)
+                    [object[]]$request = @($requests | Where-Object {
+                            $_.Sequence -gt $grant[0].Sequence -and (& $sameSource $_) -and
+                            (Get-GuiRecentField $_ 'authority_id') -eq $successorAuthority
+                        } | Select-Object -First 1)
+                    [object[]]$successorProgress = @($progress | Where-Object {
+                            $_.Sequence -gt $grant[0].Sequence -and (& $sameSource $_) -and
+                            (Get-GuiRecentField $_ 'authority_id') -eq $successorAuthority -and
+                            (Get-GuiRecentInt $_ 'current_frontier_chunk_index') -gt $episode.Frontier
+                        } | Select-Object -First 1)
+                    if ($delivery.Count -eq 1 -and $dispatch.Count -eq 1 -and
+                        $request.Count -eq 1 -and $successorProgress.Count -eq 1) {
+                        [object[]]$state = @($receiverStates | Where-Object {
+                                $_.Sequence -gt $successorProgress[0].Sequence -and
+                                (Get-GuiRecentField $_ 'log_writer_id') -eq $episode.Writer -and
+                                (Get-GuiRecentField $_ 'session_id') -eq $episode.Session -and
+                                (Get-GuiRecentField $_ 'transfer_id') -eq $episode.Transfer -and
+                                (Get-GuiRecentInt $_ 'contiguous_committed_chunk_index') -gt $episode.Frontier
+                            } | Select-Object -First 1)
+                        $recovered = $state.Count -eq 1
+                    }
+                }
+            }
+            if ($episode.PSObject.Properties.Name -contains 'HighestRegressed') { $recovered = $false }
+            if (-not $recovered) { $unresolved.Add($episode) }
+        }
+        [object[]]$first = @($unresolved | Sort-Object { $_.Event.Sequence } | Select-Object -First 1)
+        return [pscustomobject]@{
+            Unresolved = $first.Count -eq 1
+            FirstSequence = if ($first.Count -eq 1) { [long]$first[0].Event.Sequence } else { [long]::MaxValue }
+            ParsedRecords = $visits
+        }
+    }
+
     function Get-TunaGuiFallbackFrontierCheckpointAcceptanceRecheckFailure {
         param(
             [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
@@ -17662,6 +18041,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_v6_frontier_request_receive_dispatched',
             'filetransfer_v6_frontier_request_deferred',
             'filetransfer_v6_frontier_stall_grace_recheck_decided',
+            'filetransfer_v6_frontier_recent_progress_grace_deferred',
+            'filetransfer_v6_frontier_recent_progress_grace_recheck_decided',
+            'filetransfer_v6_receiver_state_deferred',
             'filetransfer_v4_state_received',
             'filetransfer_transport_rebind_safety_replay_started',
             'filetransfer_post_tuna_fallback_rebind_state_replay_suppressed',
@@ -20063,6 +20445,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackFrontierStallGraceRecheckFastPath =
         Get-TunaGuiFallbackFrontierStallGraceRecheckFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
+    $fallbackFrontierRecentProgressGraceRecheckFastPath =
+        Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure `
+            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
     $fallbackFrontierRepairSuccessorDispatchMissingFastPath =
         Get-TunaGuiFallbackFrontierRepairSuccessorDispatchMissingFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
@@ -20179,6 +20564,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [pscustomobject]@{ Kind = 'Responder'; Result = $responderPeerProbeFastPath },
             [pscustomobject]@{ Kind = 'PairedRetryResponderBinding'; Result = $pairedRetryResponderBindingFastPath },
             [pscustomobject]@{ Kind = 'Checkpoint'; Result = $fallbackFrontierCheckpointAcceptanceRecheckFastPath },
+            [pscustomobject]@{ Kind = 'RecentProgressGrace'; Result = $fallbackFrontierRecentProgressGraceRecheckFastPath },
             [pscustomobject]@{ Kind = 'StallGrace'; Result = $fallbackFrontierStallGraceRecheckFastPath },
             [pscustomobject]@{
                 Kind = 'FrontierSuccessorDispatch'
@@ -20768,6 +21154,28 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.FallbackFrontierCheckpointAcceptanceRecheckMissing = $true
         $result.CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $true
+        return $result
+    }
+
+    if ($firstEarlyRouteRuntimeKind -eq 'RecentProgressGrace') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = $earlyEvidenceLineVisitCount
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource =
+                "${classificationSource}_fallback_frontier_recent_progress_grace_recheck_index"
+        }
+        $result = New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'fallback_frontier_repair' `
+            -Reason 'post_tuna_fallback_frontier_recent_progress_grace_expired_without_exact_stall_recheck' `
+            -RouteMode $RouteMode `
+            -ClassificationSource "${classificationSource}_fallback_frontier_recent_progress_grace_recheck_index" `
+            -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
+            -EvidenceParsedRecordCount ([long]$fallbackFrontierRecentProgressGraceRecheckFastPath.ParsedRecords) `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
+        $result.FallbackFrontierRecentProgressGraceRecheckMissing = $true
+        $result.FailureVariant =
+            'settled_frontier_progress_successor_not_rechecked_after_recent_progress_grace'
         return $result
     }
 

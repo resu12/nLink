@@ -4564,6 +4564,76 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    public async Task AnalyzeRetained_PostFallbackFrontierRecentProgressGraceRecheck_HasFullCompactParity(
+        bool compact,
+        bool recovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_recent_progress_grace";
+        const string authorityId = "fta2-repair_replay-frontier-recent-progress-grace";
+        const string requestId = "v6-frontier:40:1";
+        const string correlationId = "frq-frontier-recent-progress-grace";
+        const string repairKey = "fallback-frontier:40:1:frontier-recent-progress-grace";
+        const string rangeFingerprint = "frontier-recent-progress-grace";
+        const string scope = "direction=inbound; session_id=sess_recent; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; " +
+            "bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); checkpoint_generation=1; " +
+            "route_publication_generation=5; route_commit_generation=0; log_writer_id=writer_recent";
+        var repair = $"authority_schema=2; authority_id={authorityId}; predecessor_authority_id=(none); {scope}; " +
+            $"repair_generation=4; repair_request_key={repairKey}; range_fingerprint={rangeFingerprint}; " +
+            $"frontier_chunk_index=40; durable_received_highest_chunk_index=60; range_count=1; requested_chunk_count=1; " +
+            $"source_kind=ReceiverRequest; primary_protocol_repair_request_id={requestId}; " +
+            $"primary_request_correlation_id={correlationId}; target_transport=regular_nkn";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; transfer_id={transferId}; {scope}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; transfer_id={transferId}; {repair}"),
+            LogLine($"event=filetransfer_control_plane_delivery_observed; transfer_id={transferId}; {scope}; kind=frontier_request; reason=frontier_stall_grace_elapsed; repair_request_id={requestId}; request_correlation_id={correlationId}; repair_request_key={repairKey}; range_fingerprint={rangeFingerprint}; peer_visible_any=1; accepted_any=1"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; transfer_id={transferId}; {repair}; dispatch_observed=1"),
+            LogLine($"event=filetransfer_v6_frontier_request_sent; transfer_id={transferId}; {repair}; repair_request_id={requestId}; request_correlation_id={correlationId}; reason=frontier_stall_grace_elapsed"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_contract_settled; transfer_id={transferId}; {repair}; settlement_outcome=ProgressObserved; dispatch_observed=1"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; transfer_id={transferId}; {repair}; previous_frontier_chunk_index=40; current_frontier_chunk_index=41"),
+            LogLine($"event=filetransfer_v6_fallback_frontier_repair_progress_state_forced; transfer_id={transferId}; {repair}; previous_frontier_chunk_index=40; current_frontier_chunk_index=41; receiver_state_epoch=7; data_session_identity=data-session-recent; data_session_generation=1; decision_status=Accepted"),
+            LogLine($"event=filetransfer_v6_receiver_state_sent; transfer_id={transferId}; {scope}; epoch=7; contiguous_committed_chunk_index=41; durable_received_highest_chunk_index=60; data_session_identity=data-session-recent; data_session_generation=1"),
+            LogLine($"event=filetransfer_v6_receiver_state_deferred; transfer_id={transferId}; {scope}; next_chunk_index=41; highest_received_chunk_index=60; reason=frontier_stalled; authority_effect=none")
+        };
+        if (recovered)
+        {
+            lines.Add(LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; transfer_id={transferId}; {repair}; previous_frontier_chunk_index=41; current_frontier_chunk_index=42"));
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.True(
+            result.Script.ExitCode == 0,
+            $"Recent-progress-grace analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_recovered_count"]);
+        Assert.Equal(recovered ? "0" : "1", verdict["filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_unresolved_count"]);
+        Assert.Equal(recovered ? "pass" : "fail", verdict["filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_verdict"]);
+        if (!recovered)
+        {
+            Assert.Equal("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing", verdict["recovery_failure_class"]);
+            Assert.Equal("settled_frontier_progress_successor_not_rechecked_after_recent_progress_grace", verdict["failure_variant"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false, "successor_deferral", true)]
     [InlineData(true, "successor_deferral", true)]
     [InlineData(false, "route_scope_recheck", true)]

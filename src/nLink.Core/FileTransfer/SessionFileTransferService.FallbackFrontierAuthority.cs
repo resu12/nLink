@@ -1059,6 +1059,7 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CurrentFallbackFrontierRepairContract = contract;
+            ResetInboundV6FrontierRecentProgressGraceWakeLocked(context);
             context.V6FrontierRequestSequence = nextRequestSequence;
             if (strictEpochFrontierProof)
             {

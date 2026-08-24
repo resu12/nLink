@@ -6333,6 +6333,81 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task GuiSmokeFailureClassification_PostFallbackRecentProgressGraceUsesExactIndexedFastPath(
+        bool recovered,
+        bool expectMissing)
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFileTransferFailureClassificationResult", "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-AppLogLinesAfterBookmark { throw 'live ledger was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+            function Test-TunaGuiBridgeBootstrapNotReadyEvidence { return $false }
+            function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing { return $false }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { return $false }
+            function Test-TunaGuiLogLinesContain { return $false }
+            function Get-TunaGuiReadinessStateAfterBookmark {
+                return [pscustomobject]@{ ListenerUnavailable = $false; ListenerReady = $false; TunaActive = $false }
+            }
+            function Resolve-TunaGuiFailureClassification {
+                param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
+                return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
+            }
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-frontier-recent-progress-grace-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $path = Join-Path $tempRoot 'evidence.log'
+                $scope = 'direction=inbound; session_id=sess; transfer_id=transfer; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=0; checkpoint_request_id=(none); checkpoint_generation=1; route_publication_generation=5; route_commit_generation=0; log_writer_id=writer'
+                $repair = "authority_id=repair; repair_generation=4; repair_request_key=fallback-frontier:40:1:range; range_fingerprint=range; frontier_chunk_index=40; durable_received_highest_chunk_index=60; source_kind=ReceiverRequest; primary_protocol_repair_request_id=v6-frontier:40:1; primary_request_correlation_id=correlation; $scope"
+                $lines = @(
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_fallback_frontier_repair_authority_granted; $repair; gui_evidence_sequence=1",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_control_plane_delivery_observed; $scope; kind=frontier_request; repair_request_id=v6-frontier:40:1; request_correlation_id=correlation; repair_request_key=fallback-frontier:40:1:range; range_fingerprint=range; peer_visible_any=1; accepted_any=1; gui_evidence_sequence=2",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_fallback_frontier_repair_dispatched; $repair; dispatch_observed=1; gui_evidence_sequence=3",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_v6_frontier_request_sent; $repair; repair_request_id=v6-frontier:40:1; request_correlation_id=correlation; gui_evidence_sequence=4",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_fallback_frontier_repair_contract_settled; $repair; settlement_outcome=ProgressObserved; gui_evidence_sequence=5",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_fallback_frontier_repair_progress_observed; $repair; previous_frontier_chunk_index=40; current_frontier_chunk_index=41; gui_evidence_sequence=6",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_v6_fallback_frontier_repair_progress_state_forced; $repair; previous_frontier_chunk_index=40; current_frontier_chunk_index=41; receiver_state_epoch=7; data_session_identity=data-session; data_session_generation=1; decision_status=Accepted; gui_evidence_sequence=7",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_v6_receiver_state_sent; $scope; epoch=7; contiguous_committed_chunk_index=41; durable_received_highest_chunk_index=60; gui_evidence_sequence=8",
+                    "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_v6_receiver_state_deferred; $scope; next_chunk_index=41; highest_received_chunk_index=60; reason=frontier_stalled; authority_effect=none; gui_evidence_sequence=9"
+                )
+                if (${{recovered.ToString().ToLowerInvariant()}}) {
+                    $lines += "[2026-04-26 11:17:58Z] [INFO] [FileTransfer] event=filetransfer_fallback_frontier_repair_progress_observed; $repair; previous_frontier_chunk_index=41; current_frontier_chunk_index=42; gui_evidence_sequence=10"
+                }
+                $lines | Set-Content -LiteralPath $path
+                $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ([bool]$result.FallbackFrontierRecentProgressGraceRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                    throw "recent-progress-grace indexed result mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                if (${{expectMissing.ToString().ToLowerInvariant()}} -and
+                    ($result.Phase -ne 'fallback_frontier_repair' -or
+                        $result.Reason -ne 'post_tuna_fallback_frontier_recent_progress_grace_expired_without_exact_stall_recheck' -or
+                        $result.ClassificationSource -ne 'immutable_evidence_fallback_frontier_recent_progress_grace_recheck_index' -or
+                        [long]$result.EvidenceLineVisitCount -ne $lines.Count)) {
+                    throw "recent-progress-grace indexed precedence mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                Write-Output 'gui-frontier-recent-progress-grace-fast-path-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        Assert.True(
+            result.ExitCode == 0,
+            $"Recent-progress-grace GUI fast path failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-frontier-recent-progress-grace-fast-path-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("successor_deferral", false)]
     [InlineData("route_scope_recheck", false)]
     [InlineData("unknown_stale_reason", true)]

@@ -2195,6 +2195,154 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
+    public async Task V6SparseReceiver_PostTunaFallbackRecentProgressGraceWake_BlockedReceiverStateCannotStarveStallRecheck()
+    {
+        const string transferId = "transfer_v6_post_fallback_recent_progress_wake";
+        const string sessionId = "session_v6_post_fallback_recent_progress_wake";
+        const int chunkSize = 4;
+        var previousStallGrace = SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests;
+        var previousProgressGrace = SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests;
+        SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests =
+            TimeSpan.FromMilliseconds(200);
+        SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests =
+            TimeSpan.FromMilliseconds(200);
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(0, 64 * chunkSize).Select(static index => (byte)(index % 251)).ToArray();
+        var sha256 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+        var receiverStateBlocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReceiverState = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var blockNextReceiverState = 0;
+
+        try
+        {
+            using var destination = new NonDisposingMemoryStream();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            receiverTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, _) =>
+            {
+                if (frame is FileTransferReceiverStateFrameV6 &&
+                    Interlocked.CompareExchange(ref blockNextReceiverState, 0, 1) == 1)
+                {
+                    receiverStateBlocked.TrySetResult();
+                    await releaseReceiverState.Task;
+                }
+
+                return false;
+            };
+            senderTransport.Connect(receiverTransport);
+            using var receiver = new SessionFileTransferService();
+            receiver.AttachTransport(receiverTransport);
+
+            var senderSession = await StartManualInboundV6ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v6-post-fallback-recent-progress-wake.bin",
+                payload.Length,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination));
+
+            await senderSession.SendAsync(
+                CreateManifest(
+                    sessionId,
+                    transferId,
+                    "v6-post-fallback-recent-progress-wake.bin",
+                    payload.Length,
+                    chunkSize,
+                    sha256),
+                CancellationToken.None);
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any());
+
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 12,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Skip(12 * chunkSize).Take(chunkSize).ToArray()],
+                },
+                CancellationToken.None);
+            await WaitUntilAsync(
+                () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(static frame =>
+                    frame.MissingRanges.Any(static range => range.StartChunkIndex == 0)),
+                timeoutMs: 5000);
+            var predecessorRequest = receiverTransport.SentDataFrames
+                .OfType<FileTransferFrontierRequestFrameV6>()
+                .Last(static frame => frame.MissingRanges.Any(static range => range.StartChunkIndex == 0));
+            var requestCountBeforeProgress = receiverTransport.SentDataFrames
+                .OfType<FileTransferFrontierRequestFrameV6>()
+                .Count();
+
+            Volatile.Write(ref blockNextReceiverState, 1);
+            var progressDelivery = senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = predecessorRequest.TransportEpoch,
+                    RepairRequestId = predecessorRequest.RepairRequestId,
+                    StartChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Take(chunkSize).ToArray()],
+                    Priority = predecessorRequest.Priority,
+                    RecoveryMode = predecessorRequest.RecoveryMode,
+                },
+                CancellationToken.None);
+            await receiverStateBlocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, receiver.Snapshot.Inbound?.ChunksTransferred);
+
+            await Task.Delay(300);
+            Assert.Equal(
+                requestCountBeforeProgress,
+                receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count());
+
+            await WaitUntilAsync(
+                () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count() >
+                      requestCountBeforeProgress,
+                timeoutMs: 5000);
+            var successorRequest = receiverTransport.SentDataFrames
+                .OfType<FileTransferFrontierRequestFrameV6>()
+                .Last();
+            Assert.Equal(1, successorRequest.MissingRanges[0].StartChunkIndex);
+            Assert.NotEqual(predecessorRequest.RepairRequestId, successorRequest.RepairRequestId);
+
+            releaseReceiverState.TrySetResult();
+            await progressDelivery;
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = successorRequest.TransportEpoch,
+                    RepairRequestId = successorRequest.RepairRequestId,
+                    StartChunkIndex = 1,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Skip(chunkSize).Take(chunkSize).ToArray()],
+                    Priority = successorRequest.Priority,
+                    RecoveryMode = successorRequest.RecoveryMode,
+                },
+                CancellationToken.None);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.ChunksTransferred >= 2, timeoutMs: 5000);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v6_frontier_recent_progress_grace_deferred", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_frontier_recent_progress_grace_recheck_decided", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=stall_grace_armed", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_status=dispatched", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseReceiverState.TrySetResult();
+            SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests = previousStallGrace;
+            SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests = previousProgressGrace;
+        }
+    }
+
+    [Fact]
     public async Task PostTunaFallbackV6_RepeatedFrontierRequestKeepsResponseWindowAuthorized()
     {
         const string transferId = "transfer_v6_post_fallback_frontier_retry_response";

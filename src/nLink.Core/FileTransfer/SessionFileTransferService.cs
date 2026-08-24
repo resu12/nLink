@@ -24384,6 +24384,36 @@ public sealed partial class SessionFileTransferService :
         string DataSessionIdentity,
         long DataSessionGeneration);
 
+    private sealed record InboundV6FrontierRecentProgressGraceWake(
+        long WakeGeneration,
+        string SessionId,
+        string TransferId,
+        int FrontierChunkIndex,
+        int HighestReceivedChunkIndex,
+        DateTimeOffset CommittedProgressUtc,
+        DateTimeOffset DueUtc,
+        FileTransferRoute Route,
+        string RouteToken,
+        int ProtocolVersion,
+        int LiveRouteEpoch,
+        LiveRouteEpoch? RouteEpoch,
+        int RoutePublicationGeneration,
+        int RouteCommitGeneration,
+        RoutePublicationToken RoutePublication,
+        int RuntimeGeneration,
+        int TerminalGeneration,
+        RuntimeOwnerToken RuntimeOwner,
+        int LegGeneration,
+        FileTransferLeg TransferLeg,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
+        int BridgeDecisionGeneration,
+        string CheckpointRequestId,
+        int CheckpointGeneration,
+        IFileTransferDataSession DataSession,
+        string DataSessionIdentity,
+        long DataSessionGeneration);
+
     private sealed class InboundTransferContext
     {
         public InboundTransferContext(FileTransferOfferV2 offer, FileTransferRouteSelection routeSelection)
@@ -24921,6 +24951,12 @@ public sealed partial class SessionFileTransferService :
         public long V6FrontierStallGraceWakeScheduledGeneration { get; set; }
 
         public InboundV6FrontierStallGraceWake? CurrentV6FrontierStallGraceWake { get; set; }
+
+        public long LastV6FrontierRecentProgressGraceWakeGeneration { get; set; }
+
+        public long V6FrontierRecentProgressGraceWakeScheduledGeneration { get; set; }
+
+        public InboundV6FrontierRecentProgressGraceWake? CurrentV6FrontierRecentProgressGraceWake { get; set; }
 
         public string? V6LastReceiverStateDeferredDiagnosticTuple { get; set; }
 
