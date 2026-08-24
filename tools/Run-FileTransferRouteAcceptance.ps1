@@ -9840,7 +9840,10 @@ function Get-RouteAcceptanceResultFailureClass {
             'fail',
             [System.StringComparison]::OrdinalIgnoreCase)) {
         $failureClassProperty = $Result.PSObject.Properties['finalizedAttemptSelectionFailureClass']
-        return if ($null -ne $failureClassProperty) { [string]$failureClassProperty.Value } else { 'filetransfer_route_acceptance_finalized_attempt_selection_missing' }
+        if ($null -ne $failureClassProperty) {
+            return [string]$failureClassProperty.Value
+        }
+        return 'filetransfer_route_acceptance_finalized_attempt_selection_missing'
     }
     if ($AcceptancePhase -eq 'phase5' -and $script:RouteAcceptanceExecutionMode -ne 'fake') {
         if (-not [bool]$Result.currentRuntimeProof -or
