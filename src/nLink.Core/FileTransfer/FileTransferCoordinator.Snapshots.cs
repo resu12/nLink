@@ -86,6 +86,29 @@ internal sealed record FileTransferCoordinatorRuntimeUnlockRetryOperationSnapsho
     string SuccessorAuthorityId,
     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
 
+internal sealed record FileTransferCoordinatorReceiveRecoveryOperationSnapshot(
+    string Role,
+    FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+    FileTransferCoordinatorStateBoundarySnapshot EffectiveBoundary,
+    string RecoveryKind,
+    long BridgeDecisionGeneration,
+    long RecoveryLivenessLeaseGeneration,
+    string ExecutionState,
+    string ClosureState,
+    long ClosureGeneration,
+    string ProofIdentity,
+    long ProofObservedUtcMs,
+    string HeldRetryAuthorityId,
+    string ReservedRetryAuthorityId,
+    long InitialActivationHoldGeneration,
+    long EnvelopeRefreshGeneration,
+    long CheckpointBindingGeneration,
+    long CheckpointDeliveryGeneration,
+    long CheckpointResumeGeneration,
+    long CheckpointFrontierHoldGeneration,
+    long CheckpointFrontierRecheckGeneration,
+    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
+
 internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     string Family,
     string OperationRole,
@@ -108,7 +131,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     FileTransferCoordinatorRouteRuntimeOperationSnapshot? RouteRuntime,
     FileTransferCoordinatorRouteTransitionOperationSnapshot? RouteTransition,
     FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot?
-        RuntimeUnlockRetry = null);
+        RuntimeUnlockRetry = null,
+    FileTransferCoordinatorReceiveRecoveryOperationSnapshot?
+        ReceiveRecovery = null);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -242,6 +267,280 @@ internal readonly record struct
 internal static partial class FileTransferCoordinator
 {
     private static long lastSnapshotDecisionUtcMilliseconds;
+
+    internal static FileTransferReceiveRecoveryDecision
+        FinalizeReceiveRecoverySnapshot(
+            FileTransferCoordinatorState before,
+            FileTransferReceiveRecoveryDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferReceiveRecoveryOperationAuthority? authority = null)
+    {
+        var snapshot = CreateReceiveRecoveryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            command,
+            authority ?? decision.Authority);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+        FinalizeReceiveRecoverySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+                decision,
+            string decisionKind,
+            object? command = null)
+    {
+        var authority = decision.Decision.ReceiveRecoveryOperation?.Authority;
+        var snapshot = CreateReceiveRecoveryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Decision.Status.ToString(),
+            decision.Decision.Reason,
+            command ?? decision.Decision.Request,
+            authority);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+        FinalizeReceiveRecoverySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+                decision,
+            string decisionKind,
+            object? command = null)
+    {
+        var snapshot = CreateReceiveRecoveryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Decision.Status.ToString(),
+            decision.Decision.Reason,
+            command ?? decision.Decision.Receipt.Command,
+            decision.Decision.Receipt.Command.ReceiveRecoveryAuthority);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static FileTransferCoordinatorSnapshotResult
+        CreateReceiveRecoveryTransitionSnapshot(
+            FileTransferCoordinatorState before,
+            FileTransferCoordinatorState after,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferReceiveRecoveryOperationAuthority? authority)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return new FileTransferCoordinatorSnapshotResult(after, null!);
+        }
+
+        return CreateTransitionSnapshot(
+            before,
+            after,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            CreateReceiveRecoveryAttemptedDecisionSnapshots(
+                before,
+                decisionKind,
+                decisionStatus,
+                decisionReason,
+                command,
+                authority));
+    }
+
+    internal static FileTransferCoordinatorSnapshotResult
+        CreateReceiveRecoveryAttemptSnapshot(
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferReceiveRecoveryOperationAuthority? authority)
+        => CreateReceiveRecoveryTransitionSnapshot(
+            state,
+            state,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            command,
+            authority);
+
+    private static ImmutableArray<
+        FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateReceiveRecoveryAttemptedDecisionSnapshots(
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferReceiveRecoveryOperationAuthority? authority)
+    {
+        var descriptors = CreateOperationDescriptors(state)
+            .Where(descriptor => string.Equals(
+                descriptor.Family,
+                "receive_recovery",
+                StringComparison.Ordinal));
+        if (authority is { IsDefault: false } exactAuthority)
+        {
+            descriptors = descriptors.Where(descriptor => string.Equals(
+                descriptor.AuthorityId,
+                exactAuthority.AuthorityId.ToString(),
+                StringComparison.Ordinal));
+        }
+        var descriptor = descriptors
+            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
+            .FirstOrDefault();
+        var commandFingerprint = CalculateSnapshotFingerprint(command);
+        if (descriptor is not null)
+        {
+            var operation = CreateOperationTransitionSnapshot(
+                descriptor,
+                descriptor.State,
+                descriptor.State,
+                stateApplied: false);
+            var decisionReceipt =
+                new FileTransferCoordinatorReceiptTransitionSnapshot(
+                    "attempted_decision",
+                    $"{descriptor.AuthorityId}:{decisionKind}",
+                    Math.Max(1, descriptor.OperationGeneration),
+                    commandFingerprint,
+                    $"{descriptor.AuthorityId}:{decisionKind}:decision",
+                    Math.Max(1, descriptor.OperationGeneration),
+                    decisionStatus,
+                    decisionReason,
+                    CalculateSnapshotFingerprint(new
+                    {
+                        decisionKind,
+                        decisionStatus,
+                        decisionReason,
+                        command,
+                    }),
+                    true);
+            return ImmutableArray.Create(operation with
+            {
+                CommandIdentity = decisionReceipt.CommandIdentity,
+                CommandGeneration = decisionReceipt.CommandGeneration,
+                CommandFingerprint = decisionReceipt.CommandFingerprint,
+                ReceiptIdentity = decisionReceipt.ReceiptIdentity,
+                ReceiptGeneration = decisionReceipt.ReceiptGeneration,
+                ReceiptStatus = decisionReceipt.ReceiptStatus,
+                ReceiptFingerprint = decisionReceipt.ReceiptFingerprint,
+                ReceiptValidated = true,
+                ReceiveRecovery = operation.ReceiveRecovery is null
+                    ? null
+                    : operation.ReceiveRecovery with
+                    {
+                        Receipts = ImmutableArray.Create(decisionReceipt),
+                    },
+            });
+        }
+
+        var generation = Math.Max(
+            1,
+            authority?.OperationGeneration ??
+            state.PersistentState.FileTransferReceiveRecovery
+                .LastOperationGeneration + 1);
+        var syntheticAuthority = authority is { IsDefault: false } exact
+            ? exact.AuthorityId.ToString()
+            : $"attempt:{commandFingerprint}";
+        var boundary = authority is { IsDefault: false } scoped
+            ? CreateReceiveRecoverySourceBoundary(state, scoped.Observation)
+            : CreateStateBoundarySnapshot(state);
+        var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "attempted_decision",
+            $"{syntheticAuthority}:{decisionKind}",
+            generation,
+            commandFingerprint,
+            $"{syntheticAuthority}:{decisionKind}:decision",
+            generation,
+            decisionStatus,
+            decisionReason,
+            CalculateSnapshotFingerprint(new
+            {
+                decisionKind,
+                decisionStatus,
+                decisionReason,
+                command,
+            }),
+            true);
+        return ImmutableArray.Create(
+            new FileTransferCoordinatorOperationTransitionSnapshot(
+                "receive_recovery",
+                "attempted_decision",
+                CreateCoordinatorOperationKey(
+                    "receive_recovery",
+                    "attempted_decision",
+                    syntheticAuthority,
+                    generation,
+                    decisionKind),
+                decisionKind,
+                syntheticAuthority,
+                authority?.PredecessorAuthorityId?.ToString() ?? "(none)",
+                generation,
+                "None",
+                "None",
+                receipt.CommandIdentity,
+                receipt.CommandGeneration,
+                receipt.CommandFingerprint,
+                receipt.ReceiptIdentity,
+                receipt.ReceiptGeneration,
+                receipt.ReceiptStatus,
+                receipt.ReceiptFingerprint,
+                true,
+                false,
+                null,
+                null,
+                null,
+                new FileTransferCoordinatorReceiveRecoveryOperationSnapshot(
+                    "attempted_decision",
+                    boundary,
+                    boundary,
+                    authority?.BridgeRecoveryDecision.RecoveryKind.ToString() ??
+                        "Unknown",
+                    authority?.BridgeRecoveryDecision.BridgeDecisionGeneration ?? 0,
+                    authority?.RecoveryLivenessLease?.LeaseGeneration ?? 0,
+                    "None",
+                    "None",
+                    0,
+                    "(none)",
+                    0,
+                    "(none)",
+                    "(none)",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableArray.Create(receipt))));
+    }
 
     internal static RuntimeUnlockRetryLifecycleTransitionDecision
         FinalizeRuntimeUnlockRetrySnapshot(
@@ -1376,7 +1675,8 @@ internal static partial class FileTransferCoordinator
             stateApplied,
             operation.RouteRuntime,
             operation.RouteTransition,
-            operation.RuntimeUnlockRetry);
+            operation.RuntimeUnlockRetry,
+            operation.ReceiveRecovery);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -1450,49 +1750,7 @@ internal static partial class FileTransferCoordinator
         }
 
         AddRuntimeUnlockRetryOperationDescriptors(state, builder);
-
-        var recovery = persistent.FileTransferReceiveRecovery.CurrentOperation ??
-                       persistent.FileTransferReceiveRecovery.LastTerminalOperation;
-        if (recovery is { } recoveryOperation)
-        {
-            builder.Add(new CoordinatorOperationDescriptor(
-                "receive_recovery",
-                recoveryOperation.Authority.BridgeRecoveryDecision.RecoveryKind.ToString(),
-                recoveryOperation.Authority.AuthorityId.ToString(),
-                recoveryOperation.Authority.PredecessorAuthorityId?.ToString() ?? "(none)",
-                recoveryOperation.Authority.OperationGeneration,
-                $"{recoveryOperation.ExecutionState}:{recoveryOperation.ClosureState}",
-                recoveryOperation.Authority.AuthorityId.ToString(),
-                recoveryOperation.Authority.OperationGeneration,
-                CalculateSnapshotFingerprint(new
-                {
-                    recoveryOperation.Authority.AuthorityId,
-                    recoveryOperation.Authority.PredecessorAuthorityId,
-                    recoveryOperation.Authority.OperationGeneration,
-                    recoveryOperation.Authority.BridgeRecoveryDecision.BridgeDecisionGeneration,
-                    recoveryOperation.Authority.RecoveryLivenessLease?.LeaseGeneration,
-                    recoveryOperation.Authority.BridgeRecoveryDecision.Reason,
-                }),
-                recoveryOperation.ExecutionReceipt is not null
-                    ? recoveryOperation.Authority.AuthorityId.ToString()
-                    : "(none)",
-                recoveryOperation.ExecutionReceipt is not null ||
-                recoveryOperation.ReceiveProof is not null
-                    ? Math.Max(
-                        recoveryOperation.ClosureGeneration,
-                        recoveryOperation.Authority.OperationGeneration)
-                    : 0,
-                recoveryOperation.ExecutionReceipt?.Outcome.ToString() ?? "(none)",
-                CalculateSnapshotFingerprint(new
-                {
-                    ExecutionOutcome = recoveryOperation.ExecutionReceipt?.Outcome,
-                    ExecutionReason = recoveryOperation.ExecutionReceipt?.Reason,
-                    recoveryOperation.ClosureGeneration,
-                    HasReceiveProof = recoveryOperation.ReceiveProof is not null,
-                }),
-                recoveryOperation.ExecutionReceipt is not null ||
-                recoveryOperation.ReceiveProof is not null));
-        }
+        AddReceiveRecoveryOperationDescriptors(state, builder);
 
         var yield = persistent.FallbackTailYield.CurrentOperation ??
                     persistent.FallbackTailYield.LastTerminalOperation;
@@ -1962,6 +2220,526 @@ internal static partial class FileTransferCoordinator
             attempt.DispatchObserved,
             attempt.SuccessorAuthorityId,
         });
+
+    private static void AddReceiveRecoveryOperationDescriptors(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        if (recovery.CurrentOperation is { } current)
+        {
+            builder.Add(CreateReceiveRecoveryOperationDescriptor(
+                state,
+                current,
+                "operation_current"));
+        }
+        if (recovery.LastTerminalOperation is { } terminal &&
+            (recovery.CurrentOperation is null ||
+             terminal.Authority != recovery.CurrentOperation.Value.Authority))
+        {
+            builder.Add(CreateReceiveRecoveryOperationDescriptor(
+                state,
+                terminal,
+                "operation_terminal"));
+        }
+
+        var proof = recovery.ProofStatePublication;
+        if (proof?.PendingCommand is { } pendingProof)
+        {
+            AddReceiveRecoveryChildDescriptor(
+                state,
+                builder,
+                pendingProof.Authority,
+                "proof_publication_pending",
+                "ProofPublication",
+                pendingProof.PublicationGeneration,
+                "Pending",
+                pendingProof,
+                null,
+                "Pending");
+        }
+        if (proof?.LastReceipt is { } proofReceipt)
+        {
+            AddReceiveRecoveryChildDescriptor(
+                state,
+                builder,
+                proofReceipt.Command.Authority,
+                "proof_publication_terminal",
+                "ProofPublication",
+                proofReceipt.Command.PublicationGeneration,
+                proofReceipt.Outcome.ToString(),
+                proofReceipt.Command,
+                proofReceipt,
+                proofReceipt.Outcome.ToString(),
+                proofReceipt.Outcome !=
+                    FileTransferReceiveRecoveryProofStatePublicationOutcome.Rejected);
+        }
+        if (proof?.PendingRecheckArm is { } recheckArm)
+        {
+            AddReceiveRecoveryChildDescriptor(
+                state,
+                builder,
+                recheckArm.PredecessorReceipt.Command.Authority,
+                "proof_publication_recheck",
+                "ProofPublicationRecheck",
+                recheckArm.PredecessorReceipt.Command.PublicationGeneration,
+                "Armed",
+                recheckArm,
+                proof.LastRecheckEvidence,
+                proof.LastRecheckEvidence is null ? "Pending" : "Observed",
+                proof.LastRecheckEvidence is not null);
+        }
+
+        AddReceiveRecoveryInitialActivationDescriptors(state, recovery, builder);
+        AddReceiveRecoveryCheckpointDescriptors(state, recovery, builder);
+    }
+
+    private static void AddReceiveRecoveryInitialActivationDescriptors(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoverySubstate recovery,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        if (recovery.CurrentInitialActivationHold is { } currentHold)
+        {
+            AddReceiveRecoveryChildDescriptor(
+                state,
+                builder,
+                currentHold.ReceiveRecoveryAuthority,
+                "initial_activation_hold_current",
+                "InitialActivationHold",
+                currentHold.HoldGeneration,
+                currentHold.Status.ToString(),
+                currentHold.Request,
+                currentHold,
+                currentHold.Status.ToString(),
+                true);
+        }
+        if (recovery.LastInitialActivationHold is { } terminalHold &&
+            (recovery.CurrentInitialActivationHold is null ||
+             terminalHold.HoldGeneration !=
+                 recovery.CurrentInitialActivationHold.HoldGeneration))
+        {
+            AddReceiveRecoveryChildDescriptor(
+                state,
+                builder,
+                terminalHold.ReceiveRecoveryAuthority,
+                "initial_activation_hold_terminal",
+                "InitialActivationHold",
+                terminalHold.HoldGeneration,
+                terminalHold.Status.ToString(),
+                terminalHold.Request,
+                terminalHold,
+                terminalHold.Status.ToString(),
+                true);
+        }
+
+        var refreshCommand =
+            recovery.PendingInitialActivationEnvelopeRefresh ??
+            recovery.LastInitialActivationEnvelopeRefreshReceipt?.Command;
+        if (refreshCommand is not null)
+        {
+            var refreshReceipt =
+                recovery.LastInitialActivationEnvelopeRefreshReceipt is
+                    { } candidate && candidate.Command == refreshCommand
+                    ? candidate
+                    : null;
+            AddReceiveRecoveryChildDescriptor(
+                state,
+                builder,
+                refreshCommand.ReceiveRecoveryAuthority,
+                "initial_activation_envelope_refresh",
+                "InitialActivationEnvelopeRefresh",
+                refreshCommand.RefreshGeneration,
+                refreshReceipt is null ? "Pending" : "Committed",
+                refreshCommand,
+                refreshReceipt,
+                refreshReceipt is null ? "Pending" : "Accepted",
+                refreshReceipt is not null);
+        }
+    }
+
+    private static void AddReceiveRecoveryCheckpointDescriptors(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoverySubstate recovery,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var checkpoint = recovery.ProofStatePublication?.FallbackCheckpoint;
+        if (checkpoint is null)
+        {
+            return;
+        }
+
+        if (checkpoint.CurrentBinding is { } currentBinding)
+        {
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, currentBinding,
+                "checkpoint_binding_current",
+                "FallbackCheckpointBinding",
+                currentBinding.BindingGeneration,
+                currentBinding.State.ToString(),
+                currentBinding,
+                null,
+                "Pending");
+        }
+        if (checkpoint.LastTerminalBinding is { } terminalBinding &&
+            (checkpoint.CurrentBinding is null ||
+             terminalBinding.BindingGeneration !=
+                 checkpoint.CurrentBinding.BindingGeneration))
+        {
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, terminalBinding,
+                "checkpoint_binding_terminal",
+                "FallbackCheckpointBinding",
+                terminalBinding.BindingGeneration,
+                terminalBinding.State.ToString(),
+                terminalBinding,
+                terminalBinding,
+                terminalBinding.State.ToString(),
+                terminalBinding.State is
+                    FileTransferReceiveRecoveryFallbackCheckpointBindingState.Accepted or
+                    FileTransferReceiveRecoveryFallbackCheckpointBindingState.Retired);
+        }
+        if (checkpoint.PendingDeliveryCommand is { } delivery)
+        {
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, delivery.Binding,
+                "checkpoint_delivery_pending",
+                "FallbackCheckpointDelivery",
+                delivery.DeliveryGeneration,
+                "Pending",
+                delivery,
+                null,
+                "Pending");
+        }
+        if (checkpoint.LastDeliveryReceipt is { } deliveryReceipt)
+        {
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, deliveryReceipt.Command.Binding,
+                "checkpoint_delivery_terminal",
+                "FallbackCheckpointDelivery",
+                deliveryReceipt.Command.DeliveryGeneration,
+                deliveryReceipt.State.ToString(),
+                deliveryReceipt.Command,
+                deliveryReceipt,
+                deliveryReceipt.State.ToString(),
+                deliveryReceipt.State !=
+                    FileTransferReceiveRecoveryFallbackCheckpointDeliveryState.Rejected);
+        }
+        var resume = checkpoint.PendingResumeReservation ??
+                     checkpoint.LastResumeReservation;
+        if (resume is not null)
+        {
+            var resumeCompleted = checkpoint.LastResumeReservation == resume;
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, resume.Command.Binding,
+                "checkpoint_resume",
+                "FallbackCheckpointResume",
+                resume.Command.DeliveryGeneration,
+                resumeCompleted ? "Completed" : "Reserved",
+                resume,
+                resumeCompleted ? resume : null,
+                resumeCompleted ? "Accepted" : "Pending",
+                resumeCompleted);
+        }
+        if (checkpoint.PendingFrontierRequestHold is { } frontierHold)
+        {
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, frontierHold.Observation.Binding,
+                "checkpoint_frontier_hold",
+                "FallbackCheckpointFrontierHold",
+                frontierHold.HoldGeneration,
+                "Held",
+                frontierHold.Observation,
+                frontierHold,
+                "Held",
+                true);
+        }
+        var frontierRecheck = checkpoint.PendingFrontierRequestRecheckCommand ??
+                              checkpoint.LastFrontierRequestRecheckReceipt?.Command;
+        if (frontierRecheck is not null)
+        {
+            var recheckReceipt =
+                checkpoint.LastFrontierRequestRecheckReceipt is { } candidate &&
+                candidate.Command == frontierRecheck
+                    ? candidate
+                    : null;
+            AddReceiveRecoveryCheckpointChildDescriptor(
+                state, builder, frontierRecheck.AcceptedBinding,
+                "checkpoint_frontier_recheck",
+                "FallbackCheckpointFrontierRecheck",
+                frontierRecheck.RecheckGeneration,
+                recheckReceipt?.Status.ToString() ?? "Pending",
+                frontierRecheck,
+                recheckReceipt,
+                recheckReceipt?.Status.ToString() ?? "Pending",
+                recheckReceipt?.Status is
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus.Applied or
+                    FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckStatus.Idempotent);
+        }
+    }
+
+    private static void AddReceiveRecoveryCheckpointChildDescriptor(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder,
+        FileTransferReceiveRecoveryFallbackCheckpointBinding binding,
+        string role,
+        string kind,
+        long generation,
+        string lifecycleState,
+        object command,
+        object? receipt,
+        string receiptStatus,
+        bool receiptValidated = false)
+        => AddReceiveRecoveryChildDescriptor(
+            state,
+            builder,
+            binding.ParentAuthority,
+            role,
+            kind,
+            generation,
+            lifecycleState,
+            command,
+            receipt,
+            receiptStatus,
+            receiptValidated,
+            CreateReceiveRecoveryEffectiveBoundary(binding));
+
+    private static void AddReceiveRecoveryChildDescriptor(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder,
+        FileTransferReceiveRecoveryOperationAuthority authority,
+        string role,
+        string kind,
+        long generation,
+        string lifecycleState,
+        object command,
+        object? receipt,
+        string receiptStatus,
+        bool receiptValidated = false,
+        FileTransferCoordinatorStateBoundarySnapshot? effectiveBoundary = null)
+    {
+        var operation = FindReceiveRecoveryOperation(state, authority);
+        var receiptSnapshot = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            role,
+            $"{authority.AuthorityId}:{role}",
+            generation,
+            CalculateSnapshotFingerprint(command),
+            receipt is null ? "(none)" : $"{authority.AuthorityId}:{role}:receipt",
+            receipt is null ? 0 : generation,
+            receiptStatus,
+            receiptStatus,
+            receipt is null ? "(none)" : CalculateSnapshotFingerprint(receipt),
+            receiptValidated);
+        builder.Add(CreateReceiveRecoveryDescriptor(
+            state,
+            authority,
+            operation,
+            role,
+            kind,
+            generation,
+            lifecycleState,
+            receiptSnapshot,
+            effectiveBoundary));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateReceiveRecoveryOperationDescriptor(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryOperation operation,
+            string role)
+    {
+        var authority = operation.Authority;
+        return CreateReceiveRecoveryDescriptor(
+            state,
+            authority,
+            operation,
+            role,
+            authority.BridgeRecoveryDecision.RecoveryKind.ToString(),
+            authority.OperationGeneration,
+            $"{operation.ExecutionState}:{operation.ClosureState}",
+            CreateReceiveRecoveryOperationReceipt(operation),
+            null);
+    }
+
+    private static CoordinatorOperationDescriptor CreateReceiveRecoveryDescriptor(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryOperationAuthority authority,
+        FileTransferReceiveRecoveryOperation? operation,
+        string role,
+        string kind,
+        long generation,
+        string lifecycleState,
+        FileTransferCoordinatorReceiptTransitionSnapshot receipt,
+        FileTransferCoordinatorStateBoundarySnapshot? effectiveBoundary)
+    {
+        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        var checkpoint = recovery.ProofStatePublication?.FallbackCheckpoint;
+        var heldRetryAuthority = operation?.HeldRetryRequest?.PredecessorAuthorityId;
+        var reservedRetryAuthority = operation?.ReservedRetryAuthority?.AuthorityId;
+        var receipts = receipt.ReceiptIdentity == "(none)"
+            ? ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>.Empty
+            : ImmutableArray.Create(receipt);
+        return new CoordinatorOperationDescriptor(
+            "receive_recovery",
+            kind,
+            authority.AuthorityId.ToString(),
+            authority.PredecessorAuthorityId?.ToString() ?? "(none)",
+            generation,
+            lifecycleState,
+            receipt.CommandIdentity,
+            receipt.CommandGeneration,
+            receipt.CommandFingerprint,
+            receipt.ReceiptIdentity,
+            receipt.ReceiptGeneration,
+            receipt.ReceiptStatus,
+            receipt.ReceiptFingerprint,
+            receipt.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "receive_recovery",
+                role,
+                authority.AuthorityId.ToString(),
+                generation,
+                kind),
+            ReceiveRecovery: new(
+                role,
+                CreateReceiveRecoverySourceBoundary(state, authority.Observation),
+                effectiveBoundary ??
+                    CreateReceiveRecoverySourceBoundary(state, authority.Observation),
+                authority.BridgeRecoveryDecision.RecoveryKind.ToString(),
+                authority.BridgeRecoveryDecision.BridgeDecisionGeneration,
+                authority.RecoveryLivenessLease?.LeaseGeneration ?? 0,
+                operation?.ExecutionState.ToString() ?? "None",
+                operation?.ClosureState.ToString() ?? "None",
+                operation?.ClosureGeneration ?? 0,
+                operation?.ReceiveProof?.ProofIdentity ?? "(none)",
+                operation?.ReceiveProof?.ObservedUtcMs ?? 0,
+                heldRetryAuthority?.ToString() ?? "(none)",
+                reservedRetryAuthority?.ToString() ?? "(none)",
+                recovery.CurrentInitialActivationHold?.HoldGeneration ??
+                    recovery.LastInitialActivationHold?.HoldGeneration ?? 0,
+                recovery.PendingInitialActivationEnvelopeRefresh?.RefreshGeneration ??
+                    recovery.LastInitialActivationEnvelopeRefreshReceipt?.Command.RefreshGeneration ?? 0,
+                checkpoint?.CurrentBinding?.BindingGeneration ??
+                    checkpoint?.LastTerminalBinding?.BindingGeneration ?? 0,
+                checkpoint?.PendingDeliveryCommand?.DeliveryGeneration ??
+                    checkpoint?.LastDeliveryReceipt?.Command.DeliveryGeneration ?? 0,
+                checkpoint?.PendingResumeReservation?.Command.DeliveryGeneration ??
+                    checkpoint?.LastResumeReservation?.Command.DeliveryGeneration ?? 0,
+                checkpoint?.PendingFrontierRequestHold?.HoldGeneration ?? 0,
+                checkpoint?.PendingFrontierRequestRecheckCommand?.RecheckGeneration ??
+                    checkpoint?.LastFrontierRequestRecheckReceipt?.Command.RecheckGeneration ?? 0,
+                receipts));
+    }
+
+    private static FileTransferCoordinatorReceiptTransitionSnapshot
+        CreateReceiveRecoveryOperationReceipt(
+            FileTransferReceiveRecoveryOperation operation)
+    {
+        var authority = operation.Authority;
+        object? receipt = operation.ConsumingInstallReceipt ??
+                          (object?)operation.ReceiveProof ??
+                          (object?)operation.ExecutionReceipt ??
+                          (operation.ExecutionStartResult is { } start
+                              ? new
+                              {
+                                  start.Command,
+                                  start.Status,
+                                  start.Reason,
+                              }
+                              : null);
+        var status = operation.ConsumingInstallReceipt is not null
+            ? "Consumed"
+            : operation.ReceiveProof is not null
+                ? "Adopted"
+                : operation.ExecutionReceipt?.Outcome.ToString() ??
+                  operation.ExecutionStartStatus?.ToString() ?? "Pending";
+        return new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "operation",
+            authority.AuthorityId.ToString(),
+            authority.OperationGeneration,
+            CalculateSnapshotFingerprint(authority.ExecutionCommand),
+            receipt is null ? "(none)" : $"{authority.AuthorityId}:operation:receipt",
+            receipt is null ? 0 : Math.Max(
+                authority.OperationGeneration,
+                operation.ClosureGeneration),
+            status,
+            operation.InvalidationReason ??
+                operation.ExecutionReceipt?.Reason ??
+                operation.ExecutionStartReason ?? "(none)",
+            receipt is null ? "(none)" : CalculateSnapshotFingerprint(receipt),
+            receipt is not null);
+    }
+
+    private static FileTransferReceiveRecoveryOperation?
+        FindReceiveRecoveryOperation(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryOperationAuthority authority)
+    {
+        var recovery = state.PersistentState.FileTransferReceiveRecovery;
+        if (recovery.CurrentOperation is { } current &&
+            current.Authority == authority)
+        {
+            return current;
+        }
+        if (recovery.LastTerminalOperation is { } terminal &&
+            terminal.Authority == authority)
+        {
+            return terminal;
+        }
+        return null;
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateReceiveRecoverySourceBoundary(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryObservation observation)
+    {
+        var checkpointGeneration =
+            string.Equals(
+                state.CurrentLeg?.CheckpointRequestId,
+                observation.CheckpointRequestId,
+                StringComparison.Ordinal)
+                ? state.CurrentLeg?.CheckpointGeneration ?? 0
+                : 0;
+        return new(
+            observation.RouteToken,
+            observation.ProtocolVersion,
+            observation.LiveRouteEpoch,
+            observation.RoutePublication.PublicationGeneration,
+            observation.RouteCommit?.CommitGeneration ?? 0,
+            observation.RuntimeOwner.RuntimeGeneration,
+            observation.TerminalGeneration,
+            observation.LegGeneration,
+            observation.TransportEpoch,
+            observation.BridgeRecoveryGeneration,
+            checkpointGeneration,
+            observation.CheckpointRequestId ?? "(none)",
+            observation.DataSessionIdentity,
+            observation.DataSessionGeneration);
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateReceiveRecoveryEffectiveBoundary(
+            FileTransferReceiveRecoveryFallbackCheckpointBinding binding)
+    {
+        var source = binding.OriginalObservation;
+        return new(
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RoutePublication.PublicationGeneration,
+            source.RouteCommit?.CommitGeneration ?? 0,
+            source.RuntimeOwner.RuntimeGeneration,
+            source.TerminalGeneration,
+            source.LegGeneration,
+            binding.TransportEpoch,
+            source.BridgeRecoveryGeneration,
+            binding.EffectiveCheckpointGeneration,
+            binding.EffectiveCheckpointRequestId,
+            source.DataSessionIdentity,
+            source.DataSessionGeneration);
+    }
 
     private static void AddRouteRuntimeOperationDescriptors(
         FileTransferCoordinatorState state,
@@ -2694,5 +3472,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorRouteTransitionOperationSnapshot?
             RouteTransition = null,
         FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot?
-            RuntimeUnlockRetry = null);
+            RuntimeUnlockRetry = null,
+        FileTransferCoordinatorReceiveRecoveryOperationSnapshot?
+            ReceiveRecovery = null);
 }

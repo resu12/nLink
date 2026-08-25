@@ -4505,6 +4505,15 @@ public sealed partial class SessionFileTransferService
                 out operation,
                 out immutableDeadlineUtc,
                 out var classificationReason);
+            var classificationEnvelope =
+                RecordReceiveRecoveryAttemptSnapshotLocked(
+                    context,
+                    state,
+                    nameof(FileTransferCoordinator.ClassifyReceiveRecoverySubmissionFailure),
+                    disposition.ToString(),
+                    classificationReason,
+                    observation,
+                    observation.Authority);
             if (disposition == FileTransferReceiveRecoverySubmissionFailureDisposition.Rejected)
             {
                 context.ReceiveRecoverySubmissionFailureObservations.Remove(
@@ -4551,6 +4560,11 @@ public sealed partial class SessionFileTransferService
             {
                 return false;
             }
+
+            EnqueueReceiveRecoveryAttemptAuthorityEffect(
+                context,
+                classificationEnvelope,
+                "payload_hold_bound");
 
             context.ReceiveRecoverySubmissionFailureObservations.Remove(
                 physicalSendLeaseGeneration);

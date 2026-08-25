@@ -2814,6 +2814,15 @@
       ]
     },
     {
+      "id": "tools/FileTransferSoak/ArtifactWriters.ps1::Get-FileTransferReceiveRecoveryCompletedUnprovenSuccessorCorrelation",
+      "dependencies": [
+        "filetransfer_receive_recovery_operation_conflict",
+        "filetransfer_receive_recovery_operation_issued",
+        "filetransfer_recovery_authority_rejected",
+        "session_id"
+      ]
+    },
+    {
       "id": "tools/FileTransferSoak/ArtifactWriters.ps1::Get-FileTransferReceiveRecoveryFallbackCheckpointScopeHandoffCorrelation",
       "dependencies": [
         "session_id",

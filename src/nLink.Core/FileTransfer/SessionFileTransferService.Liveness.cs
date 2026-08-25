@@ -289,7 +289,7 @@ public sealed partial class SessionFileTransferService
                 .ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
                     CreateCoordinatorStateLocked(inbound),
                     evidence);
-            ApplyReceiveRecoveryStateLocked(inbound, decision.Value.State);
+            ApplyReceiveRecoveryStateLocked(inbound, decision.Value);
             operation =
                 inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
                     .CurrentOperation;
@@ -351,7 +351,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
                     CreateCoordinatorStateLocked(inbound),
                     observation);
-            ApplyReceiveRecoveryStateLocked(inbound, decision.Value.State);
+            ApplyReceiveRecoveryStateLocked(inbound, decision.Value);
             operation =
                 inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
                     .CurrentOperation;
@@ -419,7 +419,7 @@ public sealed partial class SessionFileTransferService
                         CreateCoordinatorStateLocked(context),
                         receipt,
                         receiptObservedUtcMs);
-            ApplyReceiveRecoveryStateLocked(context, decision.Value.State);
+            ApplyReceiveRecoveryStateLocked(context, decision.Value);
             operation =
                 context.CoordinatorPersistentState.FileTransferReceiveRecovery
                     .CurrentOperation;
@@ -483,7 +483,7 @@ public sealed partial class SessionFileTransferService
                             proof);
                     ApplyReceiveRecoveryStateLocked(
                         outbound,
-                        decision.Value.State,
+                        decision.Value,
                         initialActivationHoldDecision:
                             decision.Value.InitialActivationHoldDecision);
                     retryDispatchDecision =
@@ -491,10 +491,10 @@ public sealed partial class SessionFileTransferService
                     if (retryDispatchDecision is
                         { Granted: true } exactRetry)
                     {
-                        ApplyReceiveRecoveryStateLocked(
+                        ApplyRuntimeUnlockRetryLifecycleStateLocked(
                             outbound,
                             exactRetry.State,
-                            queueInitialActivationHoldDirective: false);
+                            exactRetry.SnapshotEnvelope);
                     }
                     var appliedRecovery =
                         outbound.CoordinatorPersistentState
@@ -548,7 +548,7 @@ public sealed partial class SessionFileTransferService
                             proof);
                     ApplyReceiveRecoveryStateLocked(
                         inbound,
-                        decision.Value.State,
+                        decision.Value,
                         initialActivationHoldDecision:
                             decision.Value.InitialActivationHoldDecision);
                     retryDispatchDecision =
@@ -556,10 +556,10 @@ public sealed partial class SessionFileTransferService
                     if (retryDispatchDecision is
                         { Granted: true } exactRetry)
                     {
-                        ApplyReceiveRecoveryStateLocked(
+                        ApplyRuntimeUnlockRetryLifecycleStateLocked(
                             inbound,
                             exactRetry.State,
-                            queueInitialActivationHoldDirective: false);
+                            exactRetry.SnapshotEnvelope);
                     }
                     var appliedRecovery =
                         inbound.CoordinatorPersistentState
@@ -1114,7 +1114,7 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(outbound),
                 result,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            ApplyReceiveRecoveryStateLocked(outbound, decision.State);
+            ApplyReceiveRecoveryStateLocked(outbound, decision);
             return decision;
         }
 
@@ -1127,7 +1127,7 @@ public sealed partial class SessionFileTransferService
                 CreateCoordinatorStateLocked(inbound),
                 result,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            ApplyReceiveRecoveryStateLocked(inbound, decision.State);
+            ApplyReceiveRecoveryStateLocked(inbound, decision);
             return decision;
         }
 
@@ -1150,15 +1150,15 @@ public sealed partial class SessionFileTransferService
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             ApplyReceiveRecoveryStateLocked(
                 outbound,
-                decision.State,
+                decision,
                 initialActivationHoldDecision:
                     decision.InitialActivationHoldDecision);
             if (decision.RetryDispatchDecision is { Granted: true } retry)
             {
-                ApplyReceiveRecoveryStateLocked(
+                ApplyRuntimeUnlockRetryLifecycleStateLocked(
                     outbound,
                     retry.State,
-                    queueInitialActivationHoldDirective: false);
+                    retry.SnapshotEnvelope);
                 return decision with { State = retry.State };
             }
             return decision;
@@ -1175,15 +1175,15 @@ public sealed partial class SessionFileTransferService
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             ApplyReceiveRecoveryStateLocked(
                 inbound,
-                decision.State,
+                decision,
                 initialActivationHoldDecision:
                     decision.InitialActivationHoldDecision);
             if (decision.RetryDispatchDecision is { Granted: true } retry)
             {
-                ApplyReceiveRecoveryStateLocked(
+                ApplyRuntimeUnlockRetryLifecycleStateLocked(
                     inbound,
                     retry.State,
-                    queueInitialActivationHoldDirective: false);
+                    retry.SnapshotEnvelope);
                 return decision with { State = retry.State };
             }
             return decision;
@@ -1365,7 +1365,7 @@ public sealed partial class SessionFileTransferService
                 {
                     ApplyReceiveRecoveryStateLocked(
                         outbound,
-                        invalidationDecision.Value.State,
+                        invalidationDecision.Value,
                         initialActivationHoldDecision:
                             invalidationDecision.Value
                                 .InitialActivationHoldDecision);
@@ -1400,7 +1400,7 @@ public sealed partial class SessionFileTransferService
                 {
                     ApplyReceiveRecoveryStateLocked(
                         inbound,
-                        invalidationDecision.Value.State,
+                        invalidationDecision.Value,
                         initialActivationHoldDecision:
                             invalidationDecision.Value
                                 .InitialActivationHoldDecision);

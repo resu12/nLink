@@ -6171,6 +6171,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'runtime_unlock_retry_lifecycle')
+    $snapshotReceiveRecoveryAuthoritative =
+        $snapshotEvaluatorAvailable -and
+        (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'receive_recovery')
     if ($coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
         $coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
         if ($null -ne $TestMetrics) {
@@ -6203,7 +6208,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ($snapshotRouteTransitionAuthoritative -and
          $boundaryFamilies -contains 'route_transition') -or
         ($snapshotRuntimeUnlockRetryAuthoritative -and
-         $boundaryFamilies -contains 'runtime_unlock_retry_lifecycle'))
+         $boundaryFamilies -contains 'runtime_unlock_retry_lifecycle') -or
+        ($snapshotReceiveRecoveryAuthoritative -and
+         $boundaryFamilies -contains 'receive_recovery'))
     if ($snapshotOwnsBoundary) {
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase ([string]$boundary.phase) `

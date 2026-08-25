@@ -687,6 +687,136 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "An exact MissingDispatch successor did not recover with full/compact parity: $($retryFull | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            $receiveScope = [ordered]@{
+                route='regular_nkn_v4_fast'; protocolVersion=4
+                liveRouteEpoch=1L; routePublicationGeneration=1L
+                routeCommitGeneration=0L; runtimeGeneration=1L
+                terminalGeneration=0L; legGeneration=1L
+                transportEpoch=2L; bridgeRecoveryGeneration=3L
+                checkpointGeneration=4L; checkpointRequestId='root-checkpoint'
+                dataSessionIdentity='receive-data-session'; dataSessionGeneration=5L
+            }
+            $effectiveReceiveScope = [ordered]@{}
+            foreach ($entry in $receiveScope.GetEnumerator()) {
+                $effectiveReceiveScope[$entry.Key] = $entry.Value
+            }
+            $effectiveReceiveScope.checkpointGeneration = 6L
+            $effectiveReceiveScope.checkpointRequestId = 'child-checkpoint'
+            function New-ReceiveRecoveryOperation(
+                [string]$role,
+                [string]$beforeState,
+                [string]$afterState,
+                [string]$executionState,
+                [string]$closureState,
+                [string]$proofIdentity) {
+                [ordered]@{
+                    family='receive_recovery'; operationRole=$role
+                    operationKey="receive_recovery|$role|receive-authority|1|BridgeReceiveStallRecovery"
+                    operationKind='BridgeReceiveStallRecovery'
+                    authorityId='receive-authority'; predecessorAuthorityId='(none)'
+                    operationGeneration=1L; beforeState=$beforeState; afterState=$afterState
+                    commandIdentity='receive-command'; commandGeneration=1L
+                    commandFingerprint='receive-command-fingerprint'
+                    receiptIdentity='(none)'; receiptGeneration=0L
+                    receiptStatus='Pending'; receiptFingerprint='(none)'
+                    receiptValidated=$false; stateApplied=$true
+                    routeRuntime=$null; routeTransition=$null; runtimeUnlockRetry=$null
+                    receiveRecovery=[ordered]@{
+                        role=$role; sourceBoundary=$receiveScope
+                        effectiveBoundary=$effectiveReceiveScope
+                        recoveryKind='BridgeReceiveStallRecovery'
+                        bridgeDecisionGeneration=3L
+                        recoveryLivenessLeaseGeneration=4L
+                        executionState=$executionState; closureState=$closureState
+                        closureGeneration=if ($closureState -eq 'Adopted') { 1L } else { 0L }
+                        proofIdentity=$proofIdentity
+                        proofObservedUtcMs=if ($proofIdentity -eq '(none)') { 0L } else { 100L }
+                        heldRetryAuthorityId='(none)'; reservedRetryAuthorityId='(none)'
+                        initialActivationHoldGeneration=0L; envelopeRefreshGeneration=0L
+                        checkpointBindingGeneration=6L; checkpointDeliveryGeneration=0L
+                        checkpointResumeGeneration=0L; checkpointFrontierHoldGeneration=0L
+                        checkpointFrontierRecheckGeneration=0L; receipts=@()
+                    }
+                }
+            }
+            function New-ReceiveRecoveryEnvelopeLine(
+                [string]$transitionId,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [object]$operation,
+                [long]$decisionTime,
+                [string]$decisionKind,
+                [string]$decisionStatus,
+                [string]$decisionReason) {
+                $aggregate = [ordered]@{
+                    beforeStateGeneration=$beforeGeneration
+                    afterStateGeneration=$afterGeneration
+                    beforeStateFingerprint=$beforeHash; afterStateFingerprint=$afterHash
+                    beforeBoundary=$receiveScope; afterBoundary=$receiveScope
+                    changedFamilies=@('receive_recovery'); operations=@($operation)
+                }
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId='coordinator-receive'; sessionId='session-receive'
+                    transferId='transfer-receive'; direction='inbound'
+                    decisionUtcMilliseconds=$decisionTime; transitionId=$transitionId
+                    decisionKind=$decisionKind; decisionStatus=$decisionStatus
+                    decisionReason=$decisionReason; aggregate=$aggregate
+                }
+                $json = $envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $receivePrefix; transition_id=$transitionId; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+            $receivePrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-receive; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
+            $receiveStart = "event=filetransfer_coordinator_snapshot_stream_started; $receivePrefix; initial_state_generation=0; initial_state_hash=receive-before; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $receiveIssuedOperation = New-ReceiveRecoveryOperation 'operation_current' 'None' 'Issued:None' 'Issued' 'None' '(none)'
+            $receiveIssued = New-ReceiveRecoveryEnvelopeLine 'receive-issued' 0L 1L 'receive-before' 'receive-issued-hash' $receiveIssuedOperation 30L 'IssueReceiveRecoveryOperation' 'Accepted' 'filetransfer_receive_recovery_operation_issued'
+            $receiveIncompleteEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $receivePrefix; final_state_generation=1; final_state_hash=receive-issued-hash; transition_count=1; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $receiveIncomplete = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($receiveStart,$receiveIssued,$receiveIncompleteEnd)
+            if ($receiveIncomplete.ArtifactEvidenceVerdict -ne 'pass' -or
+                $receiveIncomplete.FirstUnresolvedBoundary.taxonomyClass -ne 'filetransfer_receive_recovery_operation_incomplete' -or
+                $receiveIncomplete.ReceiveRecoveryFamilyLegacySelectionCount -ne 0 -or
+                $receiveIncomplete.LegacySelectionCount -ne 6) {
+                throw "An incomplete receive-recovery operation was not selected exactly: $($receiveIncomplete | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $receiveTerminalOperation = New-ReceiveRecoveryOperation 'operation_terminal' 'Issued:None' 'Completed:Adopted' 'Completed' 'Adopted' 'receive-proof-1'
+            $receiveProofReceipt = [ordered]@{
+                stage='operation'; commandIdentity='receive-command'
+                commandGeneration=1L; commandFingerprint='receive-command-fingerprint'
+                receiptIdentity='receive-authority:operation:receipt'
+                receiptGeneration=1L; receiptStatus='Adopted'
+                receiptReason='proof_adopted'; receiptFingerprint='receive-proof-fingerprint'
+                receiptValidated=$true
+            }
+            $receiveTerminalOperation.receiptIdentity = $receiveProofReceipt.receiptIdentity
+            $receiveTerminalOperation.receiptGeneration = 1L
+            $receiveTerminalOperation.receiptStatus = 'Adopted'
+            $receiveTerminalOperation.receiptFingerprint = 'receive-proof-fingerprint'
+            $receiveTerminalOperation.receiptValidated = $true
+            $receiveTerminalOperation.receiveRecovery.receipts = @($receiveProofReceipt)
+            $receiveCompleted = New-ReceiveRecoveryEnvelopeLine 'receive-completed' 1L 2L 'receive-issued-hash' 'receive-completed-hash' $receiveTerminalOperation 31L 'ObserveReceiveRecoveryProof' 'Accepted' 'filetransfer_receive_recovery_proof_adopted'
+            $receiveProofEffect = "event=filetransfer_coordinator_authority_effect; $receivePrefix; transition_id=receive-completed; coordinator_state_generation=2; operation_family=receive_recovery; operation_key=$($receiveTerminalOperation.operationKey); operation_authority_id=receive-authority; operation_generation=1; effect_kind=receive_proof_observed; effect_identity=receive-proof-effect; receipt_identity=$($receiveProofReceipt.receiptIdentity); receipt_generation=1; receipt_status=Adopted; receipt_fingerprint=receive-proof-fingerprint; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=4; checkpoint_request_id=root-checkpoint; data_session_identity=receive-data-session; data_session_generation=5"
+            $receiveCompletedEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $receivePrefix; final_state_generation=2; final_state_hash=receive-completed-hash; transition_count=2; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $receiveFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=irrelevant',$receiveStart,$receiveIssued,'event=other',$receiveCompleted,$receiveProofEffect,$receiveCompletedEnd)
+            $receiveCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($receiveStart,$receiveIssued,$receiveCompleted,$receiveProofEffect,$receiveCompletedEnd)
+            $receiveParity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $receiveFull -Compact $receiveCompact
+            if ($receiveFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $receiveParity.Verdict -ne 'pass' -or
+                $null -ne $receiveFull.FirstUnresolvedBoundary -or
+                $receiveFull.BoundaryHash -ne $receiveCompact.BoundaryHash) {
+                throw "Receive-recovery full/compact parity failed: $($receiveFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $unknownReceiveRole = New-ReceiveRecoveryOperation 'unknown_role' 'None' 'Issued:None' 'Issued' 'None' '(none)'
+            $unknownReceive = New-ReceiveRecoveryEnvelopeLine 'receive-unknown' 0L 1L 'receive-before' 'receive-issued-hash' $unknownReceiveRole 30L 'IssueReceiveRecoveryOperation' 'Accepted' 'filetransfer_receive_recovery_operation_issued'
+            if ((Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($receiveStart,$unknownReceive,$receiveIncompleteEnd)).ArtifactEvidenceVerdict -ne 'fail') {
+                throw 'An unknown receive-recovery role did not fail artifact evidence.'
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'
@@ -840,6 +970,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         {
             Assert.Contains("coordinator_snapshot_route_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count", text, StringComparison.Ordinal);
+            Assert.Contains("coordinator_snapshot_receive_recovery_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_boundary_hash", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_catalog_hash", text, StringComparison.Ordinal);
         }
@@ -862,6 +993,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             StringComparison.Ordinal);
         Assert.Contains(
             "coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount",
+            acceptanceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount",
             acceptanceText,
             StringComparison.Ordinal);
     }
@@ -991,7 +1126,30 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { return $null }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            $script:family3 = $false
             function Get-FileTransferCoordinatorSnapshotEvaluation {
+                if ($script:family3) {
+                    return [pscustomobject]@{
+                        Mode = 'SnapshotV1Shadow'
+                        ArtifactEvidenceVerdict = 'pass'
+                        TransitionCount = 3L
+                        FirstUnresolvedBoundary = [pscustomobject]@{
+                            boundaryId = 'receive-boundary-3'
+                            boundaryHash = 'receive-boundary-hash-3'
+                            families = @('receive_recovery')
+                            taxonomyClass = 'filetransfer_receive_recovery_operation_incomplete'
+                            phase = 'bridge_recovery_execution'
+                            decisionReason = 'receive_recovery_execution_still_running'
+                            variant = '(none)'
+                            rawCount = 1
+                            distinctCount = 1
+                            recoveredCount = 0
+                            unresolvedCount = 1
+                            writer = 'writer-helper'
+                            writerSequence = 49857L
+                        }
+                    }
+                }
                 return [pscustomobject]@{
                     Mode = 'SnapshotV1Shadow'
                     ArtifactEvidenceVerdict = 'pass'
@@ -1018,7 +1176,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 return $Family -in @(
                     'route_runtime',
                     'route_transition',
-                    'runtime_unlock_retry_lifecycle')
+                    'runtime_unlock_retry_lifecycle',
+                    'receive_recovery')
             }
 
             $root = Join-Path ([IO.Path]::GetTempPath()) (
@@ -1038,6 +1197,19 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     $actual.CoordinatorBoundaryId -ne 'retry-boundary-11' -or
                     $actual.CoordinatorWriterSequence -ne 14073L) {
                     throw "GUI did not preserve the Family 2 shared boundary: $($actual | ConvertTo-Json -Compress)"
+                }
+                $script:family3 = $true
+                $family3 = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'scenario failed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($family3.ClassificationSource -ne 'coordinator_snapshot_authority_v1' -or
+                    $family3.FailureClass -ne 'filetransfer_receive_recovery_operation_incomplete' -or
+                    $family3.Phase -ne 'bridge_recovery_execution' -or
+                    $family3.CoordinatorBoundaryId -ne 'receive-boundary-3' -or
+                    $family3.CoordinatorWriterSequence -ne 49857L) {
+                    throw "GUI did not preserve the Family 3 shared boundary: $($family3 | ConvertTo-Json -Compress)"
                 }
             }
             finally {

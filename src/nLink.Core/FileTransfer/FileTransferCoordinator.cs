@@ -2254,7 +2254,7 @@ internal enum
     Rejected = 2,
 }
 
-internal sealed record
+internal readonly record struct
     FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestObservation(
         FileTransferReceiveRecoveryFallbackCheckpointBinding Binding,
         FileTransferFrontierRequestFrameV6 Frame,
@@ -2287,7 +2287,7 @@ internal sealed record
         ObservedUtcMs <= 0;
 }
 
-internal sealed record
+internal readonly record struct
     FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold(
         FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestObservation
             Observation,
@@ -2587,18 +2587,30 @@ internal readonly record struct FileTransferReceiveRecoveryDecision(
             FileTransferReceiveRecoveryTransitionStatus.Idempotent;
 }
 
-internal readonly record struct
+internal sealed record
     RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision(
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision Decision)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
-internal readonly record struct
+internal sealed record
     RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision(
         RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision Decision)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal readonly record struct FileTransferCoordinatorPersistentState(
@@ -7982,6 +7994,40 @@ internal static partial class FileTransferCoordinator
 
     internal static FileTransferCoordinatorDecision
         ApplyReceiveRecoveryFallbackCheckpointBinding(
+            FileTransferCoordinatorEvent coordinatorEvent,
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryFallbackCheckpointBindingRequest
+                bindingRequest)
+    {
+        var decision = ApplyReceiveRecoveryFallbackCheckpointBindingCore(
+            coordinatorEvent,
+            state,
+            bindingRequest);
+        if (string.IsNullOrWhiteSpace(
+                state.PersistentState.CoordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var rejected = decision.TerminalMutationRejected ||
+            !string.IsNullOrWhiteSpace(decision.MutationRejectedReason);
+        var snapshot = CreateReceiveRecoveryTransitionSnapshot(
+            state,
+            decision.State,
+            nameof(ApplyReceiveRecoveryFallbackCheckpointBinding),
+            rejected ? "Rejected" : "Accepted",
+            decision.MutationRejectedReason ?? decision.Reason,
+            bindingRequest,
+            bindingRequest.ParentAuthority);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static FileTransferCoordinatorDecision
+        ApplyReceiveRecoveryFallbackCheckpointBindingCore(
             FileTransferCoordinatorEvent coordinatorEvent,
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryFallbackCheckpointBindingRequest
@@ -16675,26 +16721,12 @@ internal static partial class FileTransferCoordinator
             {
                 State = nextState ?? state,
             };
-            var coordinatorInstanceId =
-                state.PersistentState.CoordinatorInstanceId;
-            if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
-            {
-                return decision;
-            }
-
-            var snapshot = CreateTransitionSnapshot(
+            return FinalizeReceiveRecoverySnapshot(
                 state,
-                decision.State,
-                coordinatorInstanceId,
-                state.PersistentState.SnapshotStateGeneration,
+                decision,
                 nameof(IssueReceiveRecoveryOperation),
-                status.ToString(),
-                reason);
-            return decision with
-            {
-                State = snapshot.State,
-                SnapshotEnvelope = snapshot.Envelope,
-            };
+                observation,
+                authority);
         }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
@@ -17090,17 +17122,25 @@ internal static partial class FileTransferCoordinator
                 FileTransferReceiveRecoveryOperationAuthority?
                     previousAuthority = null,
                 FileTransferCoordinatorState? nextState = null)
-            => new(
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                    request,
-                    status,
-                    NormalizeReason(reason),
-                    holdGeneration,
-                    operation,
-                    previousAuthority))
-            {
-                State = nextState ?? state,
-            };
+        {
+            var decision = new
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision(
+                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        request,
+                        status,
+                        NormalizeReason(reason),
+                        holdGeneration,
+                        operation,
+                        previousAuthority))
+                {
+                    State = nextState ?? state,
+                };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold),
+                request);
+        }
 
         if (request.IsDefault)
         {
@@ -17316,16 +17356,24 @@ internal static partial class FileTransferCoordinator
                 long holdGeneration = 0,
                 FileTransferReceiveRecoveryOperation? operation = null,
                 FileTransferCoordinatorState? nextState = null)
-            => new(
-                new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
-                    request.HoldRequest,
-                    status,
-                    NormalizeReason(reason),
-                    holdGeneration,
-                    operation))
-            {
-                State = nextState ?? state,
-            };
+        {
+            var decision = new
+                RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision(
+                    new RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision(
+                        request.HoldRequest,
+                        status,
+                        NormalizeReason(reason),
+                        holdGeneration,
+                        operation))
+                {
+                    State = nextState ?? state,
+                };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold),
+                request);
+        }
 
         if (request.IsDefault)
         {
@@ -18168,14 +18216,22 @@ internal static partial class FileTransferCoordinator
                 RuntimeUnlockInitialActivationOfferEnvelopeRefreshStatus status,
                 string reason,
                 FileTransferCoordinatorState? nextState = null)
-            => new(
-                new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
-                    receipt,
-                    status,
-                    NormalizeReason(reason)))
-            {
-                State = nextState ?? state,
-            };
+        {
+            var decision = new
+                RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision(
+                    new RuntimeUnlockInitialActivationOfferEnvelopeRefreshDecision(
+                        receipt,
+                        status,
+                        NormalizeReason(reason)))
+                {
+                    State = nextState ?? state,
+                };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh),
+                receipt);
+        }
 
         if (receipt.IsDefault)
         {
@@ -18958,7 +19014,8 @@ internal static partial class FileTransferCoordinator
             string reason,
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryOperationAuthority? authority = null)
-            => new(
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(
                 status,
                 reason,
                 authority ??
@@ -18967,6 +19024,17 @@ internal static partial class FileTransferCoordinator
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ObserveReceiveRecoveryExecutionStart),
+                new
+                {
+                    result.Command,
+                    result.Status,
+                    result.Reason,
+                });
+        }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
         if (recoveryState.LastTerminalOperation is
@@ -19095,10 +19163,21 @@ internal static partial class FileTransferCoordinator
             string reason,
             FileTransferReceiveRecoveryOperationAuthority? authority = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, authority)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(
+                status,
+                reason,
+                authority)
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ObserveReceiveRecoveryExecutionReceipt),
+                receipt,
+                authority);
+        }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
         if (receipt.IsDefault)
@@ -19322,17 +19401,26 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryProofStatePublicationCommand?
                 command = null)
-            => new(
+        {
+            var authority = observation.IsDefault
+                ? null
+                : state.PersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation?.Authority;
+            var decision = new FileTransferReceiveRecoveryDecision(
                 status,
                 reason,
-                observation.IsDefault
-                    ? null
-                    : state.PersistentState.FileTransferReceiveRecovery
-                        .CurrentOperation?.Authority)
+                authority)
             {
                 State = nextState ?? state,
                 ProofStatePublicationCommand = command,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ObserveReceiveRecoveryPeerReachability),
+                observation,
+                authority);
+        }
 
         if (observation.IsDefault)
         {
@@ -19475,10 +19563,21 @@ internal static partial class FileTransferCoordinator
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, receipt.Command.Authority)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(
+                status,
+                reason,
+                receipt.Command.Authority)
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ApplyReceiveRecoveryProofStatePublicationReceipt),
+                receipt,
+                receipt.Command.Authority);
+        }
 
         if (receipt.IsDefault)
         {
@@ -19626,15 +19725,24 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryProofStatePublicationCommand?
                 command = null)
-            => new(
+        {
+            var authority = state.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation?.Authority;
+            var decision = new FileTransferReceiveRecoveryDecision(
                 status,
                 reason,
-                state.PersistentState.FileTransferReceiveRecovery
-                    .CurrentOperation?.Authority)
+                authority)
             {
                 State = nextState ?? state,
                 ProofStatePublicationCommand = command,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ObserveReceiveRecoveryProofStatePublicationRecheckEvidence),
+                evidence,
+                authority);
+        }
 
         if (evidence.IsDefault)
         {
@@ -19995,10 +20103,21 @@ internal static partial class FileTransferCoordinator
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, proof.Authority)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(
+                status,
+                reason,
+                proof.Authority)
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ObserveReceiveRecoveryProof),
+                proof,
+                proof.Authority);
+        }
 
         if (proof.IsDefault)
         {
@@ -20204,14 +20323,23 @@ internal static partial class FileTransferCoordinator
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
             FileTransferCoordinatorState? nextState = null)
-            => new(
+        {
+            var authority = state.PersistentState.FileTransferReceiveRecovery
+                .CurrentOperation?.Authority;
+            var decision = new FileTransferReceiveRecoveryDecision(
                 status,
                 reason,
-                state.PersistentState.FileTransferReceiveRecovery
-                    .CurrentOperation?.Authority)
+                authority)
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ReserveReceiveRecoveryClosure),
+                request,
+                authority);
+        }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
         if (recoveryState.CurrentOperation is not { } current ||
@@ -20337,10 +20465,21 @@ internal static partial class FileTransferCoordinator
             string reason,
             FileTransferReceiveRecoveryOperationAuthority? authority = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, authority)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(
+                status,
+                reason,
+                authority)
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ConsumeReceiveRecoveryClosure),
+                receipt,
+                authority);
+        }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
         if (recoveryState.LastTerminalOperation is
@@ -20534,25 +20673,12 @@ internal static partial class FileTransferCoordinator
             state,
             authority,
             reason);
-        var coordinatorInstanceId = state.PersistentState.CoordinatorInstanceId;
-        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
-        {
-            return decision;
-        }
-
-        var snapshot = CreateTransitionSnapshot(
+        return FinalizeReceiveRecoverySnapshot(
             state,
-            decision.State,
-            coordinatorInstanceId,
-            state.PersistentState.SnapshotStateGeneration,
+            decision,
             nameof(InvalidateReceiveRecoveryOperation),
-            decision.Status.ToString(),
-            decision.Reason);
-        return decision with
-        {
-            State = snapshot.State,
-            SnapshotEnvelope = snapshot.Envelope,
-        };
+            reason,
+            authority);
     }
 
     private static FileTransferReceiveRecoveryDecision
@@ -24023,10 +24149,17 @@ internal static partial class FileTransferCoordinator
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(status, reason)
             {
                 State = nextState ?? state,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt),
+                receipt);
+        }
 
         if (receipt.IsDefault)
         {
@@ -24123,11 +24256,18 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
                 command = null)
-            => new(status, reason)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(status, reason)
             {
                 State = nextState ?? state,
                 FallbackCheckpointDeliveryCommand = command,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(RecheckReceiveRecoveryFallbackCheckpointDelivery),
+                observation);
+        }
 
         if (observation.IsDefault)
         {
@@ -24234,11 +24374,18 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryFallbackCheckpointResumeReservation?
                 reservation = null)
-            => new(status, reason)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(status, reason)
             {
                 State = nextState ?? state,
                 FallbackCheckpointResumeReservation = reservation,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ReserveReceiveRecoveryFallbackCheckpointDeliveryResume),
+                evidence);
+        }
 
         if (evidence.IsDefault)
         {
@@ -24358,11 +24505,18 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold?
                 hold = null)
-            => new(status, reason)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(status, reason)
             {
                 State = nextState ?? state,
                 FallbackCheckpointFrontierRequestHold = hold,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ObserveReceiveRecoveryFallbackCheckpointFrontierRequest),
+                observation);
+        }
 
         if (observation.IsDefault)
         {
@@ -24529,12 +24683,19 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt?
                 appliedReceipt = null)
-            => new(status, reason)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(status, reason)
             {
                 State = nextState ?? state,
                 FallbackCheckpointFrontierRequestRecheckReceipt =
                     appliedReceipt,
             };
+            return FinalizeReceiveRecoverySnapshot(
+                state,
+                decision,
+                nameof(ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt),
+                receipt);
+        }
 
         if (receipt.IsDefault)
         {

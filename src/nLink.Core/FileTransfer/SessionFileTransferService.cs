@@ -5815,8 +5815,7 @@ public sealed partial class SessionFileTransferService :
                             request);
                 ApplyReceiveRecoveryStateLocked(
                     outbound,
-                    coordinatorDecision.State,
-                    queueInitialActivationHoldDirective: false);
+                    coordinatorDecision);
             }
             else if (bridgeIsCurrent &&
                      request.Direction == FileTransferDirection.Inbound &&
@@ -5837,8 +5836,7 @@ public sealed partial class SessionFileTransferService :
                             request);
                 ApplyReceiveRecoveryStateLocked(
                     inbound,
-                    coordinatorDecision.State,
-                    queueInitialActivationHoldDirective: false);
+                    coordinatorDecision);
             }
             else
             {
@@ -5904,8 +5902,7 @@ public sealed partial class SessionFileTransferService :
                             request);
                 ApplyReceiveRecoveryStateLocked(
                     outbound,
-                    coordinatorDecision.State,
-                    queueInitialActivationHoldDirective: false);
+                    coordinatorDecision);
             }
             else if (bridgeIsCurrent &&
                      request.HoldRequest.Direction ==
@@ -5927,8 +5924,7 @@ public sealed partial class SessionFileTransferService :
                             request);
                 ApplyReceiveRecoveryStateLocked(
                     inbound,
-                    coordinatorDecision.State,
-                    queueInitialActivationHoldDirective: false);
+                    coordinatorDecision);
             }
             else
             {
@@ -7734,7 +7730,7 @@ public sealed partial class SessionFileTransferService :
 
     private void ApplyReceiveRecoveryStateLocked(
         OutboundTransferContext context,
-        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryDecision decision,
         bool queueInitialActivationHoldDirective = true,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
             initialActivationHoldDecision = null)
@@ -7746,12 +7742,10 @@ public sealed partial class SessionFileTransferService :
                 previousCoordinatorState,
                 out var heldPayloadOperation,
                 out _);
-        state = AdoptCoordinatorStateLocked(
+        var state = AdoptCoordinatorStateLocked(context, decision);
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
             context,
-            state,
-            "ReceiveRecoveryStateAdopted",
-            "Accepted",
-            "coordinator_receive_recovery_transition");
+            decision.SnapshotEnvelope);
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,
@@ -7791,6 +7785,11 @@ public sealed partial class SessionFileTransferService :
             _ = TryClearPostTunaFallbackReceiveRecoveryPayloadHoldLocked(
                 context,
                 postTunaFallbackHold);
+            EnqueueReceiveRecoveryAuthorityEffect(
+                context,
+                decision.SnapshotEnvelope,
+                "operation_current",
+                "payload_resumed");
 
             context.SparseSenderPumpLastWakeReason =
                 "receive_recovery_proof_owned_payload_resumed";
@@ -7834,19 +7833,81 @@ public sealed partial class SessionFileTransferService :
                 held.Authority.OperationGeneration);
 
     private void ApplyReceiveRecoveryStateLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+            decision)
+    {
+        var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        var state = AdoptCoordinatorStateLocked(context, decision);
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        LogReceiveRecoveryOperationTransitions(
+            previous,
+            state.PersistentState.FileTransferReceiveRecovery,
+            decision.Decision.Reason);
+    }
+
+    private void ApplyReceiveRecoveryStateLocked(
         InboundTransferContext context,
-        FileTransferCoordinatorState state,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+            decision)
+    {
+        var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        var state = AdoptCoordinatorStateLocked(context, decision);
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        LogReceiveRecoveryOperationTransitions(
+            previous,
+            state.PersistentState.FileTransferReceiveRecovery,
+            decision.Decision.Reason);
+    }
+
+    private void ApplyReceiveRecoveryStateLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+            decision)
+    {
+        var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        var state = AdoptCoordinatorStateLocked(context, decision);
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        LogReceiveRecoveryOperationTransitions(
+            previous,
+            state.PersistentState.FileTransferReceiveRecovery,
+            decision.Decision.Reason);
+    }
+
+    private void ApplyReceiveRecoveryStateLocked(
+        InboundTransferContext context,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+            decision)
+    {
+        var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
+        var state = AdoptCoordinatorStateLocked(context, decision);
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        LogReceiveRecoveryOperationTransitions(
+            previous,
+            state.PersistentState.FileTransferReceiveRecovery,
+            decision.Decision.Reason);
+    }
+
+    private void ApplyReceiveRecoveryStateLocked(
+        InboundTransferContext context,
+        FileTransferReceiveRecoveryDecision decision,
         bool queueInitialActivationHoldDirective = true,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
             initialActivationHoldDecision = null)
     {
         var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
-        state = AdoptCoordinatorStateLocked(
+        var state = AdoptCoordinatorStateLocked(context, decision);
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
             context,
-            state,
-            "ReceiveRecoveryStateAdopted",
-            "Accepted",
-            "coordinator_receive_recovery_transition");
+            decision.SnapshotEnvelope);
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,
@@ -8547,8 +8608,7 @@ public sealed partial class SessionFileTransferService :
 
             ApplyReceiveRecoveryStateLocked(
                 outbound,
-                stage.CoordinatorDecision.State,
-                queueInitialActivationHoldDirective: false);
+                stage.CoordinatorDecision);
         }
         else if (stage.InboundContext is { } inbound)
         {
@@ -8565,8 +8625,7 @@ public sealed partial class SessionFileTransferService :
 
             ApplyReceiveRecoveryStateLocked(
                 inbound,
-                stage.CoordinatorDecision.State,
-                queueInitialActivationHoldDirective: false);
+                stage.CoordinatorDecision);
         }
         else
         {

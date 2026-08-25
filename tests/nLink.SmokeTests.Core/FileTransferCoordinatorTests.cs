@@ -4487,6 +4487,114 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "ReceiveRecoveryOperation")]
+    public void FileTransferReceiveRecovery_CoordinatorAuthorsExactSnapshotBoundaries()
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture();
+        var state = fixture.State with
+        {
+            PersistentState = fixture.State.PersistentState with
+            {
+                CoordinatorInstanceId = "receive-recovery-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
+        };
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+            fixture.Decision.Authority);
+
+        var issued = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            state,
+            authority.Observation,
+            authority.BridgeRecoveryDecision.RecoveryKind,
+            authority.ExecutionCommand.CheckpointRequestId);
+        Assert.True(issued.Accepted, issued.Reason);
+        var issueEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            issued.SnapshotEnvelope);
+        Assert.Equal(0, issueEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(1, issueEnvelope.Aggregate.AfterStateGeneration);
+        var current = Assert.Single(
+            issueEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "receive_recovery",
+                OperationRole: "operation_current",
+            });
+        Assert.Equal("Issued", current.ReceiveRecovery?.ExecutionState);
+        Assert.Equal(
+            authority.Observation.CheckpointRequestId ?? "(none)",
+            current.ReceiveRecovery?.SourceBoundary.CheckpointRequestId);
+        Assert.Equal(
+            authority.ExecutionCommand.CheckpointRequestId ?? "(none)",
+            current.ReceiveRecovery?.EffectiveBoundary.CheckpointRequestId);
+
+        var duplicate = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            issued.State,
+            authority.Observation,
+            authority.BridgeRecoveryDecision.RecoveryKind,
+            authority.ExecutionCommand.CheckpointRequestId);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicate.Status);
+        var duplicateEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            duplicate.SnapshotEnvelope);
+        Assert.Equal(1, duplicateEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(1, duplicateEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal("Idempotent", duplicateEnvelope.DecisionStatus);
+        var duplicateReceipt = Assert.Single(
+            Assert.Single(
+                duplicateEnvelope.Aggregate.Operations,
+                operation => operation.Family == "receive_recovery")
+            .ReceiveRecovery!.Receipts);
+        Assert.Equal("attempted_decision", duplicateReceipt.Stage);
+        Assert.Equal("Idempotent", duplicateReceipt.ReceiptStatus);
+
+        var rejected = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            duplicate.State,
+            authority.Observation with
+            {
+                ObservationIdentity = "competing-observation",
+                ObservationGeneration =
+                    authority.Observation.ObservationGeneration + 1,
+            },
+            authority.BridgeRecoveryDecision.RecoveryKind,
+            authority.ExecutionCommand.CheckpointRequestId);
+        Assert.False(rejected.Accepted);
+        var rejectedEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            rejected.SnapshotEnvelope);
+        Assert.Equal(1, rejectedEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(1, rejectedEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal("Rejected", rejectedEnvelope.DecisionStatus);
+
+        var invalidated = FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
+            rejected.State,
+            Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
+                issued.Authority),
+            "snapshot_test_invalidation");
+        Assert.True(invalidated.Accepted, invalidated.Reason);
+        var invalidationEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            invalidated.SnapshotEnvelope);
+        Assert.Equal(1, invalidationEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(2, invalidationEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Contains(
+            invalidationEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "receive_recovery",
+                OperationRole: "operation_current",
+            } && operation.AfterState == "None");
+        Assert.Contains(
+            invalidationEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "receive_recovery",
+                OperationRole: "operation_terminal",
+            } && operation.AfterState.StartsWith(
+                "Invalidated:",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockRetryLifecycle")]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
     public void RuntimeUnlockRetryLifecycle_CoordinatorAuthorsExactSnapshotBoundaries()
@@ -10008,6 +10116,14 @@ public sealed class FileTransferCoordinatorTests
     public void FileTransferReceiveRecoveryFallbackCheckpointFrontierRequest_ChildPreservesRunningOperationAndConvergesAfterProof()
     {
         var fixture = CreateNonRegularV4ReceiveRecoveryOperationFixture();
+        RunReceiveRecoveryFallbackCheckpointFrontierRequestLifecycle(fixture);
+    }
+
+    private static void
+        RunReceiveRecoveryFallbackCheckpointFrontierRequestLifecycle(
+            (FileTransferCoordinatorState State,
+             FileTransferReceiveRecoveryDecision Decision) fixture)
+    {
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);

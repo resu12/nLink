@@ -1168,7 +1168,16 @@ public sealed partial class SessionFileTransferService
             reason,
             requiresResumeRequest,
             handoffKind,
-            targetTransport);
+            targetTransport,
+            (status, decisionReason, command, exactAuthority) =>
+                RecordReceiveRecoveryAttemptSnapshotLocked(
+                    context,
+                    state,
+                    nameof(FileTransferCoordinator.ClassifyPostTunaReceiveRecoveryEpochRestart),
+                    status,
+                    decisionReason,
+                    command,
+                    exactAuthority));
     }
 
     private bool TryHoldInboundPostTunaRecoveryEpochRestartLocked(
@@ -1192,7 +1201,16 @@ public sealed partial class SessionFileTransferService
             reason,
             requiresResumeRequest,
             handoffKind,
-            targetTransport);
+            targetTransport,
+            (status, decisionReason, command, exactAuthority) =>
+                RecordReceiveRecoveryAttemptSnapshotLocked(
+                    context,
+                    state,
+                    nameof(FileTransferCoordinator.ClassifyPostTunaReceiveRecoveryEpochRestart),
+                    status,
+                    decisionReason,
+                    command,
+                    exactAuthority));
     }
 
     private static bool DecidePostTunaRecoveryEpochRestartLocked(
@@ -1201,20 +1219,29 @@ public sealed partial class SessionFileTransferService
         string reason,
         bool requiresResumeRequest,
         FileTransferTransportHandoffKind handoffKind,
-        FileTransferTransportKind targetTransport)
+        FileTransferTransportKind targetTransport,
+        Action<string, string, object,
+            FileTransferReceiveRecoveryOperationAuthority> recordSnapshot)
     {
         var observedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var restartObservation =
+            new FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
+                authority,
+                IsAvailable: false,
+                requiresResumeRequest,
+                handoffKind,
+                targetTransport,
+                reason,
+                observedUtcMs);
         var decision = FileTransferCoordinator
             .ClassifyPostTunaReceiveRecoveryEpochRestart(
                 state,
-                new FileTransferReceiveRecoveryPostTunaEpochRestartObservation(
-                    authority,
-                    IsAvailable: false,
-                    requiresResumeRequest,
-                    handoffKind,
-                    targetTransport,
-                    reason,
-                    observedUtcMs));
+                restartObservation);
+        recordSnapshot(
+            decision.Disposition.ToString(),
+            decision.Reason,
+            restartObservation,
+            authority);
         var operation = decision.Operation;
         var observation = authority.Observation;
         LocalOperationalLog.Info(

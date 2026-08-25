@@ -12,16 +12,16 @@ public sealed partial class SessionFileTransferService
         "snapshot-authority-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "2ba980b5696114cbd09fde978ae85d27270adc08f6caead9bd222c0074e9d0c6";
+        "a14a19dfbb96f09d5d22ab27b6063fef6e9eb4f3a1f3259d35109b181b305a3b";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery";
 
     private const string CoordinatorSnapshotShadowFamilyCoverage =
         "";
 
     private const string CoordinatorSnapshotAuthoritativeFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery";
 
     private static void InitializeCoordinatorSnapshotState(
         OutboundTransferContext context)
@@ -173,6 +173,62 @@ public sealed partial class SessionFileTransferService
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         InboundTransferContext context,
         FileTransferReceiveRecoveryDecision decision)
+        => AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            state => context.CoordinatorPersistentState = state.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+            decision)
+        => AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            state => context.CoordinatorPersistentState = state.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        InboundTransferContext context,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+            decision)
+        => AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            state => context.CoordinatorPersistentState = state.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        OutboundTransferContext context,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+            decision)
+        => AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            state => context.CoordinatorPersistentState = state.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        InboundTransferContext context,
+        RuntimeUnlockInitialActivationOfferEnvelopeRefreshCoordinatorDecision
+            decision)
         => AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
@@ -288,7 +344,8 @@ public sealed partial class SessionFileTransferService
                 operation.Family is
                     "route_runtime" or
                     "route_transition" or
-                    "runtime_unlock_retry_lifecycle")
+                    "runtime_unlock_retry_lifecycle" or
+                    "receive_recovery")
             .Select(operation => operation.OperationKey)
             .ToArray();
         if (authoritativeOperations.Length > 0)
@@ -325,12 +382,70 @@ public sealed partial class SessionFileTransferService
             state.PersistentState.SnapshotStateGeneration)
         {
             throw new InvalidOperationException(
-                "Coordinator-authored route snapshot envelope is missing or does not match its decision state.");
+                "Coordinator-authored snapshot envelope is missing or does not match its decision state.");
         }
 
         adopt(state);
         emitter.Enqueue(envelope);
         return state;
+    }
+
+    private static FileTransferCoordinatorTransitionEnvelope
+        RecordReceiveRecoveryAttemptSnapshotLocked(
+            OutboundTransferContext context,
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferReceiveRecoveryOperationAuthority? authority)
+    {
+        var snapshot = FileTransferCoordinator.CreateReceiveRecoveryAttemptSnapshot(
+            state,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            command,
+            authority);
+        _ = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            snapshot.State,
+            snapshot.Envelope,
+            adopted => context.CoordinatorPersistentState = adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        return snapshot.Envelope;
+    }
+
+    private static FileTransferCoordinatorTransitionEnvelope
+        RecordReceiveRecoveryAttemptSnapshotLocked(
+            InboundTransferContext context,
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferReceiveRecoveryOperationAuthority? authority)
+    {
+        var snapshot = FileTransferCoordinator.CreateReceiveRecoveryAttemptSnapshot(
+            state,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            command,
+            authority);
+        _ = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            snapshot.State,
+            snapshot.Envelope,
+            adopted => context.CoordinatorPersistentState = adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        return snapshot.Envelope;
     }
 
     private static FileTransferCoordinatorState
@@ -448,6 +563,202 @@ public sealed partial class SessionFileTransferService
             effectKind,
             $"{match.Operation.OperationKey}:{effectKind}",
             match.Receipt.ReceiptGeneration);
+    }
+
+    private static void EnqueueReceiveRecoveryAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string operationRole,
+        string effectKind)
+        => EnqueueReceiveRecoveryAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope,
+            operationRole,
+            effectKind);
+
+    private static void EnqueueReceiveRecoveryAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string operationRole,
+        string effectKind)
+        => EnqueueReceiveRecoveryAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope,
+            operationRole,
+            effectKind);
+
+    private static void EnqueueReceiveRecoveryAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string operationRole,
+        string effectKind)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "receive_recovery" &&
+                operation.OperationRole == operationRole &&
+                operation.ReceiveRecovery is not null)
+            .SelectMany(operation => operation.ReceiveRecovery!.Receipts
+                .Where(receipt => receipt.ReceiptValidated)
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            return;
+        }
+
+        var match = matches[0];
+        emitter.EnqueueAuthorityEffect(
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            stateGeneration,
+            match.Operation.Family,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint,
+            effectKind,
+            $"{match.Operation.OperationKey}:{effectKind}",
+            match.Receipt.ReceiptGeneration);
+    }
+
+    private static void EnqueueReceiveRecoveryDecisionAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        var effect = GetReceiveRecoveryDecisionEffect(envelope);
+        if (effect is { } exact)
+        {
+            EnqueueReceiveRecoveryAuthorityEffect(
+                context,
+                envelope,
+                exact.OperationRole,
+                exact.EffectKind);
+        }
+    }
+
+    private static void EnqueueReceiveRecoveryDecisionAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        var effect = GetReceiveRecoveryDecisionEffect(envelope);
+        if (effect is { } exact)
+        {
+            EnqueueReceiveRecoveryAuthorityEffect(
+                context,
+                envelope,
+                exact.OperationRole,
+                exact.EffectKind);
+        }
+    }
+
+    private static void EnqueueReceiveRecoveryAttemptAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string effectKind)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "receive_recovery" &&
+                operation.ReceiveRecovery is not null)
+            .SelectMany(operation => operation.ReceiveRecovery!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    receipt.Stage == "attempted_decision")
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            return;
+        }
+
+        var match = matches[0];
+        context.CoordinatorSnapshotEmitter.EnqueueAuthorityEffect(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            match.Operation.Family,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint,
+            effectKind,
+            $"{match.Operation.OperationKey}:{effectKind}",
+            match.Receipt.ReceiptGeneration);
+    }
+
+    private static (string OperationRole, string EffectKind)?
+        GetReceiveRecoveryDecisionEffect(
+            FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        if (envelope is null)
+        {
+            return null;
+        }
+
+        return envelope.DecisionKind switch
+        {
+            nameof(FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart) =>
+                ("operation_current", "execution_started"),
+            nameof(FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt) =>
+                ("operation_current", "execution_receipt_observed"),
+            nameof(FileTransferCoordinator.ObserveReceiveRecoveryProof) =>
+                ("operation_current", "receive_proof_observed"),
+            nameof(FileTransferCoordinator.ApplyReceiveRecoveryProofStatePublicationReceipt) =>
+                ("proof_publication_terminal", "proof_publication_delivered"),
+            nameof(FileTransferCoordinator.ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt) =>
+                ("checkpoint_delivery_terminal", "checkpoint_delivery_observed"),
+            nameof(FileTransferCoordinator.ReserveReceiveRecoveryFallbackCheckpointDeliveryResume) =>
+                ("checkpoint_resume", "checkpoint_resume_observed"),
+            nameof(FileTransferCoordinator.ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt) =>
+                ("checkpoint_frontier_recheck", "checkpoint_frontier_recheck_observed"),
+            nameof(FileTransferCoordinator.EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold) or
+            nameof(FileTransferCoordinator.InvalidateRuntimeUnlockInitialActivationReceiveRecoveryHold) =>
+                (envelope.Aggregate.Operations.Any(operation =>
+                    operation.Family == "receive_recovery" &&
+                    operation.OperationRole == "initial_activation_hold_current" &&
+                    operation.ReceiveRecovery?.Receipts.Any(receipt =>
+                        receipt.ReceiptValidated) == true)
+                    ? "initial_activation_hold_current"
+                    : "initial_activation_hold_terminal",
+                 "initial_activation_hold_observed"),
+            nameof(FileTransferCoordinator.CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh) =>
+                ("initial_activation_envelope_refresh", "initial_activation_envelope_refresh_observed"),
+            _ => null,
+        };
     }
 
     private static void EnqueueRoutePublicationAuthorityEffect(
