@@ -1024,7 +1024,12 @@ public sealed partial class SessionFileTransferService
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
-        context.CoordinatorPersistentState = state.PersistentState;
+        state = AdoptCoordinatorStateLocked(
+            context,
+            state,
+            "RuntimeUnlockRetryLifecycleStateAdopted",
+            "Accepted",
+            "runtime_unlock_retry_lifecycle_transition");
         LogReceiveRecoveryOperationTransitions(
             previous,
             state.PersistentState.FileTransferReceiveRecovery,
@@ -1043,7 +1048,12 @@ public sealed partial class SessionFileTransferService
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
-        context.CoordinatorPersistentState = state.PersistentState;
+        state = AdoptCoordinatorStateLocked(
+            context,
+            state,
+            "RuntimeUnlockRetryLifecycleStateAdopted",
+            "Accepted",
+            "runtime_unlock_retry_lifecycle_transition");
         LogReceiveRecoveryOperationTransitions(
             previous,
             state.PersistentState.FileTransferReceiveRecovery,

@@ -3231,7 +3231,12 @@ public sealed partial class SessionFileTransferService
                 observation,
                 admissionToken,
                 pendingPreCommit);
-        context.CoordinatorPersistentState = binding.State.PersistentState;
+        var bindingState = AdoptCoordinatorStateLocked(
+            context,
+            binding.State,
+            "RuntimeUnlockResponderPeerProbeHandoffBound",
+            binding.Status.ToString(),
+            binding.Reason);
         if (!binding.Accepted || binding.Authority is not { } authority)
         {
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
@@ -3250,10 +3255,15 @@ public sealed partial class SessionFileTransferService
         {
             var held = FileTransferCoordinator
                 .HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork(
-                    binding.State,
+                    bindingState,
                     authority,
                     "runtime_unlock_responder_peer_probe_handoff_owner_work_pending");
-            context.CoordinatorPersistentState = held.State.PersistentState;
+            _ = AdoptCoordinatorStateLocked(
+                context,
+                held.State,
+                "RuntimeUnlockResponderPeerProbeHandoffHeld",
+                held.Status.ToString(),
+                held.Reason);
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
                 context,
                 observation,
@@ -3406,7 +3416,12 @@ public sealed partial class SessionFileTransferService
                 observation,
                 authority.RuntimeUnlockAdmission,
                 authority.PendingPreCommitProbe);
-        context.CoordinatorPersistentState = binding.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            binding.State,
+            "RuntimeUnlockResponderPeerProbeHandoffBound",
+            binding.Status.ToString(),
+            binding.Reason);
         if (!binding.Accepted || binding.Authority is not { } currentAuthority)
         {
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(

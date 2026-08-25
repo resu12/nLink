@@ -1554,7 +1554,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         EnsureProjectionOutboundPressureScope(service, context);
         typeof(SessionFileTransferService)
             .GetMethod("EnqueueAuthorizedV4RepairsFromState", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, state, null, false, null, null, null, 0L]);
+            .Invoke(service, [context, state, null, false, null, null, null, null, 0L]);
     }
 
     private static void EnsureProjectionOutboundPressureScope(

@@ -48,7 +48,15 @@ public sealed partial class SessionFileTransferV4SenderTests
                 ObservedUtcMilliseconds: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 checkpoint));
         var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(issued.Command);
-        SetPrivateProperty(context, "CoordinatorPersistentState", issued.State.PersistentState);
+        var adoptBootstrapDecision = serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "AdoptCoordinatorStateLocked" &&
+                method.GetParameters() is { Length: 2 } parameters &&
+                parameters[0].ParameterType == context.GetType() &&
+                parameters[1].ParameterType ==
+                    typeof(FileTransferFallbackV6ProofBootstrapDecision));
+        _ = adoptBootstrapDecision.Invoke(null, [context, issued]);
 
         var localReceiverState = new FileTransferReceiverStateFrameV6
         {
@@ -122,7 +130,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             log = ReadOperationalLogTail(logStart);
         }
         while (!log.Contains(
-                   "event=filetransfer_route_transition_retained_frame_applied;",
+                   "event=filetransfer_route_transition_disposition_applied;",
                    StringComparison.Ordinal) &&
                DateTimeOffset.UtcNow < deadline);
 
@@ -1237,6 +1245,26 @@ public sealed partial class SessionFileTransferV4SenderTests
             {
                 if (!string.Equals(
                         candidate.Name,
+                        "AdoptCoordinatorStateLocked",
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 2 &&
+                       parameters[0].ParameterType == context.GetType() &&
+                       parameters[1].ParameterType ==
+                           typeof(FileTransferRouteTransitionDecision);
+            })
+            .Invoke(null, [context, committed]);
+
+        typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+            {
+                if (!string.Equals(
+                        candidate.Name,
                         "ApplyCoordinatorDecisionToContextLocked",
                         StringComparison.Ordinal))
                 {
@@ -1244,10 +1272,10 @@ public sealed partial class SessionFileTransferV4SenderTests
                 }
 
                 var parameters = candidate.GetParameters();
-                return parameters.Length == 3 &&
+                return parameters.Length == 4 &&
                        parameters[0].ParameterType == context.GetType() &&
                        parameters[1].ParameterType ==
-                           typeof(FileTransferCoordinatorDecision);
+                            typeof(FileTransferCoordinatorDecision);
             })
             .Invoke(
                 null,
@@ -1255,6 +1283,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                     context,
                     Assert.IsType<FileTransferCoordinatorDecision>(
                         committed.RouteDecision),
+                    false,
                     false,
                 ]);
 

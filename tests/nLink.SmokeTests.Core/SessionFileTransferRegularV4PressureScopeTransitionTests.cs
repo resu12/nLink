@@ -119,10 +119,9 @@ public sealed partial class SessionFileTransferV4SenderTests
                 .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
                 .Single(candidate =>
                     candidate.Name == "ApplyCoordinatorDecisionToContextLocked" &&
-                    candidate.GetParameters()[0].ParameterType == context.GetType());
-            var arguments = apply.GetParameters().Length == 3
-                ? new object?[] { context, decision, true }
-                : new object?[] { context, decision };
+                    candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                    candidate.GetParameters().Length == 4);
+            object?[] arguments = [context, decision, true, false];
 
             apply.Invoke(null, arguments);
 

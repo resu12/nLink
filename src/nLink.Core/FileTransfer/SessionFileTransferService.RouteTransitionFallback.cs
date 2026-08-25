@@ -788,6 +788,8 @@ public sealed partial class SessionFileTransferService
                 request);
         }
 
+        _ = AdoptCoordinatorStateLocked(context, prepared);
+
         if (prepared.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Prepared or
                 FileTransferRouteTransitionDecisionStatus.Idempotent or
@@ -818,7 +820,6 @@ public sealed partial class SessionFileTransferService
             prepared.Reason,
             capturedCount: 0,
             completedCount: 0);
-        context.CoordinatorPersistentState = prepared.State.PersistentState;
         if (!TryBindFileTransferRouteTransitionPause(
                 pauseCommand,
                 out var pauseReceipt,
@@ -850,6 +851,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator.CommitFileTransferRouteTransitionSupersession(
                     CreateCoordinatorStateLocked(context),
                     pauseReceipt);
+            _ = AdoptCoordinatorStateLocked(context, committedSupersession);
             LogFileTransferRouteTransitionSupersessionDecision(
                 context.SessionId,
                 context.TransferId,
@@ -868,8 +870,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            context.CoordinatorPersistentState =
-                committedSupersession.State.PersistentState;
             if (!ApplyFileTransferRouteTransitionDispositionWhileLocked(
                     context,
                     committedSupersession.DispositionCommand))
@@ -931,6 +931,7 @@ public sealed partial class SessionFileTransferService
                             FileTransferCoordinator
                                 .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
                                     capturedIds));
+                _ = AdoptCoordinatorStateLocked(context, draining);
                 if (draining.Status is not (
                         FileTransferRouteTransitionDecisionStatus.Draining or
                         FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -938,9 +939,6 @@ public sealed partial class SessionFileTransferService
                 {
                     return false;
                 }
-
-                context.CoordinatorPersistentState =
-                    draining.State.PersistentState;
             }
             else
             {
@@ -970,6 +968,7 @@ public sealed partial class SessionFileTransferService
                     capturedThrough,
                     capturedIds,
                     fingerprint);
+            _ = AdoptCoordinatorStateLocked(context, draining);
             if (draining.Status is not (
                     FileTransferRouteTransitionDecisionStatus.Draining or
                     FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -983,12 +982,30 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            context.CoordinatorPersistentState = draining.State.PersistentState;
         }
 
         if (draining.DrainCommand is not { } drainCommand)
         {
             return false;
+        }
+
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "pause_installed",
+            $"{authority.AuthorityId}:pause_bind",
+            pauseReceipt.Status.ToString(),
+            pauseReceipt);
+        foreach (var leaseId in drainCommand.CapturedPhysicalSendLeaseIds)
+        {
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                authority,
+                "physical_send_lease_registered",
+                $"lease:{leaseId}",
+                pauseReceipt.Status.ToString(),
+                pauseReceipt,
+                $"{authority.AuthorityId}:pause_bind");
         }
 
         var taskSnapshot =
@@ -1128,6 +1145,7 @@ public sealed partial class SessionFileTransferService
             : FileTransferCoordinator.PrepareFileTransferRouteTransition(
                 state,
                 request);
+        _ = AdoptCoordinatorStateLocked(context, prepared);
         if (supersedeUncommittedTuna)
         {
             LogFileTransferRouteTransitionSupersessionDecision(
@@ -1171,7 +1189,6 @@ public sealed partial class SessionFileTransferService
             prepared.Reason,
             capturedCount: 0,
             completedCount: 0);
-        context.CoordinatorPersistentState = prepared.State.PersistentState;
         if (!TryBindFileTransferRouteTransitionPause(
                 pauseCommand,
                 out var pauseReceipt,
@@ -1203,6 +1220,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator.CommitFileTransferRouteTransitionSupersession(
                     CreateCoordinatorStateLocked(context),
                     pauseReceipt);
+            _ = AdoptCoordinatorStateLocked(context, committedSupersession);
             LogFileTransferRouteTransitionSupersessionDecision(
                 context.SessionId,
                 context.TransferId,
@@ -1221,8 +1239,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            context.CoordinatorPersistentState =
-                committedSupersession.State.PersistentState;
             if (!ApplyFileTransferRouteTransitionDispositionWhileLocked(
                     context,
                     committedSupersession.DispositionCommand))
@@ -1274,6 +1290,7 @@ public sealed partial class SessionFileTransferService
                             FileTransferCoordinator
                                 .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
                                     emptyIds));
+                _ = AdoptCoordinatorStateLocked(context, draining);
                 if (draining.Status is not (
                         FileTransferRouteTransitionDecisionStatus.Draining or
                         FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -1281,9 +1298,6 @@ public sealed partial class SessionFileTransferService
                 {
                     return false;
                 }
-
-                context.CoordinatorPersistentState =
-                    draining.State.PersistentState;
             }
             else
             {
@@ -1303,6 +1317,7 @@ public sealed partial class SessionFileTransferService
                     FileTransferCoordinator
                         .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
                             emptyIds));
+            _ = AdoptCoordinatorStateLocked(context, draining);
             if (draining.Status is not (
                     FileTransferRouteTransitionDecisionStatus.Draining or
                     FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -1316,12 +1331,30 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            context.CoordinatorPersistentState = draining.State.PersistentState;
         }
 
         if (draining.DrainCommand is not { } drainCommand)
         {
             return false;
+        }
+
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "pause_installed",
+            $"{authority.AuthorityId}:pause_bind",
+            pauseReceipt.Status.ToString(),
+            pauseReceipt);
+        foreach (var leaseId in drainCommand.CapturedPhysicalSendLeaseIds)
+        {
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                authority,
+                "physical_send_lease_registered",
+                $"lease:{leaseId}",
+                pauseReceipt.Status.ToString(),
+                pauseReceipt,
+                $"{authority.AuthorityId}:pause_bind");
         }
 
         LogFileTransferRouteTransitionDecision(
@@ -1739,6 +1772,7 @@ public sealed partial class SessionFileTransferService
         var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
             CreateCoordinatorStateLocked(context),
             request);
+        _ = AdoptCoordinatorStateLocked(context, prepared);
         if (prepared.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Prepared or
                 FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -1768,7 +1802,6 @@ public sealed partial class SessionFileTransferService
             prepared.Reason,
             capturedCount: 0,
             completedCount: 0);
-        context.CoordinatorPersistentState = prepared.State.PersistentState;
         if (!TryBindFileTransferRouteTransitionPause(
                 pauseCommand,
                 out var pauseReceipt,
@@ -1812,6 +1845,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator
                     .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
                         capturedIds));
+        _ = AdoptCoordinatorStateLocked(context, draining);
         if (draining.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Draining or
                 FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -1825,7 +1859,25 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = draining.State.PersistentState;
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "pause_installed",
+            $"{authority.AuthorityId}:pause_bind",
+            pauseReceipt.Status.ToString(),
+            pauseReceipt);
+        foreach (var leaseId in drainCommand.CapturedPhysicalSendLeaseIds)
+        {
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                authority,
+                "physical_send_lease_registered",
+                $"lease:{leaseId}",
+                pauseReceipt.Status.ToString(),
+                pauseReceipt,
+                $"{authority.AuthorityId}:pause_bind");
+        }
+
         LogFileTransferRouteTransitionDecision(
             "filetransfer_route_transition_draining",
             context.SessionId,
@@ -1896,6 +1948,7 @@ public sealed partial class SessionFileTransferService
         var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
             CreateCoordinatorStateLocked(context),
             request);
+        _ = AdoptCoordinatorStateLocked(context, prepared);
         if (prepared.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Prepared or
                 FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -1925,7 +1978,6 @@ public sealed partial class SessionFileTransferService
             prepared.Reason,
             capturedCount: 0,
             completedCount: 0);
-        context.CoordinatorPersistentState = prepared.State.PersistentState;
         if (!TryBindFileTransferRouteTransitionPause(
                 pauseCommand,
                 out var pauseReceipt,
@@ -1960,6 +2012,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator
                     .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
                         emptyIds));
+        _ = AdoptCoordinatorStateLocked(context, draining);
         if (draining.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Draining or
                 FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -1973,7 +2026,25 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = draining.State.PersistentState;
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "pause_installed",
+            $"{authority.AuthorityId}:pause_bind",
+            pauseReceipt.Status.ToString(),
+            pauseReceipt);
+        foreach (var leaseId in drainCommand.CapturedPhysicalSendLeaseIds)
+        {
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                authority,
+                "physical_send_lease_registered",
+                $"lease:{leaseId}",
+                pauseReceipt.Status.ToString(),
+                pauseReceipt,
+                $"{authority.AuthorityId}:pause_bind");
+        }
+
         LogFileTransferRouteTransitionDecision(
             "filetransfer_route_transition_draining",
             context.SessionId,
@@ -2377,6 +2448,7 @@ public sealed partial class SessionFileTransferService
             drainReceipt,
             finalProof,
             pressureReceipt);
+        _ = AdoptCoordinatorStateLocked(context, committed);
         if (committed.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Committed or
                 FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -2386,6 +2458,29 @@ public sealed partial class SessionFileTransferService
             rejectionReason = committed.Reason;
             return false;
         }
+
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "completed_drain_receipt",
+            $"{authority.AuthorityId}:drain",
+            drainReceipt.Outcome.ToString(),
+            drainReceipt);
+        var committedOperation = AssertCommittedRouteTransitionOperation(
+            committed.State,
+            authority);
+        var transitionCommitEvidence =
+            FileTransferCoordinator.CreateRouteTransitionCommitEvidence(
+                committedOperation);
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "route_commit_adopted",
+            $"{authority.AuthorityId}:commit",
+            "Committed",
+            transitionCommitEvidence,
+            $"{authority.AuthorityId}:commit",
+            authority.TransitionGeneration);
 
         if (!TryAdoptOutboundFileTransferRouteTransitionPressureSettlementLocked(
                 context,
@@ -2415,13 +2510,36 @@ public sealed partial class SessionFileTransferService
         ApplyCoordinatorDecisionToContextLocked(
             context,
             routeDecision,
-            forwardRoutePublication: false);
+            forwardRoutePublication: false,
+            adoptCoordinatorState: false);
         ApplyOutboundFileTransferRouteTransitionTargetRuntimeLocked(
             context,
             authority,
             previousRoute,
             disposition,
             execution.Reason);
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "target_runtime_leg_installed",
+            $"{authority.AuthorityId}:target_runtime_leg",
+            "Committed",
+            transitionCommitEvidence,
+            $"{authority.AuthorityId}:commit",
+            authority.TransitionGeneration);
+        if (routeDecision.RouteCommitToken is { } installedCommit)
+        {
+            EnqueueRouteRuntimeCommitAuthorityEffect(
+                context,
+                installedCommit,
+                "route_commit_adopted",
+                $"commit:{installedCommit.CommitGeneration}:adopted");
+            EnqueueRouteRuntimeCommitAuthorityEffect(
+                context,
+                installedCommit,
+                "target_runtime_leg_installed",
+                $"commit:{installedCommit.CommitGeneration}:target_runtime_leg");
+        }
         TryCaptureOutboundFileTransferRouteTransitionFallbackCheckpointDispatchLocked(
             context,
             authority,
@@ -2450,6 +2568,10 @@ public sealed partial class SessionFileTransferService
             context.RoutePublicationAuthorityForwarder,
             disposition.RoutePublicationToken,
             execution.Reason);
+        if (disposition.RoutePublicationToken is { } publishedRoute)
+        {
+            EnqueueRoutePublicationAuthorityEffect(context, publishedRoute);
+        }
         snapshot = CreateSnapshotLocked();
 
         if (committed.RetainedFrameApplyCommand is { })
@@ -2728,6 +2850,7 @@ public sealed partial class SessionFileTransferService
             drainReceipt,
             finalProof,
             pressureReceipt);
+        _ = AdoptCoordinatorStateLocked(context, committed);
         if (committed.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Committed or
                 FileTransferRouteTransitionDecisionStatus.Idempotent) ||
@@ -2737,6 +2860,29 @@ public sealed partial class SessionFileTransferService
             rejectionReason = committed.Reason;
             return false;
         }
+
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "completed_drain_receipt",
+            $"{authority.AuthorityId}:drain",
+            drainReceipt.Outcome.ToString(),
+            drainReceipt);
+        var committedOperation = AssertCommittedRouteTransitionOperation(
+            committed.State,
+            authority);
+        var transitionCommitEvidence =
+            FileTransferCoordinator.CreateRouteTransitionCommitEvidence(
+                committedOperation);
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "route_commit_adopted",
+            $"{authority.AuthorityId}:commit",
+            "Committed",
+            transitionCommitEvidence,
+            $"{authority.AuthorityId}:commit",
+            authority.TransitionGeneration);
 
         if (!TryAdoptInboundFileTransferRouteTransitionPressureSettlementLocked(
                 context,
@@ -2766,13 +2912,36 @@ public sealed partial class SessionFileTransferService
         ApplyCoordinatorDecisionToContextLocked(
             context,
             routeDecision,
-            forwardRoutePublication: false);
+            forwardRoutePublication: false,
+            adoptCoordinatorState: false);
         ApplyInboundFileTransferRouteTransitionTargetRuntimeLocked(
             context,
             authority,
             previousRoute,
             disposition,
             execution.Reason);
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            authority,
+            "target_runtime_leg_installed",
+            $"{authority.AuthorityId}:target_runtime_leg",
+            "Committed",
+            transitionCommitEvidence,
+            $"{authority.AuthorityId}:commit",
+            authority.TransitionGeneration);
+        if (routeDecision.RouteCommitToken is { } installedCommit)
+        {
+            EnqueueRouteRuntimeCommitAuthorityEffect(
+                context,
+                installedCommit,
+                "route_commit_adopted",
+                $"commit:{installedCommit.CommitGeneration}:adopted");
+            EnqueueRouteRuntimeCommitAuthorityEffect(
+                context,
+                installedCommit,
+                "target_runtime_leg_installed",
+                $"commit:{installedCommit.CommitGeneration}:target_runtime_leg");
+        }
         context.FileTransferRouteTransitionExecution = execution with
         {
             Authority = authority,
@@ -2792,6 +2961,10 @@ public sealed partial class SessionFileTransferService
             context.RoutePublicationAuthorityForwarder,
             disposition.RoutePublicationToken,
             execution.Reason);
+        if (disposition.RoutePublicationToken is { } publishedRoute)
+        {
+            EnqueueRoutePublicationAuthorityEffect(context, publishedRoute);
+        }
         snapshot = CreateSnapshotLocked();
 
         if (committed.RetainedFrameApplyCommand is { })
@@ -3018,6 +3191,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinator.ApplyFileTransferRouteTransitionRetainedFrameReceipt(
                     CreateCoordinatorStateLocked(context),
                     receipt);
+            _ = AdoptCoordinatorStateLocked(context, appliedDecision);
             if (!applied ||
                 appliedDecision.Status is not (
                     FileTransferRouteTransitionDecisionStatus.Committed or
@@ -3039,8 +3213,14 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            context.CoordinatorPersistentState =
-                appliedDecision.State.PersistentState;
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                receipt.Command.Authority,
+                "retained_frame_applied",
+                $"{receipt.Command.Authority.AuthorityId}:retained_frame",
+                receipt.Status.ToString(),
+                receipt);
+
             context.FileTransferRouteTransitionExecution = execution with
             {
                 FrameApplyInFlight = false,
@@ -3130,6 +3310,7 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         FileTransferDataFrame frame,
         bool applied,
+        bool responseSent,
         string reason,
         out SessionFileTransferSnapshot? snapshot)
     {
@@ -3169,6 +3350,7 @@ public sealed partial class SessionFileTransferService
             FileTransferCoordinator.ApplyFileTransferRouteTransitionRetainedFrameReceipt(
                 CreateCoordinatorStateLocked(context),
                 receipt);
+        _ = AdoptCoordinatorStateLocked(context, decision);
         if (!applied ||
             decision.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Committed or
@@ -3182,7 +3364,27 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        if (responseSent)
+        {
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                receipt.Command.Authority,
+                "retained_frame_response",
+                $"{receipt.Command.Authority.AuthorityId}:retained_frame_response",
+                receipt.Status.ToString(),
+                receipt,
+                $"{receipt.Command.Authority.AuthorityId}:retained_frame",
+                receipt.Command.Authority.TransitionGeneration);
+        }
+
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            receipt.Command.Authority,
+            "retained_frame_applied",
+            $"{receipt.Command.Authority.AuthorityId}:retained_frame",
+            receipt.Status.ToString(),
+            receipt);
+
         context.FileTransferRouteTransitionExecution = execution with
         {
             FrameApplyInFlight = false,
@@ -3251,6 +3453,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var applied = false;
+        var responseSent = false;
         var reason =
             "filetransfer_route_transition_retained_frame_type_unsupported";
         try
@@ -3287,6 +3490,7 @@ public sealed partial class SessionFileTransferService
                                 terminalReady: false,
                                 forceSend: true)
                             .ConfigureAwait(false);
+                    responseSent = applied;
                     reason = applied
                         ? "filetransfer_route_transition_retained_frame_applied"
                         : "filetransfer_route_transition_retained_frame_response_failed";
@@ -3330,6 +3534,7 @@ public sealed partial class SessionFileTransferService
                     context,
                     frame,
                     applied,
+                    responseSent,
                     reason,
                     out snapshot))
             {
@@ -3370,6 +3575,7 @@ public sealed partial class SessionFileTransferService
             authority,
             terminalInvalidation,
             NormalizeReason(reason) ?? "filetransfer_route_transition_invalidated");
+        _ = AdoptCoordinatorStateLocked(context, decision);
         if (decision.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Invalidated or
                 FileTransferRouteTransitionDecisionStatus.Idempotent))
@@ -3377,7 +3583,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = decision.State.PersistentState;
         LogFileTransferRouteTransitionDecision(
             "filetransfer_route_transition_invalidated",
             context.SessionId,
@@ -3412,6 +3617,7 @@ public sealed partial class SessionFileTransferService
             authority,
             terminalInvalidation,
             NormalizeReason(reason) ?? "filetransfer_route_transition_invalidated");
+        _ = AdoptCoordinatorStateLocked(context, decision);
         if (decision.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Invalidated or
                 FileTransferRouteTransitionDecisionStatus.Idempotent))
@@ -3419,7 +3625,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = decision.State.PersistentState;
         LogFileTransferRouteTransitionDecision(
             "filetransfer_route_transition_invalidated",
             context.SessionId,
@@ -3506,6 +3711,7 @@ public sealed partial class SessionFileTransferService
             FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(
                 CreateCoordinatorStateLocked(context),
                 receipt);
+        _ = AdoptCoordinatorStateLocked(context, decision);
         if (decision.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Committed or
                 FileTransferRouteTransitionDecisionStatus.Invalidated or
@@ -3514,7 +3720,15 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            command.Value.Authority,
+            "route_transition_disposition_applied",
+            $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}",
+            receipt.Status.ToString(),
+            receipt,
+            $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}",
+            command.Value.Authority.TransitionGeneration);
         LogFileTransferRouteTransitionDecision(
             "filetransfer_route_transition_disposition_applied",
             context.SessionId,
@@ -3530,9 +3744,25 @@ public sealed partial class SessionFileTransferService
             context.FileTransferRouteTransitionExecution?.DrainCommand,
             resultingRoutePublication: command.Value.RoutePublicationToken,
             resultingRouteCommit: command.Value.RouteCommitToken);
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            command.Value.Authority,
+            "transition_pause_released",
+            $"{command.Value.Authority.AuthorityId}:pause_release",
+            receipt.Status.ToString(),
+            receipt,
+            $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}");
         if (command.Value.Kind ==
             FileTransferRouteTransitionDispositionKind.Committed)
         {
+            EnqueueRouteTransitionAuthorityEffect(
+                context,
+                command.Value.Authority,
+                "recovered_epoch_publication",
+                $"{command.Value.Authority.AuthorityId}:recovered_epoch",
+                receipt.Status.ToString(),
+                receipt,
+                $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}");
             EmitOutboundFileTransferRouteTransitionRecoveredProjectionLocked(
                 context,
                 command.Value);
@@ -3582,6 +3812,7 @@ public sealed partial class SessionFileTransferService
             FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(
                 CreateCoordinatorStateLocked(context),
                 receipt);
+        _ = AdoptCoordinatorStateLocked(context, decision);
         if (decision.Status is not (
                 FileTransferRouteTransitionDecisionStatus.Committed or
                 FileTransferRouteTransitionDecisionStatus.Invalidated or
@@ -3590,7 +3821,15 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            command.Value.Authority,
+            "route_transition_disposition_applied",
+            $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}",
+            receipt.Status.ToString(),
+            receipt,
+            $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}",
+            command.Value.Authority.TransitionGeneration);
         LogFileTransferRouteTransitionDecision(
             "filetransfer_route_transition_disposition_applied",
             context.SessionId,
@@ -3606,6 +3845,14 @@ public sealed partial class SessionFileTransferService
             context.FileTransferRouteTransitionExecution?.DrainCommand,
             resultingRoutePublication: command.Value.RoutePublicationToken,
             resultingRouteCommit: command.Value.RouteCommitToken);
+        EnqueueRouteTransitionAuthorityEffect(
+            context,
+            command.Value.Authority,
+            "transition_pause_released",
+            $"{command.Value.Authority.AuthorityId}:pause_release",
+            receipt.Status.ToString(),
+            receipt,
+            $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}");
         if (command.Value.Kind is
             FileTransferRouteTransitionDispositionKind.Committed or
             FileTransferRouteTransitionDispositionKind.RolledBack)
@@ -3613,6 +3860,14 @@ public sealed partial class SessionFileTransferService
             if (command.Value.Kind ==
                 FileTransferRouteTransitionDispositionKind.Committed)
             {
+                EnqueueRouteTransitionAuthorityEffect(
+                    context,
+                    command.Value.Authority,
+                    "recovered_epoch_publication",
+                    $"{command.Value.Authority.AuthorityId}:recovered_epoch",
+                    receipt.Status.ToString(),
+                    receipt,
+                    $"{command.Value.Authority.AuthorityId}:{command.Value.Kind}");
                 EmitInboundFileTransferRouteTransitionRecoveredProjectionLocked(
                     context,
                     command.Value);

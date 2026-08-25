@@ -1,36 +1,72 @@
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'FileTransferOps\CoordinatorSnapshotEvidence.ps1')
+
 if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
     Add-Type -Path (Join-Path $PSScriptRoot 'GuiSmokeLogLedgerStreamingProcessor.cs')
+}
+
+$script:GuiSmokeLegacyV0EvidenceCatalog = $null
+
+function Get-GuiSmokeLegacyV0EvidenceCatalog {
+    if ($null -ne $script:GuiSmokeLegacyV0EvidenceCatalog) {
+        return $script:GuiSmokeLegacyV0EvidenceCatalog
+    }
+
+    $path = Join-Path $PSScriptRoot 'FileTransferOps\LegacyV0EvidenceCatalog.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "legacy_v0_evidence_catalog_missing:$path"
+    }
+
+    $catalogMetadata = (Get-FileTransferCoordinatorEvidenceCatalog).LegacyV0
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    $actualHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+    if ($actualHash -cne [string]$catalogMetadata.Hash) {
+        throw "legacy_v0_evidence_catalog_hash_invalid:$actualHash"
+    }
+    $catalog = (
+        [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)) |
+        ConvertFrom-Json
+    if ([string]$catalog.version -cne [string]$catalogMetadata.Version) {
+        throw "legacy_v0_evidence_catalog_version_unknown:$($catalog.version)"
+    }
+
+    $events = @($catalog.events | ForEach-Object { [string]$_ })
+    $registered = @(
+        $catalog.correlators |
+            ForEach-Object { @($_.dependencies) } |
+            ForEach-Object { ([string]$_).ToLowerInvariant() } |
+            Sort-Object -Unique)
+    if ($events.Count -eq 0 -or
+        @($events | Sort-Object -Unique).Count -ne $events.Count -or
+        ($events -join "`n") -cne (@($events | Sort-Object) -join "`n") -or
+        ($events -join "`n") -cne ($registered -join "`n")) {
+        throw 'legacy_v0_evidence_catalog_registry_invalid'
+    }
+
+    $script:GuiSmokeLegacyV0EvidenceCatalog = $catalog
+    return $catalog
+}
+
+function Get-GuiSmokeLegacyV0SemanticEvidenceEventNames {
+    $catalog = Get-GuiSmokeLegacyV0EvidenceCatalog
+    return [string[]]@($catalog.events)
 }
 
 function Get-GuiSmokeSemanticEvidenceEventNames {
     $names = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($path in @(
-            (Join-Path $PSScriptRoot 'GuiSmoke-Windows.ps1'),
-            (Join-Path $PSScriptRoot 'FileTransferOps\AnalyzerOrchestration.ps1'),
-            (Join-Path $PSScriptRoot 'FileTransferSoak\ArtifactWriters.ps1'))) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            continue
-        }
-        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false, $true))
-        foreach ($match in [regex]::Matches(
-                $text,
-                '(?<quote>[''"])(?<name>(?:filetransfer|file_transfer|runtime_unlock|tuna_|session_|transfer_terminal|nkn_|screenshare_)[a-z0-9_]{2,})\k<quote>',
-                [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
-            [void]$names.Add([string]$match.Groups['name'].Value)
-        }
+    # LegacyV0 remains isolated behind this compatibility catalog. Snapshot V1
+    # events are declared explicitly and never discovered from analyzer source.
+    foreach ($name in @(Get-GuiSmokeLegacyV0SemanticEvidenceEventNames)) {
+        [void]$names.Add([string]$name)
     }
-    foreach ($name in @('integrity_verify_passed', 'temp_finalize_succeeded')) {
-        [void]$names.Add($name)
-    }
+    $coordinatorCatalog = Get-FileTransferCoordinatorEvidenceCatalog
     foreach ($name in @(
-            'filetransfer_route_transition_physical_send_lease_registered',
-            'filetransfer_route_transition_physical_send_lease_retired',
-            'filetransfer_outbound_physical_send_lease_registered',
-            'filetransfer_outbound_physical_send_lease_retired')) {
-        [void]$names.Remove($name)
+            $coordinatorCatalog.SnapshotAuthorityV1 +
+            $coordinatorCatalog.GenerationStampedEffects +
+            $coordinatorCatalog.NonAuthorityEvidence)) {
+        [void]$names.Add([string]$name)
     }
     return [string[]]@($names | Sort-Object)
 }

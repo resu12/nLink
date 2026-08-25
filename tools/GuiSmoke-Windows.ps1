@@ -4420,6 +4420,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
         generations = @($finalSnapshot.generations)
         writers = @($finalWriters)
     }
+    $coordinatorEvidenceCatalog = Get-FileTransferCoordinatorEvidenceCatalog
     $evidence = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_gui_log_ledger'
@@ -4427,6 +4428,9 @@ function Write-FileTransferGuiLogLedgerEvidence {
         scenarioRunId = $expectedScenarioRunId
         ledgerId = [string]$finalSnapshot.ledgerId
         writerEvidenceVersion = 3
+        coordinatorSnapshotContractVersion = [int]$coordinatorEvidenceCatalog.SnapshotContractVersion
+        coordinatorSnapshotCatalogVersion = [string]$coordinatorEvidenceCatalog.Version
+        coordinatorSnapshotCatalogHash = [string]$coordinatorEvidenceCatalog.Hash
         initial = $initialEvidence
         final = $finalEvidence
         rotationCount = [int]$diagnostics.RotationCount
@@ -5368,13 +5372,32 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         [object]$EvidenceLineVisitCount = 0L,
         [object]$EvidenceParsedRecordCount = 0L,
         [object]$EvidenceLookupCount = 0L,
-        [long]$ClassificationElapsedMilliseconds = 0
+        [long]$ClassificationElapsedMilliseconds = 0,
+        [string]$FailureClass = '(none)',
+        [string]$FailureVariant = '(none)',
+        [string]$CoordinatorBoundaryId = '(none)',
+        [string]$CoordinatorBoundaryHash = '(none)',
+        [object]$CoordinatorRawCount = 0,
+        [object]$CoordinatorDistinctCount = 0,
+        [object]$CoordinatorRecoveredCount = 0,
+        [object]$CoordinatorUnresolvedCount = 0,
+        [string]$CoordinatorWriter = '(none)',
+        [object]$CoordinatorWriterSequence = 0L
     )
 
     return [pscustomobject]@{
         Phase = $Phase
         Reason = $Reason
-        FailureVariant = '(none)'
+        FailureClass = $FailureClass
+        FailureVariant = $FailureVariant
+        CoordinatorBoundaryId = $CoordinatorBoundaryId
+        CoordinatorBoundaryHash = $CoordinatorBoundaryHash
+        CoordinatorRawCount = $CoordinatorRawCount
+        CoordinatorDistinctCount = $CoordinatorDistinctCount
+        CoordinatorRecoveredCount = $CoordinatorRecoveredCount
+        CoordinatorUnresolvedCount = $CoordinatorUnresolvedCount
+        CoordinatorWriter = $CoordinatorWriter
+        CoordinatorWriterSequence = $CoordinatorWriterSequence
         RouteMode = $RouteMode
         ClassificationSource = $ClassificationSource
         ClassificationComplete = $ClassificationComplete
@@ -6116,6 +6139,88 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
     }
     $evidenceLines = @($lines + $processLines)
+    $snapshotEvaluatorAvailable =
+        $null -ne (Get-Command Get-FileTransferCoordinatorSnapshotEvaluation `
+            -ErrorAction SilentlyContinue) -and
+        $null -ne (Get-Command Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -ErrorAction SilentlyContinue)
+    $coordinatorSnapshotEvaluation = if ($snapshotEvaluatorAvailable) {
+        Get-FileTransferCoordinatorSnapshotEvaluation `
+            -Lines ([string[]]$evidenceLines)
+    }
+    else {
+        [pscustomobject]@{
+            Mode = 'LegacyV0'
+            ArtifactEvidenceVerdict = 'pass'
+            TransitionCount = 0
+            FirstUnresolvedBoundary = $null
+        }
+    }
+    $snapshotRouteRuntimeAuthoritative =
+        $snapshotEvaluatorAvailable -and
+        (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'route_runtime')
+    $snapshotRouteTransitionAuthoritative =
+        $snapshotEvaluatorAvailable -and
+        (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'route_transition')
+    if ($coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
+        $coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
+        if ($null -ne $TestMetrics) {
+            $TestMetrics.evidenceLineVisitCount = [long]$evidenceLines.Count
+            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.classificationSource =
+                'coordinator_snapshot_evidence'
+        }
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase 'evidence_finalization' `
+            -Reason 'coordinator_snapshot_evidence_invalid' `
+            -RouteMode $RouteMode `
+            -ClassificationSource 'coordinator_snapshot_evidence' `
+            -EvidenceLineVisitCount ([long]$evidenceLines.Count) `
+            -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+            -FailureClass 'filetransfer_coordinator_snapshot_evidence_invalid'
+    }
+    $boundary = $coordinatorSnapshotEvaluation.FirstUnresolvedBoundary
+    $boundaryFamilies = if ($null -eq $boundary) {
+        @()
+    }
+    else {
+        @($boundary.families)
+    }
+    $snapshotOwnsBoundary = $null -ne $boundary -and (
+        ($snapshotRouteRuntimeAuthoritative -and
+         $boundaryFamilies -contains 'route_runtime') -or
+        ($snapshotRouteTransitionAuthoritative -and
+         $boundaryFamilies -contains 'route_transition'))
+    if ($snapshotOwnsBoundary) {
+        return New-TunaGuiFileTransferFailureClassificationResult `
+            -Phase ([string]$boundary.phase) `
+            -Reason ([string]$boundary.decisionReason) `
+            -RouteMode $RouteMode `
+            -ClassificationSource 'coordinator_snapshot_authority_v1' `
+            -EvidenceLineVisitCount ([long]$evidenceLines.Count) `
+            -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
+            -EvidenceLookupCount 0L `
+            -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+            -FailureClass ([string]$boundary.taxonomyClass) `
+            -FailureVariant ([string](Get-FileTransferCoordinatorSnapshotObjectProperty -InputObject $boundary -Name 'variant' -Default '(none)')) `
+            -CoordinatorBoundaryId ([string]$boundary.boundaryId) `
+            -CoordinatorBoundaryHash ([string]$boundary.boundaryHash) `
+            -CoordinatorRawCount ([int]$boundary.rawCount) `
+            -CoordinatorDistinctCount ([int]$boundary.distinctCount) `
+            -CoordinatorRecoveredCount ([int]$boundary.recoveredCount) `
+            -CoordinatorUnresolvedCount ([int]$boundary.unresolvedCount) `
+            -CoordinatorWriter ([string]$boundary.writer) `
+            -CoordinatorWriterSequence ([long]$boundary.writerSequence)
+    }
+    if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative') {
+        return $null
+    }
     $guiFailureEvidenceIndexMetrics = [pscustomobject]@{
         parsedRecordCount = 0L
         settlementLookupCount = 0L
@@ -29058,6 +29163,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'event=filetransfer_route_transition_prepared',
                     'source_route=file_tuna_v4',
                     'target_route=post_tuna_fallback_v6')))
+    if ($snapshotRouteTransitionAuthoritative) {
+        $routeTransitionDrainingTransportGraceTerminalization = $false
+        $fallbackV6ProofBootstrapMissing = $false
+    }
     $regularV4RecoveryPredecessorSettlementClosedSuccessor =
         Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettlementClosed =

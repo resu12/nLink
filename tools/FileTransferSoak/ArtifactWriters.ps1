@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferOps\CoordinatorSnapshotEvidence.ps1')
+
 $script:FileTransferRegularNknTargetGoodputBytesPerSecond = 1500000D
 $script:FileTransferExpectedBridgeControlSubClients = 4
 $script:FileTransferExpectedBridgeMediaSubClients = 8
@@ -15257,7 +15259,10 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
 }
 
 function Get-FileTransferFileTunaV4DataPathProof {
-    param([Parameter(Mandatory = $true)]$Summary)
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        $CoordinatorSnapshotEvaluation = $null
+    )
 
     $cachePropertyName = '__FileTransferFileTunaV4DataPathProof'
     if ($null -ne $Summary.PSObject.Properties[$cachePropertyName]) {
@@ -15271,6 +15276,19 @@ function Get-FileTransferFileTunaV4DataPathProof {
     if ($events.Count -eq 0) {
         $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
     }
+    if ($null -eq $CoordinatorSnapshotEvaluation) {
+        $CoordinatorSnapshotEvaluation =
+            Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $events | ForEach-Object { [string]$_.RawLine })
+    }
+    $snapshotRouteRuntimeAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $CoordinatorSnapshotEvaluation `
+            -Family 'route_runtime'
+    $snapshotRouteTransitionAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $CoordinatorSnapshotEvaluation `
+            -Family 'route_transition'
 
     $allowedEventNames = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($eventName in @(Get-FileTransferFileTunaV4DataPathEventNames)) {
@@ -15283,9 +15301,19 @@ function Get-FileTransferFileTunaV4DataPathProof {
         } | Sort-Object Sequence, LineNumber)
     [object[]]$intentEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathIntentEvent -Event $_ })
     [object[]]$actualEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathActualEvent -Event $_ })
-    $routeTransitionProof = Get-FileTransferRouteTransitionCorrelation `
-        -Events $events `
-        -AlreadyChronologicallyOrdered
+    $routeTransitionProof = if ($snapshotRouteTransitionAuthoritative) {
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $CoordinatorSnapshotEvaluation `
+            -Family 'route_transition' `
+            -TaxonomyClasses @(
+                'filetransfer_route_transition_incomplete',
+                'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+    }
+    else {
+        Get-FileTransferRouteTransitionCorrelation `
+            -Events $events `
+            -AlreadyChronologicallyOrdered
+    }
     [object[]]$downstreamEvents = @($events | Where-Object {
             $_.EventName -notin @(
                 'filetransfer_route_transition_physical_send_lease_registered',
@@ -15293,11 +15321,29 @@ function Get-FileTransferFileTunaV4DataPathProof {
                 'filetransfer_route_transition_physical_send_lease_rejected')
         })
     $routeTransitionLiveEpochProjectionProof =
-        Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
-            -Events $downstreamEvents
+        if ($snapshotRouteRuntimeAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $CoordinatorSnapshotEvaluation `
+                -Family 'route_runtime' `
+                -TaxonomyClasses @(
+                    'filetransfer_live_route_epoch_projection_missing')
+        }
+        else {
+            Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
+                -Events $downstreamEvents
+        }
     $routeTransitionTransportGraceProof =
-        Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
-            -Events $downstreamEvents
+        if ($snapshotRouteTransitionAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $CoordinatorSnapshotEvaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @(
+                    'filetransfer_route_transition_draining_transport_grace_terminalization')
+        }
+        else {
+            Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
+                -Events $downstreamEvents
+        }
     $dataPathIndex =
         New-FileTransferFileTunaV4DataPathCorrelationIndex `
             -Events $downstreamEvents
@@ -63703,6 +63749,17 @@ function Get-FileTransferRecoveryFailureClassification {
     }
 
     [object[]]$allEvents = @($events)
+    $coordinatorSnapshotEvaluation =
+        Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+            $allEvents | ForEach-Object { [string]$_.RawLine })
+    $snapshotRouteRuntimeAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'route_runtime'
+    $snapshotRouteTransitionAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'route_transition'
     [object[]]$submissionBarrierRetirementEvents = @($allEvents | Where-Object {
         $_.EventName -in @(
             'filetransfer_outbound_physical_send_lease_retired',
@@ -64653,7 +64710,17 @@ function Get-FileTransferRecoveryFailureClassification {
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
-    $fileTransferRouteTransitionProof = $fileTunaV4DataPathProof.RouteTransitionProof
+    $fileTransferRouteTransitionProof = if ($snapshotRouteTransitionAuthoritative) {
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'route_transition' `
+            -TaxonomyClasses @(
+                'filetransfer_route_transition_incomplete',
+                'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+    }
+    else {
+        $fileTunaV4DataPathProof.RouteTransitionProof
+    }
     $fileTransferGuiLiveFallbackFaultWindowProof =
         Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
             -Events $allEvents `
@@ -64663,9 +64730,27 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $allEvents `
             -LiveRouteProofMode $LiveRouteProofMode
     $fileTransferRouteTransitionLiveEpochProjectionProof =
-        $fileTunaV4DataPathProof.RouteTransitionLiveEpochProjectionProof
+        if ($snapshotRouteRuntimeAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $coordinatorSnapshotEvaluation `
+                -Family 'route_runtime' `
+                -TaxonomyClasses @(
+                    'filetransfer_live_route_epoch_projection_missing')
+        }
+        else {
+            $fileTunaV4DataPathProof.RouteTransitionLiveEpochProjectionProof
+        }
     $fileTransferRouteTransitionDrainingTransportGraceProof =
-        $fileTunaV4DataPathProof.RouteTransitionTransportGraceProof
+        if ($snapshotRouteTransitionAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $coordinatorSnapshotEvaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @(
+                    'filetransfer_route_transition_draining_transport_grace_terminalization')
+        }
+        else {
+            $fileTunaV4DataPathProof.RouteTransitionTransportGraceProof
+        }
     $runtimeUnlockRegularV4RouteCommitSendDrainProof = $fileTunaV4DataPathProof.RouteCommitSendDrainProof
 
     function Test-RuntimeUnlockRetryDispatchMatch {
@@ -70725,6 +70810,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         [switch]$IncludeRawSlices
     )
 
+    $snapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+        $Summary.TransferEvents | ForEach-Object { [string]$_.RawLine })
+
     $analyzedFiles = if ($Summary.LogFiles.Count -gt 0) { $Summary.LogFiles -join ';' } else { '(none)' }
     $warningKinds = @(@(
         foreach ($warning in @($GateResult.Warnings)) {
@@ -70792,6 +70880,15 @@ function Write-FileTransferDiagnosticsArtifacts {
     $effectiveHardFailures = New-Object System.Collections.Generic.List[string]
     foreach ($failure in @($GateResult.HardFailures)) {
         $effectiveHardFailures.Add([string]$failure) | Out-Null
+    }
+    if ($snapshotEvaluation.Mode -ne 'LegacyV0' -and
+        $snapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
+        $effectiveVerdict = 'FAIL_ARTIFACT_EVIDENCE'
+        $effectiveGateStatus = 'fail'
+        $effectiveNextArtifact = 'filetransfer-coordinator-snapshot-summary.txt'
+        $effectiveHardFailures.Add(
+            ("coordinator snapshot evidence invalid: {0}" -f
+                $snapshotEvaluation.ArtifactEvidenceFailureReason)) | Out-Null
     }
     [object[]]$effectiveEvidenceEvents = @($GateResult.EvidenceEvents)
     $baseVerdictText = if ($null -eq $GateResult.Verdict) { '' } else { [string]$GateResult.Verdict }
@@ -71997,13 +72094,64 @@ function Write-FileTransferDiagnosticsArtifacts {
         'top_evidence:'
     ) + (Get-FileTransferArtifactEvidenceLines -Events $effectiveEvidenceEvents -Limit 30)
 
+    $verdictLines = @(
+        ("coordinator_snapshot_mode={0}" -f $snapshotEvaluation.Mode),
+        ("coordinator_snapshot_contract_version={0}" -f $snapshotEvaluation.ContractVersion),
+        ("coordinator_snapshot_catalog_version={0}" -f $snapshotEvaluation.CatalogVersion),
+        ("coordinator_snapshot_catalog_hash={0}" -f $snapshotEvaluation.CatalogHash),
+        ("coordinator_snapshot_stream_complete={0}" -f ([string]$snapshotEvaluation.StreamComplete).ToLowerInvariant()),
+        ("coordinator_snapshot_artifact_evidence_verdict={0}" -f $snapshotEvaluation.ArtifactEvidenceVerdict),
+        ("coordinator_snapshot_artifact_evidence_failure_reason={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.ArtifactEvidenceFailureReason)) { '(none)' } else { $snapshotEvaluation.ArtifactEvidenceFailureReason }))),
+        ("coordinator_snapshot_transition_count={0}" -f $snapshotEvaluation.TransitionCount),
+        ("coordinator_snapshot_effect_count={0}" -f $snapshotEvaluation.EffectCount),
+        ("coordinator_snapshot_boundary_count={0}" -f $snapshotEvaluation.BoundaryCount),
+        ("coordinator_snapshot_boundary_hash={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.BoundaryHash)) { '(none)' } else { $snapshotEvaluation.BoundaryHash }))),
+        ("coordinator_snapshot_legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount)
+        ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
+    ) + $verdictLines
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
+    $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-coordinator-snapshot-summary.txt' -Lines @(
+        ("mode={0}" -f $snapshotEvaluation.Mode),
+        ("contract_version={0}" -f $snapshotEvaluation.ContractVersion),
+        ("catalog_version={0}" -f $snapshotEvaluation.CatalogVersion),
+        ("catalog_hash={0}" -f $snapshotEvaluation.CatalogHash),
+        ("stream_complete={0}" -f ([string]$snapshotEvaluation.StreamComplete).ToLowerInvariant()),
+        ("artifact_evidence_verdict={0}" -f $snapshotEvaluation.ArtifactEvidenceVerdict),
+        ("artifact_evidence_failure_reason={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.ArtifactEvidenceFailureReason)) { '(none)' } else { $snapshotEvaluation.ArtifactEvidenceFailureReason }))),
+        ("transition_count={0}" -f $snapshotEvaluation.TransitionCount),
+        ("effect_count={0}" -f $snapshotEvaluation.EffectCount),
+        ("boundary_count={0}" -f $snapshotEvaluation.BoundaryCount),
+        ("boundary_hash={0}" -f $snapshotEvaluation.BoundaryHash),
+        ("legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount)
+        ("route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
+    ) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transfer-terminal-summary.txt' -Lines (New-FileTransferTerminalSummaryLines -Summary $Summary -GateResult $GateResult) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-summary.txt' -Lines (New-FileTransferThroughputSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-decomposition-summary.txt' -Lines (New-FileTransferThroughputDecompositionSummaryLines -Summary $Summary -ArtifactDir $ArtifactDir) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'payload-efficiency-summary.txt' -Lines (New-FileTransferPayloadEfficiencySummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'protocol-shape-summary.txt' -Lines (New-FileTransferProtocolShapeSummaryLines -Summary $Summary) | Out-Null
-    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines (New-FileTransferRouteConsistencySummaryLines -Summary $Summary -LiveRouteProofMode $LiveRouteProofMode -RecoveryClassification $recoveryClassification) | Out-Null
+    $routeConsistencyLines = @(
+        New-FileTransferRouteConsistencySummaryLines `
+            -Summary $Summary `
+            -LiveRouteProofMode $LiveRouteProofMode `
+            -RecoveryClassification $recoveryClassification
+    ) + @(
+        ("coordinator_snapshot_mode={0}" -f $snapshotEvaluation.Mode),
+        ("coordinator_snapshot_contract_version={0}" -f $snapshotEvaluation.ContractVersion),
+        ("coordinator_snapshot_catalog_version={0}" -f $snapshotEvaluation.CatalogVersion),
+        ("coordinator_snapshot_catalog_hash={0}" -f $snapshotEvaluation.CatalogHash),
+        ("coordinator_snapshot_stream_complete={0}" -f ([string]$snapshotEvaluation.StreamComplete).ToLowerInvariant()),
+        ("coordinator_snapshot_artifact_evidence_verdict={0}" -f $snapshotEvaluation.ArtifactEvidenceVerdict),
+        ("coordinator_snapshot_artifact_evidence_failure_reason={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.ArtifactEvidenceFailureReason)) { '(none)' } else { $snapshotEvaluation.ArtifactEvidenceFailureReason }))),
+        ("coordinator_snapshot_transition_count={0}" -f $snapshotEvaluation.TransitionCount),
+        ("coordinator_snapshot_effect_count={0}" -f $snapshotEvaluation.EffectCount),
+        ("coordinator_snapshot_boundary_count={0}" -f $snapshotEvaluation.BoundaryCount),
+        ("coordinator_snapshot_boundary_hash={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.BoundaryHash)) { '(none)' } else { $snapshotEvaluation.BoundaryHash }))),
+        ("coordinator_snapshot_legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount),
+        ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
+    )
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines $routeConsistencyLines | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transport-budget-summary.txt' -Lines (New-FileTransferTransportBudgetSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'bridge-config-summary.txt' -Lines (New-FileTransferBridgeConfigSummaryLines -Summary $Summary) | Out-Null

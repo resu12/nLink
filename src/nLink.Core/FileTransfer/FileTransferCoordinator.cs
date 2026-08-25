@@ -1405,6 +1405,12 @@ internal readonly record struct FileTransferFallbackV6ProofBootstrapDecision(
     FileTransferFallbackV6ProofBootstrapReceipt? Receipt = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal readonly record struct FileTransferRouteTransitionPauseOwnership(
@@ -1436,6 +1442,12 @@ internal readonly record struct FileTransferRouteTransitionDecision(
     FileTransferCoordinatorDecision? RouteDecision = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal enum RuntimeUnlockRetryLifecycleAttemptState
@@ -2518,6 +2530,12 @@ internal readonly record struct FileTransferReceiveRecoveryDecision(
         init;
     }
 
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
+
     public FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold?
         FallbackCheckpointFrontierRequestHold
     {
@@ -2559,6 +2577,10 @@ internal readonly record struct FileTransferCoordinatorPersistentState(
     RuntimeUnlockResponderPeerProbeRouteTransitionHandoffSubstate
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoff = default)
 {
+    internal string? CoordinatorInstanceId { get; init; }
+
+    internal long SnapshotStateGeneration { get; init; }
+
     private readonly RuntimeUnlockRetryLifecycleSubstate?
         runtimeUnlockRetryLifecycle;
     private readonly FileTransferFallbackTailYieldSubstate?
@@ -2633,6 +2655,7 @@ internal readonly record struct RegularV4FrontierRepairPressureRecoveryHandoffDe
         get;
         init;
     }
+
 }
 
 internal enum FallbackFrontierRepairSourceKind
@@ -3003,6 +3026,12 @@ internal readonly record struct FileTransferCoordinatorActionDecision(
         get;
         init;
     }
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal enum FileTransferBridgeRecoveryExecutionDecisionStatus
@@ -3047,7 +3076,10 @@ internal sealed record FileTransferCoordinatorDecision(
     FileTransferReceiveRecoveryFallbackCheckpointDeliveryCommand?
         ReceiveRecoveryFallbackCheckpointDeliveryCommand = null,
     FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand?
-        ReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand = null);
+        ReceiveRecoveryFallbackCheckpointFrontierRequestRecheckCommand = null)
+{
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope { get; init; }
+}
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -3145,7 +3177,7 @@ internal sealed class FileTransferLeg
     public bool RuntimeUnlockProbeAllowedAfterTransportEpochAdoption { get; set; }
 }
 
-internal static class FileTransferCoordinator
+internal static partial class FileTransferCoordinator
 {
     private const long ReceiveRecoveryLivenessDeferralMs = 90_000;
     private const long ReceiveRecoveryLivenessMaxDeferralMs = 210_000;
@@ -5723,6 +5755,21 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferFallbackV6ProofBootstrapObservation observation)
     {
+        var decision = IssueFileTransferFallbackV6ProofBootstrapCore(
+            state,
+            observation);
+        return FinalizeFallbackV6ProofBootstrapDecisionSnapshot(
+            state,
+            decision,
+            nameof(IssueFileTransferFallbackV6ProofBootstrap),
+            observation);
+    }
+
+    private static FileTransferFallbackV6ProofBootstrapDecision
+        IssueFileTransferFallbackV6ProofBootstrapCore(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackV6ProofBootstrapObservation observation)
+    {
         var substate = state.PersistentState.FileTransferRouteTransition;
         if (substate.PendingFallbackV6ProofBootstrap is { } pending)
         {
@@ -5849,6 +5896,22 @@ internal static class FileTransferCoordinator
 
     internal static FileTransferFallbackV6ProofBootstrapDecision
         ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackV6ProofBootstrapReceipt receipt)
+    {
+        var decision = ApplyFileTransferFallbackV6ProofBootstrapReceiptCore(
+            state,
+            receipt);
+        return FinalizeFallbackV6ProofBootstrapDecisionSnapshot(
+            state,
+            decision,
+            nameof(ApplyFileTransferFallbackV6ProofBootstrapReceipt),
+            receipt.Command.Observation,
+            receipt);
+    }
+
+    private static FileTransferFallbackV6ProofBootstrapDecision
+        ApplyFileTransferFallbackV6ProofBootstrapReceiptCore(
             FileTransferCoordinatorState state,
             FileTransferFallbackV6ProofBootstrapReceipt receipt)
     {
@@ -6200,6 +6263,20 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionPrepareRequest request)
     {
+        var decision = PrepareFileTransferRouteTransitionCore(state, request);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(PrepareFileTransferRouteTransition),
+            request,
+            decision.Authority,
+            operationRole: request.SourceRuntimeOwner.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision PrepareFileTransferRouteTransitionCore(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionPrepareRequest request)
+    {
         state =
             InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
                 state);
@@ -6370,6 +6447,34 @@ internal static class FileTransferCoordinator
             IReadOnlyList<long> capturedPhysicalSendLeaseIds,
             string capturedPhysicalSendFingerprint)
     {
+        var decision = BeginFileTransferRouteTransitionPhysicalDrainCore(
+            state,
+            authority,
+            pauseBindReceipt,
+            capturedThroughPhysicalSendGeneration,
+            capturedPhysicalSendLeaseIds,
+            capturedPhysicalSendFingerprint);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(BeginFileTransferRouteTransitionPhysicalDrain),
+            pauseBindReceipt.Command,
+            authority,
+            pauseBindReceipt,
+            pauseBindReceipt.Status.ToString(),
+            pauseBindReceipt.Reason,
+            authority.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision
+        BeginFileTransferRouteTransitionPhysicalDrainCore(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionAuthority authority,
+            FileTransferRouteTransitionPauseBindReceipt pauseBindReceipt,
+            long capturedThroughPhysicalSendGeneration,
+            IReadOnlyList<long> capturedPhysicalSendLeaseIds,
+            string capturedPhysicalSendFingerprint)
+    {
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.CurrentOperation is not { } current ||
             current.Authority != authority)
@@ -6495,6 +6600,25 @@ internal static class FileTransferCoordinator
             FileTransferRouteTransitionAuthority predecessorAuthority,
             FileTransferRouteTransitionPrepareRequest successorRequest)
     {
+        var decision = StageFileTransferRouteTransitionSupersessionCore(
+            state,
+            predecessorAuthority,
+            successorRequest);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(StageFileTransferRouteTransitionSupersession),
+            successorRequest,
+            decision.Authority ?? predecessorAuthority,
+            operationRole: successorRequest.SourceRuntimeOwner.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision
+        StageFileTransferRouteTransitionSupersessionCore(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionAuthority predecessorAuthority,
+            FileTransferRouteTransitionPrepareRequest successorRequest)
+    {
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.PendingSupersession is { } pending)
         {
@@ -6597,6 +6721,26 @@ internal static class FileTransferCoordinator
 
     internal static FileTransferRouteTransitionDecision
         CommitFileTransferRouteTransitionSupersession(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionPauseBindReceipt pauseRebindReceipt)
+    {
+        var decision = CommitFileTransferRouteTransitionSupersessionCore(
+            state,
+            pauseRebindReceipt);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(CommitFileTransferRouteTransitionSupersession),
+            pauseRebindReceipt.Command,
+            decision.Authority ?? pauseRebindReceipt.Command.Authority,
+            pauseRebindReceipt,
+            pauseRebindReceipt.Status.ToString(),
+            pauseRebindReceipt.Reason,
+            pauseRebindReceipt.Command.Authority.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision
+        CommitFileTransferRouteTransitionSupersessionCore(
             FileTransferCoordinatorState state,
             FileTransferRouteTransitionPauseBindReceipt pauseRebindReceipt)
     {
@@ -6767,6 +6911,32 @@ internal static class FileTransferCoordinator
     }
 
     internal static FileTransferRouteTransitionDecision CommitFileTransferRouteTransition(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+        RuntimeUnlockRouteCommitProof? finalProof = null,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt = null)
+    {
+        var decision = CommitFileTransferRouteTransitionCore(
+            state,
+            authority,
+            drainReceipt,
+            finalProof,
+            pressureSettlementReceipt);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(CommitFileTransferRouteTransition),
+            drainReceipt.Command,
+            authority,
+            drainReceipt,
+            drainReceipt.Outcome.ToString(),
+            drainReceipt.Reason,
+            authority.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision CommitFileTransferRouteTransitionCore(
         FileTransferCoordinatorState state,
         FileTransferRouteTransitionAuthority authority,
         FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
@@ -7171,6 +7341,26 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferRouteTransitionRetainedFrameApplyReceipt receipt)
     {
+        var decision = ApplyFileTransferRouteTransitionRetainedFrameReceiptCore(
+            state,
+            receipt);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(ApplyFileTransferRouteTransitionRetainedFrameReceipt),
+            receipt.Command,
+            receipt.Command.Authority,
+            receipt,
+            receipt.Status.ToString(),
+            receipt.Reason,
+            receipt.Command.Authority.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision
+        ApplyFileTransferRouteTransitionRetainedFrameReceiptCore(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionRetainedFrameApplyReceipt receipt)
+    {
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (!IsFileTransferRouteTransitionRetainedFrameApplyCommandValid(
                 receipt.Command) ||
@@ -7272,6 +7462,27 @@ internal static class FileTransferCoordinator
             bool terminalInvalidation,
             string reason)
     {
+        var decision = InvalidateFileTransferRouteTransitionCore(
+            state,
+            authority,
+            terminalInvalidation,
+            reason);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(InvalidateFileTransferRouteTransition),
+            new { authority.AuthorityId, terminalInvalidation, reason },
+            authority,
+            operationRole: authority.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision
+        InvalidateFileTransferRouteTransitionCore(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionAuthority authority,
+            bool terminalInvalidation,
+            string reason)
+    {
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         var normalizedReason = NormalizeReason(reason);
         var kind = terminalInvalidation
@@ -7360,6 +7571,26 @@ internal static class FileTransferCoordinator
 
     internal static FileTransferRouteTransitionDecision
         ApplyFileTransferRouteTransitionDispositionReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferRouteTransitionDispositionReceipt receipt)
+    {
+        var decision = ApplyFileTransferRouteTransitionDispositionReceiptCore(
+            state,
+            receipt);
+        return FinalizeRouteTransitionDecisionSnapshot(
+            state,
+            decision,
+            nameof(ApplyFileTransferRouteTransitionDispositionReceipt),
+            receipt.Command,
+            receipt.Command.Authority,
+            receipt,
+            receipt.Status.ToString(),
+            receipt.Reason,
+            receipt.Command.Authority.Direction.ToString());
+    }
+
+    private static FileTransferRouteTransitionDecision
+        ApplyFileTransferRouteTransitionDispositionReceiptCore(
             FileTransferCoordinatorState state,
             FileTransferRouteTransitionDispositionReceipt receipt)
     {
@@ -7458,6 +7689,50 @@ internal static class FileTransferCoordinator
     }
 
     public static FileTransferCoordinatorDecision Apply(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state)
+    {
+        var decision = ApplyCore(coordinatorEvent, state);
+        if (string.IsNullOrWhiteSpace(
+                state.PersistentState.CoordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var rejected = decision.TerminalMutationRejected ||
+                       !string.IsNullOrWhiteSpace(
+                           decision.MutationRejectedReason) ||
+                       !string.IsNullOrWhiteSpace(
+                           decision.RuntimeUnlockCommitRejectedReason);
+        var attemptedOperations = CreateRouteRuntimeAttemptSnapshots(
+            state,
+            decision.State,
+            coordinatorEvent);
+        if (coordinatorEvent.Kind == FileTransferCoordinatorEventKind.Terminalized)
+        {
+            attemptedOperations = attemptedOperations.AddRange(
+                CreateRouteTransitionTerminalizationAttemptSnapshots(state));
+        }
+        var snapshot = CreateTransitionSnapshot(
+            state,
+            decision.State,
+            state.PersistentState.CoordinatorInstanceId,
+            state.PersistentState.SnapshotStateGeneration,
+            coordinatorEvent.Kind.ToString(),
+            rejected ? "Rejected" : "Accepted",
+            decision.MutationRejectedReason ??
+            decision.RuntimeUnlockCommitRejectedReason ??
+            decision.Reason,
+            attemptedOperations,
+            selectionMode: FileTransferCoordinatorSnapshotSelectionMode.Shadow);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static FileTransferCoordinatorDecision ApplyCore(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state)
     {
@@ -7699,7 +7974,7 @@ internal static class FileTransferCoordinator
             return decision;
         }
 
-        var publication = AuthorizeAction(
+        var publication = AuthorizeActionCore(
             decision.State,
             new FileTransferCoordinatorActionRequest(
                 FileTransferCoordinatorActionKind.RoutePublication,
@@ -7723,6 +7998,29 @@ internal static class FileTransferCoordinator
     }
 
     public static FileTransferCoordinatorActionDecision AuthorizeAction(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request)
+    {
+        var decision = AuthorizeActionCore(state, request);
+        if (string.IsNullOrWhiteSpace(
+                state.PersistentState.CoordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var snapshot = CreateTransitionSnapshot(
+            state,
+            decision,
+            request,
+            state.PersistentState.CoordinatorInstanceId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static FileTransferCoordinatorActionDecision AuthorizeActionCore(
         FileTransferCoordinatorState state,
         FileTransferCoordinatorActionRequest request)
     {
@@ -16197,10 +16495,35 @@ internal static class FileTransferCoordinator
             string reason,
             FileTransferReceiveRecoveryOperationAuthority? authority = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, authority)
+        {
+            var decision = new FileTransferReceiveRecoveryDecision(
+                status,
+                reason,
+                authority)
             {
                 State = nextState ?? state,
             };
+            var coordinatorInstanceId =
+                state.PersistentState.CoordinatorInstanceId;
+            if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+            {
+                return decision;
+            }
+
+            var snapshot = CreateTransitionSnapshot(
+                state,
+                decision.State,
+                coordinatorInstanceId,
+                state.PersistentState.SnapshotStateGeneration,
+                nameof(IssueReceiveRecoveryOperation),
+                status.ToString(),
+                reason);
+            return decision with
+            {
+                State = snapshot.State,
+                SnapshotEnvelope = snapshot.Envelope,
+            };
+        }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
         FileTransferReceiveRecoveryOperation? completedPredecessor =
@@ -19961,7 +20284,7 @@ internal static class FileTransferCoordinator
                  reservedRequest,
                  reservedAuthority)))
         {
-            nextState = InvalidateReceiveRecoveryOperation(
+            nextState = InvalidateReceiveRecoveryOperationCore(
                 state,
                 current.Authority,
                 reason).State;
@@ -20034,6 +20357,37 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryOperationAuthority authority,
             string reason)
+    {
+        var decision = InvalidateReceiveRecoveryOperationCore(
+            state,
+            authority,
+            reason);
+        var coordinatorInstanceId = state.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var snapshot = CreateTransitionSnapshot(
+            state,
+            decision.State,
+            coordinatorInstanceId,
+            state.PersistentState.SnapshotStateGeneration,
+            nameof(InvalidateReceiveRecoveryOperation),
+            decision.Status.ToString(),
+            decision.Reason);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static FileTransferReceiveRecoveryDecision
+        InvalidateReceiveRecoveryOperationCore(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryOperationAuthority authority,
+        string reason)
     {
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,

@@ -3074,6 +3074,7 @@ public sealed partial class SessionFileTransferService :
                 context.NegotiatedDataProtocolVersion = acceptedProtocolVersion.Value;
                 context.State = FileTransferTransferState.PreparingMetadata;
                 context.StatusMessage = "Preparing file metadata.";
+                StartCoordinatorSnapshotStreamLocked(context);
             }
         }
 
@@ -7238,13 +7239,28 @@ public sealed partial class SessionFileTransferService :
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
         FileTransferCoordinatorDecision decision,
-        bool forwardRoutePublication = true)
+        bool forwardRoutePublication = true,
+        bool adoptCoordinatorState = true)
     {
         var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         var previousReceiveRecovery =
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
+        var terminalizedWhileDraining =
+            CaptureDrainingRouteTransitionForRejectedTerminalEffect(
+                decision,
+                context.CoordinatorPersistentState);
+        if (adoptCoordinatorState)
+        {
+            decision = decision with
+            {
+                State = AdoptCoordinatorStateLocked(context, decision),
+            };
+        }
+        EnqueueRejectedTerminalWhileDrainingEffect(
+            context,
+            terminalizedWhileDraining);
         var runtimeGraph = CloneCoordinatorRuntimeGraphForContext(decision.State);
         QueueBridgeRecoveryExecutionInvalidationLocked(
             context.CurrentBridgeRecoveryExecutionCommand,
@@ -7277,7 +7293,6 @@ public sealed partial class SessionFileTransferService :
         context.LastFallbackControlPlanePressureGeneration = decision.State.LastFallbackControlPlanePressureGeneration;
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
-        context.CoordinatorPersistentState = decision.State.PersistentState;
         LogFallbackTailYieldAggregateTransitions(
             previousFallbackTail,
             decision.State.PersistentState.FallbackTailYield,
@@ -7298,25 +7313,50 @@ public sealed partial class SessionFileTransferService :
             decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(runtimeGraph.LegHistory);
-
         if (forwardRoutePublication &&
             context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
             previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
         {
             context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
+            EnqueueRoutePublicationAuthorityEffect(context, currentToken);
         }
     }
 
     private static void ApplyCoordinatorDecisionToContextLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorDecision decision,
+        bool forwardRoutePublication)
+        => ApplyCoordinatorDecisionToContextLocked(
+            context,
+            decision,
+            forwardRoutePublication,
+            adoptCoordinatorState: true);
+
+    private static void ApplyCoordinatorDecisionToContextLocked(
         InboundTransferContext context,
         FileTransferCoordinatorDecision decision,
-        bool forwardRoutePublication = true)
+        bool forwardRoutePublication = true,
+        bool adoptCoordinatorState = true)
     {
         var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         var previousReceiveRecovery =
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
+        var terminalizedWhileDraining =
+            CaptureDrainingRouteTransitionForRejectedTerminalEffect(
+                decision,
+                context.CoordinatorPersistentState);
+        if (adoptCoordinatorState)
+        {
+            decision = decision with
+            {
+                State = AdoptCoordinatorStateLocked(context, decision),
+            };
+        }
+        EnqueueRejectedTerminalWhileDrainingEffect(
+            context,
+            terminalizedWhileDraining);
         var runtimeGraph = CloneCoordinatorRuntimeGraphForContext(decision.State);
         QueueBridgeRecoveryExecutionInvalidationLocked(
             context.CurrentBridgeRecoveryExecutionCommand,
@@ -7349,7 +7389,6 @@ public sealed partial class SessionFileTransferService :
         context.LastFallbackControlPlanePressureGeneration = decision.State.LastFallbackControlPlanePressureGeneration;
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
-        context.CoordinatorPersistentState = decision.State.PersistentState;
         LogFallbackTailYieldAggregateTransitions(
             previousFallbackTail,
             decision.State.PersistentState.FallbackTailYield,
@@ -7375,12 +7414,23 @@ public sealed partial class SessionFileTransferService :
             previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
         {
             context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
+            EnqueueRoutePublicationAuthorityEffect(context, currentToken);
         }
 
         ReconcileInboundRegularV4FrontierRepairProjectionLocked(
             context,
             $"coordinator_decision_{NormalizeReason(decision.Reason)}");
     }
+
+    private static void ApplyCoordinatorDecisionToContextLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorDecision decision,
+        bool forwardRoutePublication)
+        => ApplyCoordinatorDecisionToContextLocked(
+            context,
+            decision,
+            forwardRoutePublication,
+            adoptCoordinatorState: true);
 
     private static (
         LiveRouteEpoch? CurrentLiveRouteEpoch,
@@ -7516,6 +7566,10 @@ public sealed partial class SessionFileTransferService :
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
+        decision = decision with
+        {
+            State = AdoptCoordinatorStateLocked(context, decision),
+        };
         QueueBridgeRecoveryExecutionInvalidationLocked(
             context.CurrentBridgeRecoveryExecutionCommand,
             decision.State.CurrentBridgeRecoveryExecutionCommand,
@@ -7532,7 +7586,6 @@ public sealed partial class SessionFileTransferService :
         context.LastFallbackControlPlanePressureGeneration = decision.State.LastFallbackControlPlanePressureGeneration;
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
-        context.CoordinatorPersistentState = decision.State.PersistentState;
         LogFallbackTailYieldAggregateTransitions(
             previousFallbackTail,
             decision.State.PersistentState.FallbackTailYield,
@@ -7570,6 +7623,10 @@ public sealed partial class SessionFileTransferService :
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
+        decision = decision with
+        {
+            State = AdoptCoordinatorStateLocked(context, decision),
+        };
         QueueBridgeRecoveryExecutionInvalidationLocked(
             context.CurrentBridgeRecoveryExecutionCommand,
             decision.State.CurrentBridgeRecoveryExecutionCommand,
@@ -7586,7 +7643,6 @@ public sealed partial class SessionFileTransferService :
         context.LastFallbackControlPlanePressureGeneration = decision.State.LastFallbackControlPlanePressureGeneration;
         context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
         context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
-        context.CoordinatorPersistentState = decision.State.PersistentState;
         LogFallbackTailYieldAggregateTransitions(
             previousFallbackTail,
             decision.State.PersistentState.FallbackTailYield,
@@ -7636,7 +7692,12 @@ public sealed partial class SessionFileTransferService :
                 previousCoordinatorState,
                 out var heldPayloadOperation,
                 out _);
-        context.CoordinatorPersistentState = state.PersistentState;
+        state = AdoptCoordinatorStateLocked(
+            context,
+            state,
+            "ReceiveRecoveryStateAdopted",
+            "Accepted",
+            "coordinator_receive_recovery_transition");
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,
@@ -7726,7 +7787,12 @@ public sealed partial class SessionFileTransferService :
             initialActivationHoldDecision = null)
     {
         var previous = context.CoordinatorPersistentState.FileTransferReceiveRecovery;
-        context.CoordinatorPersistentState = state.PersistentState;
+        state = AdoptCoordinatorStateLocked(
+            context,
+            state,
+            "ReceiveRecoveryStateAdopted",
+            "Accepted",
+            "coordinator_receive_recovery_transition");
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,
@@ -8667,10 +8733,10 @@ public sealed partial class SessionFileTransferService :
 
         var previousState =
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        var adoptedState = AdoptCoordinatorStateLocked(context, decision);
         LogReceiveRecoveryOperationTransitions(
             previousState,
-            decision.State.PersistentState.FileTransferReceiveRecovery,
+            adoptedState.PersistentState.FileTransferReceiveRecovery,
             "coordinator_receive_recovery_transition");
         if (decision.InitialActivationHoldDecision is
             { IsDefault: false } exactHoldDecision)
@@ -8720,10 +8786,10 @@ public sealed partial class SessionFileTransferService :
 
         var previousState =
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        var adoptedState = AdoptCoordinatorStateLocked(context, decision);
         LogReceiveRecoveryOperationTransitions(
             previousState,
-            decision.State.PersistentState.FileTransferReceiveRecovery,
+            adoptedState.PersistentState.FileTransferReceiveRecovery,
             "coordinator_receive_recovery_transition");
         if (decision.InitialActivationHoldDecision is
             { IsDefault: false } exactHoldDecision)
@@ -9132,11 +9198,15 @@ public sealed partial class SessionFileTransferService :
                     reason);
         if (invalidated.Accepted)
         {
-            context.CoordinatorPersistentState =
-                invalidated.State.PersistentState;
+            var state = AdoptCoordinatorStateLocked(
+                context,
+                invalidated.State,
+                "FallbackTailYieldTransportEpochReauthorizationInvalidated",
+                invalidated.Status.ToString(),
+                invalidated.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
-                invalidated.State.PersistentState.FallbackTailYield,
+                state.PersistentState.FallbackTailYield,
                 reason);
         }
     }
@@ -9160,11 +9230,15 @@ public sealed partial class SessionFileTransferService :
                     reason);
         if (invalidated.Accepted)
         {
-            context.CoordinatorPersistentState =
-                invalidated.State.PersistentState;
+            var state = AdoptCoordinatorStateLocked(
+                context,
+                invalidated.State,
+                "FallbackTailYieldTransportEpochReauthorizationInvalidated",
+                invalidated.Status.ToString(),
+                invalidated.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
-                invalidated.State.PersistentState.FallbackTailYield,
+                state.PersistentState.FallbackTailYield,
                 reason);
         }
     }
@@ -11528,7 +11602,8 @@ public sealed partial class SessionFileTransferService :
                 issued.Reason,
                 bridgeRecoveryDecision: null,
                 recoveryLivenessLease: null,
-                bridgeRecoveryExecutionCommand: null);
+                bridgeRecoveryExecutionCommand: null,
+                snapshotEnvelope: issued.SnapshotEnvelope);
         }
 
         return CreateBridgeRecoveryActionDecision(
@@ -11539,7 +11614,8 @@ public sealed partial class SessionFileTransferService :
             authority.BridgeRecoveryDecision,
             authority.RecoveryLivenessLease,
             authority.ExecutionCommand,
-            issued.InitialActivationHoldDecision);
+            issued.InitialActivationHoldDecision,
+            issued.SnapshotEnvelope);
     }
 
     private FileTransferCoordinatorActionDecision AuthorizeBridgeRecoveryWithRegularV4PressureHandoffLocked(
@@ -11703,7 +11779,8 @@ public sealed partial class SessionFileTransferService :
         RecoveryLivenessLease? recoveryLivenessLease,
         FileTransferBridgeRecoveryExecutionCommand? bridgeRecoveryExecutionCommand,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
-            initialActivationHoldDecision = null)
+            initialActivationHoldDecision = null,
+        FileTransferCoordinatorTransitionEnvelope? snapshotEnvelope = null)
     {
         var owner = state.CurrentRuntimeOwner;
         var leg = state.CurrentLeg;
@@ -11725,6 +11802,7 @@ public sealed partial class SessionFileTransferService :
             State = state,
             InitialActivationHoldDecision =
                 initialActivationHoldDecision,
+            SnapshotEnvelope = snapshotEnvelope,
         };
     }
 
@@ -13909,11 +13987,15 @@ public sealed partial class SessionFileTransferService :
             {
                 var previous =
                     context.CoordinatorPersistentState.FallbackTailYield;
-                context.CoordinatorPersistentState =
-                    carryForward.State.PersistentState;
+                var state = AdoptCoordinatorStateLocked(
+                    context,
+                    carryForward.State,
+                    "FallbackTailPairedReleaseCarriedForward",
+                    carryForward.Status.ToString(),
+                    carryForward.Reason);
                 LogFallbackTailYieldAggregateTransitions(
                     previous,
-                    carryForward.State.PersistentState.FallbackTailYield,
+                    state.PersistentState.FallbackTailYield,
                     reason);
             }
         }
@@ -14050,11 +14132,15 @@ public sealed partial class SessionFileTransferService :
             {
                 var previous =
                     context.CoordinatorPersistentState.FallbackTailYield;
-                context.CoordinatorPersistentState =
-                    carryForward.State.PersistentState;
+                var state = AdoptCoordinatorStateLocked(
+                    context,
+                    carryForward.State,
+                    "FallbackTailPairedReleaseCarriedForward",
+                    carryForward.Status.ToString(),
+                    carryForward.Reason);
                 LogFallbackTailYieldAggregateTransitions(
                     previous,
-                    carryForward.State.PersistentState.FallbackTailYield,
+                    state.PersistentState.FallbackTailYield,
                     reason);
             }
         }
@@ -15882,11 +15968,15 @@ public sealed partial class SessionFileTransferService :
             localProof: receipt);
         if (applied.StateChanged)
         {
-            context.CoordinatorPersistentState =
-                applied.State.PersistentState;
+            var adoptedState = AdoptCoordinatorStateLocked(
+                context,
+                applied.State,
+                "FallbackTailLocalProofReceiptApplied",
+                applied.Status.ToString(),
+                applied.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
-                applied.State.PersistentState.FallbackTailYield,
+                adoptedState.PersistentState.FallbackTailYield,
                 reason);
         }
 
@@ -15939,11 +16029,15 @@ public sealed partial class SessionFileTransferService :
             localProof: receipt);
         if (applied.StateChanged)
         {
-            context.CoordinatorPersistentState =
-                applied.State.PersistentState;
+            var adoptedState = AdoptCoordinatorStateLocked(
+                context,
+                applied.State,
+                "FallbackTailLocalProofReceiptApplied",
+                applied.Status.ToString(),
+                applied.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
-                applied.State.PersistentState.FallbackTailYield,
+                adoptedState.PersistentState.FallbackTailYield,
                 reason);
         }
 
@@ -16161,13 +16255,18 @@ public sealed partial class SessionFileTransferService :
         var accepted = ApplyFallbackTailPeerProofReceiptLocked(
             state,
             frame,
-            persistentState => context.CoordinatorPersistentState =
-                persistentState,
+            out var appliedState,
             out var stateChanged,
             out duplicate,
             out reason);
         if (stateChanged)
         {
+            _ = AdoptCoordinatorStateLocked(
+                context,
+                appliedState,
+                "FallbackTailPeerProofReceiptApplied",
+                duplicate ? "Idempotent" : "Accepted",
+                reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 context.CoordinatorPersistentState.FallbackTailYield,
@@ -16189,13 +16288,18 @@ public sealed partial class SessionFileTransferService :
         var accepted = ApplyFallbackTailPeerProofReceiptLocked(
             state,
             frame,
-            persistentState => context.CoordinatorPersistentState =
-                persistentState,
+            out var appliedState,
             out var stateChanged,
             out duplicate,
             out reason);
         if (stateChanged)
         {
+            _ = AdoptCoordinatorStateLocked(
+                context,
+                appliedState,
+                "FallbackTailPeerProofReceiptApplied",
+                duplicate ? "Idempotent" : "Accepted",
+                reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 context.CoordinatorPersistentState.FallbackTailYield,
@@ -16208,11 +16312,12 @@ public sealed partial class SessionFileTransferService :
     private static bool ApplyFallbackTailPeerProofReceiptLocked(
         FileTransferCoordinatorState state,
         FileTransferFallbackTailYieldFrameV6 frame,
-        Action<FileTransferCoordinatorPersistentState> applyState,
+        out FileTransferCoordinatorState appliedState,
         out bool stateChanged,
         out bool duplicate,
         out string reason)
     {
+        appliedState = state;
         stateChanged = false;
         duplicate = false;
         reason = "fallback_tail_peer_proof_invalid";
@@ -16254,7 +16359,7 @@ public sealed partial class SessionFileTransferService :
         stateChanged = applied.StateChanged;
         if (stateChanged)
         {
-            applyState(applied.State.PersistentState);
+            appliedState = applied.State;
         }
 
         if (!applied.Accepted)
@@ -23241,6 +23346,14 @@ public sealed partial class SessionFileTransferService :
 
     private sealed class OutboundTransferContext
     {
+        public string CoordinatorInstanceId { get; } =
+            Guid.NewGuid().ToString("N");
+
+        public CoordinatorSnapshotStreamEmitter CoordinatorSnapshotEmitter
+        {
+            get;
+        } = new();
+
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
 
         private readonly List<CancellationTokenSource> retiredV6SenderPipelineCts = [];
@@ -24051,6 +24164,7 @@ public sealed partial class SessionFileTransferService :
             Descriptor = descriptor ?? throw new ArgumentNullException(nameof(descriptor));
             OpenReadStreamAsync = openReadStreamAsync ?? throw new ArgumentNullException(nameof(openReadStreamAsync));
             ChunkSizeBytes = descriptor.ChunkSizeBytes ?? FileTransferProtocol.MaxChunkRawBytes;
+            InitializeCoordinatorSnapshotState(this);
         }
 
         public void CancelLifetime()
@@ -24116,6 +24230,11 @@ public sealed partial class SessionFileTransferService :
             }
 
             DataSession = null;
+            CoordinatorSnapshotEmitter.Complete(
+                CoordinatorInstanceId,
+                SessionId,
+                TransferId,
+                FileTransferDirection.Outbound);
         }
 
         public IFileTransferDataSession? DetachDataSession()
@@ -24416,6 +24535,14 @@ public sealed partial class SessionFileTransferService :
 
     private sealed class InboundTransferContext
     {
+        public string CoordinatorInstanceId { get; } =
+            Guid.NewGuid().ToString("N");
+
+        public CoordinatorSnapshotStreamEmitter CoordinatorSnapshotEmitter
+        {
+            get;
+        } = new();
+
         public InboundTransferContext(FileTransferOfferV2 offer, FileTransferRouteSelection routeSelection)
         {
             ArgumentNullException.ThrowIfNull(offer);
@@ -24427,6 +24554,8 @@ public sealed partial class SessionFileTransferService :
             RouteSelection = routeSelection;
             RouteRuntime = routeSelection.RuntimeDescriptor;
             NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion;
+            InitializeCoordinatorSnapshotState(this);
+            StartCoordinatorSnapshotStreamLocked(this);
         }
 
         public CancellationTokenSource LifetimeCts { get; } = new();
@@ -25323,6 +25452,11 @@ public sealed partial class SessionFileTransferService :
             WriteStream = null;
             Hash = null;
             DataSession = null;
+            CoordinatorSnapshotEmitter.Complete(
+                CoordinatorInstanceId,
+                SessionId,
+                TransferId,
+                FileTransferDirection.Inbound);
         }
 
         public IFileTransferDataSession? DetachDataSession()

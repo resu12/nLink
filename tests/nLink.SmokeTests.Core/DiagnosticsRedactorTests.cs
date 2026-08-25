@@ -111,6 +111,37 @@ public sealed class DiagnosticsRedactorTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesOnlyProjectedCoordinatorSnapshotEvidence()
+    {
+        const string evidenceToken = "fte1-0123456789abcdef01234567";
+        const string hash =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const string payload =
+            "eyJjb29yZGluYXRvckluc3RhbmNlSWQiOiJmdGUxLTAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2NyJ9";
+        var sample =
+            "event=filetransfer_coordinator_transition_snapshot; " +
+            $"coordinator_instance_id={evidenceToken}; session_id={evidenceToken}; " +
+            $"snapshot_catalog_hash={hash}; snapshot_sha256={hash}; " +
+            $"snapshot_payload={payload}; secret=do-not-keep";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains(
+            $"coordinator_instance_id={evidenceToken}",
+            redacted,
+            StringComparison.Ordinal);
+        Assert.Contains($"snapshot_sha256={hash}", redacted, StringComparison.Ordinal);
+        Assert.Contains($"snapshot_payload={payload}", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-keep", redacted, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+
+        var unrelated = SensitiveDataRedactor.Redact(
+            $"event=unrelated; snapshot_payload={payload}");
+        Assert.Contains("snapshot_payload=[redacted]", unrelated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsRedactor_Redacts_Seeds_PrivateKeys_AndWalletSecrets()
     {
         var sample = string.Join(Environment.NewLine, new[]

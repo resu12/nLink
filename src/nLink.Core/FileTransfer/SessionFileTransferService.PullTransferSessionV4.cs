@@ -6269,8 +6269,12 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                context.CoordinatorPersistentState =
-                    resumeDecision.State.PersistentState;
+                _ = AdoptCoordinatorStateLocked(
+                    context,
+                    resumeDecision.State,
+                    "ReceiveRecoveryFallbackCheckpointResumeReserved",
+                    resumeDecision.Status.ToString(),
+                    resumeDecision.Reason);
                 resumeReservation = acceptedReservation;
             }
 
@@ -7237,7 +7241,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            decision.State,
+            "ReceiveRecoveryFallbackCheckpointDeliveryReceiptApplied",
+            decision.Status.ToString(),
+            decision.Reason);
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_receive_recovery_fallback_checkpoint_delivery_receipt_applied; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(command.Binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={command.Binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(command.Binding.ParentCheckpointRequestId ?? "(none)")}; effective_checkpoint_request_id={FormatProtocolLogValue(command.Binding.EffectiveCheckpointRequestId)}; checkpoint_binding_generation={command.Binding.BindingGeneration}; checkpoint_delivery_generation={command.DeliveryGeneration}; frame_fingerprint={FormatProtocolLogValue(command.Binding.FrameIdentity.Sha256)}; delivery_state={state.ToString().ToLowerInvariant()}; decision_status={decision.Status.ToString().ToLowerInvariant()}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
@@ -8006,7 +8015,12 @@ public sealed partial class SessionFileTransferService
                 decisionReason,
                 Math.Max(0, durableReceivedHighestChunkIndex - frontierChunkIndex + 1)),
             pressureReason);
-        context.CoordinatorPersistentState = bindingDecision.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            bindingDecision.State,
+            "RegularV4FrontierRepairPressureBindingStaged",
+            bindingDecision.Status.ToString(),
+            bindingDecision.Reason);
         if (bindingDecision.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected ||
             bindingDecision.Binding is not { } binding)
         {
@@ -8045,7 +8059,12 @@ public sealed partial class SessionFileTransferService
                 decisionReason,
                 Math.Max(0, durableReceivedHighestChunkIndex - frontierChunkIndex + 1)),
             pressureReason);
-        context.CoordinatorPersistentState = bindingDecision.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            bindingDecision.State,
+            "RegularV4FrontierRepairPressureBindingStaged",
+            bindingDecision.Status.ToString(),
+            bindingDecision.Reason);
         if (bindingDecision.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected ||
             bindingDecision.Binding is not { } binding)
         {
@@ -8883,11 +8902,21 @@ public sealed partial class SessionFileTransferService
                 receipt);
             if (settlement.Direction == FileTransferDirection.Outbound && outboundTransfer is { } currentOutbound)
             {
-                currentOutbound.CoordinatorPersistentState = committed.State.PersistentState;
+                _ = AdoptCoordinatorStateLocked(
+                    currentOutbound,
+                    committed.State,
+                    "RegularV4FrontierRepairPressureSettlementCommitted",
+                    committed.Status.ToString(),
+                    committed.Reason);
             }
             else if (settlement.Direction == FileTransferDirection.Inbound && inboundTransfer is { } currentInbound)
             {
-                currentInbound.CoordinatorPersistentState = committed.State.PersistentState;
+                _ = AdoptCoordinatorStateLocked(
+                    currentInbound,
+                    committed.State,
+                    "RegularV4FrontierRepairPressureSettlementCommitted",
+                    committed.Status.ToString(),
+                    committed.Reason);
             }
 
             if (committed.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected)
@@ -19485,6 +19514,28 @@ public sealed partial class SessionFileTransferService
                 {
                     context.OutboundPhysicalSendRetiredCount++;
                     LogOutboundPhysicalSendLeaseRetired(context, lease);
+                    if (FileTransferCoordinator
+                            .GetFileTransferRouteTransitionSubstate(
+                                CreateCoordinatorStateLocked(context))
+                            .CurrentOperation is
+                        {
+                            State: FileTransferRouteTransitionState.Draining,
+                            Authority: { } transitionAuthority,
+                            PauseBindReceipt: { } pauseReceipt,
+                            DrainCommand: { } drainCommand,
+                        } &&
+                        drainCommand.CapturedPhysicalSendLeaseIds.Contains(
+                            lease.LeaseGeneration))
+                    {
+                        EnqueueRouteTransitionAuthorityEffect(
+                            context,
+                            transitionAuthority,
+                            "physical_send_lease_retired",
+                            $"lease:{lease.LeaseGeneration}",
+                            pauseReceipt.Status.ToString(),
+                            pauseReceipt,
+                            $"{transitionAuthority.AuthorityId}:pause_bind");
+                    }
                     RecheckOutboundFileTransferRouteTransitionAfterPhysicalSendLocked(
                         context,
                         lease);
@@ -19813,7 +19864,12 @@ public sealed partial class SessionFileTransferService
         var decision = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             receipt);
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            decision.State,
+            "RegularV4FrontierRepairPressureBindingCommitted",
+            decision.Status.ToString(),
+            decision.Reason);
         return CommitRegularV4FrontierRepairPressureBindingDecision(
             contract,
             decision,
@@ -19829,7 +19885,12 @@ public sealed partial class SessionFileTransferService
         var decision = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             receipt);
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            decision.State,
+            "RegularV4FrontierRepairPressureBindingCommitted",
+            decision.Status.ToString(),
+            decision.Reason);
         return CommitRegularV4FrontierRepairPressureBindingDecision(
             contract,
             decision,
@@ -21808,8 +21869,12 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            context.CoordinatorPersistentState =
-                decision.State.PersistentState;
+            _ = AdoptCoordinatorStateLocked(
+                context,
+                decision.State,
+                "ReceiveRecoveryFallbackCheckpointDeliveryRechecked",
+                decision.Status.ToString(),
+                decision.Reason);
             checkpointReissueRequest = redeliveryCommand.Frame;
         }
         else

@@ -1060,9 +1060,30 @@ function Test-TunaGuiRetainedAnalysisCompletedProofArtifacts {
     $routeSummaryPath = Join-Path $AnalysisDir 'filetransfer-route-consistency-summary.txt'
     $operatorVerdictPath = Join-Path $AnalysisDir 'filetransfer-operator-verdict.txt'
     $stabilitySummaryPath = Join-Path $AnalysisDir 'stability-gates-summary.txt'
+    $snapshotFullPath = Join-Path $AnalysisDir 'filetransfer-coordinator-snapshot-full-summary.json'
+    $snapshotCompactPath = Join-Path $AnalysisDir 'filetransfer-coordinator-snapshot-compact-summary.json'
+    $snapshotParityPath = Join-Path $AnalysisDir 'filetransfer-coordinator-snapshot-parity-summary.json'
     if (-not (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf)) {
+        -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $snapshotFullPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $snapshotCompactPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $snapshotParityPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $snapshotFull = Get-Content -LiteralPath $snapshotFullPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $snapshotCompact = Get-Content -LiteralPath $snapshotCompactPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $snapshotParity = Get-Content -LiteralPath $snapshotParityPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    if (-not [string]::Equals([string]$snapshotParity.Verdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$snapshotFull.BoundaryHash, [string]$snapshotCompact.BoundaryHash, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$snapshotFull.ArtifactEvidenceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$snapshotCompact.ArtifactEvidenceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 

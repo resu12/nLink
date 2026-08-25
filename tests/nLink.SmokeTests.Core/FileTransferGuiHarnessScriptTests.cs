@@ -11108,6 +11108,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'clean_fallback_leg_proof_verdict=pass',
                     'bridge_liveness_integration_verdict=pass',
                     'control_plane_isolation_verdict=pass')
+                '{"BoundaryHash":"","ArtifactEvidenceVerdict":"pass"}' | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-full-summary.json')
+                '{"BoundaryHash":"","ArtifactEvidenceVerdict":"pass"}' | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-compact-summary.json')
+                '{"Verdict":"pass"}' | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-parity-summary.json')
                 $log = Join-Path $root 'filetransfer-retained-log-slice.log'
                 Set-Content -LiteralPath $log -Value 'event=proof'
                 if (-not (Test-TunaGuiRetainedAnalysisCompletedProofArtifacts -AnalysisDir $root -LogPath $log -LiveRouteProofMode RegularActivationCycle)) {
@@ -11156,11 +11159,18 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'filetransfer-retained-analysis-diagnostics.json',
                     'filetransfer-retained-analysis-stage-diagnostics.json',
                     'filetransfer-retained-compact-summary.json',
+                    'filetransfer-coordinator-snapshot-full-summary.json',
+                    'filetransfer-coordinator-snapshot-compact-summary.json',
+                    'filetransfer-coordinator-snapshot-parity-summary.json',
                     'filetransfer-route-consistency-summary.txt',
                     'filetransfer-operator-verdict.txt',
                     'stability-gates-summary.txt')) {
                     [IO.File]::WriteAllText((Join-Path $root $name), 'proof', [Text.UTF8Encoding]::new($false))
                 }
+                $snapshot = '{"Mode":"SnapshotV1Shadow","ContractVersion":1,"CatalogVersion":"snapshot-authority-v1","CatalogHash":"catalog-hash","BoundaryHash":"boundary-hash","ArtifactEvidenceVerdict":"pass"}'
+                [IO.File]::WriteAllText((Join-Path $root 'filetransfer-coordinator-snapshot-full-summary.json'), $snapshot, [Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $root 'filetransfer-coordinator-snapshot-compact-summary.json'), $snapshot, [Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $root 'filetransfer-coordinator-snapshot-parity-summary.json'), '{"Verdict":"pass"}', [Text.UTF8Encoding]::new($false))
                 $sha = Get-FileTransferEvidenceSha256 -Path $log
                 $lines = Get-FileTransferEvidenceLineCount -Path $log
                 Write-FileTransferRetainedAnalysisAttemptReceipt `

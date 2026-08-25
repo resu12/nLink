@@ -975,6 +975,28 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
 
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+    $fullSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+        $Index.AllEvents | ForEach-Object { [string]$_.RawLine })
+    $compactSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+        $Index.AllEvents |
+            Where-Object {
+                $snapshotCatalog.SnapshotAuthorityV1 -contains $_.EventName -or
+                $snapshotCatalog.GenerationStampedEffects -contains $_.EventName
+            } |
+            ForEach-Object { [string]$_.RawLine })
+    $snapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+        -Full $fullSnapshotEvaluation `
+        -Compact $compactSnapshotEvaluation
+    $snapshotEvaluation = $compactSnapshotEvaluation
+    $snapshotRouteRuntimeAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'route_runtime'
+    $snapshotRouteTransitionAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'route_transition'
 
     function Invoke-FileTransferCompactCorrelator {
         param(
@@ -2754,7 +2776,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     $dataPathCorrelationStopwatch =
         [System.Diagnostics.Stopwatch]::StartNew()
-    $fileTransferRouteTransitionProof =
+    $fileTransferRouteTransitionProof = if ($snapshotRouteTransitionAuthoritative) {
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $snapshotEvaluation `
+            -Family 'route_transition' `
+            -TaxonomyClasses @(
+                'filetransfer_route_transition_incomplete',
+                'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+    }
+    else {
         Invoke-FileTransferCompactCorrelator `
             -Name 'filetransfer_route_transition' `
             -InputCount $fileTunaV4RouteTransitionInputCount `
@@ -2765,6 +2795,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -RetiredLeaseEvents $fileTunaV4RetiredLeaseEvents `
                     -AlreadyChronologicallyOrdered
             }
+    }
     if ($fileTunaV4DataPathDownstreamEvents.Count -eq 0) {
         $fileTunaV4DataPathDownstreamEvents = @(
             $fileTunaV4DataPathEvents | Where-Object {
@@ -2813,21 +2844,39 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -LiveRouteProofMode $LiveRouteProofMode
             }
     $fileTransferRouteTransitionLiveEpochProjectionProof =
-        Invoke-FileTransferCompactCorrelator `
+        if ($snapshotRouteRuntimeAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'route_runtime' `
+                -TaxonomyClasses @(
+                    'filetransfer_live_route_epoch_projection_missing')
+        }
+        else {
+            Invoke-FileTransferCompactCorrelator `
             -Name 'filetransfer_route_transition_live_epoch_projection' `
             -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
             -Action {
                 Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
                     -Events $fileTunaV4DataPathDownstreamEvents
             }
+        }
     $fileTransferRouteTransitionDrainingTransportGraceProof =
-        Invoke-FileTransferCompactCorrelator `
+        if ($snapshotRouteTransitionAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @(
+                    'filetransfer_route_transition_draining_transport_grace_terminalization')
+        }
+        else {
+            Invoke-FileTransferCompactCorrelator `
             -Name 'filetransfer_route_transition_draining_transport_grace' `
             -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
             -Action {
                 Get-FileTransferRouteTransitionDrainingTransportGraceCorrelation `
                     -Events $fileTunaV4DataPathDownstreamEvents
             }
+        }
     $dataPathIndexStopwatch =
         [System.Diagnostics.Stopwatch]::StartNew()
     $fileTunaV4DataPathCorrelationIndex =
@@ -3911,6 +3960,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         }
     }
 
+    if (($snapshotEvaluation.Mode -ne 'LegacyV0' -and
+         $snapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') -or
+        $snapshotParity.Verdict -ne 'pass') {
+        $verdict = 'FAIL_ARTIFACT_EVIDENCE'
+        $gateStatus = 'fail'
+        $acceptanceFailureClass = 'artifact_evidence'
+    }
+
     $recoveryFailureClass = if ($null -ne $firstCompactProofChainFailure) {
         [string]$firstCompactProofChainFailure.Class
     }
@@ -4610,6 +4667,19 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
 
     $routeLines = @(
         'route_consistency_verdict=pass',
+        ("coordinator_snapshot_mode={0}" -f $snapshotEvaluation.Mode),
+        ("coordinator_snapshot_contract_version={0}" -f $snapshotEvaluation.ContractVersion),
+        ("coordinator_snapshot_catalog_version={0}" -f $snapshotEvaluation.CatalogVersion),
+        ("coordinator_snapshot_catalog_hash={0}" -f $snapshotEvaluation.CatalogHash),
+        ("coordinator_snapshot_stream_complete={0}" -f ([string]$snapshotEvaluation.StreamComplete).ToLowerInvariant()),
+        ("coordinator_snapshot_artifact_evidence_verdict={0}" -f $snapshotEvaluation.ArtifactEvidenceVerdict),
+        ("coordinator_snapshot_artifact_evidence_failure_reason={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.ArtifactEvidenceFailureReason)) { '(none)' } else { $snapshotEvaluation.ArtifactEvidenceFailureReason }))),
+        ("coordinator_snapshot_transition_count={0}" -f $snapshotEvaluation.TransitionCount),
+        ("coordinator_snapshot_effect_count={0}" -f $snapshotEvaluation.EffectCount),
+        ("coordinator_snapshot_boundary_count={0}" -f $snapshotEvaluation.BoundaryCount),
+        ("coordinator_snapshot_boundary_hash={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.BoundaryHash)) { '(none)' } else { $snapshotEvaluation.BoundaryHash }))),
+        ("coordinator_snapshot_legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount),
+        ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount),
         ("selected_routes={0}" -f $selectedRouteText),
         ("selected_route_sequence={0}" -f $selectedRouteText),
         ("selected_route_changes={0}" -f $selectedRouteText),
@@ -5938,6 +6008,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
 
     $compactDto = [ordered]@{
         retained_analysis_mode = 'compact'
+        coordinator_snapshot_mode = $snapshotEvaluation.Mode
+        coordinator_snapshot_contract_version = $snapshotEvaluation.ContractVersion
+        coordinator_snapshot_catalog_version = $snapshotEvaluation.CatalogVersion
+        coordinator_snapshot_catalog_hash = $snapshotEvaluation.CatalogHash
+        coordinator_snapshot_stream_complete = $snapshotEvaluation.StreamComplete
+        coordinator_snapshot_artifact_evidence_verdict = $snapshotEvaluation.ArtifactEvidenceVerdict
+        coordinator_snapshot_artifact_evidence_failure_reason = $snapshotEvaluation.ArtifactEvidenceFailureReason
+        coordinator_snapshot_transition_count = $snapshotEvaluation.TransitionCount
+        coordinator_snapshot_effect_count = $snapshotEvaluation.EffectCount
+        coordinator_snapshot_boundary_count = $snapshotEvaluation.BoundaryCount
+        coordinator_snapshot_boundary_hash = $snapshotEvaluation.BoundaryHash
+        coordinator_snapshot_legacy_selection_count = $snapshotEvaluation.LegacySelectionCount
+        coordinator_snapshot_route_family_legacy_selection_count = $snapshotEvaluation.RouteFamilyLegacySelectionCount
+        coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
+        coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
+        coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
+        coordinator_snapshot_compact_boundary_hash = $snapshotParity.CompactBoundaryHash
         verdict = $verdict
         gate_status = $gateStatus
         acceptance_failure_class = $acceptanceFailureClass
@@ -6470,6 +6557,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.BoundedLookupVisitCount
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
+    $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+    $fullSnapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+    $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
     return [pscustomobject]@{
         Verdict = $verdict
@@ -9717,7 +9807,9 @@ function Invoke-FileTransferRetainedAnalysis {
 
         $compactRequested = [string]::Equals($env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT, '1', [System.StringComparison]::OrdinalIgnoreCase)
         $compactForLargeSlice = $eventsForArtifacts.Count -gt 25000 -and -not $IncludeRawSlices
-        $largeFullIndexed = $eventsForArtifacts.Count -gt 25000 -and $IncludeRawSlices -and -not $compactRequested
+        # Full mode must evaluate its own input. Large full analyses no longer
+        # synthesize a full result by copying the compact summary.
+        $largeFullIndexed = $false
         # FieldMax/FieldSum are acceleration caches only. Eagerly parsing every
         # field in a large raw slice duplicates the work and memory retained by
         # the canonical event index before full analysis can begin. Large full
@@ -9744,13 +9836,10 @@ function Invoke-FileTransferRetainedAnalysis {
         $stageDiagnostics['compact_requested'] = if ($compactRequested) { 1 } else { 0 }
         $stageDiagnostics['compact_for_large_slice'] = if ($compactForLargeSlice) { 1 } else { 0 }
         $stageDiagnostics['large_full_indexed'] = if ($largeFullIndexed) { 1 } else { 0 }
-        if ($compactRequested -or $compactForLargeSlice -or $largeFullIndexed) {
-            $stageDiagnostics['compact_mode'] = if ($largeFullIndexed) { 0 } else { 1 }
+        if ($compactRequested -or $compactForLargeSlice) {
+            $stageDiagnostics['compact_mode'] = 1
             $stageDiagnostics['compact_selection_reason'] = if ($compactRequested) {
                 'environment_requested'
-            }
-            elseif ($largeFullIndexed) {
-                'large_full_indexed_semantics'
             }
             else {
                 'large_slice_without_raw_slices'
@@ -9766,15 +9855,6 @@ function Invoke-FileTransferRetainedAnalysis {
                 LiveRouteProofMode = $LiveRouteProofMode
             }
             $compactResult = Write-FileTransferCompactRetainedAnalysisArtifacts @compactArtifactArgs
-            if ($largeFullIndexed) {
-                Copy-Item `
-                    -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-retained-compact-summary.json') `
-                    -Destination (Join-Path $resolvedArtifactDir 'filetransfer-retained-full-summary.json') `
-                    -Force
-                Write-FileTransferIndexedRawEvidenceArtifact `
-                    -ArtifactDir $resolvedArtifactDir `
-                    -Index $index
-            }
             $stageDiagnostics['data_path_correlation_index_ms'] =
                 $compactResult.DataPathCorrelationIndexMilliseconds
             $stageDiagnostics['data_path_correlation_total_ms'] =
@@ -9827,6 +9907,51 @@ function Invoke-FileTransferRetainedAnalysis {
         Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
         $artifactStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $fullSnapshotEvaluation =
+            Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $eventsForArtifacts | ForEach-Object { [string]$_.RawLine })
+        $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+        $compactSnapshotEvaluation =
+            Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $eventsForArtifacts |
+                    Where-Object {
+                        $snapshotCatalog.SnapshotAuthorityV1 -contains $_.EventName -or
+                        $snapshotCatalog.GenerationStampedEffects -contains $_.EventName
+                    } |
+                    ForEach-Object { [string]$_.RawLine })
+        $snapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+            -Full $fullSnapshotEvaluation `
+            -Compact $compactSnapshotEvaluation
+        $fullSnapshotEvaluation | ConvertTo-Json -Depth 64 |
+            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+        $compactSnapshotEvaluation | ConvertTo-Json -Depth 64 |
+            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+        $snapshotParity | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
+        [ordered]@{
+            retained_analysis_mode = 'full'
+            verdict = [string]$gate.Verdict
+            gate_status = [string]$gate.GateStatus
+            event_count = [long]$eventsForArtifacts.Count
+            coordinator_snapshot_mode = $fullSnapshotEvaluation.Mode
+            coordinator_snapshot_contract_version = $fullSnapshotEvaluation.ContractVersion
+            coordinator_snapshot_catalog_version = $fullSnapshotEvaluation.CatalogVersion
+            coordinator_snapshot_catalog_hash = $fullSnapshotEvaluation.CatalogHash
+            coordinator_snapshot_stream_complete = $fullSnapshotEvaluation.StreamComplete
+            coordinator_snapshot_artifact_evidence_verdict = $fullSnapshotEvaluation.ArtifactEvidenceVerdict
+            coordinator_snapshot_artifact_evidence_failure_reason = $fullSnapshotEvaluation.ArtifactEvidenceFailureReason
+            coordinator_snapshot_transition_count = $fullSnapshotEvaluation.TransitionCount
+            coordinator_snapshot_effect_count = $fullSnapshotEvaluation.EffectCount
+            coordinator_snapshot_boundary_count = $fullSnapshotEvaluation.BoundaryCount
+            coordinator_snapshot_boundary_hash = $fullSnapshotEvaluation.BoundaryHash
+            coordinator_snapshot_legacy_selection_count = $fullSnapshotEvaluation.LegacySelectionCount
+            coordinator_snapshot_route_family_legacy_selection_count = $fullSnapshotEvaluation.RouteFamilyLegacySelectionCount
+            coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
+            coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
+            coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
+            coordinator_snapshot_compact_boundary_hash = $snapshotParity.CompactBoundaryHash
+        } | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-retained-full-summary.json') -Encoding UTF8
         Write-FileTransferDiagnosticsArtifacts -ArtifactDir $resolvedArtifactDir -Summary $summary -GateResult $gate -LiveRouteProofMode $LiveRouteProofMode -IncludeRawSlices:$IncludeRawSlices
         Write-FileTransferEfficiencySummaryArtifacts -ArtifactDir $resolvedArtifactDir -Index $index -Events $eventsForArtifacts -Summary $summary -GateResult $gate -StageDiagnostics $stageDiagnostics
         $artifactStopwatch.Stop()

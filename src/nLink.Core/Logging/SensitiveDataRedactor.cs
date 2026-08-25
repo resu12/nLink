@@ -36,8 +36,12 @@ public static partial class SensitiveDataRedactor
             return string.Empty;
         }
 
+        var protectedSnapshotEvidenceValues = new List<string>();
+        var redacted = ProtectSnapshotEvidenceValues(
+            text,
+            protectedSnapshotEvidenceValues);
         var protectedEventValues = new List<string>();
-        var redacted = ProtectStructuredEventValues(text, protectedEventValues);
+        redacted = ProtectStructuredEventValues(redacted, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = ChatPlaintextKeyValueRegex().Replace(redacted, "[redacted]");
         var protectedAuthorityIdValues = new List<string>();
@@ -46,6 +50,9 @@ public static partial class SensitiveDataRedactor
         redacted = ProtectStructuredKeys(redacted, protectedStructuredKeys);
         redacted = LongSecretTokenRegex().Replace(redacted, "[redacted]");
         redacted = RestoreStructuredKeys(redacted, protectedStructuredKeys);
+        redacted = RestoreSnapshotEvidenceValues(
+            redacted,
+            protectedSnapshotEvidenceValues);
         redacted = RestoreStructuredAuthorityIdValues(redacted, protectedAuthorityIdValues);
         redacted = RestoreStructuredEventValues(redacted, protectedEventValues);
         return redacted;
@@ -93,6 +100,9 @@ public static partial class SensitiveDataRedactor
 
     [GeneratedRegex(@"\b(?<key>authority_id|predecessor_authority_id|successor_authority_id|requested_predecessor_authority_id|release_authority_id|retained_predecessor_authority_id|current_authority_id|current_successor_authority_id|receive_recovery_operation_authority_id|recovery_liveness_lease_authority_id|retry_authority_id)=(?<value>fta[0-9]+-[A-Za-z0-9._/:-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex AuthorityIdKeyValueRegex();
+
+    [GeneratedRegex(@"\b(?<key>snapshot_catalog_hash|coordinator_instance_id|session_id|transfer_id|transition_id|snapshot_sha256|snapshot_payload|initial_state_hash|final_state_hash|operation_key|operation_authority_id|effect_identity|receipt_identity|receipt_fingerprint|checkpoint_request_id|data_session_identity)=(?<value>fte1-[a-f0-9]{24}|[a-f0-9]{64}|[A-Za-z0-9_-]+)", RegexOptions.CultureInvariant)]
+    private static partial Regex SnapshotEvidenceKeyValueRegex();
 
     [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})(?<separator>\s*[:=])", RegexOptions.CultureInvariant)]
     private static partial Regex StructuredKeyRegex();
@@ -145,6 +155,41 @@ public static partial class SensitiveDataRedactor
             restored = restored.Replace(
                 $"AIVP{i}",
                 protectedAuthorityIdValues[i],
+                StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
+
+    private static string ProtectSnapshotEvidenceValues(
+        string text,
+        List<string> protectedValues)
+    {
+        if (!text.Contains(
+                "event=filetransfer_coordinator_",
+                StringComparison.Ordinal))
+        {
+            return text;
+        }
+
+        return SnapshotEvidenceKeyValueRegex().Replace(text, match =>
+        {
+            var placeholder = $"SEVP{protectedValues.Count}";
+            protectedValues.Add(match.Groups["value"].Value);
+            return $"{match.Groups["key"].Value}={placeholder}";
+        });
+    }
+
+    private static string RestoreSnapshotEvidenceValues(
+        string text,
+        List<string> protectedValues)
+    {
+        var restored = text;
+        for (var i = protectedValues.Count - 1; i >= 0; i--)
+        {
+            restored = restored.Replace(
+                $"SEVP{i}",
+                protectedValues[i],
                 StringComparison.Ordinal);
         }
 

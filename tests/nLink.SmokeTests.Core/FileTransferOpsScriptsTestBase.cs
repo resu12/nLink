@@ -79,6 +79,7 @@ public abstract class FileTransferOpsScriptsTestBase
     protected static readonly string[] ImplementationFiles =
     [
         "tools/FileTransferOps/AnalyzerOrchestration.ps1",
+        "tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1",
         "tools/FileTransferSoak/LogParsing.ps1",
         "tools/FileTransferSoak/SoakSummaryExtraction.ps1",
         "tools/FileTransferSoak/StabilizationGates.ps1",
@@ -114,6 +115,11 @@ public abstract class FileTransferOpsScriptsTestBase
         "filetransfer-invariant-summary.json",
         "filetransfer-efficiency-summary.txt",
         "filetransfer-efficiency-summary.json",
+        "filetransfer-coordinator-snapshot-summary.txt",
+        "filetransfer-coordinator-snapshot-summary.json",
+        "filetransfer-coordinator-snapshot-full-summary.json",
+        "filetransfer-coordinator-snapshot-compact-summary.json",
+        "filetransfer-coordinator-snapshot-parity-summary.json",
         "v4-promotion-decision.txt",
         "v4-promotion-decision.json"
     ];

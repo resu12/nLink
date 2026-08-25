@@ -1685,6 +1685,23 @@ function New-RouteAcceptanceRunResult {
         writerChronologyVerdict = 'missing'
         currentRuntimeProof = $false
         currentRuntimeProofReasons = @('manifest_missing')
+        coordinatorSnapshotMode = 'LegacyV0'
+        coordinatorSnapshotContractVersion = 0
+        coordinatorSnapshotCatalogVersion = 'legacy-v0'
+        coordinatorSnapshotCatalogHash = ''
+        coordinatorSnapshotStreamComplete = $false
+        coordinatorSnapshotArtifactEvidenceVerdict = 'missing'
+        coordinatorSnapshotArtifactEvidenceFailureReason = ''
+        coordinatorSnapshotTransitionCount = 0L
+        coordinatorSnapshotEffectCount = 0L
+        coordinatorSnapshotBoundaryCount = 0L
+        coordinatorSnapshotBoundaryHash = ''
+        coordinatorSnapshotLegacySelectionCount = 1L
+        coordinatorSnapshotRouteFamilyLegacySelectionCount = 2L
+        coordinatorSnapshotFullCompactParityVerdict = 'missing'
+        coordinatorSnapshotFullCompactParityFailureReason = ''
+        coordinatorSnapshotFullBoundaryHash = ''
+        coordinatorSnapshotCompactBoundaryHash = ''
         finalizedAttemptSelectionVerdict = 'none'
         finalizedAttemptSelectionFailureClass = 'none'
         finalizedAttemptSelectionReason = '(none)'
@@ -3433,6 +3450,23 @@ function Assert-Phase4RouteSummary {
     $Result.cleanFallbackLegProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'clean_fallback_leg_proof_verdict' -DefaultValue $Result.fallbackLegAuthorityProofVerdict
     $Result.bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
     $Result.controlPlaneIsolationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'control_plane_isolation_verdict' -DefaultValue '(missing)'
+    $Result.coordinatorSnapshotMode = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_mode' -DefaultValue 'LegacyV0'
+    $Result.coordinatorSnapshotContractVersion = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_contract_version' -DefaultValue '0')
+    $Result.coordinatorSnapshotCatalogVersion = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_catalog_version' -DefaultValue 'legacy-v0'
+    $Result.coordinatorSnapshotCatalogHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_catalog_hash' -DefaultValue ''
+    $Result.coordinatorSnapshotStreamComplete = ConvertTo-RouteAcceptanceBool -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_stream_complete' -DefaultValue 'false')
+    $Result.coordinatorSnapshotArtifactEvidenceVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_artifact_evidence_verdict' -DefaultValue 'missing'
+    $Result.coordinatorSnapshotArtifactEvidenceFailureReason = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_artifact_evidence_failure_reason' -DefaultValue ''
+    $Result.coordinatorSnapshotTransitionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_transition_count' -DefaultValue '0')
+    $Result.coordinatorSnapshotEffectCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_effect_count' -DefaultValue '0')
+    $Result.coordinatorSnapshotBoundaryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_boundary_count' -DefaultValue '0')
+    $Result.coordinatorSnapshotBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_boundary_hash' -DefaultValue ''
+    $Result.coordinatorSnapshotLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_legacy_selection_count' -DefaultValue '1')
+    $Result.coordinatorSnapshotRouteFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_route_family_legacy_selection_count' -DefaultValue '2')
+    $Result.coordinatorSnapshotFullCompactParityVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_verdict' -DefaultValue 'missing'
+    $Result.coordinatorSnapshotFullCompactParityFailureReason = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_failure_reason' -DefaultValue ''
+    $Result.coordinatorSnapshotFullBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_boundary_hash' -DefaultValue ''
+    $Result.coordinatorSnapshotCompactBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_compact_boundary_hash' -DefaultValue ''
     $Result.fallbackTailBridgeRecoveryGenerationPairingVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_pairing_verdict' -DefaultValue 'none'
     $Result.fallbackTailBridgeRecoveryGenerationMismatchRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_raw_count' -DefaultValue '0')
     $Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_distinct_count' -DefaultValue '0')
@@ -6610,9 +6644,30 @@ function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
     $routeSummaryPath = Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt'
     $operatorVerdictPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
     $stabilitySummaryPath = Join-Path $ArtifactDir 'stability-gates-summary.txt'
+    $snapshotFullPath = Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json'
+    $snapshotCompactPath = Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json'
+    $snapshotParityPath = Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json'
     if (-not (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf)) {
+        -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $snapshotFullPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $snapshotCompactPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $snapshotParityPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $snapshotFull = Get-Content -LiteralPath $snapshotFullPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $snapshotCompact = Get-Content -LiteralPath $snapshotCompactPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $snapshotParity = Get-Content -LiteralPath $snapshotParityPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    if (-not [string]::Equals([string]$snapshotParity.Verdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$snapshotFull.BoundaryHash, [string]$snapshotCompact.BoundaryHash, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$snapshotFull.ArtifactEvidenceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$snapshotCompact.ArtifactEvidenceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 
@@ -10588,6 +10643,23 @@ function New-RouteAcceptanceSummaryRunDto {
         writerChronologyVerdict = [string]$Result.writerChronologyVerdict
         currentRuntimeProof = [bool]$Result.currentRuntimeProof
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.currentRuntimeProofReasons -Limit 32)
+        coordinatorSnapshotMode = [string]$Result.coordinatorSnapshotMode
+        coordinatorSnapshotContractVersion = [int]$Result.coordinatorSnapshotContractVersion
+        coordinatorSnapshotCatalogVersion = [string]$Result.coordinatorSnapshotCatalogVersion
+        coordinatorSnapshotCatalogHash = [string]$Result.coordinatorSnapshotCatalogHash
+        coordinatorSnapshotStreamComplete = [bool]$Result.coordinatorSnapshotStreamComplete
+        coordinatorSnapshotArtifactEvidenceVerdict = [string]$Result.coordinatorSnapshotArtifactEvidenceVerdict
+        coordinatorSnapshotArtifactEvidenceFailureReason = [string]$Result.coordinatorSnapshotArtifactEvidenceFailureReason
+        coordinatorSnapshotTransitionCount = [long]$Result.coordinatorSnapshotTransitionCount
+        coordinatorSnapshotEffectCount = [long]$Result.coordinatorSnapshotEffectCount
+        coordinatorSnapshotBoundaryCount = [long]$Result.coordinatorSnapshotBoundaryCount
+        coordinatorSnapshotBoundaryHash = [string]$Result.coordinatorSnapshotBoundaryHash
+        coordinatorSnapshotLegacySelectionCount = [long]$Result.coordinatorSnapshotLegacySelectionCount
+        coordinatorSnapshotRouteFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotRouteFamilyLegacySelectionCount
+        coordinatorSnapshotFullCompactParityVerdict = [string]$Result.coordinatorSnapshotFullCompactParityVerdict
+        coordinatorSnapshotFullCompactParityFailureReason = [string]$Result.coordinatorSnapshotFullCompactParityFailureReason
+        coordinatorSnapshotFullBoundaryHash = [string]$Result.coordinatorSnapshotFullBoundaryHash
+        coordinatorSnapshotCompactBoundaryHash = [string]$Result.coordinatorSnapshotCompactBoundaryHash
         finalizedAttemptSelectionVerdict = [string]$Result.finalizedAttemptSelectionVerdict
         finalizedAttemptSelectionFailureClass = [string]$Result.finalizedAttemptSelectionFailureClass
         finalizedAttemptSelectionReason = [string]$Result.finalizedAttemptSelectionReason
@@ -12556,6 +12628,23 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.writer_chronology_verdict={1}" -f $prefix, $result.writerChronologyVerdict)
         $textLines += ("{0}.current_runtime_proof={1}" -f $prefix, ($(if ($result.currentRuntimeProof) { 1 } else { 0 })))
         $textLines += ("{0}.current_runtime_proof_reasons={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.currentRuntimeProofReasons))
+        $textLines += ("{0}.coordinator_snapshot_mode={1}" -f $prefix, $result.coordinatorSnapshotMode)
+        $textLines += ("{0}.coordinator_snapshot_contract_version={1}" -f $prefix, $result.coordinatorSnapshotContractVersion)
+        $textLines += ("{0}.coordinator_snapshot_catalog_version={1}" -f $prefix, $result.coordinatorSnapshotCatalogVersion)
+        $textLines += ("{0}.coordinator_snapshot_catalog_hash={1}" -f $prefix, $result.coordinatorSnapshotCatalogHash)
+        $textLines += ("{0}.coordinator_snapshot_stream_complete={1}" -f $prefix, ($(if ($result.coordinatorSnapshotStreamComplete) { 1 } else { 0 })))
+        $textLines += ("{0}.coordinator_snapshot_artifact_evidence_verdict={1}" -f $prefix, $result.coordinatorSnapshotArtifactEvidenceVerdict)
+        $textLines += ("{0}.coordinator_snapshot_artifact_evidence_failure_reason={1}" -f $prefix, $result.coordinatorSnapshotArtifactEvidenceFailureReason)
+        $textLines += ("{0}.coordinator_snapshot_transition_count={1}" -f $prefix, $result.coordinatorSnapshotTransitionCount)
+        $textLines += ("{0}.coordinator_snapshot_effect_count={1}" -f $prefix, $result.coordinatorSnapshotEffectCount)
+        $textLines += ("{0}.coordinator_snapshot_boundary_count={1}" -f $prefix, $result.coordinatorSnapshotBoundaryCount)
+        $textLines += ("{0}.coordinator_snapshot_boundary_hash={1}" -f $prefix, $result.coordinatorSnapshotBoundaryHash)
+        $textLines += ("{0}.coordinator_snapshot_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotLegacySelectionCount)
+        $textLines += ("{0}.coordinator_snapshot_route_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotRouteFamilyLegacySelectionCount)
+        $textLines += ("{0}.coordinator_snapshot_full_compact_parity_verdict={1}" -f $prefix, $result.coordinatorSnapshotFullCompactParityVerdict)
+        $textLines += ("{0}.coordinator_snapshot_full_compact_parity_failure_reason={1}" -f $prefix, $result.coordinatorSnapshotFullCompactParityFailureReason)
+        $textLines += ("{0}.coordinator_snapshot_full_boundary_hash={1}" -f $prefix, $result.coordinatorSnapshotFullBoundaryHash)
+        $textLines += ("{0}.coordinator_snapshot_compact_boundary_hash={1}" -f $prefix, $result.coordinatorSnapshotCompactBoundaryHash)
         $textLines += ("{0}.finalized_attempt_selection_verdict={1}" -f $prefix, $result.finalizedAttemptSelectionVerdict)
         $textLines += ("{0}.finalized_attempt_selection_failure_class={1}" -f $prefix, $result.finalizedAttemptSelectionFailureClass)
         $textLines += ("{0}.finalized_attempt_selection_reason={1}" -f $prefix, $result.finalizedAttemptSelectionReason)

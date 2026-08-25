@@ -185,6 +185,12 @@ function Write-FileTransferTunaDirectEvidenceManifestProjection {
         'retainedAnalysisStatus',
         'retainedAnalysisExitCodeAvailable',
         'retainedAnalysisExitCode',
+        'coordinatorSnapshotMode',
+        'coordinatorSnapshotContractVersion',
+        'coordinatorSnapshotCatalogVersion',
+        'coordinatorSnapshotCatalogHash',
+        'coordinatorSnapshotBoundaryHash',
+        'coordinatorSnapshotParityVerdict',
         'generatedAtUtc')
     $projection = [ordered]@{}
     foreach ($name in $propertyNames) {
@@ -261,6 +267,24 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
             sha256 = Get-FileTransferEvidenceSha256 -Path $path
         }
     }
+    $snapshotMode = ''
+    $snapshotContractVersion = 0
+    $snapshotCatalogVersion = ''
+    $snapshotCatalogHash = ''
+    $snapshotBoundaryHash = ''
+    $snapshotParityVerdict = 'missing'
+    try {
+        $snapshotFull = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $snapshotParity = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $snapshotMode = [string]$snapshotFull.Mode
+        $snapshotContractVersion = [int]$snapshotFull.ContractVersion
+        $snapshotCatalogVersion = [string]$snapshotFull.CatalogVersion
+        $snapshotCatalogHash = [string]$snapshotFull.CatalogHash
+        $snapshotBoundaryHash = [string]$snapshotFull.BoundaryHash
+        $snapshotParityVerdict = [string]$snapshotParity.Verdict
+    }
+    catch {
+    }
     $receipt = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_retained_analysis_attempt_receipt'
@@ -284,11 +308,20 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         exitCode = $ExitCode
         completedProofArtifacts = $CompletedProofArtifacts
         status = $status
+        coordinatorSnapshotMode = $snapshotMode
+        coordinatorSnapshotContractVersion = $snapshotContractVersion
+        coordinatorSnapshotCatalogVersion = $snapshotCatalogVersion
+        coordinatorSnapshotCatalogHash = $snapshotCatalogHash
+        coordinatorSnapshotBoundaryHash = $snapshotBoundaryHash
+        coordinatorSnapshotParityVerdict = $snapshotParityVerdict
         stdout = & $artifact 'filetransfer-retained-analysis.stdout.txt'
         stderr = & $artifact 'filetransfer-retained-analysis.stderr.txt'
         diagnostics = & $artifact 'filetransfer-retained-analysis-diagnostics.json'
         stageDiagnostics = & $artifact 'filetransfer-retained-analysis-stage-diagnostics.json'
         compactSummary = & $artifact 'filetransfer-retained-compact-summary.json'
+        coordinatorSnapshotFullSummary = & $artifact 'filetransfer-coordinator-snapshot-full-summary.json'
+        coordinatorSnapshotCompactSummary = & $artifact 'filetransfer-coordinator-snapshot-compact-summary.json'
+        coordinatorSnapshotParitySummary = & $artifact 'filetransfer-coordinator-snapshot-parity-summary.json'
         routeSummary = & $artifact 'filetransfer-route-consistency-summary.txt'
         operatorVerdict = & $artifact 'filetransfer-operator-verdict.txt'
         stabilitySummary = & $artifact 'stability-gates-summary.txt'
@@ -329,6 +362,9 @@ function Test-FileTransferRetainedAnalysisAttemptReceipt {
             [pscustomobject]@{ Receipt = $Receipt.diagnostics; Name = 'filetransfer-retained-analysis-diagnostics.json'; Required = $true }
             [pscustomobject]@{ Receipt = $Receipt.stageDiagnostics; Name = 'filetransfer-retained-analysis-stage-diagnostics.json'; Required = $true }
             [pscustomobject]@{ Receipt = $Receipt.compactSummary; Name = 'filetransfer-retained-compact-summary.json'; Required = ($CompactRequired -or [bool]$Receipt.compactRequested) }
+            [pscustomobject]@{ Receipt = $Receipt.coordinatorSnapshotFullSummary; Name = 'filetransfer-coordinator-snapshot-full-summary.json'; Required = $true }
+            [pscustomobject]@{ Receipt = $Receipt.coordinatorSnapshotCompactSummary; Name = 'filetransfer-coordinator-snapshot-compact-summary.json'; Required = $true }
+            [pscustomobject]@{ Receipt = $Receipt.coordinatorSnapshotParitySummary; Name = 'filetransfer-coordinator-snapshot-parity-summary.json'; Required = $true }
             [pscustomobject]@{ Receipt = $Receipt.routeSummary; Name = 'filetransfer-route-consistency-summary.txt'; Required = $true }
             [pscustomobject]@{ Receipt = $Receipt.operatorVerdict; Name = 'filetransfer-operator-verdict.txt'; Required = $true }
             [pscustomobject]@{ Receipt = $Receipt.stabilitySummary; Name = 'stability-gates-summary.txt'; Required = $true }
@@ -348,6 +384,22 @@ function Test-FileTransferRetainedAnalysisAttemptReceipt {
             }
         }
 
+        $snapshotBindingValid = $false
+        try {
+            $snapshotFull = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $snapshotParity = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $snapshotBindingValid =
+                [string]::Equals([string]$Receipt.coordinatorSnapshotMode, [string]$snapshotFull.Mode, [System.StringComparison]::Ordinal) -and
+                [int]$Receipt.coordinatorSnapshotContractVersion -eq [int]$snapshotFull.ContractVersion -and
+                [string]::Equals([string]$Receipt.coordinatorSnapshotCatalogVersion, [string]$snapshotFull.CatalogVersion, [System.StringComparison]::Ordinal) -and
+                [string]::Equals([string]$Receipt.coordinatorSnapshotCatalogHash, [string]$snapshotFull.CatalogHash, [System.StringComparison]::Ordinal) -and
+                [string]::Equals([string]$Receipt.coordinatorSnapshotBoundaryHash, [string]$snapshotFull.BoundaryHash, [System.StringComparison]::Ordinal) -and
+                [string]::Equals([string]$Receipt.coordinatorSnapshotParityVerdict, [string]$snapshotParity.Verdict, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+        catch {
+            $snapshotBindingValid = $false
+        }
+
         return [int]$Receipt.schemaVersion -eq 1 -and
             [string]::Equals([string]$Receipt.event, 'filetransfer_retained_analysis_attempt_receipt', [System.StringComparison]::Ordinal) -and
             [string]::Equals([string]$Receipt.owner, $ExpectedOwner, [System.StringComparison]::Ordinal) -and
@@ -361,6 +413,7 @@ function Test-FileTransferRetainedAnalysisAttemptReceipt {
             (-not $CompactRequired -or [bool]$Receipt.compactRequested) -and
             $timestampsValid -and
             $artifactBindingsValid -and
+            $snapshotBindingValid -and
             -not [bool]$Receipt.timedOut -and
             [bool]$Receipt.exitCodeAvailable -and
             [int]$Receipt.exitCode -eq 0 -and
@@ -477,6 +530,12 @@ function Update-FileTransferTunaDirectEvidenceManifestFromReceipt {
         retainedAnalysisStatus = [string]$receipt.status
         retainedAnalysisExitCodeAvailable = [bool]$receipt.exitCodeAvailable
         retainedAnalysisExitCode = [int]$receipt.exitCode
+        coordinatorSnapshotMode = [string]$receipt.coordinatorSnapshotMode
+        coordinatorSnapshotContractVersion = [int]$receipt.coordinatorSnapshotContractVersion
+        coordinatorSnapshotCatalogVersion = [string]$receipt.coordinatorSnapshotCatalogVersion
+        coordinatorSnapshotCatalogHash = [string]$receipt.coordinatorSnapshotCatalogHash
+        coordinatorSnapshotBoundaryHash = [string]$receipt.coordinatorSnapshotBoundaryHash
+        coordinatorSnapshotParityVerdict = [string]$receipt.coordinatorSnapshotParityVerdict
         analyzerInputSha256 = $inputSha
         captureSha256 = $captureSha
         ledgerSha256 = Get-FileTransferEvidenceSha256 -Path $ledgerPath

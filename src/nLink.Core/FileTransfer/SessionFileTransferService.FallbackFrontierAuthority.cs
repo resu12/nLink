@@ -1465,7 +1465,15 @@ public sealed partial class SessionFileTransferService
             .ObserveReceiveRecoveryFallbackCheckpointFrontierRequest(
                 state,
                 observation);
-        context.CoordinatorPersistentState = decision.State.PersistentState;
+        decision = decision with
+        {
+            State = AdoptCoordinatorStateLocked(
+                context,
+                decision.State,
+                "ReceiveRecoveryFallbackCheckpointFrontierRequestObserved",
+                decision.Status.ToString(),
+                decision.Reason),
+        };
         var hold = decision.FallbackCheckpointFrontierRequestHold;
         var scope = binding.OriginalObservation;
         LocalOperationalLog.Info(
@@ -1530,8 +1538,12 @@ public sealed partial class SessionFileTransferService
             .ApplyReceiveRecoveryFallbackCheckpointFrontierRequestRecheckReceipt(
                 CreateCoordinatorStateLocked(context),
                 receipt);
-        context.CoordinatorPersistentState =
-            receiptDecision.State.PersistentState;
+        _ = AdoptCoordinatorStateLocked(
+            context,
+            receiptDecision.State,
+            "ReceiveRecoveryFallbackCheckpointFrontierRequestReceiptApplied",
+            receiptDecision.Status.ToString(),
+            receiptDecision.Reason);
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_receive_recovery_fallback_checkpoint_frontier_request_recheck_applied; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; recovery_operation_authority_id={FormatProtocolLogValue(binding.ParentAuthority.AuthorityId.ToString())}; recovery_operation_generation={binding.ParentAuthority.OperationGeneration}; root_checkpoint_request_id={FormatProtocolLogValue(binding.ParentCheckpointRequestId ?? "(none)")}; root_checkpoint_generation={binding.ParentCheckpointGeneration}; effective_checkpoint_request_id={FormatProtocolLogValue(binding.EffectiveCheckpointRequestId)}; effective_checkpoint_generation={binding.EffectiveCheckpointGeneration}; checkpoint_binding_generation={binding.BindingGeneration}; checkpoint_binding_state={binding.State.ToString().ToLowerInvariant()}; checkpoint_frame_fingerprint={FormatProtocolLogValue(binding.FrameIdentity.Sha256)}; repair_request_id={FormatProtocolLogValue(observation.Frame.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(observation.Frame.RequestCorrelationId ?? "(none)")}; range_fingerprint={FormatProtocolLogValue(observation.RangeFingerprint)}; frontier_frame_type={FormatProtocolLogValue(observation.FrameIdentity.FrameType)}; frontier_frame_transport_epoch={observation.FrameIdentity.TransportEpoch}; frontier_frame_fingerprint={FormatProtocolLogValue(observation.FrameIdentity.Sha256)}; hold_generation={hold.HoldGeneration}; recheck_generation={command.RecheckGeneration}; dispatch_path={FormatProtocolLogValue(observation.DispatchPath.ToString())}; received_transport={FormatFileTransferTransportKind(observation.ReceivedTransportKind)}; receiving_data_session_identity={FormatProtocolLogValue(observation.ReceivingDataSessionIdentity)}; receiving_data_session_generation={observation.ReceivingDataSessionGeneration}; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; route_publication_generation={scope.RoutePublication.PublicationGeneration}; route_commit_generation={scope.RoutePublication.RouteCommitGeneration ?? 0}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity)}; data_session_generation={scope.DataSessionGeneration}; receipt_status={receiptStatus.ToString().ToLowerInvariant()}; decision_status={receiptDecision.Status.ToString().ToLowerInvariant()}; outcome={(receiptDecision.Accepted ? receiptStatus.ToString().ToLowerInvariant() : "rejected")}; decision_reason={FormatProtocolLogValue(receiptDecision.Reason)}");

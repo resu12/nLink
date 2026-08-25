@@ -157,6 +157,7 @@ public sealed partial class SessionFileTransferService
             var decision = FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
                 CreateCoordinatorStateLocked(context),
                 observation);
+            _ = AdoptCoordinatorStateLocked(context, decision);
             if (decision.Status is not (
                     FileTransferFallbackV6ProofBootstrapDecisionStatus.Issued or
                     FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent) ||
@@ -171,7 +172,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            context.CoordinatorPersistentState = decision.State.PersistentState;
             command = issued;
             TryAdmitOutboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
                 context,
@@ -227,6 +227,7 @@ public sealed partial class SessionFileTransferService
         var inboundDecision = FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
             CreateCoordinatorStateLocked(inbound),
             inboundObservation);
+        _ = AdoptCoordinatorStateLocked(inbound, inboundDecision);
         if (inboundDecision.Status is not (
                 FileTransferFallbackV6ProofBootstrapDecisionStatus.Issued or
                 FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent) ||
@@ -241,7 +242,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        inbound.CoordinatorPersistentState = inboundDecision.State.PersistentState;
         command = inboundCommand;
         TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
             inbound,
@@ -292,6 +292,7 @@ public sealed partial class SessionFileTransferService
             var decision = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
                 CreateCoordinatorStateLocked(outbound),
                 receipt);
+            _ = AdoptCoordinatorStateLocked(outbound, decision);
             if (decision.Status is not (
                     FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied or
                     FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent))
@@ -299,7 +300,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            outbound.CoordinatorPersistentState = decision.State.PersistentState;
             if (receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered &&
                 TryBindOutboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
                     outbound,
@@ -321,6 +321,7 @@ public sealed partial class SessionFileTransferService
             var decision = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
                 CreateCoordinatorStateLocked(inbound),
                 receipt);
+            _ = AdoptCoordinatorStateLocked(inbound, decision);
             if (decision.Status is not (
                     FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied or
                     FileTransferFallbackV6ProofBootstrapDecisionStatus.Idempotent))
@@ -328,7 +329,6 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            inbound.CoordinatorPersistentState = decision.State.PersistentState;
             if (receipt.Status == FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered &&
                 TryBindInboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
                     inbound,
