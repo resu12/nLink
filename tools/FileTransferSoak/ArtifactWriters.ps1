@@ -63768,6 +63768,10 @@ function Get-FileTransferRecoveryFailureClassification {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'receive_recovery'
+    $snapshotFallbackTailYieldAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'fallback_tail_yield'
     $snapshotRuntimeUnlockRetryProof =
         Get-FileTransferCoordinatorSnapshotCorrelationResult `
             -Evaluation $coordinatorSnapshotEvaluation `
@@ -63787,6 +63791,13 @@ function Get-FileTransferRecoveryFailureClassification {
                 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
                 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing')
+    $snapshotFallbackTailYieldProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'fallback_tail_yield' `
+            -TaxonomyClasses @(
+                'fallback_tail_yield_authority_invalid',
+                'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
     [object[]]$submissionBarrierRetirementEvents = @($allEvents | Where-Object {
         $_.EventName -in @(
             'filetransfer_outbound_physical_send_lease_retired',
@@ -68528,6 +68539,18 @@ function Get-FileTransferRecoveryFailureClassification {
         }
     }
 
+    if ($snapshotFallbackTailYieldAuthoritative) {
+        foreach ($candidate in @(
+                $snapshotFallbackTailYieldProof.UnresolvedCandidateRecords)) {
+            Add-FileTransferProofChainFailureCandidates `
+                -Candidates $proofChainFailureCandidates `
+                -Class ([string]$candidate.Class) `
+                -Events @($candidate.Event) `
+                -DefaultReason ([string]$candidate.Reason) `
+                -UseDefaultReason
+        }
+    }
+
     $snapshotRuntimeUnlockRetryPureClasses = @(
         'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
         'runtime_unlock_retry_dispatch_contract_unsettled',
@@ -68544,6 +68567,9 @@ function Get-FileTransferRecoveryFailureClassification {
         'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
         'runtime_unlock_retry_dispatch_post_fallback_receive_recovery_hold_missing',
         'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing')
+    $snapshotFallbackTailYieldPureClasses = @(
+        'fallback_tail_yield_authority_invalid',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
     [object[]]$firstProofChainFailureCandidates = @(
         $proofChainFailureCandidates.ToArray() |
             Where-Object {
@@ -68553,6 +68579,10 @@ function Get-FileTransferRecoveryFailureClassification {
             } | Where-Object {
                 -not $snapshotReceiveRecoveryAuthoritative -or
                 $_.Class -notin $snapshotReceiveRecoveryPureClasses -or
+                [string]$_.SourcePath -ceq '(coordinator_snapshot)'
+            } | Where-Object {
+                -not $snapshotFallbackTailYieldAuthoritative -or
+                $_.Class -notin $snapshotFallbackTailYieldPureClasses -or
                 [string]$_.SourcePath -ceq '(coordinator_snapshot)'
             })
     $initialResponderTerminalWithoutDrainReceiptUnresolved = @(
@@ -72192,6 +72222,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
         ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount)
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount)
+        ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount)
     ) + $verdictLines
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
     $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
@@ -72211,6 +72242,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
         ("runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount)
         ("receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount)
+        ("fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount)
     ) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transfer-terminal-summary.txt' -Lines (New-FileTransferTerminalSummaryLines -Summary $Summary -GateResult $GateResult) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-summary.txt' -Lines (New-FileTransferThroughputSummaryLines -Summary $Summary) | Out-Null
@@ -72238,6 +72270,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount),
         ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount),
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount)
+        ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount)
     )
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines $routeConsistencyLines | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null

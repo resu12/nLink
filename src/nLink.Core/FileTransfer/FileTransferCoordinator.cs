@@ -900,6 +900,12 @@ internal readonly record struct FileTransferFallbackTailYieldTransitionDecision(
 
     public RuntimeUnlockRetryDispatchAuthorityRequest? RetryRecheckRequest =>
         State.PersistentState.FallbackTailYield.PendingRetryRecheckRequest;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal readonly record struct RepairReplayDecision(
@@ -4219,7 +4225,7 @@ internal static partial class FileTransferCoordinator
                     "fallback_tail_paired_release_reservation_missing");
             }
 
-            var consumption = ConsumeFallbackTailPairedRelease(
+            var consumption = ConsumeFallbackTailPairedReleaseCore(
                 committedState,
                 reservation,
                 receipt,
@@ -11297,6 +11303,17 @@ internal static partial class FileTransferCoordinator
         ApplyFallbackTailLocalProofReceipt(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailLocalProofReceipt receipt)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            ApplyFallbackTailLocalProofReceiptCore(state, receipt),
+            nameof(ApplyFallbackTailLocalProofReceipt),
+            receipt,
+            receipt.Decision.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        ApplyFallbackTailLocalProofReceiptCore(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailLocalProofReceipt receipt)
     {
         var originalSubstate = state.PersistentState.FallbackTailYield;
         state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
@@ -11371,6 +11388,17 @@ internal static partial class FileTransferCoordinator
 
     internal static FileTransferFallbackTailYieldTransitionDecision
         ApplyFallbackTailPeerProofReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailPeerProofReceipt receipt)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            ApplyFallbackTailPeerProofReceiptCore(state, receipt),
+            nameof(ApplyFallbackTailPeerProofReceipt),
+            receipt,
+            receipt.Proof.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        ApplyFallbackTailPeerProofReceiptCore(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailPeerProofReceipt receipt)
     {
@@ -11720,6 +11748,22 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             long targetTransportEpoch,
             string reason)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            CarryForwardFallbackTailPairedReleaseToTransportEpochCore(
+                state,
+                targetTransportEpoch,
+                reason),
+            nameof(CarryForwardFallbackTailPairedReleaseToTransportEpoch),
+            new { targetTransportEpoch, reason },
+            state.PersistentState.FallbackTailYield.CurrentOperation?
+                .Decision.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        CarryForwardFallbackTailPairedReleaseToTransportEpochCore(
+            FileTransferCoordinatorState state,
+            long targetTransportEpoch,
+            string reason)
     {
         var normalizedReason = NormalizeReason(reason);
         var substate = state.PersistentState.FallbackTailYield;
@@ -11833,6 +11877,21 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FallbackTailYieldTransportEpochReauthorization reauthorization,
             string reason)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            InvalidateFallbackTailYieldTransportEpochReauthorizationCore(
+                state,
+                reauthorization,
+                reason),
+            nameof(InvalidateFallbackTailYieldTransportEpochReauthorization),
+            new { reauthorization, reason },
+            reauthorization.PredecessorDecision.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        InvalidateFallbackTailYieldTransportEpochReauthorizationCore(
+            FileTransferCoordinatorState state,
+            FallbackTailYieldTransportEpochReauthorization reauthorization,
+            string reason)
     {
         var normalizedReason = NormalizeReason(reason);
         var substate = state.PersistentState.FallbackTailYield;
@@ -11877,6 +11936,21 @@ internal static partial class FileTransferCoordinator
 
     internal static FileTransferFallbackTailYieldTransitionDecision
         ReserveFallbackTailPairedRelease(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailPairedReleaseReceipt release,
+            RuntimeUnlockRetryDispatchAuthority retryAuthority)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            ReserveFallbackTailPairedReleaseCore(
+                state,
+                release,
+                retryAuthority),
+            nameof(ReserveFallbackTailPairedRelease),
+            new { release, retryAuthority },
+            release.ReleaseAuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        ReserveFallbackTailPairedReleaseCore(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailPairedReleaseReceipt release,
             RuntimeUnlockRetryDispatchAuthority retryAuthority)
@@ -12007,6 +12081,23 @@ internal static partial class FileTransferCoordinator
             FileTransferFallbackTailPairedReleaseReservation reservation,
             RuntimeUnlockRetryDispatchInstallReceipt installReceipt,
             RuntimeUnlockRetryDispatchInstallStatus installStatus)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            ConsumeFallbackTailPairedReleaseCore(
+                state,
+                reservation,
+                installReceipt,
+                installStatus),
+            nameof(ConsumeFallbackTailPairedRelease),
+            new { reservation, installReceipt, installStatus },
+            reservation.Release.ReleaseAuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        ConsumeFallbackTailPairedReleaseCore(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailPairedReleaseReservation reservation,
+            RuntimeUnlockRetryDispatchInstallReceipt installReceipt,
+            RuntimeUnlockRetryDispatchInstallStatus installStatus)
     {
         var originalSubstate = state.PersistentState.FallbackTailYield;
         state = InvalidateFallbackTailYieldForDataSessionReplacement(state);
@@ -12080,6 +12171,34 @@ internal static partial class FileTransferCoordinator
 
     internal static FileTransferFallbackTailYieldTransitionDecision
         SupersedeFallbackTailPairedYieldAfterRejectedProbe(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailRetryCycleSupersessionRole role,
+            FallbackTailYieldDecision expectedDecision,
+            FileTransferFallbackTailPairedReleaseReceipt expectedRelease,
+            RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
+            string reason)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            SupersedeFallbackTailPairedYieldAfterRejectedProbeCore(
+                state,
+                role,
+                expectedDecision,
+                expectedRelease,
+                expectedInstallReceipt,
+                reason),
+            nameof(SupersedeFallbackTailPairedYieldAfterRejectedProbe),
+            new
+            {
+                role,
+                expectedDecision,
+                expectedRelease,
+                expectedInstallReceipt,
+                reason,
+            },
+            expectedDecision.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        SupersedeFallbackTailPairedYieldAfterRejectedProbeCore(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailRetryCycleSupersessionRole role,
             FallbackTailYieldDecision expectedDecision,
@@ -14223,6 +14342,22 @@ internal static partial class FileTransferCoordinator
     }
 
     public static FileTransferCoordinatorDecision RebindFallbackTailYieldTransportEpochReauthorization(
+        FileTransferCoordinatorState state,
+        FallbackTailYieldTransportEpochReauthorization reauthorization,
+        long targetTransportEpoch,
+        string reason)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            RebindFallbackTailYieldTransportEpochReauthorizationCore(
+                state,
+                reauthorization,
+                targetTransportEpoch,
+                reason),
+            nameof(RebindFallbackTailYieldTransportEpochReauthorization),
+            reauthorization,
+            reauthorization.PredecessorDecision.AuthorityId);
+
+    private static FileTransferCoordinatorDecision RebindFallbackTailYieldTransportEpochReauthorizationCore(
         FileTransferCoordinatorState state,
         FallbackTailYieldTransportEpochReauthorization reauthorization,
         long targetTransportEpoch,
@@ -16425,7 +16560,7 @@ internal static partial class FileTransferCoordinator
                     "fallback_paired_tail_yield_pending");
             }
 
-            var reservation = ReserveFallbackTailPairedRelease(
+            var reservation = ReserveFallbackTailPairedReleaseCore(
                 acceptedState,
                 pairedRelease,
                 authority);
@@ -21910,6 +22045,21 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryDispatchAuthorityRequest request,
             FallbackFrontierRepairAuthority blockingRepair)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            BindFallbackTailYieldRetryDispatchHoldCore(
+                state,
+                request,
+                blockingRepair),
+            nameof(BindFallbackTailYieldRetryDispatchHold),
+            new { request, blockingRepair },
+            request.FallbackPairedTailYieldEvidence?.LocalDecision.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        BindFallbackTailYieldRetryDispatchHoldCore(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthorityRequest request,
+            FallbackFrontierRepairAuthority blockingRepair)
     {
         var substate = state.PersistentState.FallbackTailYield;
         if (state.IsTerminal ||
@@ -21993,6 +22143,36 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FallbackFrontierRepairAuthority predecessor,
             FallbackFrontierRepairAuthority successor)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessorCore(
+                state,
+                predecessor,
+                successor),
+            nameof(RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor),
+            new { predecessor, successor },
+            state.PersistentState.FallbackTailYield.CurrentOperation?
+                .Decision.AuthorityId);
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
+        RejectFallbackTailYieldRetryDispatchHoldSuccessor(
+            FileTransferCoordinatorState state,
+            FallbackFrontierRepairAuthority? predecessor,
+            FallbackFrontierRepairAuthority successor,
+            string reason)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            FallbackTailYieldTransitionRejected(state, reason),
+            nameof(RejectFallbackTailYieldRetryDispatchHoldSuccessor),
+            new { predecessor, successor, reason },
+            state.PersistentState.FallbackTailYield.CurrentOperation?
+                .Decision.AuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessorCore(
+            FileTransferCoordinatorState state,
+            FallbackFrontierRepairAuthority predecessor,
+            FallbackFrontierRepairAuthority successor)
     {
         var substate = state.PersistentState.FallbackTailYield;
         if (predecessor.IsDefault ||
@@ -22041,7 +22221,7 @@ internal static partial class FileTransferCoordinator
                 "fallback_tail_retry_dispatch_hold_successor_scope_replaced");
         }
 
-        return BindFallbackTailYieldRetryDispatchHold(
+        return BindFallbackTailYieldRetryDispatchHoldCore(
             state,
             hold.Request,
             successor);
@@ -22049,6 +22229,19 @@ internal static partial class FileTransferCoordinator
 
     internal static FileTransferFallbackTailYieldTransitionDecision
         IssueFallbackTailYieldRetryDispatchRecheck(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldRetryDispatchRecheckObservation observation)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            IssueFallbackTailYieldRetryDispatchRecheckCore(
+                state,
+                observation),
+            nameof(IssueFallbackTailYieldRetryDispatchRecheck),
+            observation,
+            observation.Hold.Release.ReleaseAuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        IssueFallbackTailYieldRetryDispatchRecheckCore(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailYieldRetryDispatchRecheckObservation observation)
     {
@@ -22138,6 +22331,19 @@ internal static partial class FileTransferCoordinator
 
     internal static FileTransferFallbackTailYieldTransitionDecision
         ApplyFallbackTailYieldRetryDispatchRecheckReceipt(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldRetryDispatchRecheckReceipt receipt)
+        => FinalizeFallbackTailYieldSnapshot(
+            state,
+            ApplyFallbackTailYieldRetryDispatchRecheckReceiptCore(
+                state,
+                receipt),
+            nameof(ApplyFallbackTailYieldRetryDispatchRecheckReceipt),
+            receipt,
+            receipt.Command.Hold.Release.ReleaseAuthorityId);
+
+    private static FileTransferFallbackTailYieldTransitionDecision
+        ApplyFallbackTailYieldRetryDispatchRecheckReceiptCore(
             FileTransferCoordinatorState state,
             FileTransferFallbackTailYieldRetryDispatchRecheckReceipt receipt)
     {

@@ -12,16 +12,16 @@ public sealed partial class SessionFileTransferService
         "snapshot-authority-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "a14a19dfbb96f09d5d22ab27b6063fef6e9eb4f3a1f3259d35109b181b305a3b";
+        "9444761dd91253649ef1ca4b562604dd8d7ae05ad41232db32d14dfc38c2247d";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield";
 
     private const string CoordinatorSnapshotShadowFamilyCoverage =
         "";
 
     private const string CoordinatorSnapshotAuthoritativeFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield";
 
     private static void InitializeCoordinatorSnapshotState(
         OutboundTransferContext context)
@@ -185,6 +185,50 @@ public sealed partial class SessionFileTransferService
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
+        FileTransferFallbackTailYieldTransitionDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        context.LastFallbackTailYieldSnapshotEnvelope =
+            decision.SnapshotEnvelope;
+        EnqueueFallbackTailYieldDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        InboundTransferContext context,
+        FileTransferFallbackTailYieldTransitionDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        context.LastFallbackTailYieldSnapshotEnvelope =
+            decision.SnapshotEnvelope;
+        EnqueueFallbackTailYieldDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        OutboundTransferContext context,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
             decision)
         => AdoptCoordinatorAuthoredEnvelopeLocked(
@@ -242,16 +286,20 @@ public sealed partial class SessionFileTransferService
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
         FileTransferCoordinatorDecision decision)
-        => decision.SnapshotEnvelope is null
-            ? AdoptCoordinatorStateLocked(
+    {
+        if (decision.SnapshotEnvelope is null)
+        {
+            return AdoptCoordinatorStateLocked(
                 context,
                 decision.State,
                 "LegacyFamilyCoordinatorDecision",
                 GetCoordinatorDecisionSnapshotStatus(decision),
                 decision.MutationRejectedReason ??
                 decision.RuntimeUnlockCommitRejectedReason ??
-                decision.Reason)
-            : AdoptCoordinatorAuthoredEnvelopeLocked(
+                decision.Reason);
+        }
+
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
@@ -260,20 +308,36 @@ public sealed partial class SessionFileTransferService
             decision.SnapshotEnvelope,
             state => context.CoordinatorPersistentState = state.PersistentState,
             context.CoordinatorSnapshotEmitter);
+        if (decision.SnapshotEnvelope.Aggregate.Operations.Any(
+                operation => operation.Family == "fallback_tail_yield"))
+        {
+            context.LastFallbackTailYieldSnapshotEnvelope =
+                decision.SnapshotEnvelope;
+            EnqueueFallbackTailYieldDecisionAuthorityEffect(
+                context,
+                decision.SnapshotEnvelope);
+        }
+
+        return state;
+    }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         InboundTransferContext context,
         FileTransferCoordinatorDecision decision)
-        => decision.SnapshotEnvelope is null
-            ? AdoptCoordinatorStateLocked(
+    {
+        if (decision.SnapshotEnvelope is null)
+        {
+            return AdoptCoordinatorStateLocked(
                 context,
                 decision.State,
                 "LegacyFamilyCoordinatorDecision",
                 GetCoordinatorDecisionSnapshotStatus(decision),
                 decision.MutationRejectedReason ??
                 decision.RuntimeUnlockCommitRejectedReason ??
-                decision.Reason)
-            : AdoptCoordinatorAuthoredEnvelopeLocked(
+                decision.Reason);
+        }
+
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
@@ -282,6 +346,18 @@ public sealed partial class SessionFileTransferService
             decision.SnapshotEnvelope,
             state => context.CoordinatorPersistentState = state.PersistentState,
             context.CoordinatorSnapshotEmitter);
+        if (decision.SnapshotEnvelope.Aggregate.Operations.Any(
+                operation => operation.Family == "fallback_tail_yield"))
+        {
+            context.LastFallbackTailYieldSnapshotEnvelope =
+                decision.SnapshotEnvelope;
+            EnqueueFallbackTailYieldDecisionAuthorityEffect(
+                context,
+                decision.SnapshotEnvelope);
+        }
+
+        return state;
+    }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
@@ -345,7 +421,8 @@ public sealed partial class SessionFileTransferService
                     "route_runtime" or
                     "route_transition" or
                     "runtime_unlock_retry_lifecycle" or
-                    "receive_recovery")
+                    "receive_recovery" or
+                    "fallback_tail_yield")
             .Select(operation => operation.OperationKey)
             .ToArray();
         if (authoritativeOperations.Length > 0)
@@ -759,6 +836,175 @@ public sealed partial class SessionFileTransferService
                 ("initial_activation_envelope_refresh", "initial_activation_envelope_refresh_observed"),
             _ => null,
         };
+    }
+
+    private static void EnqueueFallbackTailYieldDecisionAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+        => EnqueueFallbackTailYieldDecisionAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope);
+
+    private static void EnqueueFallbackTailYieldDecisionAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+        => EnqueueFallbackTailYieldDecisionAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope);
+
+    private static void EnqueueFallbackTailYieldDecisionAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var effects = envelope.DecisionKind switch
+        {
+            nameof(FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt) =>
+                new[]
+                {
+                    (Stage: "local_proof", Kind: "local_proof_sent"),
+                    (Stage: "local_proof", Kind: "local_proof_applied"),
+                },
+            nameof(FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt) =>
+                new[]
+                {
+                    (Stage: "peer_proof", Kind: "peer_proof_observed"),
+                },
+            nameof(FileTransferCoordinator.CarryForwardFallbackTailPairedReleaseToTransportEpoch) =>
+                new[]
+                {
+                    (Stage: "carry_forward", Kind: "transport_epoch_reauthorization_handoff"),
+                },
+            nameof(FileTransferCoordinator.InvalidateFallbackTailYieldTransportEpochReauthorization) =>
+                new[]
+                {
+                    (Stage: "transport_reauthorization", Kind: "transport_epoch_reauthorization_handoff"),
+                },
+            nameof(FileTransferCoordinator.BindFallbackTailYieldRetryDispatchHold) or
+            nameof(FileTransferCoordinator.RebindFallbackTailYieldRetryDispatchHoldToRepairSuccessor) =>
+                new[]
+                {
+                    (Stage: "RetryDispatchHold", Kind: "retry_dispatch_hold_observed"),
+                },
+            nameof(FileTransferCoordinator.ApplyFallbackTailYieldRetryDispatchRecheckReceipt) =>
+                new[]
+                {
+                    (Stage: "RetryDispatchRecheck", Kind: "retry_dispatch_recheck_observed"),
+                },
+            _ => Array.Empty<(string Stage, string Kind)>(),
+        };
+        foreach (var effect in effects)
+        {
+            EnqueueFallbackTailYieldAuthorityEffect(
+                emitter,
+                coordinatorInstanceId,
+                sessionId,
+                transferId,
+                direction,
+                stateGeneration,
+                envelope,
+                effect.Stage,
+                effect.Kind);
+        }
+    }
+
+    private static void EnqueueFallbackTailYieldAuthorityEffect(
+        OutboundTransferContext context,
+        string stage,
+        string kind)
+        => EnqueueFallbackTailYieldAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            context.LastFallbackTailYieldSnapshotEnvelope,
+            stage,
+            kind);
+
+    private static void EnqueueFallbackTailYieldAuthorityEffect(
+        InboundTransferContext context,
+        string stage,
+        string kind)
+        => EnqueueFallbackTailYieldAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            context.LastFallbackTailYieldSnapshotEnvelope,
+            stage,
+            kind);
+
+    private static void EnqueueFallbackTailYieldAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string stage,
+        string kind)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "fallback_tail_yield" &&
+                operation.FallbackTailYield is not null)
+            .SelectMany(operation => operation.FallbackTailYield!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    receipt.Stage == stage)
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            return;
+        }
+
+        var match = matches[0];
+        emitter.EnqueueAuthorityEffect(
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            stateGeneration,
+            match.Operation.Family,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint,
+            kind,
+            $"{match.Operation.OperationKey}:{kind}",
+            match.Receipt.ReceiptGeneration);
     }
 
     private static void EnqueueRoutePublicationAuthorityEffect(
@@ -1220,7 +1466,9 @@ public sealed partial class SessionFileTransferService
             {
                 var scope = operation.RouteRuntime?.Boundary ??
                             operation.RouteTransition?.SourceBoundary ??
-                            operation.RuntimeUnlockRetry?.SourceBoundary;
+                            operation.RuntimeUnlockRetry?.SourceBoundary ??
+                            operation.ReceiveRecovery?.SourceBoundary ??
+                            operation.FallbackTailYield?.SourceBoundary;
                 if (operation.ReceiptValidated)
                 {
                     IndexAuthorityEffectBindingLocked(
@@ -1233,32 +1481,13 @@ public sealed partial class SessionFileTransferService
                         scope);
                 }
 
-                if (operation.RouteTransition is not { } routeTransition)
-                {
-                    if (operation.RuntimeUnlockRetry is not { } retry)
-                    {
-                        continue;
-                    }
-
-                    foreach (var receipt in retry.Receipts)
-                    {
-                        if (!receipt.ReceiptValidated)
-                        {
-                            continue;
-                        }
-                        IndexAuthorityEffectBindingLocked(
-                            envelope,
-                            operation,
-                            receipt.ReceiptIdentity,
-                            receipt.ReceiptGeneration,
-                            receipt.ReceiptStatus,
-                            receipt.ReceiptFingerprint,
-                            scope);
-                    }
-                    continue;
-                }
-
-                foreach (var receipt in routeTransition.Receipts)
+                var typedReceipts = operation.RouteTransition?.Receipts ??
+                                    operation.RuntimeUnlockRetry?.Receipts ??
+                                    operation.ReceiveRecovery?.Receipts ??
+                                    operation.FallbackTailYield?.Receipts ??
+                                    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+                                        .Empty;
+                foreach (var receipt in typedReceipts)
                 {
                     if (!receipt.ReceiptValidated)
                     {

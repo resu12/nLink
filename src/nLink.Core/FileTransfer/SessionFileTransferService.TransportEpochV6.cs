@@ -4925,12 +4925,7 @@ public sealed partial class SessionFileTransferService
         FileTransferFallbackTailYieldTransitionDecision transition)
     {
         var previous = context.CoordinatorPersistentState.FallbackTailYield;
-        var state = AdoptCoordinatorStateLocked(
-            context,
-            transition.State,
-            "FallbackTailYieldTransition",
-            transition.Status.ToString(),
-            transition.Reason);
+        var state = AdoptCoordinatorStateLocked(context, transition);
         LogFallbackTailYieldAggregateTransitions(
             previous,
             state.PersistentState.FallbackTailYield,
@@ -4942,12 +4937,7 @@ public sealed partial class SessionFileTransferService
         FileTransferFallbackTailYieldTransitionDecision transition)
     {
         var previous = context.CoordinatorPersistentState.FallbackTailYield;
-        var state = AdoptCoordinatorStateLocked(
-            context,
-            transition.State,
-            "FallbackTailYieldTransition",
-            transition.Status.ToString(),
-            transition.Reason);
+        var state = AdoptCoordinatorStateLocked(context, transition);
         LogFallbackTailYieldAggregateTransitions(
             previous,
             state.PersistentState.FallbackTailYield,

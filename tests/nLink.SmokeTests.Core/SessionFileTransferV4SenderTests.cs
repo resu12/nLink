@@ -18692,7 +18692,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
             .Single(candidate =>
                 candidate.Name == "ApplyCoordinatorDecisionToContextLocked" &&
-                candidate.GetParameters()[0].ParameterType == context.GetType())
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters().Length == 3 &&
+                candidate.GetParameters()[1].ParameterType ==
+                    typeof(FileTransferCoordinatorDecision))
             .Invoke(
                 null,
                 [
@@ -18707,7 +18710,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                         FrozenLeg: null,
                         AcceptedCheckpointLeg: null,
                         FallbackCheckpointRequired: false,
-                        Reason: "reauthorization_conflicting_yield"),
+                        Reason: "reauthorization_conflicting_yield")
+                    {
+                        SnapshotEnvelope = invalidated.SnapshotEnvelope,
+                    },
                     true,
                 ]);
 
@@ -19034,6 +19040,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 sender,
                 [senderContext, Assert.IsType<FileTransferFallbackTailYieldFrameV6>(parsedReceiverFrame)]);
 
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => CountOccurrences(
+                    ReadOperationalLogTail(logStart),
+                    "effect_kind=paired_release_published;") == 2,
+                TimeSpan.FromSeconds(3)),
+            ReadOperationalLogTail(logStart));
         var log = ReadOperationalLogTail(logStart);
         Assert.True(
             GetPrivateProperty<bool>(senderContext, "PairedFallbackTailYieldGranted"),
@@ -21808,6 +21821,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_handoff_tail_unblocked; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "effect_kind=recovery_owner_retired_after_yield;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3)),
+            ReadOperationalLogTail(logStart));
         Assert.Contains("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_runtime_unlock_activation_window_granted; direction=inbound;", log, StringComparison.Ordinal);
     }

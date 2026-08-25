@@ -707,7 +707,7 @@ public sealed partial class SessionFileTransferService
             FileTransferCoordinator.IssueFallbackTailYieldRetryDispatchRecheck(
                 CreateCoordinatorStateLocked(context),
                 observation);
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, issuance.State);
+        _ = AdoptCoordinatorStateLocked(context, issuance);
         var command = issuance.State.PersistentState.FallbackTailYield
             .PendingRetryDispatchRecheckCommand;
         if (!issuance.Accepted || command is not { IsDefault: false } currentCommand)
@@ -737,7 +737,7 @@ public sealed partial class SessionFileTransferService
             FileTransferCoordinator.ApplyFallbackTailYieldRetryDispatchRecheckReceipt(
                 CreateCoordinatorStateLocked(context),
                 receipt);
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, application.State);
+        _ = AdoptCoordinatorStateLocked(context, application);
         LogFallbackTailYieldRetryDispatchUnblockRecheck(
             context,
             hold,
@@ -771,10 +771,12 @@ public sealed partial class SessionFileTransferService
             successorAuthority.PredecessorAuthorityId !=
                 predecessor.Authority.AuthorityId)
         {
-            binding = new FileTransferFallbackTailYieldTransitionDecision(
-                FileTransferFallbackTailYieldTransitionStatus.Rejected,
-                "fallback_tail_retry_dispatch_hold_successor_lifecycle_mismatch",
-                CreateCoordinatorStateLocked(context));
+            binding = FileTransferCoordinator
+                .RejectFallbackTailYieldRetryDispatchHoldSuccessor(
+                    CreateCoordinatorStateLocked(context),
+                    predecessor?.Authority,
+                    successorAuthority,
+                    "fallback_tail_retry_dispatch_hold_successor_lifecycle_mismatch");
         }
         else
         {
@@ -783,8 +785,9 @@ public sealed partial class SessionFileTransferService
                     CreateCoordinatorStateLocked(context),
                     predecessor.Authority,
                     successorAuthority);
-            ApplyRuntimeUnlockRetryLifecycleStateLocked(context, binding.State);
         }
+
+        _ = AdoptCoordinatorStateLocked(context, binding);
 
         LogFallbackTailYieldRetryDispatchHoldBindingDecision(
             context,

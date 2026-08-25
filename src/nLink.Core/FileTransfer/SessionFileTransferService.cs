@@ -7049,17 +7049,11 @@ public sealed partial class SessionFileTransferService :
             binding,
             "initial_hold",
             predecessorAuthorityId: null);
+        var adoptedBindingState = AdoptCoordinatorStateLocked(context, binding);
         if (!binding.Accepted)
         {
             return decision;
         }
-
-        var adoptedBindingState = AdoptCoordinatorStateLocked(
-            context,
-            binding.State,
-            "BindFallbackTailYieldRetryDispatchHold",
-            binding.Status.ToString(),
-            binding.Reason);
 
         if (binding.Status ==
             FileTransferFallbackTailYieldTransitionStatus.Accepted)
@@ -9309,14 +9303,9 @@ public sealed partial class SessionFileTransferService :
                     CreateCoordinatorStateLocked(context),
                     pending,
                     reason);
+        var state = AdoptCoordinatorStateLocked(context, invalidated);
         if (invalidated.Accepted)
         {
-            var state = AdoptCoordinatorStateLocked(
-                context,
-                invalidated.State,
-                "FallbackTailYieldTransportEpochReauthorizationInvalidated",
-                invalidated.Status.ToString(),
-                invalidated.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 state.PersistentState.FallbackTailYield,
@@ -9341,14 +9330,9 @@ public sealed partial class SessionFileTransferService :
                     CreateCoordinatorStateLocked(context),
                     pending,
                     reason);
+        var state = AdoptCoordinatorStateLocked(context, invalidated);
         if (invalidated.Accepted)
         {
-            var state = AdoptCoordinatorStateLocked(
-                context,
-                invalidated.State,
-                "FallbackTailYieldTransportEpochReauthorizationInvalidated",
-                invalidated.Status.ToString(),
-                invalidated.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 state.PersistentState.FallbackTailYield,
@@ -14096,16 +14080,11 @@ public sealed partial class SessionFileTransferService :
                         CreateCoordinatorStateLocked(context),
                         transportEpoch,
                         reason);
+            var previous =
+                context.CoordinatorPersistentState.FallbackTailYield;
+            var state = AdoptCoordinatorStateLocked(context, carryForward);
             if (carryForward.Accepted)
             {
-                var previous =
-                    context.CoordinatorPersistentState.FallbackTailYield;
-                var state = AdoptCoordinatorStateLocked(
-                    context,
-                    carryForward.State,
-                    "FallbackTailPairedReleaseCarriedForward",
-                    carryForward.Status.ToString(),
-                    carryForward.Reason);
                 LogFallbackTailYieldAggregateTransitions(
                     previous,
                     state.PersistentState.FallbackTailYield,
@@ -14241,16 +14220,11 @@ public sealed partial class SessionFileTransferService :
                         CreateCoordinatorStateLocked(context),
                         transportEpoch,
                         reason);
+            var previous =
+                context.CoordinatorPersistentState.FallbackTailYield;
+            var state = AdoptCoordinatorStateLocked(context, carryForward);
             if (carryForward.Accepted)
             {
-                var previous =
-                    context.CoordinatorPersistentState.FallbackTailYield;
-                var state = AdoptCoordinatorStateLocked(
-                    context,
-                    carryForward.State,
-                    "FallbackTailPairedReleaseCarriedForward",
-                    carryForward.Status.ToString(),
-                    carryForward.Reason);
                 LogFallbackTailYieldAggregateTransitions(
                     previous,
                     state.PersistentState.FallbackTailYield,
@@ -16079,14 +16053,9 @@ public sealed partial class SessionFileTransferService :
             applied.Status.ToString(),
             applied.Reason,
             localProof: receipt);
+        var adoptedState = AdoptCoordinatorStateLocked(context, applied);
         if (applied.StateChanged)
         {
-            var adoptedState = AdoptCoordinatorStateLocked(
-                context,
-                applied.State,
-                "FallbackTailLocalProofReceiptApplied",
-                applied.Status.ToString(),
-                applied.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 adoptedState.PersistentState.FallbackTailYield,
@@ -16140,14 +16109,9 @@ public sealed partial class SessionFileTransferService :
             applied.Status.ToString(),
             applied.Reason,
             localProof: receipt);
+        var adoptedState = AdoptCoordinatorStateLocked(context, applied);
         if (applied.StateChanged)
         {
-            var adoptedState = AdoptCoordinatorStateLocked(
-                context,
-                applied.State,
-                "FallbackTailLocalProofReceiptApplied",
-                applied.Status.ToString(),
-                applied.Reason);
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 adoptedState.PersistentState.FallbackTailYield,
@@ -16368,18 +16332,15 @@ public sealed partial class SessionFileTransferService :
         var accepted = ApplyFallbackTailPeerProofReceiptLocked(
             state,
             frame,
-            out var appliedState,
-            out var stateChanged,
+            out var applied,
             out duplicate,
             out reason);
-        if (stateChanged)
+        if (applied.SnapshotEnvelope is not null)
         {
-            _ = AdoptCoordinatorStateLocked(
-                context,
-                appliedState,
-                "FallbackTailPeerProofReceiptApplied",
-                duplicate ? "Idempotent" : "Accepted",
-                reason);
+            _ = AdoptCoordinatorStateLocked(context, applied);
+        }
+        if (applied.StateChanged)
+        {
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 context.CoordinatorPersistentState.FallbackTailYield,
@@ -16401,18 +16362,15 @@ public sealed partial class SessionFileTransferService :
         var accepted = ApplyFallbackTailPeerProofReceiptLocked(
             state,
             frame,
-            out var appliedState,
-            out var stateChanged,
+            out var applied,
             out duplicate,
             out reason);
-        if (stateChanged)
+        if (applied.SnapshotEnvelope is not null)
         {
-            _ = AdoptCoordinatorStateLocked(
-                context,
-                appliedState,
-                "FallbackTailPeerProofReceiptApplied",
-                duplicate ? "Idempotent" : "Accepted",
-                reason);
+            _ = AdoptCoordinatorStateLocked(context, applied);
+        }
+        if (applied.StateChanged)
+        {
             LogFallbackTailYieldAggregateTransitions(
                 previous,
                 context.CoordinatorPersistentState.FallbackTailYield,
@@ -16425,13 +16383,11 @@ public sealed partial class SessionFileTransferService :
     private static bool ApplyFallbackTailPeerProofReceiptLocked(
         FileTransferCoordinatorState state,
         FileTransferFallbackTailYieldFrameV6 frame,
-        out FileTransferCoordinatorState appliedState,
-        out bool stateChanged,
+        out FileTransferFallbackTailYieldTransitionDecision appliedDecision,
         out bool duplicate,
         out string reason)
     {
-        appliedState = state;
-        stateChanged = false;
+        appliedDecision = default;
         duplicate = false;
         reason = "fallback_tail_peer_proof_invalid";
         if (!TryCreateFallbackTailPeerProof(
@@ -16449,6 +16405,7 @@ public sealed partial class SessionFileTransferService :
         var applied = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
             state,
             receipt);
+        appliedDecision = applied;
         reason = applied.Reason;
         if (state.PersistentState.FallbackTailYield.CurrentOperation is
             { } operation)
@@ -16469,12 +16426,6 @@ public sealed partial class SessionFileTransferService :
                 applied.Status,
                 applied.Reason);
         }
-        stateChanged = applied.StateChanged;
-        if (stateChanged)
-        {
-            appliedState = applied.State;
-        }
-
         if (!applied.Accepted)
         {
             return false;
@@ -17092,6 +17043,10 @@ public sealed partial class SessionFileTransferService :
             pairedRelease.PairingGeneration);
         if (context.FallbackTailYieldProofSuppressionKeys.Add(pairingLogKey))
         {
+            EnqueueFallbackTailYieldAuthorityEffect(
+                context,
+                "paired_release",
+                "paired_release_published");
             LogFileTransferFallbackTailPairedYieldGranted(
                 FileTransferDirection.Outbound,
                 context.TransferId,
@@ -17138,6 +17093,10 @@ public sealed partial class SessionFileTransferService :
             pairedRelease.PairingGeneration);
         if (context.FallbackTailYieldProofSuppressionKeys.Add(pairingLogKey))
         {
+            EnqueueFallbackTailYieldAuthorityEffect(
+                context,
+                "paired_release",
+                "paired_release_published");
             LogFileTransferFallbackTailPairedYieldGranted(
                 FileTransferDirection.Inbound,
                 context.TransferId,
@@ -17765,6 +17724,11 @@ public sealed partial class SessionFileTransferService :
 
         context.FallbackTailRetiredOwnerSuppressionDiagnostics.Clear();
 
+        EnqueueFallbackTailYieldAuthorityEffect(
+            context,
+            "yield",
+            "recovery_owner_retired_after_yield");
+
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; previous_handoff_epoch={previousHandoffEpoch}; previous_handoff_state={FormatProtocolLogValue(previousHandoffState)}; discarded_repair_frame_count={discardedRepairFrameCount}; discarded_repair_chunk_count={discardedRepairChunkCount}; reason={FormatProtocolLogValue(reason)}");
@@ -17800,6 +17764,11 @@ public sealed partial class SessionFileTransferService :
         ClearInboundPrimaryRegularNknFrontierRepairTransactionLocked(context);
 
         context.FallbackTailRetiredOwnerSuppressionDiagnostics.Clear();
+
+        EnqueueFallbackTailYieldAuthorityEffect(
+            context,
+            "yield",
+            "recovery_owner_retired_after_yield");
 
         LocalOperationalLog.Info(
             "FileTransferService",
@@ -23467,6 +23436,9 @@ public sealed partial class SessionFileTransferService :
             get;
         } = new();
 
+        public FileTransferCoordinatorTransitionEnvelope?
+            LastFallbackTailYieldSnapshotEnvelope { get; set; }
+
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
 
         private readonly List<CancellationTokenSource> retiredV6SenderPipelineCts = [];
@@ -24655,6 +24627,9 @@ public sealed partial class SessionFileTransferService :
         {
             get;
         } = new();
+
+        public FileTransferCoordinatorTransitionEnvelope?
+            LastFallbackTailYieldSnapshotEnvelope { get; set; }
 
         public InboundTransferContext(FileTransferOfferV2 offer, FileTransferRouteSelection routeSelection)
         {

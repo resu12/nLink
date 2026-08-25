@@ -817,6 +817,106 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw 'An unknown receive-recovery role did not fail artifact evidence.'
             }
 
+            function New-FallbackTailReceipt([string]$stage) {
+                [ordered]@{
+                    stage=$stage; commandIdentity="fallback-$stage-command"
+                    commandGeneration=1L; commandFingerprint="fallback-$stage-command-fingerprint"
+                    receiptIdentity="fallback-$stage-receipt"; receiptGeneration=1L
+                    receiptStatus='Accepted'; receiptReason='accepted'
+                    receiptFingerprint="fallback-$stage-receipt-fingerprint"
+                    receiptValidated=$true
+                }
+            }
+            function New-FallbackTailOperation([object[]]$receipts) {
+                [ordered]@{
+                    family='fallback_tail_yield'; operationRole='yield_current'
+                    operationKey='fallback_tail_yield|yield_current|fta2-fallback_tail_yield-snapshot|1|Quiescent'
+                    operationKind='Quiescent'; authorityId='fta2-fallback_tail_yield-snapshot'
+                    predecessorAuthorityId='(none)'; operationGeneration=1L
+                    beforeState='YieldIssued'; afterState='Paired'
+                    commandIdentity='fallback-tail-command'; commandGeneration=1L
+                    commandFingerprint='fallback-tail-command-fingerprint'
+                    receiptIdentity='fallback-tail-receipt'; receiptGeneration=1L
+                    receiptStatus='Accepted'; receiptFingerprint='fallback-tail-receipt-fingerprint'
+                    receiptValidated=$false; stateApplied=$true
+                    fallbackTailYield=[ordered]@{
+                        role='yield_current'; sourceBoundary=$receiveScope
+                        effectiveBoundary=$receiveScope; targetBoundary=$receiveScope
+                        yieldKind='Quiescent'; pairingState='Paired'
+                        ownerKey='owner-key'; pairKey='pair-key'
+                        localProofIdentity='local-proof'; localProofFingerprint='local-fingerprint'
+                        peerProofAuthorityId='peer-authority'; peerProofGeneration=1L
+                        peerProofIdentity='peer-proof'; peerProofFingerprint='peer-fingerprint'
+                        pairedReleaseAuthorityId='fta2-fallback_tail_yield-snapshot'
+                        pairedReleaseGeneration=1L; pairingGeneration=1L
+                        failedPredecessorAuthorityId='(none)'; failedPredecessorGeneration=0L
+                        failedSupersessionCarriedPeerProof=$false
+                        reauthorizationGeneration=0L; reauthorizationSourceTransportEpoch=0L
+                        reauthorizationTargetTransportEpoch=0L
+                        reservationGeneration=0L; consumingInstallAuthorityId='(none)'
+                        consumingInstallGeneration=0L; retryHoldGeneration=0L
+                        retryRecheckGeneration=0L; invalidationReason='(none)'
+                        receipts=$receipts
+                    }
+                }
+            }
+            function New-FallbackTailEnvelopeLine([object]$operation) {
+                $aggregate = [ordered]@{
+                    beforeStateGeneration=0L; afterStateGeneration=1L
+                    beforeStateFingerprint='fallback-before'; afterStateFingerprint='fallback-after'
+                    beforeBoundary=$receiveScope; afterBoundary=$receiveScope
+                    changedFamilies=@('fallback_tail_yield'); operations=@($operation)
+                }
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId='coordinator-fallback'; sessionId='session-receive'
+                    transferId='transfer-receive'; direction='inbound'
+                    decisionUtcMilliseconds=40L; transitionId='fallback-paired'
+                    decisionKind='ApplyFallbackTailPeerProofReceipt'; decisionStatus='Accepted'
+                    decisionReason='fallback_tail_peer_proof_receipt_applied'; aggregate=$aggregate
+                }
+                $json = $envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $fallbackPrefix; transition_id=fallback-paired; before_state_generation=0; after_state_generation=1; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+            $fallbackPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-fallback; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
+            $fallbackCoverage = 'route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield'
+            $fallbackStart = "event=filetransfer_coordinator_snapshot_stream_started; $fallbackPrefix; initial_state_generation=0; initial_state_hash=fallback-before; emitted_family_coverage=$fallbackCoverage; shadow_family_coverage=; authoritative_family_coverage=$fallbackCoverage; authority_effect=none"
+            $fallbackEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $fallbackPrefix; final_state_generation=1; final_state_hash=fallback-after; transition_count=1; emitted_family_coverage=$fallbackCoverage; shadow_family_coverage=; authoritative_family_coverage=$fallbackCoverage; authority_effect=none"
+            function New-FallbackTailEffect([string]$stage, [string]$kind) {
+                "event=filetransfer_coordinator_authority_effect; $fallbackPrefix; transition_id=fallback-paired; coordinator_state_generation=1; operation_family=fallback_tail_yield; operation_key=fallback_tail_yield|yield_current|fta2-fallback_tail_yield-snapshot|1|Quiescent; operation_authority_id=fta2-fallback_tail_yield-snapshot; operation_generation=1; effect_kind=$kind; effect_identity=fallback-$kind-effect; effect_generation=1; receipt_identity=fallback-$stage-receipt; receipt_generation=1; receipt_status=Accepted; receipt_fingerprint=fallback-$stage-receipt-fingerprint; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=4; checkpoint_request_id=root-checkpoint; data_session_identity=receive-data-session; data_session_generation=5; authority_effect=applied"
+            }
+            $invalidFallbackTransition = New-FallbackTailEnvelopeLine (New-FallbackTailOperation @())
+            $invalidFallback = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($fallbackStart,$invalidFallbackTransition,$fallbackEnd)
+            if ($invalidFallback.ArtifactEvidenceVerdict -ne 'pass' -or
+                $invalidFallback.FirstUnresolvedBoundary.taxonomyClass -ne 'fallback_tail_yield_authority_invalid' -or
+                $invalidFallback.FallbackTailYieldFamilyLegacySelectionCount -ne 0 -or
+                $invalidFallback.LegacySelectionCount -ne 2) {
+                throw "An invalid paired fallback-tail boundary was not selected exactly: $($invalidFallback | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $validFallbackTransition = New-FallbackTailEnvelopeLine (New-FallbackTailOperation @(
+                (New-FallbackTailReceipt 'yield'),
+                (New-FallbackTailReceipt 'local_proof'),
+                (New-FallbackTailReceipt 'peer_proof'),
+                (New-FallbackTailReceipt 'paired_release')))
+            $fallbackEffects = @(
+                (New-FallbackTailEffect 'yield' 'recovery_owner_retired_after_yield'),
+                (New-FallbackTailEffect 'local_proof' 'local_proof_sent'),
+                (New-FallbackTailEffect 'local_proof' 'local_proof_applied'),
+                (New-FallbackTailEffect 'peer_proof' 'peer_proof_observed'),
+                (New-FallbackTailEffect 'paired_release' 'paired_release_published'))
+            $fallbackFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=irrelevant',$fallbackStart,$validFallbackTransition) + $fallbackEffects + @($fallbackEnd))
+            $fallbackCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@($fallbackStart,$validFallbackTransition) + $fallbackEffects + @($fallbackEnd))
+            $fallbackParity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $fallbackFull -Compact $fallbackCompact
+            if ($fallbackFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $fallbackFull.FirstUnresolvedBoundary -or
+                $fallbackParity.Verdict -ne 'pass' -or
+                $fallbackFull.BoundaryHash -ne $fallbackCompact.BoundaryHash) {
+                throw "Fallback-tail full/compact parity failed: $($fallbackFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'
@@ -971,6 +1071,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             Assert.Contains("coordinator_snapshot_route_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_receive_recovery_family_legacy_selection_count", text, StringComparison.Ordinal);
+            Assert.Contains("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_boundary_hash", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_catalog_hash", text, StringComparison.Ordinal);
         }
@@ -998,6 +1099,18 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.Contains(
             "coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount",
             acceptanceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount",
+            acceptanceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-Family 'fallback_tail_yield'",
+            guiText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount",
+            guiText,
             StringComparison.Ordinal);
     }
 
@@ -1127,7 +1240,30 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function Get-TunaGuiExplicitFailureClassification { return $null }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             $script:family3 = $false
+            $script:family4 = $false
             function Get-FileTransferCoordinatorSnapshotEvaluation {
+                if ($script:family4) {
+                    return [pscustomobject]@{
+                        Mode = 'SnapshotV1Shadow'
+                        ArtifactEvidenceVerdict = 'pass'
+                        TransitionCount = 2L
+                        FirstUnresolvedBoundary = [pscustomobject]@{
+                            boundaryId = 'fallback-tail-boundary-4'
+                            boundaryHash = 'fallback-tail-boundary-hash-4'
+                            families = @('fallback_tail_yield')
+                            taxonomyClass = 'fallback_tail_yield_authority_invalid'
+                            phase = 'fallback_tail_yield'
+                            decisionReason = 'paired_release_receipt_missing'
+                            variant = '(none)'
+                            rawCount = 1
+                            distinctCount = 1
+                            recoveredCount = 0
+                            unresolvedCount = 1
+                            writer = 'writer-helper'
+                            writerSequence = 14938L
+                        }
+                    }
+                }
                 if ($script:family3) {
                     return [pscustomobject]@{
                         Mode = 'SnapshotV1Shadow'
@@ -1177,7 +1313,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     'route_runtime',
                     'route_transition',
                     'runtime_unlock_retry_lifecycle',
-                    'receive_recovery')
+                    'receive_recovery',
+                    'fallback_tail_yield')
             }
 
             $root = Join-Path ([IO.Path]::GetTempPath()) (
@@ -1210,6 +1347,20 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     $family3.CoordinatorBoundaryId -ne 'receive-boundary-3' -or
                     $family3.CoordinatorWriterSequence -ne 49857L) {
                     throw "GUI did not preserve the Family 3 shared boundary: $($family3 | ConvertTo-Json -Compress)"
+                }
+                $script:family3 = $false
+                $script:family4 = $true
+                $family4 = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'scenario failed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($family4.ClassificationSource -ne 'coordinator_snapshot_authority_v1' -or
+                    $family4.FailureClass -ne 'fallback_tail_yield_authority_invalid' -or
+                    $family4.Phase -ne 'fallback_tail_yield' -or
+                    $family4.CoordinatorBoundaryId -ne 'fallback-tail-boundary-4' -or
+                    $family4.CoordinatorWriterSequence -ne 14938L) {
+                    throw "GUI did not preserve the Family 4 shared boundary: $($family4 | ConvertTo-Json -Compress)"
                 }
             }
             finally {

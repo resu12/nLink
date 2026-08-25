@@ -4595,6 +4595,112 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "FallbackTailYield")]
+    public void FallbackTailYield_CoordinatorAuthorsTypedProofAndPairingSnapshots()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var source = ActiveFallbackStateWithoutCheckpoint() with
+        {
+            CurrentDataSessionIdentity = "fallback-snapshot-data-session",
+            CurrentDataSessionGeneration = 7,
+        };
+        var yielded = MarkFallbackTailQuiescent(
+            source,
+            fallback,
+            source.CurrentLeg!.TransportEpochId,
+            committedChunk: 5,
+            highestObservedChunk: 5);
+        var state = yielded.State with
+        {
+            PersistentState = yielded.State.PersistentState with
+            {
+                CoordinatorInstanceId = "fallback-tail-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
+        };
+        var decision = Assert.IsType<FallbackTailYieldDecision>(
+            yielded.FallbackTailYieldDecision);
+        var localReceipt =
+            FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+                state,
+                decision,
+                "snapshot-local-proof",
+                "snapshot-local-fingerprint",
+                1_000);
+        var peerReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                state,
+                CreateCoordinatorFallbackTailPeerProof(state, decision),
+                "snapshot-peer-proof",
+                1_001);
+
+        var local = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
+            state,
+            localReceipt);
+        Assert.True(local.Accepted, local.Reason);
+        var localEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(local.SnapshotEnvelope);
+        Assert.Equal(0, localEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(1, localEnvelope.Aggregate.AfterStateGeneration);
+        var localOperation = Assert.Single(
+            localEnvelope.Aggregate.Operations,
+            operation => operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "yield_current");
+        Assert.Equal("LocalProofObserved", localOperation.AfterState);
+        Assert.Contains(
+            localOperation.FallbackTailYield!.Receipts,
+            receipt => receipt.Stage == "local_proof" &&
+                receipt.ReceiptValidated);
+
+        var paired = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            local.State,
+            peerReceipt);
+        Assert.True(paired.Accepted, paired.Reason);
+        var pairedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(paired.SnapshotEnvelope);
+        Assert.Equal(1, pairedEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(2, pairedEnvelope.Aggregate.AfterStateGeneration);
+        var pairedOperation = Assert.Single(
+            pairedEnvelope.Aggregate.Operations,
+            operation => operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "yield_current");
+        Assert.Equal("Paired", pairedOperation.AfterState);
+        Assert.Equal(
+            decision.PairKey,
+            pairedOperation.FallbackTailYield!.PairKey);
+        Assert.Contains(
+            pairedOperation.FallbackTailYield.Receipts,
+            receipt => receipt.Stage == "local_proof");
+        Assert.Contains(
+            pairedOperation.FallbackTailYield.Receipts,
+            receipt => receipt.Stage == "peer_proof");
+        Assert.Contains(
+            pairedOperation.FallbackTailYield.Receipts,
+            receipt => receipt.Stage == "paired_release");
+
+        var duplicate =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                paired.State,
+                peerReceipt);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            duplicate.Status);
+        var duplicateEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                duplicate.SnapshotEnvelope);
+        Assert.Equal(2, duplicateEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(2, duplicateEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal("Idempotent", duplicateEnvelope.DecisionStatus);
+        Assert.Contains(
+            duplicateEnvelope.Aggregate.Operations,
+            operation => operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "attempted_decision" &&
+                !operation.StateApplied);
+    }
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockRetryLifecycle")]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
     public void RuntimeUnlockRetryLifecycle_CoordinatorAuthorsExactSnapshotBoundaries()

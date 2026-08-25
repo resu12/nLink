@@ -997,6 +997,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
             -Family 'route_transition'
+    $snapshotFallbackTailYieldAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'fallback_tail_yield'
+    $snapshotFallbackTailYieldProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $snapshotEvaluation `
+            -Family 'fallback_tail_yield' `
+            -TaxonomyClasses @(
+                'fallback_tail_yield_authority_invalid',
+                'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
 
     function Invoke-FileTransferCompactCorrelator {
         param(
@@ -3752,8 +3763,27 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Variant = 'release_consumed_gen1_not_retired_for_fresh_quiescent_pair'
         }) | Out-Null
     }
+    if ($snapshotFallbackTailYieldAuthoritative) {
+        foreach ($candidateRecord in @(
+                $snapshotFallbackTailYieldProof.UnresolvedCandidateRecords)) {
+            $compactProofChainCandidates.Add([pscustomobject]@{
+                Class = [string]$candidateRecord.Class
+                Event = $candidateRecord.Event
+                Reason = [string]$candidateRecord.Reason
+                Variant = '(none)'
+            }) | Out-Null
+        }
+    }
+    $snapshotFallbackTailYieldPureClasses = @(
+        'fallback_tail_yield_authority_invalid',
+        'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
     $firstCompactProofChainFailure = @(
         $compactProofChainCandidates.ToArray() |
+            Where-Object {
+                -not $snapshotFallbackTailYieldAuthoritative -or
+                $_.Class -notin $snapshotFallbackTailYieldPureClasses -or
+                [string]$_.Event.FilePath -ceq '(coordinator_snapshot)'
+            } |
             Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
             Select-Object -First 1
     )
@@ -4682,6 +4712,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount),
         ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount),
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount),
+        ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount),
         ("selected_routes={0}" -f $selectedRouteText),
         ("selected_route_sequence={0}" -f $selectedRouteText),
         ("selected_route_changes={0}" -f $selectedRouteText),
@@ -6025,6 +6056,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         coordinator_snapshot_route_family_legacy_selection_count = $snapshotEvaluation.RouteFamilyLegacySelectionCount
         coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
         coordinator_snapshot_receive_recovery_family_legacy_selection_count = $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
+        coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
         coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
         coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
         coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
@@ -9952,6 +9984,7 @@ function Invoke-FileTransferRetainedAnalysis {
             coordinator_snapshot_route_family_legacy_selection_count = $fullSnapshotEvaluation.RouteFamilyLegacySelectionCount
             coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $fullSnapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
             coordinator_snapshot_receive_recovery_family_legacy_selection_count = $fullSnapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
+            coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $fullSnapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
             coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
             coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
             coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash

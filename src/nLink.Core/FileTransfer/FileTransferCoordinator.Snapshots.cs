@@ -109,6 +109,38 @@ internal sealed record FileTransferCoordinatorReceiveRecoveryOperationSnapshot(
     long CheckpointFrontierRecheckGeneration,
     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
 
+internal sealed record FileTransferCoordinatorFallbackTailYieldOperationSnapshot(
+    string Role,
+    FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+    FileTransferCoordinatorStateBoundarySnapshot EffectiveBoundary,
+    FileTransferCoordinatorStateBoundarySnapshot TargetBoundary,
+    string YieldKind,
+    string PairingState,
+    string OwnerKey,
+    string PairKey,
+    string LocalProofIdentity,
+    string LocalProofFingerprint,
+    string PeerProofAuthorityId,
+    int PeerProofYieldGeneration,
+    string PeerProofIdentity,
+    string PeerProofFingerprint,
+    long PairingGeneration,
+    string PairedReleaseAuthorityId,
+    int PairedReleaseGeneration,
+    string PairedReleaseOutcome,
+    string FailedPredecessorAuthorityId,
+    bool FailedSupersessionCarriedPeerProof,
+    int ReauthorizationGeneration,
+    long ReauthorizationSourceTransportEpoch,
+    long ReauthorizationTargetTransportEpoch,
+    long ReservationGeneration,
+    string ReservedRetryAuthorityId,
+    long ConsumingInstallGeneration,
+    int RetryHoldGeneration,
+    int RetryRecheckGeneration,
+    string InvalidationReason,
+    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
+
 internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     string Family,
     string OperationRole,
@@ -133,7 +165,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot?
         RuntimeUnlockRetry = null,
     FileTransferCoordinatorReceiveRecoveryOperationSnapshot?
-        ReceiveRecovery = null);
+        ReceiveRecovery = null,
+    FileTransferCoordinatorFallbackTailYieldOperationSnapshot?
+        FallbackTailYield = null);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -267,6 +301,253 @@ internal readonly record struct
 internal static partial class FileTransferCoordinator
 {
     private static long lastSnapshotDecisionUtcMilliseconds;
+
+    internal static FileTransferFallbackTailYieldTransitionDecision
+        FinalizeFallbackTailYieldSnapshot(
+            FileTransferCoordinatorState before,
+            FileTransferFallbackTailYieldTransitionDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferAuthorityId? authorityId = null)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            CreateFallbackTailYieldAttemptedDecisionSnapshots(
+                before,
+                decisionKind,
+                decision.Status.ToString(),
+                decision.Reason,
+                command,
+                authorityId));
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static FileTransferCoordinatorDecision
+        FinalizeFallbackTailYieldSnapshot(
+            FileTransferCoordinatorState before,
+            FileTransferCoordinatorDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferAuthorityId? authorityId = null)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var status = !string.IsNullOrWhiteSpace(decision.MutationRejectedReason)
+            ? "Rejected"
+            : before.PersistentState == decision.State.PersistentState
+                ? "Idempotent"
+                : "Accepted";
+        var reason = decision.MutationRejectedReason ?? decision.Reason;
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            status,
+            reason,
+            CreateFallbackTailYieldAttemptedDecisionSnapshots(
+                before,
+                decisionKind,
+                status,
+                reason,
+                command,
+                authorityId));
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static ImmutableArray<
+        FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateFallbackTailYieldAttemptedDecisionSnapshots(
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferAuthorityId? authorityId)
+    {
+        var descriptors = CreateOperationDescriptors(state)
+            .Where(descriptor => string.Equals(
+                descriptor.Family,
+                "fallback_tail_yield",
+                StringComparison.Ordinal));
+        if (authorityId is { IsDefault: false } exactAuthority)
+        {
+            descriptors = descriptors.Where(descriptor => string.Equals(
+                descriptor.AuthorityId,
+                exactAuthority.ToString(),
+                StringComparison.Ordinal));
+        }
+        var descriptor = descriptors
+            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
+            .FirstOrDefault();
+        var commandFingerprint = CalculateSnapshotFingerprint(command);
+        if (descriptor is not null)
+        {
+            var operation = CreateOperationTransitionSnapshot(
+                descriptor,
+                descriptor.State,
+                descriptor.State,
+                stateApplied: false);
+            var generation = Math.Max(1, descriptor.OperationGeneration);
+            var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "attempted_decision",
+                $"{descriptor.AuthorityId}:{decisionKind}",
+                generation,
+                commandFingerprint,
+                $"{descriptor.AuthorityId}:{decisionKind}:decision",
+                generation,
+                decisionStatus,
+                decisionReason,
+                CalculateSnapshotFingerprint(new
+                {
+                    decisionKind,
+                    decisionStatus,
+                    decisionReason,
+                    command,
+                }),
+                true);
+            return ImmutableArray.Create(operation with
+            {
+                OperationRole = "attempted_decision",
+                OperationKey = CreateCoordinatorOperationKey(
+                    "fallback_tail_yield",
+                    "attempted_decision",
+                    descriptor.AuthorityId,
+                    generation,
+                    decisionKind),
+                OperationKind = decisionKind,
+                CommandIdentity = receipt.CommandIdentity,
+                CommandGeneration = receipt.CommandGeneration,
+                CommandFingerprint = receipt.CommandFingerprint,
+                ReceiptIdentity = receipt.ReceiptIdentity,
+                ReceiptGeneration = receipt.ReceiptGeneration,
+                ReceiptStatus = receipt.ReceiptStatus,
+                ReceiptFingerprint = receipt.ReceiptFingerprint,
+                ReceiptValidated = true,
+                FallbackTailYield = operation.FallbackTailYield is null
+                    ? null
+                    : operation.FallbackTailYield with
+                    {
+                        Role = "attempted_decision",
+                        Receipts = ImmutableArray.Create(receipt),
+                    },
+            });
+        }
+
+        var fallback = state.PersistentState.FallbackTailYield;
+        var generationFallback = Math.Max(
+            1,
+            fallback.LastYieldGeneration + 1);
+        var syntheticAuthority = authorityId is { IsDefault: false } exact
+            ? exact.ToString()
+            : $"attempt:{commandFingerprint}";
+        var boundary = CreateStateBoundarySnapshot(state);
+        var receiptFallback =
+            new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "attempted_decision",
+                $"{syntheticAuthority}:{decisionKind}",
+                generationFallback,
+                commandFingerprint,
+                $"{syntheticAuthority}:{decisionKind}:decision",
+                generationFallback,
+                decisionStatus,
+                decisionReason,
+                CalculateSnapshotFingerprint(new
+                {
+                    decisionKind,
+                    decisionStatus,
+                    decisionReason,
+                    command,
+                }),
+                true);
+        return ImmutableArray.Create(
+            new FileTransferCoordinatorOperationTransitionSnapshot(
+                "fallback_tail_yield",
+                "attempted_decision",
+                CreateCoordinatorOperationKey(
+                    "fallback_tail_yield",
+                    "attempted_decision",
+                    syntheticAuthority,
+                    generationFallback,
+                    decisionKind),
+                decisionKind,
+                syntheticAuthority,
+                "(none)",
+                generationFallback,
+                "None",
+                "None",
+                receiptFallback.CommandIdentity,
+                receiptFallback.CommandGeneration,
+                receiptFallback.CommandFingerprint,
+                receiptFallback.ReceiptIdentity,
+                receiptFallback.ReceiptGeneration,
+                receiptFallback.ReceiptStatus,
+                receiptFallback.ReceiptFingerprint,
+                true,
+                false,
+                null,
+                null,
+                null,
+                null,
+                new FileTransferCoordinatorFallbackTailYieldOperationSnapshot(
+                    "attempted_decision",
+                    boundary,
+                    boundary,
+                    boundary,
+                    "Attempt",
+                    decisionStatus,
+                    "(none)",
+                    "(none)",
+                    "(none)",
+                    "(none)",
+                    "(none)",
+                    0,
+                    "(none)",
+                    "(none)",
+                    0,
+                    "(none)",
+                    0,
+                    "(none)",
+                    "(none)",
+                    false,
+                    0,
+                    boundary.TransportEpoch,
+                    boundary.TransportEpoch,
+                    0,
+                    "(none)",
+                    0,
+                    0,
+                    0,
+                    decisionReason,
+                    ImmutableArray.Create(receiptFallback))));
+    }
 
     internal static FileTransferReceiveRecoveryDecision
         FinalizeReceiveRecoverySnapshot(
@@ -1676,7 +1957,8 @@ internal static partial class FileTransferCoordinator
             operation.RouteRuntime,
             operation.RouteTransition,
             operation.RuntimeUnlockRetry,
-            operation.ReceiveRecovery);
+            operation.ReceiveRecovery,
+            operation.FallbackTailYield);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -1752,42 +2034,7 @@ internal static partial class FileTransferCoordinator
         AddRuntimeUnlockRetryOperationDescriptors(state, builder);
         AddReceiveRecoveryOperationDescriptors(state, builder);
 
-        var yield = persistent.FallbackTailYield.CurrentOperation ??
-                    persistent.FallbackTailYield.LastTerminalOperation;
-        if (yield is { } yieldOperation)
-        {
-            builder.Add(new CoordinatorOperationDescriptor(
-                "fallback_tail_yield",
-                yieldOperation.Decision.YieldKind.ToString(),
-                yieldOperation.Decision.AuthorityId.ToString(),
-                yieldOperation.Decision.PredecessorAuthorityId?.ToString() ?? "(none)",
-                yieldOperation.Decision.YieldGeneration,
-                yieldOperation.PairingState.ToString(),
-                yieldOperation.Decision.AuthorityId.ToString(),
-                yieldOperation.Decision.YieldGeneration,
-                CalculateSnapshotFingerprint(new
-                {
-                    yieldOperation.Decision.AuthorityId,
-                    yieldOperation.Decision.PredecessorAuthorityId,
-                    yieldOperation.Decision.YieldGeneration,
-                    yieldOperation.Decision.OwnerKey,
-                    yieldOperation.Decision.PairKey,
-                    yieldOperation.Decision.CheckpointRequestIdSnapshot,
-                    yieldOperation.Decision.Reason,
-                }),
-                yieldOperation.PairedRelease?.ReleaseAuthorityId.ToString() ?? "(none)",
-                yieldOperation.PairedRelease?.ReleaseGeneration ?? 0,
-                yieldOperation.PairedRelease?.ReleaseOutcome ?? "(none)",
-                CalculateSnapshotFingerprint(new
-                {
-                    yieldOperation.PairedRelease?.ReleaseAuthorityId,
-                    yieldOperation.PairedRelease?.ReleaseGeneration,
-                    yieldOperation.PairedRelease?.ReleaseOutcome,
-                    LocalAuthorityId = yieldOperation.PairedRelease?.LocalProof.Decision.AuthorityId,
-                    PeerAuthorityId = yieldOperation.PairedRelease?.PeerProof.Proof.AuthorityId,
-                }),
-                yieldOperation.PairedRelease is not null));
-        }
+        AddFallbackTailYieldOperationDescriptors(state, builder);
 
         var pressure = persistent.RegularV4FrontierRepairPressure.InstalledBinding ??
                        persistent.RegularV4FrontierRepairPressure.PendingBinding ??
@@ -1906,6 +2153,746 @@ internal static partial class FileTransferCoordinator
             }
         }
     }
+
+    private static void AddFallbackTailYieldOperationDescriptors(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var fallback = state.PersistentState.FallbackTailYield;
+        if (fallback.CurrentOperation is { } current)
+        {
+            builder.Add(CreateFallbackTailYieldOperationDescriptor(
+                state,
+                current,
+                "yield_current"));
+        }
+        if (fallback.LastTerminalOperation is { } terminal &&
+            (fallback.CurrentOperation is null ||
+             terminal.Decision.AuthorityId !=
+                 fallback.CurrentOperation.Value.Decision.AuthorityId))
+        {
+            builder.Add(CreateFallbackTailYieldOperationDescriptor(
+                state,
+                terminal,
+                "yield_terminal"));
+        }
+        if (fallback.RetainedPredecessor is { } retained &&
+            fallback.LastTerminalOperation is { } retainedOperation &&
+            retainedOperation.Decision == retained)
+        {
+            builder.Add(CreateFallbackTailYieldOperationDescriptor(
+                state,
+                retainedOperation,
+                "yield_retained_predecessor"));
+        }
+
+        AddPeerProof(
+            "peer_proof_pending_initial",
+            fallback.PendingPeerProofBeforeLocalYield);
+        AddPeerProof(
+            "peer_proof_pending_reauthorization",
+            fallback.PendingReauthorizationPeerProof);
+        AddPeerProof(
+            "peer_proof_pending_retry_successor",
+            fallback.PendingRetryCycleSuccessorPeerProof);
+
+        if (fallback.PendingReauthorization is { } pendingReauthorization)
+        {
+            builder.Add(CreateFallbackTailYieldReauthorizationDescriptor(
+                state,
+                pendingReauthorization,
+                "reauthorization_pending",
+                "Pending",
+                fallback.PendingReauthorizationPeerProof));
+        }
+        if (fallback.LastInvalidatedReauthorization is { } terminalReauthorization)
+        {
+            builder.Add(CreateFallbackTailYieldReauthorizationDescriptor(
+                state,
+                terminalReauthorization,
+                "reauthorization_terminal",
+                "Invalidated",
+                null,
+                fallback.LastReauthorizationInvalidationReason));
+        }
+
+        if (fallback.CurrentOperation is { } retryOperation)
+        {
+            if (fallback.PendingRetryRecheckRequest is { } retryRequest)
+            {
+                builder.Add(CreateFallbackTailYieldChildDescriptor(
+                    state,
+                    retryOperation,
+                    "retry_request_pending",
+                    "RetryRequest",
+                    retryRequest.DispatchAttemptGeneration,
+                    "Pending",
+                    retryRequest,
+                    null,
+                    "Pending"));
+            }
+            if (fallback.CurrentRetryDispatchHold is { } retryHold)
+            {
+                builder.Add(CreateFallbackTailYieldChildDescriptor(
+                    state,
+                    retryOperation,
+                    "retry_hold_current",
+                    "RetryDispatchHold",
+                    retryHold.HoldGeneration,
+                    "Held",
+                    retryHold,
+                    retryHold,
+                    "Held"));
+            }
+            if (fallback.PendingRetryDispatchRecheckCommand is { } recheck)
+            {
+                builder.Add(CreateFallbackTailYieldChildDescriptor(
+                    state,
+                    retryOperation,
+                    "retry_recheck_pending",
+                    "RetryDispatchRecheck",
+                    recheck.RecheckGeneration,
+                    "Pending",
+                    recheck,
+                    null,
+                    "Pending"));
+            }
+            if (fallback.LastRetryDispatchRecheckReceipt is { } recheckReceipt)
+            {
+                builder.Add(CreateFallbackTailYieldChildDescriptor(
+                    state,
+                    retryOperation,
+                    "retry_recheck_terminal",
+                    "RetryDispatchRecheck",
+                    recheckReceipt.Command.RecheckGeneration,
+                    recheckReceipt.Status.ToString(),
+                    recheckReceipt.Command,
+                    recheckReceipt,
+                    recheckReceipt.Status.ToString(),
+                    recheckReceipt.Status !=
+                        FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Rejected));
+            }
+            if (fallback.CurrentReservation is { } reservation)
+            {
+                builder.Add(CreateFallbackTailYieldReservationDescriptor(
+                    state,
+                    retryOperation,
+                    reservation,
+                    "release_reservation_current",
+                    fallback.LastConsumingInstallReceipt));
+            }
+            if (fallback.LastConsumedReservation is { } consumed)
+            {
+                builder.Add(CreateFallbackTailYieldReservationDescriptor(
+                    state,
+                    retryOperation,
+                    consumed,
+                    "release_reservation_consumed",
+                    fallback.LastConsumingInstallReceipt));
+            }
+        }
+
+        return;
+
+        void AddPeerProof(
+            string role,
+            FileTransferFallbackTailPeerProofReceipt? receipt)
+        {
+            if (receipt is { } exact)
+            {
+                builder.Add(CreateFallbackTailYieldPeerProofDescriptor(
+                    state,
+                    role,
+                    exact));
+            }
+        }
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateFallbackTailYieldOperationDescriptor(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldOperation operation,
+            string role)
+    {
+        var receipts = CreateFallbackTailYieldReceiptSnapshots(operation);
+        var latest = receipts.IsDefaultOrEmpty ? null : receipts[^1];
+        var decision = operation.Decision;
+        var authorityId = decision.AuthorityId.ToString();
+        return new CoordinatorOperationDescriptor(
+            "fallback_tail_yield",
+            decision.YieldKind.ToString(),
+            authorityId,
+            decision.PredecessorAuthorityId?.ToString() ?? "(none)",
+            decision.YieldGeneration,
+            operation.PairingState.ToString(),
+            latest?.CommandIdentity ?? $"{authorityId}:yield",
+            latest?.CommandGeneration ?? decision.YieldGeneration,
+            latest?.CommandFingerprint ?? CalculateSnapshotFingerprint(decision),
+            latest?.ReceiptIdentity ?? "(none)",
+            latest?.ReceiptGeneration ?? 0,
+            latest?.ReceiptStatus ?? "(none)",
+            latest?.ReceiptFingerprint ?? "(none)",
+            latest?.ReceiptValidated ?? false,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "fallback_tail_yield",
+                role,
+                authorityId,
+                decision.YieldGeneration,
+                decision.YieldKind.ToString()),
+            FallbackTailYield: CreateFallbackTailYieldSnapshot(
+                state,
+                role,
+                operation,
+                receipts));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateFallbackTailYieldPeerProofDescriptor(
+            FileTransferCoordinatorState state,
+            string role,
+            FileTransferFallbackTailPeerProofReceipt receipt)
+    {
+        var proof = receipt.Proof;
+        var authorityId = proof.AuthorityId.ToString();
+        var generation = proof.YieldGeneration;
+        var exactReceipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "peer_proof",
+            $"{authorityId}:peer_proof",
+            generation,
+            CalculateSnapshotFingerprint(proof),
+            receipt.ObservationIdentity,
+            generation,
+            "Observed",
+            "fallback_tail_peer_proof_retained",
+            CalculateSnapshotFingerprint(receipt),
+            !receipt.IsDefault);
+        var boundary = CreateFallbackTailYieldScopeBoundary(
+            receipt.ObservationScope);
+        return new CoordinatorOperationDescriptor(
+            "fallback_tail_yield",
+            "PeerProof",
+            authorityId,
+            proof.PredecessorAuthorityId?.ToString() ?? "(none)",
+            generation,
+            "Pending",
+            exactReceipt.CommandIdentity,
+            exactReceipt.CommandGeneration,
+            exactReceipt.CommandFingerprint,
+            exactReceipt.ReceiptIdentity,
+            exactReceipt.ReceiptGeneration,
+            exactReceipt.ReceiptStatus,
+            exactReceipt.ReceiptFingerprint,
+            exactReceipt.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "fallback_tail_yield",
+                role,
+                authorityId,
+                generation,
+                "PeerProof"),
+            FallbackTailYield:
+                new FileTransferCoordinatorFallbackTailYieldOperationSnapshot(
+                    role,
+                    boundary,
+                    boundary,
+                    boundary,
+                    "PeerProof",
+                    "Pending",
+                    receipt.ObservationScope.OwnerKey,
+                    receipt.ObservationScope.PairKey,
+                    "(none)",
+                    "(none)",
+                    authorityId,
+                    generation,
+                    receipt.ObservationIdentity,
+                    proof.FrameFingerprint,
+                    0,
+                    "(none)",
+                    0,
+                    "(none)",
+                    proof.PredecessorAuthorityId?.ToString() ?? "(none)",
+                    false,
+                    0,
+                    proof.TransportEpoch,
+                    proof.TransportEpoch,
+                    0,
+                    "(none)",
+                    0,
+                    0,
+                    0,
+                    "(none)",
+                    ImmutableArray.Create(exactReceipt)));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateFallbackTailYieldReauthorizationDescriptor(
+            FileTransferCoordinatorState state,
+            FallbackTailYieldTransportEpochReauthorization reauthorization,
+            string role,
+            string status,
+            FileTransferFallbackTailPeerProofReceipt? peerProof,
+            string? reason = null)
+    {
+        var authorityId = reauthorization.PredecessorDecision.AuthorityId.ToString();
+        var generation = reauthorization.ReauthorizationGeneration;
+        var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "transport_reauthorization",
+            $"{authorityId}:reauthorization:{generation}",
+            generation,
+            CalculateSnapshotFingerprint(reauthorization),
+            $"{authorityId}:reauthorization:{generation}:{status}",
+            generation,
+            status,
+            reason ?? reauthorization.Reason,
+            CalculateSnapshotFingerprint(new
+            {
+                reauthorization,
+                peerProof,
+                status,
+                reason,
+            }),
+            !reauthorization.IsDefault);
+        var source = CreateFallbackTailYieldReauthorizationSourceBoundary(
+            reauthorization);
+        var target = CreateFallbackTailYieldReauthorizationTargetBoundary(
+            reauthorization);
+        return new CoordinatorOperationDescriptor(
+            "fallback_tail_yield",
+            "TransportEpochReauthorization",
+            authorityId,
+            reauthorization.PredecessorDecision.PredecessorAuthorityId?.ToString() ??
+                "(none)",
+            generation,
+            status,
+            receipt.CommandIdentity,
+            receipt.CommandGeneration,
+            receipt.CommandFingerprint,
+            receipt.ReceiptIdentity,
+            receipt.ReceiptGeneration,
+            receipt.ReceiptStatus,
+            receipt.ReceiptFingerprint,
+            receipt.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "fallback_tail_yield",
+                role,
+                authorityId,
+                generation,
+                "TransportEpochReauthorization"),
+            FallbackTailYield:
+                new FileTransferCoordinatorFallbackTailYieldOperationSnapshot(
+                    role,
+                    source,
+                    target,
+                    target,
+                    reauthorization.PredecessorDecision.YieldKind.ToString(),
+                    status,
+                    reauthorization.SourceOwnerKey,
+                    reauthorization.SourcePairKey,
+                    "(none)",
+                    "(none)",
+                    peerProof?.Proof.AuthorityId.ToString() ?? "(none)",
+                    peerProof?.Proof.YieldGeneration ?? 0,
+                    peerProof?.ObservationIdentity ?? "(none)",
+                    peerProof?.Proof.FrameFingerprint ?? "(none)",
+                    0,
+                    "(none)",
+                    0,
+                    "(none)",
+                    reauthorization.PredecessorDecision.AuthorityId.ToString(),
+                    false,
+                    generation,
+                    reauthorization.SourceTransportEpoch,
+                    reauthorization.TargetTransportEpoch,
+                    0,
+                    "(none)",
+                    0,
+                    0,
+                    0,
+                    reason ?? "(none)",
+                    ImmutableArray.Create(receipt)));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateFallbackTailYieldReservationDescriptor(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldOperation operation,
+            FileTransferFallbackTailPairedReleaseReservation reservation,
+            string role,
+            RuntimeUnlockRetryDispatchInstallReceipt? installReceipt)
+    {
+        var authorityId = operation.Decision.AuthorityId.ToString();
+        var consumed = string.Equals(
+            role,
+            "release_reservation_consumed",
+            StringComparison.Ordinal);
+        var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            consumed ? "release_consumption" : "release_reservation",
+            $"{authorityId}:reservation:{reservation.ReservationGeneration}",
+            reservation.ReservationGeneration,
+            CalculateSnapshotFingerprint(reservation),
+            consumed
+                ? $"{reservation.RetryAuthority.AuthorityId}:install:{installReceipt?.InstallGeneration ?? 0}"
+                : $"{authorityId}:reservation:{reservation.ReservationGeneration}",
+            consumed
+                ? installReceipt?.InstallGeneration ?? 0
+                : reservation.ReservationGeneration,
+            consumed ? "Consumed" : "Reserved",
+            consumed
+                ? "fallback_tail_paired_release_consumed"
+                : "fallback_tail_paired_release_reserved",
+            CalculateSnapshotFingerprint(consumed ? installReceipt : reservation),
+            !reservation.IsDefault && (!consumed ||
+                installReceipt is { IsDefault: false }));
+        return CreateFallbackTailYieldChildDescriptor(
+            state,
+            operation,
+            role,
+            "PairedReleaseReservation",
+            reservation.ReservationGeneration,
+            consumed ? "Consumed" : "Reserved",
+            reservation,
+            consumed ? installReceipt : reservation,
+            receipt.ReceiptStatus,
+            receipt.ReceiptValidated,
+            receipt);
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateFallbackTailYieldChildDescriptor(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackTailYieldOperation operation,
+            string role,
+            string kind,
+            long generation,
+            string status,
+            object command,
+            object? receipt,
+            string receiptStatus,
+            bool receiptValidated = false,
+            FileTransferCoordinatorReceiptTransitionSnapshot?
+                exactReceipt = null)
+    {
+        var authorityId = operation.Decision.AuthorityId.ToString();
+        var receiptSnapshot = exactReceipt ??
+            new FileTransferCoordinatorReceiptTransitionSnapshot(
+                kind,
+                $"{authorityId}:{role}:{generation}",
+                generation,
+                CalculateSnapshotFingerprint(command),
+                receipt is null
+                    ? "(none)"
+                    : $"{authorityId}:{role}:{generation}:receipt",
+                receipt is null ? 0 : generation,
+                receiptStatus,
+                status,
+                receipt is null
+                    ? "(none)"
+                    : CalculateSnapshotFingerprint(receipt),
+                receiptValidated);
+        var snapshot = CreateFallbackTailYieldSnapshot(
+            state,
+            role,
+            operation,
+            ImmutableArray.Create(receiptSnapshot));
+        return new CoordinatorOperationDescriptor(
+            "fallback_tail_yield",
+            kind,
+            authorityId,
+            operation.Decision.PredecessorAuthorityId?.ToString() ?? "(none)",
+            generation,
+            status,
+            receiptSnapshot.CommandIdentity,
+            receiptSnapshot.CommandGeneration,
+            receiptSnapshot.CommandFingerprint,
+            receiptSnapshot.ReceiptIdentity,
+            receiptSnapshot.ReceiptGeneration,
+            receiptSnapshot.ReceiptStatus,
+            receiptSnapshot.ReceiptFingerprint,
+            receiptSnapshot.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "fallback_tail_yield",
+                role,
+                authorityId,
+                generation,
+                kind),
+            FallbackTailYield: snapshot with
+            {
+                ReservationGeneration = role.StartsWith(
+                    "release_reservation_",
+                    StringComparison.Ordinal)
+                    ? generation
+                    : snapshot.ReservationGeneration,
+                ReservedRetryAuthorityId = command is
+                    FileTransferFallbackTailPairedReleaseReservation reservation
+                    ? reservation.RetryAuthority.AuthorityId.ToString()
+                    : snapshot.ReservedRetryAuthorityId,
+                ConsumingInstallGeneration = receipt is
+                    RuntimeUnlockRetryDispatchInstallReceipt install
+                    ? install.InstallGeneration
+                    : snapshot.ConsumingInstallGeneration,
+                RetryHoldGeneration = command is
+                    FileTransferFallbackTailYieldRetryDispatchHold hold
+                    ? hold.HoldGeneration
+                    : snapshot.RetryHoldGeneration,
+                RetryRecheckGeneration = command switch
+                {
+                    FileTransferFallbackTailYieldRetryDispatchRecheckCommand recheck =>
+                        recheck.RecheckGeneration,
+                    FileTransferFallbackTailYieldRetryDispatchRecheckReceipt recheckReceipt =>
+                        recheckReceipt.Command.RecheckGeneration,
+                    _ => snapshot.RetryRecheckGeneration,
+                },
+            });
+    }
+
+    private static FileTransferCoordinatorFallbackTailYieldOperationSnapshot
+        CreateFallbackTailYieldSnapshot(
+            FileTransferCoordinatorState state,
+            string role,
+            FileTransferFallbackTailYieldOperation operation,
+            ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+                receipts)
+    {
+        var fallback = state.PersistentState.FallbackTailYield;
+        var source = CreateFallbackTailYieldScopeBoundary(operation.Scope);
+        var effectiveScope = GetEffectiveFallbackTailYieldScope(operation);
+        var effective = CreateFallbackTailYieldScopeBoundary(effectiveScope);
+        var reauthorization = operation.SourceReauthorization?.Reauthorization;
+        var reservation = fallback.CurrentReservation ??
+                          fallback.LastConsumedReservation;
+        return new(
+            role,
+            source,
+            effective,
+            effective,
+            operation.Decision.YieldKind.ToString(),
+            operation.PairingState.ToString(),
+            effectiveScope.OwnerKey,
+            effectiveScope.PairKey,
+            operation.LocalProof?.ProofIdentity ?? "(none)",
+            operation.LocalProof?.FrameFingerprint ?? "(none)",
+            operation.PeerProof?.Proof.AuthorityId.ToString() ?? "(none)",
+            operation.PeerProof?.Proof.YieldGeneration ?? 0,
+            operation.PeerProof?.ObservationIdentity ?? "(none)",
+            operation.PeerProof?.Proof.FrameFingerprint ?? "(none)",
+            operation.PairedRelease?.PairingGeneration ?? 0,
+            operation.PairedRelease?.ReleaseAuthorityId.ToString() ?? "(none)",
+            operation.PairedRelease?.ReleaseGeneration ?? 0,
+            operation.PairedRelease?.ReleaseOutcome ?? "(none)",
+            operation.FailedYieldSupersession?.FailedDecision.AuthorityId
+                .ToString() ?? "(none)",
+            operation.FailedYieldSupersession?.CarriedPeerProof ?? false,
+            reauthorization?.ReauthorizationGeneration ?? 0,
+            reauthorization?.SourceTransportEpoch ?? source.TransportEpoch,
+            reauthorization?.TargetTransportEpoch ?? effective.TransportEpoch,
+            reservation?.ReservationGeneration ?? 0,
+            reservation?.RetryAuthority.AuthorityId.ToString() ?? "(none)",
+            fallback.LastConsumingInstallReceipt?.InstallGeneration ?? 0,
+            fallback.CurrentRetryDispatchHold?.HoldGeneration ?? 0,
+            fallback.PendingRetryDispatchRecheckCommand?.RecheckGeneration ??
+                fallback.LastRetryDispatchRecheckReceipt?.Command
+                    .RecheckGeneration ?? 0,
+            operation.InvalidationReason ?? "(none)",
+            receipts);
+    }
+
+    private static ImmutableArray<
+        FileTransferCoordinatorReceiptTransitionSnapshot>
+        CreateFallbackTailYieldReceiptSnapshots(
+            FileTransferFallbackTailYieldOperation operation)
+    {
+        var builder = ImmutableArray.CreateBuilder<
+            FileTransferCoordinatorReceiptTransitionSnapshot>();
+        var decision = operation.Decision;
+        var authorityId = decision.AuthorityId.ToString();
+        builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "yield",
+            $"{authorityId}:yield",
+            decision.YieldGeneration,
+            CalculateSnapshotFingerprint(decision),
+            $"{authorityId}:yield:decision",
+            decision.YieldGeneration,
+            decision.Accepted ? "Accepted" : "Rejected",
+            decision.Reason,
+            CalculateSnapshotFingerprint(new
+            {
+                decision.Accepted,
+                decision.Reason,
+                decision.YieldKind,
+                decision.OwnerKey,
+                decision.PairKey,
+            }),
+            decision.Accepted && !decision.IsDefault));
+        if (operation.LocalProof is { } local)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "local_proof",
+                $"{authorityId}:local_proof",
+                decision.YieldGeneration,
+                CalculateSnapshotFingerprint(local.Decision),
+                local.ProofIdentity,
+                decision.YieldGeneration,
+                "Observed",
+                "fallback_tail_local_proof_observed",
+                CalculateSnapshotFingerprint(local),
+                !local.IsDefault && local.Decision == decision));
+        }
+        if (operation.PeerProof is { } peer)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "peer_proof",
+                $"{peer.Proof.AuthorityId}:peer_proof",
+                peer.Proof.YieldGeneration,
+                CalculateSnapshotFingerprint(peer.Proof),
+                peer.ObservationIdentity,
+                peer.Proof.YieldGeneration,
+                "Observed",
+                "fallback_tail_peer_proof_observed",
+                CalculateSnapshotFingerprint(peer),
+                !peer.IsDefault));
+        }
+        if (operation.PairedRelease is { } release)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "paired_release",
+                $"{authorityId}:pair:{release.PairingGeneration}",
+                release.PairingGeneration,
+                CalculateSnapshotFingerprint(new
+                {
+                    release.LocalProof,
+                    release.PeerProof,
+                }),
+                $"{authorityId}:pair:{release.PairingGeneration}:receipt",
+                release.PairingGeneration,
+                "Paired",
+                release.ReleaseOutcome,
+                CalculateSnapshotFingerprint(release),
+                !release.IsDefault));
+        }
+        if (operation.PairedReleaseCarryForward is { } carryForward)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "carry_forward",
+                $"{authorityId}:carry:{carryForward.TargetScope.TransportEpoch}",
+                carryForward.TargetScope.TransportEpoch,
+                CalculateSnapshotFingerprint(carryForward.SourceScope),
+                $"{authorityId}:carry:{carryForward.TargetScope.TransportEpoch}:receipt",
+                carryForward.TargetScope.TransportEpoch,
+                "Carried",
+                carryForward.Reason,
+                CalculateSnapshotFingerprint(carryForward),
+                !carryForward.IsDefault));
+        }
+        if (operation.SourceReauthorization is { } sourceReauthorization)
+        {
+            var exact = sourceReauthorization.Reauthorization;
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "transport_reauthorization",
+                $"{authorityId}:reauthorization:{exact.ReauthorizationGeneration}",
+                exact.ReauthorizationGeneration,
+                CalculateSnapshotFingerprint(exact),
+                $"{authorityId}:reauthorization:{exact.ReauthorizationGeneration}:receipt",
+                exact.ReauthorizationGeneration,
+                "Applied",
+                exact.Reason,
+                CalculateSnapshotFingerprint(sourceReauthorization),
+                !sourceReauthorization.IsDefault));
+        }
+        if (operation.FailedYieldSupersession is { } supersession)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "failed_supersession",
+                $"{supersession.FailedDecision.AuthorityId}:supersede",
+                supersession.FailedDecision.YieldGeneration,
+                CalculateSnapshotFingerprint(supersession.FailedDecision),
+                $"{authorityId}:supersession:receipt",
+                decision.YieldGeneration,
+                "Superseded",
+                supersession.Reason,
+                CalculateSnapshotFingerprint(supersession),
+                !supersession.IsDefault));
+        }
+        if (!string.IsNullOrWhiteSpace(operation.InvalidationReason))
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "invalidation",
+                $"{authorityId}:invalidate",
+                decision.YieldGeneration,
+                CalculateSnapshotFingerprint(operation),
+                $"{authorityId}:invalidate:receipt",
+                decision.YieldGeneration,
+                "Invalidated",
+                operation.InvalidationReason,
+                CalculateSnapshotFingerprint(new
+                {
+                    operation.Decision,
+                    operation.InvalidationReason,
+                }),
+                true));
+        }
+        return builder.ToImmutable();
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateFallbackTailYieldScopeBoundary(
+            FileTransferFallbackTailYieldScope scope)
+        => new(
+            scope.RouteToken,
+            scope.ProtocolVersion,
+            scope.LiveRouteEpoch,
+            scope.RoutePublication?.PublicationGeneration ?? 0,
+            scope.RoutePublication?.RouteCommitGeneration ?? 0,
+            scope.RuntimeOwner.RuntimeGeneration,
+            scope.TerminalGeneration,
+            scope.LegGeneration,
+            scope.TransportEpoch,
+            scope.BridgeRecoveryGeneration,
+            scope.CheckpointGeneration,
+            scope.CheckpointRequestIdSnapshot,
+            scope.DataSessionIdentity ?? "(none)",
+            scope.DataSessionGeneration);
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateFallbackTailYieldReauthorizationSourceBoundary(
+            FallbackTailYieldTransportEpochReauthorization reauthorization)
+        => new(
+            reauthorization.SourceRuntimeOwner.RouteToken,
+            reauthorization.SourceRuntimeOwner.ProtocolVersion,
+            reauthorization.SourceRuntimeOwner.LiveRouteEpoch,
+            reauthorization.SourceRoutePublicationToken.PublicationGeneration,
+            reauthorization.SourceRoutePublicationToken.RouteCommitGeneration ?? 0,
+            reauthorization.SourceRuntimeOwner.RuntimeGeneration,
+            reauthorization.SourceRuntimeOwner.TerminalGeneration,
+            reauthorization.PredecessorDecision.CurrentLegGeneration,
+            reauthorization.SourceTransportEpoch,
+            reauthorization.PredecessorDecision.CurrentBridgeRecoveryGeneration,
+            reauthorization.PredecessorDecision.CheckpointLease?
+                .CheckpointGeneration ?? 0,
+            reauthorization.PredecessorDecision.CheckpointRequestIdSnapshot,
+            reauthorization.TargetDataSessionIdentity ?? "(none)",
+            reauthorization.TargetDataSessionGeneration);
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateFallbackTailYieldReauthorizationTargetBoundary(
+            FallbackTailYieldTransportEpochReauthorization reauthorization)
+        => new(
+            reauthorization.TargetRuntimeOwner.RouteToken,
+            reauthorization.TargetRuntimeOwner.ProtocolVersion,
+            reauthorization.TargetRuntimeOwner.LiveRouteEpoch,
+            reauthorization.TargetRoutePublicationToken?.PublicationGeneration ?? 0,
+            reauthorization.TargetRoutePublicationToken?.RouteCommitGeneration ?? 0,
+            reauthorization.TargetRuntimeOwner.RuntimeGeneration,
+            reauthorization.TargetTerminalGeneration,
+            reauthorization.TargetLegGeneration,
+            reauthorization.TargetTransportEpoch,
+            reauthorization.TargetBridgeRecoveryGeneration,
+            reauthorization.TargetCheckpointGeneration,
+            reauthorization.TargetCheckpointRequestIdSnapshot,
+            reauthorization.TargetDataSessionIdentity ?? "(none)",
+            reauthorization.TargetDataSessionGeneration);
 
     private static CoordinatorOperationDescriptor
         CreateRuntimeUnlockRetryAttemptDescriptor(
@@ -3474,5 +4461,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot?
             RuntimeUnlockRetry = null,
         FileTransferCoordinatorReceiveRecoveryOperationSnapshot?
-            ReceiveRecovery = null);
+            ReceiveRecovery = null,
+        FileTransferCoordinatorFallbackTailYieldOperationSnapshot?
+            FallbackTailYield = null);
 }
