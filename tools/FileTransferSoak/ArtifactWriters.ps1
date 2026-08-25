@@ -63760,6 +63760,19 @@ function Get-FileTransferRecoveryFailureClassification {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'route_transition'
+    $snapshotRuntimeUnlockRetryAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'runtime_unlock_retry_lifecycle'
+    $snapshotRuntimeUnlockRetryProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'runtime_unlock_retry_lifecycle' `
+            -TaxonomyClasses @(
+                'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
+                'runtime_unlock_retry_dispatch_contract_unsettled',
+                'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
+                'runtime_unlock_retry_dispatch_chain_closure_incomplete')
     [object[]]$submissionBarrierRetirementEvents = @($allEvents | Where-Object {
         $_.EventName -in @(
             'filetransfer_outbound_physical_send_lease_retired',
@@ -67501,8 +67514,10 @@ function Get-FileTransferRecoveryFailureClassification {
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete' `
-        -Events @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents | Where-Object {
-            [int64]$_.Sequence -notin $fileTransferReceiveRecoveryOperationPhase2EvidenceSequences
+        -Events $(if ($snapshotRuntimeUnlockRetryAuthoritative) { @() } else {
+            @($runtimeUnlockRetryDispatchInstallProof.GrantEvidenceUnresolvedCandidateEvents | Where-Object {
+                [int64]$_.Sequence -notin $fileTransferReceiveRecoveryOperationPhase2EvidenceSequences
+            })
         })
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
@@ -68475,8 +68490,30 @@ function Get-FileTransferRecoveryFailureClassification {
         }
     }
 
-    [object[]]$firstProofChainFailureCandidates =
-        @($proofChainFailureCandidates.ToArray())
+    if ($snapshotRuntimeUnlockRetryAuthoritative) {
+        foreach ($candidate in @(
+                $snapshotRuntimeUnlockRetryProof.UnresolvedCandidateRecords)) {
+            Add-FileTransferProofChainFailureCandidates `
+                -Candidates $proofChainFailureCandidates `
+                -Class ([string]$candidate.Class) `
+                -Events @($candidate.Event) `
+                -DefaultReason ([string]$candidate.Reason) `
+                -UseDefaultReason
+        }
+    }
+
+    $snapshotRuntimeUnlockRetryPureClasses = @(
+        'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete',
+        'runtime_unlock_retry_dispatch_contract_unsettled',
+        'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
+        'runtime_unlock_retry_dispatch_chain_closure_incomplete')
+    [object[]]$firstProofChainFailureCandidates = @(
+        $proofChainFailureCandidates.ToArray() |
+            Where-Object {
+                -not $snapshotRuntimeUnlockRetryAuthoritative -or
+                $_.Class -notin $snapshotRuntimeUnlockRetryPureClasses -or
+                [string]$_.SourcePath -ceq '(coordinator_snapshot)'
+            })
     $initialResponderTerminalWithoutDrainReceiptUnresolved = @(
         $fileTransferRouteTransitionProof.UnresolvedCandidateRecords |
             Where-Object {
@@ -68553,7 +68590,8 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_settlement_unaccepted'
     }
-    elseif ($runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.Count -gt 0) {
+    elseif (-not $snapshotRuntimeUnlockRetryAuthoritative -and
+        $runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_chain_closure_incomplete'
     }
     elseif ($runtimeUnlockRetryDispatchInvalidFreshGrantEvents.Count -gt 0) {
@@ -68562,10 +68600,12 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget'
     }
-    elseif ($runtimeUnlockRetryDispatchUnsettledAuthorityNonReceiveRecoveryOperationEvents.Count -gt 0) {
+    elseif (-not $snapshotRuntimeUnlockRetryAuthoritative -and
+        $runtimeUnlockRetryDispatchUnsettledAuthorityNonReceiveRecoveryOperationEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_contract_unsettled'
     }
-    elseif ($runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount -gt 0) {
+    elseif (-not $snapshotRuntimeUnlockRetryAuthoritative -and
+        $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
     }
     elseif ($runtimeUnlockRetryPostFallbackReceiveRecoveryHoldProof.UnresolvedCount -gt 0) {
@@ -68705,7 +68745,8 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_settlement_handoff_bypassed'
     }
-    elseif ($runtimeUnlockRetryDispatchProofVerdict -eq 'fail') {
+    elseif (-not $snapshotRuntimeUnlockRetryAuthoritative -and
+        $runtimeUnlockRetryDispatchProofVerdict -eq 'fail') {
         $class = 'runtime_unlock_retry_dispatch_missing'
     }
     elseif ($regularV4RecoveryPredecessorSettlementClosedSuccessorEvents.Count -gt 0) {
@@ -72108,6 +72149,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_boundary_hash={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.BoundaryHash)) { '(none)' } else { $snapshotEvaluation.BoundaryHash }))),
         ("coordinator_snapshot_legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount)
         ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
+        ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount)
     ) + $verdictLines
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
     $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
@@ -72125,6 +72167,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("boundary_hash={0}" -f $snapshotEvaluation.BoundaryHash),
         ("legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount)
         ("route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
+        ("runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount)
     ) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transfer-terminal-summary.txt' -Lines (New-FileTransferTerminalSummaryLines -Summary $Summary -GateResult $GateResult) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-summary.txt' -Lines (New-FileTransferThroughputSummaryLines -Summary $Summary) | Out-Null
@@ -72149,7 +72192,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_boundary_count={0}" -f $snapshotEvaluation.BoundaryCount),
         ("coordinator_snapshot_boundary_hash={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.BoundaryHash)) { '(none)' } else { $snapshotEvaluation.BoundaryHash }))),
         ("coordinator_snapshot_legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount),
-        ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount)
+        ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount),
+        ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount)
     )
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines $routeConsistencyLines | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null

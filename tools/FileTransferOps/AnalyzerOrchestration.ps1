@@ -4680,6 +4680,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("coordinator_snapshot_boundary_hash={0}" -f ($(if ([string]::IsNullOrWhiteSpace($snapshotEvaluation.BoundaryHash)) { '(none)' } else { $snapshotEvaluation.BoundaryHash }))),
         ("coordinator_snapshot_legacy_selection_count={0}" -f $snapshotEvaluation.LegacySelectionCount),
         ("coordinator_snapshot_route_family_legacy_selection_count={0}" -f $snapshotEvaluation.RouteFamilyLegacySelectionCount),
+        ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount),
         ("selected_routes={0}" -f $selectedRouteText),
         ("selected_route_sequence={0}" -f $selectedRouteText),
         ("selected_route_changes={0}" -f $selectedRouteText),
@@ -6021,6 +6022,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         coordinator_snapshot_boundary_hash = $snapshotEvaluation.BoundaryHash
         coordinator_snapshot_legacy_selection_count = $snapshotEvaluation.LegacySelectionCount
         coordinator_snapshot_route_family_legacy_selection_count = $snapshotEvaluation.RouteFamilyLegacySelectionCount
+        coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
         coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
         coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
         coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
@@ -9946,6 +9948,7 @@ function Invoke-FileTransferRetainedAnalysis {
             coordinator_snapshot_boundary_hash = $fullSnapshotEvaluation.BoundaryHash
             coordinator_snapshot_legacy_selection_count = $fullSnapshotEvaluation.LegacySelectionCount
             coordinator_snapshot_route_family_legacy_selection_count = $fullSnapshotEvaluation.RouteFamilyLegacySelectionCount
+            coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $fullSnapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
             coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
             coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
             coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash

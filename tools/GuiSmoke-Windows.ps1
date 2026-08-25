@@ -6166,6 +6166,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'route_transition')
+    $snapshotRuntimeUnlockRetryAuthoritative =
+        $snapshotEvaluatorAvailable -and
+        (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'runtime_unlock_retry_lifecycle')
     if ($coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
         $coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
         if ($null -ne $TestMetrics) {
@@ -6196,7 +6201,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ($snapshotRouteRuntimeAuthoritative -and
          $boundaryFamilies -contains 'route_runtime') -or
         ($snapshotRouteTransitionAuthoritative -and
-         $boundaryFamilies -contains 'route_transition'))
+         $boundaryFamilies -contains 'route_transition') -or
+        ($snapshotRuntimeUnlockRetryAuthoritative -and
+         $boundaryFamilies -contains 'runtime_unlock_retry_lifecycle'))
     if ($snapshotOwnsBoundary) {
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase ([string]$boundary.phase) `
@@ -28959,11 +28966,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $runtimeUnlockRetryHeldByRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery')
     $runtimeUnlockRetryReleasedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_released_after_regular_v4_receive_recovery')
     $runtimeUnlockRetryRejectedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery')
-    $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_missing_after_authority_granted')
+    $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted =
+        -not $snapshotRuntimeUnlockRetryAuthoritative -and
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_missing_after_authority_granted'))
     $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatch =
-        Test-TunaGuiRuntimeUnlockMissingDispatchSuccessorUnresolved -Lines $evidenceLines
-    $runtimeUnlockRetryDispatchUnsettledReason =
+        -not $snapshotRuntimeUnlockRetryAuthoritative -and
+        (Test-TunaGuiRuntimeUnlockMissingDispatchSuccessorUnresolved -Lines $evidenceLines)
+    $runtimeUnlockRetryDispatchUnsettledReason = if (
+        $snapshotRuntimeUnlockRetryAuthoritative) {
+        '(none)'
+    }
+    else {
         Get-TunaGuiRuntimeUnlockUnsettledGrantReason -Lines $evidenceLines
+    }
     $runtimeUnlockRetrySourcePublicationMismatch = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_authority_rejected', 'decision_reason=retry_dispatch_source_publication_mismatch')
     $runtimeUnlockRetryDispatchAuthorityTupleMismatch =
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_decision_tuple_rejected', 'decision_reason=runtime_unlock_retry_dispatch_authority_tuple_mismatch')) -or

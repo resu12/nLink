@@ -1698,6 +1698,7 @@ function New-RouteAcceptanceRunResult {
         coordinatorSnapshotBoundaryHash = ''
         coordinatorSnapshotLegacySelectionCount = 1L
         coordinatorSnapshotRouteFamilyLegacySelectionCount = 2L
+        coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount = 1L
         coordinatorSnapshotFullCompactParityVerdict = 'missing'
         coordinatorSnapshotFullCompactParityFailureReason = ''
         coordinatorSnapshotFullBoundaryHash = ''
@@ -3463,6 +3464,7 @@ function Assert-Phase4RouteSummary {
     $Result.coordinatorSnapshotBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_boundary_hash' -DefaultValue ''
     $Result.coordinatorSnapshotLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotRouteFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_route_family_legacy_selection_count' -DefaultValue '2')
+    $Result.coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotFullCompactParityVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_verdict' -DefaultValue 'missing'
     $Result.coordinatorSnapshotFullCompactParityFailureReason = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_failure_reason' -DefaultValue ''
     $Result.coordinatorSnapshotFullBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_boundary_hash' -DefaultValue ''
@@ -10656,6 +10658,7 @@ function New-RouteAcceptanceSummaryRunDto {
         coordinatorSnapshotBoundaryHash = [string]$Result.coordinatorSnapshotBoundaryHash
         coordinatorSnapshotLegacySelectionCount = [long]$Result.coordinatorSnapshotLegacySelectionCount
         coordinatorSnapshotRouteFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotRouteFamilyLegacySelectionCount
+        coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount
         coordinatorSnapshotFullCompactParityVerdict = [string]$Result.coordinatorSnapshotFullCompactParityVerdict
         coordinatorSnapshotFullCompactParityFailureReason = [string]$Result.coordinatorSnapshotFullCompactParityFailureReason
         coordinatorSnapshotFullBoundaryHash = [string]$Result.coordinatorSnapshotFullBoundaryHash
@@ -12641,6 +12644,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.coordinator_snapshot_boundary_hash={1}" -f $prefix, $result.coordinatorSnapshotBoundaryHash)
         $textLines += ("{0}.coordinator_snapshot_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotLegacySelectionCount)
         $textLines += ("{0}.coordinator_snapshot_route_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotRouteFamilyLegacySelectionCount)
+        $textLines += ("{0}.coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount)
         $textLines += ("{0}.coordinator_snapshot_full_compact_parity_verdict={1}" -f $prefix, $result.coordinatorSnapshotFullCompactParityVerdict)
         $textLines += ("{0}.coordinator_snapshot_full_compact_parity_failure_reason={1}" -f $prefix, $result.coordinatorSnapshotFullCompactParityFailureReason)
         $textLines += ("{0}.coordinator_snapshot_full_boundary_hash={1}" -f $prefix, $result.coordinatorSnapshotFullBoundaryHash)

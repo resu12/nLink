@@ -1603,6 +1603,12 @@ internal readonly record struct RuntimeUnlockRetryLifecycleTransitionDecision(
     public RuntimeUnlockRetryDispatchSettlementDecision?
         PredecessorSettlementDecision { get; init; }
 
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
+
     public bool Accepted =>
         Status is
             RuntimeUnlockRetryLifecycleTransitionStatus.Accepted or
@@ -1615,6 +1621,12 @@ internal readonly record struct RuntimeUnlockRetryLifecycleInstallReceiptDecisio
     RuntimeUnlockRetryDispatchInstallReceipt? Receipt = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 
     public bool Accepted =>
         Status is
@@ -1630,6 +1642,12 @@ internal readonly record struct RuntimeUnlockRetryLifecycleDeadlineDecision(
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
 
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
+
     public bool SettlementIssued =>
         Status == RuntimeUnlockRetryLifecycleTransitionStatus.Accepted &&
         Settlement is { IsDefault: false };
@@ -1641,6 +1659,12 @@ internal readonly record struct RuntimeUnlockRetryLifecycleScopeInvalidationDeci
     RuntimeUnlockRetryDispatchScopeInvalidationCommand? Command = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 
     public bool Accepted =>
         Status is
@@ -1665,6 +1689,12 @@ internal readonly record struct RuntimeUnlockRetryDispatchSuccessorDecision(
     RuntimeUnlockRetryDispatchDecision? AuthorizationDecision = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 
     public bool Requested =>
         (Status is
@@ -3481,10 +3511,15 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockRetryLifecycleTransitionStatus status,
             string reason,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleTransitionDecision(status, reason)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(ObserveRuntimeUnlockRetryDispatchStage),
+                stageResult,
+                stageResult.Decision.Contract?.Authority.AuthorityId);
 
         if (state.IsTerminal)
         {
@@ -3569,7 +3604,7 @@ internal static partial class FileTransferCoordinator
             if (pending.StageExpiresUtcMs > 0 &&
                 observedUtcMs >= pending.StageExpiresUtcMs)
             {
-                return EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+                return EvaluateRuntimeUnlockRetryDispatchStageExpiryCore(
                     state,
                     pending.Authority.AuthorityId,
                     observedUtcMs);
@@ -3640,10 +3675,18 @@ internal static partial class FileTransferCoordinator
             string reason,
             RuntimeUnlockRetryDispatchInstallReceipt? receipt = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, receipt)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleInstallReceiptDecision(
+                    status,
+                    reason,
+                    receipt)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(IssueRuntimeUnlockRetryDispatchInstallReceipt),
+                expectedRequest,
+                stagedDecision.Contract?.Authority.AuthorityId);
 
         if (state.IsTerminal)
         {
@@ -3718,7 +3761,7 @@ internal static partial class FileTransferCoordinator
                     "retry_dispatch_install_receipt_observation_invalid");
             }
 
-            var expiry = EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+            var expiry = EvaluateRuntimeUnlockRetryDispatchStageExpiryCore(
                 state,
                 pending.Authority.AuthorityId,
                 observedUtcMs);
@@ -3798,12 +3841,17 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             RuntimeUnlockRetryDispatchSettlementDecision?
                 predecessorSettlementDecision = null)
-            => new(status, reason)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleTransitionDecision(status, reason)
             {
                 State = nextState ?? state,
                 PredecessorSettlementDecision =
                     predecessorSettlementDecision,
-            };
+            },
+                nameof(CommitRuntimeUnlockRetryDispatchInstall),
+                installResult,
+                installResult.Receipt.Authority.AuthorityId);
 
         if (state.IsTerminal)
         {
@@ -3961,7 +4009,7 @@ internal static partial class FileTransferCoordinator
             expirablePending.StageExpiresUtcMs > 0 &&
             observedUtcMs >= expirablePending.StageExpiresUtcMs)
         {
-            var expiry = EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+            var expiry = EvaluateRuntimeUnlockRetryDispatchStageExpiryCore(
                 state,
                 receipt.Authority.AuthorityId,
                 observedUtcMs);
@@ -4200,6 +4248,24 @@ internal static partial class FileTransferCoordinator
             FileTransferAuthorityId authorityId,
             long observedUtcMs)
     {
+        var decision = EvaluateRuntimeUnlockRetryDispatchStageExpiryCore(
+            state,
+            authorityId,
+            observedUtcMs);
+        return FinalizeRuntimeUnlockRetrySnapshot(
+            state,
+            decision,
+            nameof(EvaluateRuntimeUnlockRetryDispatchStageExpiry),
+            new { authorityId, observedUtcMs },
+            authorityId);
+    }
+
+    private static RuntimeUnlockRetryLifecycleTransitionDecision
+        EvaluateRuntimeUnlockRetryDispatchStageExpiryCore(
+            FileTransferCoordinatorState state,
+            FileTransferAuthorityId authorityId,
+            long observedUtcMs)
+    {
         RuntimeUnlockRetryLifecycleTransitionDecision Decision(
             RuntimeUnlockRetryLifecycleTransitionStatus status,
             string reason,
@@ -4285,10 +4351,18 @@ internal static partial class FileTransferCoordinator
             string reason,
             RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, command)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleScopeInvalidationDecision(
+                    status,
+                    reason,
+                    command)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(PrepareRuntimeUnlockRetryDispatchStageExpiry),
+                (object?)command ?? new { authorityId, observedUtcMs },
+                authorityId);
 
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
         if (lifecycle.PendingScopeInvalidationCommand is
@@ -4310,7 +4384,7 @@ internal static partial class FileTransferCoordinator
         }
 
         var expiry =
-            EvaluateRuntimeUnlockRetryDispatchStageExpiry(
+            EvaluateRuntimeUnlockRetryDispatchStageExpiryCore(
                 state,
                 authorityId,
                 observedUtcMs);
@@ -4372,10 +4446,17 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockRetryLifecycleTransitionStatus status,
             string decisionReason,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, decisionReason)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleTransitionDecision(
+                    status,
+                    decisionReason)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(InvalidateRuntimeUnlockRetryDispatchPendingAttempt),
+                new { authorityId, reason },
+                authorityId);
 
         var normalizedReason = NormalizeReason(reason);
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
@@ -4453,10 +4534,17 @@ internal static partial class FileTransferCoordinator
             string decisionReason,
             RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, decisionReason, command)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleScopeInvalidationDecision(
+                    status,
+                    decisionReason,
+                    command)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(PrepareRuntimeUnlockRetryLifecycleScopeInvalidation),
+                (object?)command ?? reason);
 
         var normalizedReason = NormalizeReason(reason);
         if (string.IsNullOrWhiteSpace(normalizedReason))
@@ -4547,10 +4635,17 @@ internal static partial class FileTransferCoordinator
             string reason,
             RuntimeUnlockRetryDispatchScopeInvalidationCommand? command = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, command)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleScopeInvalidationDecision(
+                    status,
+                    reason,
+                    command)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(CommitRuntimeUnlockRetryLifecycleScopeInvalidation),
+                receipt);
 
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
         var installedForScopeInvalidation =
@@ -4727,10 +4822,18 @@ internal static partial class FileTransferCoordinator
             string reason,
             RuntimeUnlockRetryDispatchSettlementReport? settlement = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason, settlement)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleDeadlineDecision(
+                    status,
+                    reason,
+                    settlement)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(EvaluateRuntimeUnlockRetryDispatchDeadline),
+                new { authorityId, observedUtcMs },
+                authorityId);
 
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
         if (lifecycle.PendingScopeInvalidationCommand is not null)
@@ -4799,7 +4902,7 @@ internal static partial class FileTransferCoordinator
             DispatchObserved = false,
         };
         var settlementDecision =
-            ObserveRuntimeUnlockRetryDispatchSettlement(state, settlement);
+            ObserveRuntimeUnlockRetryDispatchSettlementCore(state, settlement);
         if (settlementDecision.Status is not
             (RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted or
              RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent))
@@ -4832,10 +4935,22 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockRetryLifecycleTransitionStatus status,
             string reason,
             FileTransferCoordinatorState? nextState = null)
-            => new(status, reason)
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryLifecycleTransitionDecision(status, reason)
             {
                 State = nextState ?? state,
-            };
+            },
+                nameof(ObserveRuntimeUnlockRetryDispatchExecutionState),
+                new
+                {
+                    installReceipt,
+                    attemptPhase,
+                    offerGeneration,
+                    offerNonce,
+                    dispatchObserved,
+                },
+                installReceipt.Authority.AuthorityId);
 
         var lifecycle = GetRuntimeUnlockRetryLifecycle(state);
         if (lifecycle.PendingScopeInvalidationCommand is not null)
@@ -5002,15 +5117,18 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockRetryDispatchAuthorityRequest? request = null,
             RuntimeUnlockRetryDispatchDecision? authorizationDecision = null,
             FileTransferCoordinatorState? nextState = null)
-            => new(
-                status,
-                reason,
-                evaluation,
-                request,
-                authorizationDecision)
-            {
-                State = nextState ?? state,
-            };
+            => FinalizeRuntimeUnlockRetrySnapshot(
+                state,
+                new RuntimeUnlockRetryDispatchSuccessorDecision(
+                    status,
+                    reason,
+                    evaluation,
+                    request,
+                    authorizationDecision)
+                {
+                    State = nextState ?? state,
+                },
+                nameof(PrepareRuntimeUnlockRetryDispatchSuccessor));
 
         if (evaluation.IsDefault)
         {
@@ -5147,7 +5265,7 @@ internal static partial class FileTransferCoordinator
             missingDispatchGeneration >
                 RuntimeUnlockRetryMissingDispatchSuccessorLimit)
         {
-            var closure = CloseRuntimeUnlockRetryDispatchChain(
+            var closure = CloseRuntimeUnlockRetryDispatchChainCore(
                 state,
                 request,
                 "retry_dispatch_missing_successor_limit_exhausted");
@@ -5280,6 +5398,24 @@ internal static partial class FileTransferCoordinator
 
     internal static RuntimeUnlockRetryLifecycleTransitionDecision
         CloseRuntimeUnlockRetryDispatchChain(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthorityRequest rejectedSuccessorRequest,
+            string reason)
+    {
+        var decision = CloseRuntimeUnlockRetryDispatchChainCore(
+            state,
+            rejectedSuccessorRequest,
+            reason);
+        return FinalizeRuntimeUnlockRetrySnapshot(
+            state,
+            decision,
+            nameof(CloseRuntimeUnlockRetryDispatchChain),
+            rejectedSuccessorRequest,
+            rejectedSuccessorRequest.PredecessorAuthorityId);
+    }
+
+    private static RuntimeUnlockRetryLifecycleTransitionDecision
+        CloseRuntimeUnlockRetryDispatchChainCore(
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryDispatchAuthorityRequest rejectedSuccessorRequest,
             string reason)
@@ -15602,7 +15738,8 @@ internal static partial class FileTransferCoordinator
         FileTransferAuthorityId? releaseAuthorityId,
         int releaseGeneration,
         string releaseOutcome)
-        => AuthorizeRuntimeUnlockRetryDispatchCore(
+    {
+        var decision = AuthorizeRuntimeUnlockRetryDispatchCore(
             state,
             request,
             releaseKind,
@@ -15610,6 +15747,19 @@ internal static partial class FileTransferCoordinator
             releaseGeneration,
             releaseOutcome,
             allowCoordinatorPreparedSuccessor: false);
+        return FinalizeRuntimeUnlockRetrySnapshot(
+            state,
+            decision,
+            nameof(AuthorizeRuntimeUnlockRetryDispatch),
+            new
+            {
+                request,
+                releaseKind,
+                releaseAuthorityId,
+                releaseGeneration,
+                releaseOutcome,
+            });
+    }
 
     private static RuntimeUnlockRetryDispatchDecision
         AuthorizeRuntimeUnlockRetryDispatchCore(
@@ -15988,7 +16138,7 @@ internal static partial class FileTransferCoordinator
                     return Decision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                         "retry_dispatch_missing_successor_limit_exhausted",
-                        nextState: CloseRuntimeUnlockRetryDispatchChain(
+                        nextState: CloseRuntimeUnlockRetryDispatchChainCore(
                             state,
                             request,
                             "retry_dispatch_missing_successor_limit_exhausted").State);
@@ -16169,6 +16319,14 @@ internal static partial class FileTransferCoordinator
                 receiveRecoveryOperationGeneration,
             ReceiveRecoveryDataSessionGeneration =
                 receiveRecoveryDataSessionGeneration,
+            CheckpointGeneration =
+                state.CurrentFallbackCheckpointLease?.CheckpointGeneration ?? 0,
+            CheckpointRequestId =
+                state.CurrentFallbackCheckpointLease?.CheckpointRequestId ??
+                "(none)",
+            DataSessionIdentity =
+                state.CurrentDataSessionIdentity ?? "(none)",
+            DataSessionGeneration = state.CurrentDataSessionGeneration,
         };
         var contract = new RuntimeUnlockRetryDispatchContract(
             authority,
@@ -16244,6 +16402,20 @@ internal static partial class FileTransferCoordinator
 
     internal static RuntimeUnlockRetryDispatchSettlementDecision
         ObserveRuntimeUnlockRetryDispatchSettlement(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchSettlementReport report)
+    {
+        var decision = ObserveRuntimeUnlockRetryDispatchSettlementCore(
+            state,
+            report);
+        return FinalizeRuntimeUnlockRetrySnapshot(
+            state,
+            decision,
+            nameof(ObserveRuntimeUnlockRetryDispatchSettlement));
+    }
+
+    private static RuntimeUnlockRetryDispatchSettlementDecision
+        ObserveRuntimeUnlockRetryDispatchSettlementCore(
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryDispatchSettlementReport report)
     {

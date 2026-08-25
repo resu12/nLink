@@ -478,6 +478,215 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw 'A committed route without its exact publication effect was not selected.'
             }
 
+            $retryScope = [ordered]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6
+                liveRouteEpoch=2L; routePublicationGeneration=2L
+                routeCommitGeneration=2L; runtimeGeneration=2L
+                terminalGeneration=0L; legGeneration=2L
+                transportEpoch=3L; bridgeRecoveryGeneration=4L
+                checkpointGeneration=5L; checkpointRequestId='checkpoint-retry'
+                dataSessionIdentity='data-session-retry'; dataSessionGeneration=6L
+            }
+            function New-RetryOperation(
+                [string]$authorityId,
+                [string]$predecessorAuthorityId,
+                [string]$role,
+                [long]$authorityGeneration,
+                [string]$beforeState,
+                [string]$afterState,
+                [bool]$dispatchObserved,
+                [object[]]$receipts) {
+                [ordered]@{
+                    family='runtime_unlock_retry_lifecycle'; operationRole=$role
+                    operationKey="runtime_unlock_retry_lifecycle|$role|$authorityId|$authorityGeneration|RetryAttempt"
+                    operationKind='RetryAttempt'; authorityId=$authorityId
+                    predecessorAuthorityId=$predecessorAuthorityId
+                    operationGeneration=$authorityGeneration
+                    beforeState=$beforeState; afterState=$afterState
+                    commandIdentity=[string]$receipts[-1].commandIdentity
+                    commandGeneration=[long]$receipts[-1].commandGeneration
+                    commandFingerprint=[string]$receipts[-1].commandFingerprint
+                    receiptIdentity=[string]$receipts[-1].receiptIdentity
+                    receiptGeneration=[long]$receipts[-1].receiptGeneration
+                    receiptStatus=[string]$receipts[-1].receiptStatus
+                    receiptFingerprint=[string]$receipts[-1].receiptFingerprint
+                    receiptValidated=$true; stateApplied=$true
+                    routeRuntime=$null; routeTransition=$null
+                    runtimeUnlockRetry=[ordered]@{
+                        role=$role; sourceBoundary=$retryScope
+                        authorityGeneration=$authorityGeneration
+                        recoveryContractGeneration=7L
+                        dispatchAttemptGeneration=[int]$authorityGeneration
+                        missingDispatchSuccessorGeneration=[int]($authorityGeneration - 1L)
+                        retiredOfferGeneration=8L; offerGeneration=8L
+                        offerNonceFingerprint="nonce-$authorityGeneration"
+                        dispatchDeadlineUtcMs=9000L
+                        dispatchObserved=$dispatchObserved
+                        releaseKind='FallbackPairedYield'
+                        releaseAuthorityId='paired-release-1'; releaseGeneration=3
+                        releaseOutcome='Paired'; listenerRearmRequirement='Required'
+                        listenerExecutionMode='Default'
+                        requestActivePredecessorSupersession=$false
+                        successorAuthorityId='(none)'; receipts=$receipts
+                    }
+                }
+            }
+            function New-RetryEnvelopeLine(
+                [string]$transitionId,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [object]$operation,
+                [long]$decisionTime,
+                [string]$decisionKind = 'ObserveRuntimeUnlockRetryDispatchSettlement',
+                [string]$decisionStatus = 'Accepted',
+                [string]$decisionReason = 'retry_dispatch_settlement_accepted') {
+                $aggregate = [ordered]@{
+                    beforeStateGeneration=$beforeGeneration
+                    afterStateGeneration=$afterGeneration
+                    beforeStateFingerprint=$beforeHash
+                    afterStateFingerprint=$afterHash
+                    beforeBoundary=$retryScope; afterBoundary=$retryScope
+                    changedFamilies=@('runtime_unlock_retry_lifecycle')
+                    operations=@($operation)
+                }
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId='coordinator-retry'; sessionId='session-retry'
+                    transferId='transfer-retry'; direction='outbound'
+                    decisionUtcMilliseconds=$decisionTime; transitionId=$transitionId
+                    decisionKind=$decisionKind
+                    decisionStatus=$decisionStatus
+                    decisionReason=$decisionReason
+                    aggregate=$aggregate
+                }
+                $json = $envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $retryPrefix; transition_id=$transitionId; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+            function New-RetryEffect(
+                [string]$transitionId,
+                [long]$stateGeneration,
+                [string]$authorityId,
+                [long]$authorityGeneration,
+                [string]$role,
+                [string]$kind,
+                [string]$receiptId,
+                [long]$receiptGeneration,
+                [string]$status,
+                [string]$fingerprint) {
+                "event=filetransfer_coordinator_authority_effect; $retryPrefix; transition_id=$transitionId; coordinator_state_generation=$stateGeneration; operation_family=runtime_unlock_retry_lifecycle; operation_key=runtime_unlock_retry_lifecycle|$role|$authorityId|$authorityGeneration|RetryAttempt; operation_authority_id=$authorityId; operation_generation=$authorityGeneration; effect_kind=$kind; effect_identity=$receiptId; effect_generation=$receiptGeneration; receipt_identity=$receiptId; receipt_generation=$receiptGeneration; receipt_status=$status; receipt_fingerprint=$fingerprint; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; route_publication_generation=2; route_commit_generation=2; runtime_generation=2; terminal_generation=0; leg_generation=2; transport_epoch=3; bridge_recovery_generation=4; checkpoint_generation=5; checkpoint_request_id=checkpoint-retry; data_session_identity=data-session-retry; data_session_generation=6; authority_effect=applied"
+            }
+            $retryPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-retry; session_id=session-retry; transfer_id=transfer-retry; direction=outbound"
+            $retryStart = "event=filetransfer_coordinator_snapshot_stream_started; $retryPrefix; initial_state_generation=0; initial_state_hash=retry-before; emitted_family_coverage=runtime_unlock_retry_lifecycle; shadow_family_coverage=; authoritative_family_coverage=runtime_unlock_retry_lifecycle; authority_effect=none"
+            $missingReceipt = [ordered]@{
+                stage='settlement'; commandIdentity='retry-a:settlement'; commandGeneration=8L
+                commandFingerprint='retry-a-command'; receiptIdentity='retry-a:settlement'
+                receiptGeneration=8L; receiptStatus='MissingDispatch'
+                receiptReason='missing_dispatch'; receiptFingerprint='retry-a-settlement'
+                receiptValidated=$true
+            }
+            $retryA = New-RetryOperation 'retry-a' '(none)' 'attempt_terminal' 1L 'SendInFlight' 'Settled' $false @($missingReceipt)
+            $retryTransitionA = New-RetryEnvelopeLine 'retry-transition-a' 0L 1L 'retry-before' 'retry-after-a' $retryA 10L
+            $retryEffectA = New-RetryEffect 'retry-transition-a' 1L 'retry-a' 1L 'attempt_terminal' 'settlement_observed' 'retry-a:settlement' 8L 'MissingDispatch' 'retry-a-settlement'
+            $retryCompletedA = "event=filetransfer_coordinator_snapshot_stream_completed; $retryPrefix; final_state_generation=1; final_state_hash=retry-after-a; transition_count=1; emitted_family_coverage=runtime_unlock_retry_lifecycle; shadow_family_coverage=; authoritative_family_coverage=runtime_unlock_retry_lifecycle; authority_effect=none"
+            $retryUnresolved = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($retryStart,$retryTransitionA,$retryEffectA,$retryCompletedA)
+            if ($retryUnresolved.ArtifactEvidenceVerdict -ne 'pass' -or
+                $retryUnresolved.FirstUnresolvedBoundary.taxonomyClass -ne 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' -or
+                $retryUnresolved.RuntimeUnlockRetryFamilyLegacySelectionCount -ne 0 -or
+                $retryUnresolved.LegacySelectionCount -ne 6) {
+                throw "A MissingDispatch attempt without an exact successor was not selected by Snapshot V1: $($retryUnresolved | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $closureDecisionReceipt = [ordered]@{
+                stage='decision'; commandIdentity='retry-a:successor:2'
+                commandGeneration=2L; commandFingerprint='retry-a-successor-command'
+                receiptIdentity='retry-a:successor:2:decision'; receiptGeneration=2L
+                receiptStatus='Rejected'
+                receiptReason='retry_dispatch_missing_successor_limit_exhausted'
+                receiptFingerprint='retry-a-successor-rejected'; receiptValidated=$true
+            }
+            $closureRejectedOperation = New-RetryOperation 'retry-a' '(none)' 'attempt_terminal' 1L 'Settled' 'Settled' $false @($closureDecisionReceipt)
+            $closureRejectedOperation.stateApplied = $false
+            $closureRejected = New-RetryEnvelopeLine 'retry-closure-rejected' 1L 1L 'retry-after-a' 'retry-after-a' $closureRejectedOperation 11L 'PrepareRuntimeUnlockRetryDispatchSuccessor' 'Rejected' 'retry_dispatch_missing_successor_limit_exhausted'
+            $retryClosureMissingCompleted = "event=filetransfer_coordinator_snapshot_stream_completed; $retryPrefix; final_state_generation=1; final_state_hash=retry-after-a; transition_count=2; emitted_family_coverage=runtime_unlock_retry_lifecycle; shadow_family_coverage=; authoritative_family_coverage=runtime_unlock_retry_lifecycle; authority_effect=none"
+            $retryClosureMissing = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($retryStart,$retryTransitionA,$retryEffectA,$closureRejected,$retryClosureMissingCompleted)
+            $retryClosureMissingCorrelation = Get-FileTransferCoordinatorSnapshotCorrelationResult -Evaluation $retryClosureMissing -Family 'runtime_unlock_retry_lifecycle'
+            if ($retryClosureMissing.FirstUnresolvedBoundary.taxonomyClass -ne 'runtime_unlock_retry_dispatch_chain_closure_incomplete' -or
+                $retryClosureMissingCorrelation.RawCount -ne 1 -or
+                $retryClosureMissingCorrelation.DistinctCount -ne 1 -or
+                $retryClosureMissingCorrelation.RecoveredCount -ne 0 -or
+                $retryClosureMissingCorrelation.UnresolvedCount -ne 1) {
+                throw "A rejected bounded successor without exact closure was not selected: $($retryClosureMissing | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $closureReceipt = [ordered]@{
+                stage='bounded_closure'; commandIdentity='retry-a:successor:2'
+                commandGeneration=2L; commandFingerprint='retry-a-successor-command'
+                receiptIdentity='retry-a:closure:1'; receiptGeneration=1L
+                receiptStatus='Closed'; receiptReason='retry_dispatch_chain_closed'
+                receiptFingerprint='retry-a-closure'; receiptValidated=$true
+            }
+            $closureOperation = New-RetryOperation 'retry-a' '(none)' 'bounded_closure' 1L 'None' 'Closed' $false @($closureReceipt)
+            $closureOperation.operationKey = 'runtime_unlock_retry_lifecycle|bounded_closure|retry-a|1|BoundedClosure'
+            $closureOperation.operationKind = 'BoundedClosure'
+            $closureOperation.runtimeUnlockRetry.role = 'bounded_closure'
+            $closureTransition = New-RetryEnvelopeLine 'retry-closure-applied' 1L 2L 'retry-after-a' 'retry-after-closure' $closureOperation 12L 'CloseRuntimeUnlockRetryDispatchChain' 'Accepted' 'retry_dispatch_chain_closed'
+            $retryClosureCompleted = "event=filetransfer_coordinator_snapshot_stream_completed; $retryPrefix; final_state_generation=2; final_state_hash=retry-after-closure; transition_count=3; emitted_family_coverage=runtime_unlock_retry_lifecycle; shadow_family_coverage=; authoritative_family_coverage=runtime_unlock_retry_lifecycle; authority_effect=none"
+            $retryClosureRecovered = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($retryStart,$retryTransitionA,$retryEffectA,$closureRejected,$closureTransition,$retryClosureCompleted)
+            $retryClosureRecoveredCorrelation = Get-FileTransferCoordinatorSnapshotCorrelationResult -Evaluation $retryClosureRecovered -Family 'runtime_unlock_retry_lifecycle'
+            if ($null -ne $retryClosureRecovered.FirstUnresolvedBoundary -or
+                $retryClosureRecoveredCorrelation.RawCount -ne 1 -or
+                $retryClosureRecoveredCorrelation.DistinctCount -ne 1 -or
+                $retryClosureRecoveredCorrelation.RecoveredCount -ne 1 -or
+                $retryClosureRecoveredCorrelation.UnresolvedCount -ne 0) {
+                throw "An exact bounded closure did not recover the rejected successor boundary: $($retryClosureRecovered | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $installReceipt = [ordered]@{
+                stage='install'; commandIdentity='retry-b:install'; commandGeneration=9L
+                commandFingerprint='retry-b-install-command'; receiptIdentity='retry-b:install'
+                receiptGeneration=9L; receiptStatus='Settled'; receiptReason='retry_dispatch_install_receipt'
+                receiptFingerprint='retry-b-install'; receiptValidated=$true
+            }
+            $executionReceipt = [ordered]@{
+                stage='execution'; commandIdentity='retry-b:execution'; commandGeneration=9L
+                commandFingerprint='retry-b-execution-command'; receiptIdentity='retry-b:offer:9'
+                receiptGeneration=9L; receiptStatus='Settled'; receiptReason='dispatch_observed'
+                receiptFingerprint='retry-b-execution'; receiptValidated=$true
+            }
+            $settlementReceipt = [ordered]@{
+                stage='settlement'; commandIdentity='retry-b:settlement'; commandGeneration=9L
+                commandFingerprint='retry-b-settlement-command'; receiptIdentity='retry-b:settlement'
+                receiptGeneration=9L; receiptStatus='DispatchObserved'; receiptReason='dispatch_observed'
+                receiptFingerprint='retry-b-settlement'; receiptValidated=$true
+            }
+            $retryB = New-RetryOperation 'retry-b' 'retry-a' 'attempt_terminal' 2L 'Installed' 'Settled' $true @($installReceipt,$executionReceipt,$settlementReceipt)
+            $retryTransitionB = New-RetryEnvelopeLine 'retry-transition-b' 1L 2L 'retry-after-a' 'retry-after-b' $retryB 20L
+            $retryEffectsB = @(
+                (New-RetryEffect 'retry-transition-b' 2L 'retry-b' 2L 'attempt_terminal' 'install_committed' 'retry-b:install' 9L 'Settled' 'retry-b-install'),
+                (New-RetryEffect 'retry-transition-b' 2L 'retry-b' 2L 'attempt_terminal' 'execution_observed' 'retry-b:offer:9' 9L 'Settled' 'retry-b-execution'),
+                (New-RetryEffect 'retry-transition-b' 2L 'retry-b' 2L 'attempt_terminal' 'settlement_observed' 'retry-b:settlement' 9L 'DispatchObserved' 'retry-b-settlement'))
+            $retryCompletedB = "event=filetransfer_coordinator_snapshot_stream_completed; $retryPrefix; final_state_generation=2; final_state_hash=retry-after-b; transition_count=2; emitted_family_coverage=runtime_unlock_retry_lifecycle; shadow_family_coverage=; authoritative_family_coverage=runtime_unlock_retry_lifecycle; authority_effect=none"
+            $retryFullLines = @('event=unrelated',$retryStart,$retryTransitionA,$retryEffectA,'event=other',$retryTransitionB) + $retryEffectsB + @($retryCompletedB)
+            $retryCompactLines = @($retryStart,$retryTransitionA,$retryEffectA,$retryTransitionB) + $retryEffectsB + @($retryCompletedB)
+            $retryFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $retryFullLines
+            $retryCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $retryCompactLines
+            $retryParity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $retryFull -Compact $retryCompact
+            $retryRecovered = Get-FileTransferCoordinatorSnapshotCorrelationResult -Evaluation $retryFull -Family 'runtime_unlock_retry_lifecycle'
+            if ($retryFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $retryParity.Verdict -ne 'pass' -or
+                $null -ne $retryFull.FirstUnresolvedBoundary -or
+                $retryRecovered.RawCount -ne 1 -or
+                $retryRecovered.DistinctCount -ne 1 -or
+                $retryRecovered.RecoveredCount -ne 1 -or
+                $retryRecovered.UnresolvedCount -ne 0) {
+                throw "An exact MissingDispatch successor did not recover with full/compact parity: $($retryFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'
@@ -630,6 +839,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         foreach (var text in new[] { orchestrationText, artifactWriterText })
         {
             Assert.Contains("coordinator_snapshot_route_family_legacy_selection_count", text, StringComparison.Ordinal);
+            Assert.Contains("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_boundary_hash", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_catalog_hash", text, StringComparison.Ordinal);
         }
@@ -648,6 +858,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             StringComparison.Ordinal);
         Assert.Contains(
             "coordinatorSnapshotRouteFamilyLegacySelectionCount",
+            acceptanceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "coordinatorSnapshotRuntimeUnlockRetryFamilyLegacySelectionCount",
             acceptanceText,
             StringComparison.Ordinal);
     }
@@ -746,6 +960,97 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.True(
             result.ExitCode == 0,
             $"GUI shared-boundary validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public async Task FileTransferOps_Family2SnapshotCutoverGuiConsumesExactSharedBoundary()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var guiText = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var script = $$"""
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { return $null }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            function Get-FileTransferCoordinatorSnapshotEvaluation {
+                return [pscustomobject]@{
+                    Mode = 'SnapshotV1Shadow'
+                    ArtifactEvidenceVerdict = 'pass'
+                    TransitionCount = 4L
+                    FirstUnresolvedBoundary = [pscustomobject]@{
+                        boundaryId = 'retry-boundary-11'
+                        boundaryHash = 'retry-boundary-hash-11'
+                        families = @('runtime_unlock_retry_lifecycle')
+                        taxonomyClass = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
+                        phase = 'runtime_unlock_retry'
+                        decisionReason = 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor'
+                        variant = '(none)'
+                        rawCount = 2
+                        distinctCount = 1
+                        recoveredCount = 0
+                        unresolvedCount = 1
+                        writer = 'writer-sender'
+                        writerSequence = 14073L
+                    }
+                }
+            }
+            function Test-FileTransferCoordinatorSnapshotFamilyAuthoritative {
+                param($Evaluation, [string]$Family)
+                return $Family -in @(
+                    'route_runtime',
+                    'route_transition',
+                    'runtime_unlock_retry_lifecycle')
+            }
+
+            $root = Join-Path ([IO.Path]::GetTempPath()) (
+                'nlink-family2-gui-boundary-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            try {
+                $path = Join-Path $root 'evidence.log'
+                [IO.File]::WriteAllText($path, 'event=filetransfer_coordinator_snapshot_stream_started')
+                $actual = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'scenario failed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($actual.ClassificationSource -ne 'coordinator_snapshot_authority_v1' -or
+                    $actual.FailureClass -ne 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' -or
+                    $actual.Phase -ne 'runtime_unlock_retry' -or
+                    $actual.CoordinatorBoundaryId -ne 'retry-boundary-11' -or
+                    $actual.CoordinatorWriterSequence -ne 14073L) {
+                    throw "GUI did not preserve the Family 2 shared boundary: $($actual | ConvertTo-Json -Compress)"
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"GUI Family 2 shared-boundary validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
     }
 
     [Fact]

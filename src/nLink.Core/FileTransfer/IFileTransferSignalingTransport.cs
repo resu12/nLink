@@ -1377,6 +1377,14 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
 
     public long ReceiveRecoveryDataSessionGeneration { get; init; }
 
+    public int CheckpointGeneration { get; init; }
+
+    public string CheckpointRequestId { get; init; } = "(none)";
+
+    public string DataSessionIdentity { get; init; } = "(none)";
+
+    public long DataSessionGeneration { get; init; }
+
     public bool IsDefault => AuthorityId.IsDefault ||
                              RuntimeOwner.IsDefault ||
                              SourcePublicationAuthority.IsDefault ||
@@ -1929,6 +1937,12 @@ internal readonly record struct RuntimeUnlockRetryDispatchDecision(
     public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; init; }
 
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal readonly record struct RuntimeUnlockRetryDispatchDecisionStageResult(
@@ -2047,6 +2061,12 @@ internal readonly record struct RuntimeUnlockRetryDispatchSettlementDecision(
     public bool Accepted => Status == RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted;
 
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(

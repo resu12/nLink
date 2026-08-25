@@ -12,15 +12,16 @@ public sealed partial class SessionFileTransferService
         "snapshot-authority-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "f62968f36d3d19e93805666bd527afacafb19227ef9634f9edf564d921de391e";
+        "2ba980b5696114cbd09fde978ae85d27270adc08f6caead9bd222c0074e9d0c6";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
-        "route_runtime,route_transition";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle";
 
-    private const string CoordinatorSnapshotShadowFamilyCoverage = "";
+    private const string CoordinatorSnapshotShadowFamilyCoverage =
+        "";
 
     private const string CoordinatorSnapshotAuthoritativeFamilyCoverage =
-        "route_runtime,route_transition";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle";
 
     private static void InitializeCoordinatorSnapshotState(
         OutboundTransferContext context)
@@ -77,7 +78,7 @@ public sealed partial class SessionFileTransferService
             decisionKind,
             decisionStatus,
             decisionReason);
-        AssertNoFamilyOneOperations(snapshot.Envelope);
+        AssertNoAuthoritativeFamilyOperations(snapshot.Envelope);
         context.CoordinatorPersistentState = snapshot.State.PersistentState;
         context.CoordinatorSnapshotEmitter.Enqueue(snapshot.Envelope);
         return snapshot.State;
@@ -98,7 +99,7 @@ public sealed partial class SessionFileTransferService
             decisionKind,
             decisionStatus,
             decisionReason);
-        AssertNoFamilyOneOperations(snapshot.Envelope);
+        AssertNoAuthoritativeFamilyOperations(snapshot.Envelope);
         context.CoordinatorPersistentState = snapshot.State.PersistentState;
         context.CoordinatorSnapshotEmitter.Enqueue(snapshot.Envelope);
         return snapshot.State;
@@ -279,20 +280,23 @@ public sealed partial class SessionFileTransferService
             ? "Rejected"
             : "Accepted";
 
-    private static void AssertNoFamilyOneOperations(
+    private static void AssertNoAuthoritativeFamilyOperations(
         FileTransferCoordinatorTransitionEnvelope envelope)
     {
-        var familyOneOperations = envelope.Aggregate.Operations
+        var authoritativeOperations = envelope.Aggregate.Operations
             .Where(operation =>
-                operation.Family is "route_runtime" or "route_transition")
+                operation.Family is
+                    "route_runtime" or
+                    "route_transition" or
+                    "runtime_unlock_retry_lifecycle")
             .Select(operation => operation.OperationKey)
             .ToArray();
-        if (familyOneOperations.Length > 0)
+        if (authoritativeOperations.Length > 0)
         {
             throw new InvalidOperationException(
-                "A route/runtime or route-transition decision did not provide " +
+                "An authoritative Coordinator decision did not provide " +
                 "its Coordinator-authored snapshot envelope: " +
-                string.Join(",", familyOneOperations));
+                string.Join(",", authoritativeOperations));
         }
     }
 
@@ -327,6 +331,123 @@ public sealed partial class SessionFileTransferService
         adopt(state);
         emitter.Enqueue(envelope);
         return state;
+    }
+
+    private static FileTransferCoordinatorState
+        AdoptRuntimeUnlockRetryCoordinatorStateLocked(
+            OutboundTransferContext context,
+            FileTransferCoordinatorState state,
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        => AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            state,
+            envelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+
+    private static FileTransferCoordinatorState
+        AdoptRuntimeUnlockRetryCoordinatorStateLocked(
+            InboundTransferContext context,
+            FileTransferCoordinatorState state,
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        => AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            state,
+            envelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+
+    private static void EnqueueRuntimeUnlockRetryAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string receiptKind,
+        string effectKind)
+        => EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope,
+            receiptKind,
+            effectKind);
+
+    private static void EnqueueRuntimeUnlockRetryAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string receiptKind,
+        string effectKind)
+        => EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope,
+            receiptKind,
+            effectKind);
+
+    private static void EnqueueRuntimeUnlockRetryAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        string receiptKind,
+        string effectKind)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "runtime_unlock_retry_lifecycle" &&
+                operation.RuntimeUnlockRetry is not null)
+            .SelectMany(operation => operation.RuntimeUnlockRetry!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    string.Equals(
+                        receipt.Stage,
+                        receiptKind,
+                        StringComparison.Ordinal))
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            return;
+        }
+
+        var match = matches[0];
+        emitter.EnqueueAuthorityEffect(
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            stateGeneration,
+            match.Operation.Family,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint,
+            effectKind,
+            $"{match.Operation.OperationKey}:{effectKind}",
+            match.Receipt.ReceiptGeneration);
     }
 
     private static void EnqueueRoutePublicationAuthorityEffect(
@@ -787,7 +908,8 @@ public sealed partial class SessionFileTransferService
             foreach (var operation in envelope.Aggregate.Operations)
             {
                 var scope = operation.RouteRuntime?.Boundary ??
-                            operation.RouteTransition?.SourceBoundary;
+                            operation.RouteTransition?.SourceBoundary ??
+                            operation.RuntimeUnlockRetry?.SourceBoundary;
                 if (operation.ReceiptValidated)
                 {
                     IndexAuthorityEffectBindingLocked(
@@ -802,6 +924,26 @@ public sealed partial class SessionFileTransferService
 
                 if (operation.RouteTransition is not { } routeTransition)
                 {
+                    if (operation.RuntimeUnlockRetry is not { } retry)
+                    {
+                        continue;
+                    }
+
+                    foreach (var receipt in retry.Receipts)
+                    {
+                        if (!receipt.ReceiptValidated)
+                        {
+                            continue;
+                        }
+                        IndexAuthorityEffectBindingLocked(
+                            envelope,
+                            operation,
+                            receipt.ReceiptIdentity,
+                            receipt.ReceiptGeneration,
+                            receipt.ReceiptStatus,
+                            receipt.ReceiptFingerprint,
+                            scope);
+                    }
                     continue;
                 }
 
@@ -930,6 +1072,22 @@ public sealed partial class SessionFileTransferService
                         RetainedFrameFingerprint = EvidenceToken(
                             transition.RetainedFrameFingerprint),
                         Receipts = transition.Receipts
+                            .Select(CreateEvidenceReceipt)
+                            .ToImmutableArray(),
+                    }
+                    : null,
+                RuntimeUnlockRetry = operation.RuntimeUnlockRetry is { } retry
+                    ? retry with
+                    {
+                        SourceBoundary = CreateEvidenceBoundary(
+                            retry.SourceBoundary),
+                        OfferNonceFingerprint = EvidenceToken(
+                            retry.OfferNonceFingerprint),
+                        ReleaseAuthorityId = EvidenceToken(
+                            retry.ReleaseAuthorityId),
+                        SuccessorAuthorityId = EvidenceToken(
+                            retry.SuccessorAuthorityId),
+                        Receipts = retry.Receipts
                             .Select(CreateEvidenceReceipt)
                             .ToImmutableArray(),
                     }

@@ -634,7 +634,15 @@ public sealed partial class SessionFileTransferService
                 observation.OfferGeneration,
                 observation.OfferNonce,
                 observation.DispatchObserved);
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope,
+            "execution",
+            "execution_observed");
         return decision;
     }
 
@@ -651,7 +659,15 @@ public sealed partial class SessionFileTransferService
                 observation.OfferGeneration,
                 observation.OfferNonce,
                 observation.DispatchObserved);
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope,
+            "execution",
+            "execution_observed");
         return decision;
     }
 
@@ -664,7 +680,10 @@ public sealed partial class SessionFileTransferService
         var decision = PrepareRuntimeUnlockRetryDispatchSuccessor(
             state,
             evaluation);
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
         return decision;
     }
 
@@ -677,7 +696,10 @@ public sealed partial class SessionFileTransferService
         var decision = PrepareRuntimeUnlockRetryDispatchSuccessor(
             state,
             evaluation);
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
         return decision;
     }
 
@@ -685,26 +707,9 @@ public sealed partial class SessionFileTransferService
         PrepareRuntimeUnlockRetryDispatchSuccessor(
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryDispatchSuccessorEvaluation evaluation)
-    {
-        if (!FileTransferCoordinator
-                .TryGetInstalledRuntimeUnlockRetryDispatchAttempt(
-                    state,
-                    out var installed) ||
-            installed.Authority != evaluation.PredecessorAuthority)
-        {
-            return new RuntimeUnlockRetryDispatchSuccessorDecision(
-                RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Rejected,
-                "retry_dispatch_successor_predecessor_tuple_not_current",
-                evaluation)
-            {
-                State = state,
-            };
-        }
-
-        return FileTransferCoordinator.PrepareRuntimeUnlockRetryDispatchSuccessor(
+        => FileTransferCoordinator.PrepareRuntimeUnlockRetryDispatchSuccessor(
             state,
             evaluation);
-    }
 
     private static void LogRuntimeUnlockRetryDispatchSuccessorDecision(
         RuntimeUnlockRetryDispatchSuccessorEvaluation evaluation,
@@ -758,7 +763,10 @@ public sealed partial class SessionFileTransferService
                 state,
                 evaluation.Authority.AuthorityId,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
         return decision;
     }
 
@@ -788,7 +796,10 @@ public sealed partial class SessionFileTransferService
                 state,
                 evaluation.Authority.AuthorityId,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
         return decision;
     }
 
@@ -891,10 +902,17 @@ public sealed partial class SessionFileTransferService
                 observedUtcMs);
         if (!prepared.Accepted || prepared.Command is not { } command)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                prepared.State,
+                prepared.SnapshotEnvelope);
             return false;
         }
 
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, prepared.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            prepared.State,
+            prepared.SnapshotEnvelope);
         if (transport is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
         {
             return false;
@@ -916,10 +934,22 @@ public sealed partial class SessionFileTransferService
                     receipt);
         if (!committed.Accepted)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                committed.State,
+                committed.SnapshotEnvelope);
             return false;
         }
 
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, committed.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            committed.State,
+            committed.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            committed.SnapshotEnvelope,
+            "scope_invalidation",
+            "scope_invalidation_applied");
         return true;
     }
 
@@ -936,10 +966,17 @@ public sealed partial class SessionFileTransferService
                 observedUtcMs);
         if (!prepared.Accepted || prepared.Command is not { } command)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                prepared.State,
+                prepared.SnapshotEnvelope);
             return false;
         }
 
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, prepared.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            prepared.State,
+            prepared.SnapshotEnvelope);
         if (transport is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
         {
             return false;
@@ -961,10 +998,22 @@ public sealed partial class SessionFileTransferService
                     receipt);
         if (!committed.Accepted)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                committed.State,
+                committed.SnapshotEnvelope);
             return false;
         }
 
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, committed.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            committed.State,
+            committed.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            committed.SnapshotEnvelope,
+            "scope_invalidation",
+            "scope_invalidation_applied");
         return true;
     }
 
@@ -1018,18 +1067,24 @@ public sealed partial class SessionFileTransferService
 
     private static void ApplyRuntimeUnlockRetryLifecycleStateLocked(
         OutboundTransferContext context,
-        FileTransferCoordinatorState state)
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorTransitionEnvelope? envelope = null)
     {
         var previous =
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
-        state = AdoptCoordinatorStateLocked(
-            context,
-            state,
-            "RuntimeUnlockRetryLifecycleStateAdopted",
-            "Accepted",
-            "runtime_unlock_retry_lifecycle_transition");
+        state = envelope is null
+            ? AdoptCoordinatorStateLocked(
+                context,
+                state,
+                "RuntimeUnlockRetryLifecycleStateAdopted",
+                "Accepted",
+                "runtime_unlock_retry_lifecycle_transition")
+            : AdoptRuntimeUnlockRetryCoordinatorStateLocked(
+                context,
+                state,
+                envelope);
         LogReceiveRecoveryOperationTransitions(
             previous,
             state.PersistentState.FileTransferReceiveRecovery,
@@ -1042,18 +1097,24 @@ public sealed partial class SessionFileTransferService
 
     private static void ApplyRuntimeUnlockRetryLifecycleStateLocked(
         InboundTransferContext context,
-        FileTransferCoordinatorState state)
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorTransitionEnvelope? envelope = null)
     {
         var previous =
             context.CoordinatorPersistentState.FileTransferReceiveRecovery;
         var previousFallbackTail =
             context.CoordinatorPersistentState.FallbackTailYield;
-        state = AdoptCoordinatorStateLocked(
-            context,
-            state,
-            "RuntimeUnlockRetryLifecycleStateAdopted",
-            "Accepted",
-            "runtime_unlock_retry_lifecycle_transition");
+        state = envelope is null
+            ? AdoptCoordinatorStateLocked(
+                context,
+                state,
+                "RuntimeUnlockRetryLifecycleStateAdopted",
+                "Accepted",
+                "runtime_unlock_retry_lifecycle_transition")
+            : AdoptRuntimeUnlockRetryCoordinatorStateLocked(
+                context,
+                state,
+                envelope);
         LogReceiveRecoveryOperationTransitions(
             previous,
             state.PersistentState.FileTransferReceiveRecovery,
@@ -1084,6 +1145,10 @@ public sealed partial class SessionFileTransferService
                     reason);
         if (!prepared.Accepted)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                prepared.State,
+                prepared.SnapshotEnvelope);
             return false;
         }
 
@@ -1091,7 +1156,8 @@ public sealed partial class SessionFileTransferService
         {
             ApplyRuntimeUnlockRetryLifecycleStateLocked(
                 context,
-                prepared.State);
+                prepared.State,
+                prepared.SnapshotEnvelope);
             return true;
         }
 
@@ -1109,7 +1175,8 @@ public sealed partial class SessionFileTransferService
 
         ApplyRuntimeUnlockRetryLifecycleStateLocked(
             context,
-            prepared.State);
+            prepared.State,
+            prepared.SnapshotEnvelope);
         var receipt =
             bridge.ApplyRuntimeUnlockRetryDispatchScopeInvalidation(command);
         var committed =
@@ -1119,10 +1186,22 @@ public sealed partial class SessionFileTransferService
                     receipt);
         if (!committed.Accepted)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                committed.State,
+                committed.SnapshotEnvelope);
             return false;
         }
 
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, committed.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            committed.State,
+            committed.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            committed.SnapshotEnvelope,
+            "scope_invalidation",
+            "scope_invalidation_applied");
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=runtime_unlock_retry_lifecycle_scope_invalidated; direction=outbound; session_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(context.SessionId)}; transfer_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(context.TransferId)}; authority_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(authority?.AuthorityId.ToString() ?? "(none)")}; data_session_generation={context.DataSessionGeneration}; invalidation_generation={command.InvalidationGeneration}; invalidation_status={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(receipt.Status.ToString())}; decision_status={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(committed.Status.ToString())}; decision_reason={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(committed.Reason)}");
@@ -1149,6 +1228,10 @@ public sealed partial class SessionFileTransferService
                     reason);
         if (!prepared.Accepted)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                prepared.State,
+                prepared.SnapshotEnvelope);
             return false;
         }
 
@@ -1156,7 +1239,8 @@ public sealed partial class SessionFileTransferService
         {
             ApplyRuntimeUnlockRetryLifecycleStateLocked(
                 context,
-                prepared.State);
+                prepared.State,
+                prepared.SnapshotEnvelope);
             return true;
         }
 
@@ -1174,7 +1258,8 @@ public sealed partial class SessionFileTransferService
 
         ApplyRuntimeUnlockRetryLifecycleStateLocked(
             context,
-            prepared.State);
+            prepared.State,
+            prepared.SnapshotEnvelope);
         var receipt =
             bridge.ApplyRuntimeUnlockRetryDispatchScopeInvalidation(command);
         var committed =
@@ -1184,10 +1269,22 @@ public sealed partial class SessionFileTransferService
                     receipt);
         if (!committed.Accepted)
         {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                committed.State,
+                committed.SnapshotEnvelope);
             return false;
         }
 
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, committed.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            committed.State,
+            committed.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            committed.SnapshotEnvelope,
+            "scope_invalidation",
+            "scope_invalidation_applied");
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=runtime_unlock_retry_lifecycle_scope_invalidated; direction=inbound; session_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(context.SessionId)}; transfer_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(context.TransferId)}; authority_id={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(authority?.AuthorityId.ToString() ?? "(none)")}; data_session_generation={context.DataSessionGeneration}; invalidation_generation={command.InvalidationGeneration}; invalidation_status={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(receipt.Status.ToString())}; decision_status={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(committed.Status.ToString())}; decision_reason={RuntimeUnlockRetryDispatchTelemetry.SanitizeToken(committed.Reason)}");
@@ -1222,14 +1319,30 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope,
+            "settlement",
+            "settlement_observed");
     }
 
     private static void ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(
         InboundTransferContext context,
         RuntimeUnlockRetryDispatchSettlementDecision decision)
     {
-        ApplyRuntimeUnlockRetryLifecycleStateLocked(context, decision.State);
+        ApplyRuntimeUnlockRetryLifecycleStateLocked(
+            context,
+            decision.State,
+            decision.SnapshotEnvelope);
+        EnqueueRuntimeUnlockRetryAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope,
+            "settlement",
+            "settlement_observed");
     }
 
     private static void ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked(
@@ -1237,6 +1350,15 @@ public sealed partial class SessionFileTransferService
         RuntimeUnlockRetryDispatchAuthorityRequest request,
         RuntimeUnlockRetryDispatchDecision decision)
     {
+        if (decision.SnapshotEnvelope is not null)
+        {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                decision.State,
+                decision.SnapshotEnvelope);
+            return;
+        }
+
         if (decision.Granted &&
             decision.Contract is not null &&
             FileTransferCoordinator.TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
@@ -1284,6 +1406,15 @@ public sealed partial class SessionFileTransferService
         RuntimeUnlockRetryDispatchAuthorityRequest request,
         RuntimeUnlockRetryDispatchDecision decision)
     {
+        if (decision.SnapshotEnvelope is not null)
+        {
+            ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                context,
+                decision.State,
+                decision.SnapshotEnvelope);
+            return;
+        }
+
         if (decision.Granted &&
             decision.Contract is not null &&
             FileTransferCoordinator.TryValidateRuntimeUnlockRetryDispatchGrantedDecision(

@@ -64,6 +64,28 @@ internal sealed record FileTransferCoordinatorRouteTransitionOperationSnapshot(
     string RetainedFrameFingerprint,
     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
 
+internal sealed record FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot(
+    string Role,
+    FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+    int AuthorityGeneration,
+    long RecoveryContractGeneration,
+    int DispatchAttemptGeneration,
+    int MissingDispatchSuccessorGeneration,
+    long RetiredOfferGeneration,
+    long OfferGeneration,
+    string OfferNonceFingerprint,
+    long DispatchDeadlineUtcMs,
+    bool DispatchObserved,
+    string ReleaseKind,
+    string ReleaseAuthorityId,
+    int ReleaseGeneration,
+    string ReleaseOutcome,
+    string ListenerRearmRequirement,
+    string ListenerExecutionMode,
+    bool RequestActivePredecessorSupersession,
+    string SuccessorAuthorityId,
+    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
+
 internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     string Family,
     string OperationRole,
@@ -84,7 +106,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     bool ReceiptValidated,
     bool StateApplied,
     FileTransferCoordinatorRouteRuntimeOperationSnapshot? RouteRuntime,
-    FileTransferCoordinatorRouteTransitionOperationSnapshot? RouteTransition);
+    FileTransferCoordinatorRouteTransitionOperationSnapshot? RouteTransition,
+    FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot?
+        RuntimeUnlockRetry = null);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -219,6 +243,369 @@ internal static partial class FileTransferCoordinator
 {
     private static long lastSnapshotDecisionUtcMilliseconds;
 
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryLifecycleTransitionDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferAuthorityId? authorityId = null)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            command,
+            authorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RuntimeUnlockRetryLifecycleInstallReceiptDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryLifecycleInstallReceiptDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferAuthorityId? authorityId = null)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            command,
+            authorityId ?? decision.Receipt?.Authority.AuthorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RuntimeUnlockRetryLifecycleDeadlineDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryLifecycleDeadlineDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferAuthorityId? authorityId = null)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            command,
+            authorityId ?? decision.Settlement?.Authority.AuthorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RuntimeUnlockRetryLifecycleScopeInvalidationDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryLifecycleScopeInvalidationDecision decision,
+            string decisionKind,
+            object? command = null,
+            FileTransferAuthorityId? authorityId = null)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            command ?? decision.Command,
+            authorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RuntimeUnlockRetryDispatchSuccessorDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryDispatchSuccessorDecision decision,
+            string decisionKind)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            decision.Evaluation,
+            decision.Evaluation.PredecessorAuthority.AuthorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RuntimeUnlockRetryDispatchDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryDispatchDecision decision,
+            string decisionKind,
+            object? command = null)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            command ?? decision.Request,
+            decision.Contract?.Authority.AuthorityId ??
+            decision.Request.PredecessorAuthorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RuntimeUnlockRetryDispatchSettlementDecision
+        FinalizeRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockRetryDispatchSettlementDecision decision,
+            string decisionKind)
+    {
+        var snapshot = CreateRuntimeUnlockRetryTransitionSnapshot(
+            before,
+            decision.State,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            decision.Report,
+            decision.Report.Authority.AuthorityId);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static FileTransferCoordinatorSnapshotResult
+        CreateRuntimeUnlockRetryTransitionSnapshot(
+            FileTransferCoordinatorState before,
+            FileTransferCoordinatorState after,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferAuthorityId? authorityId)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return new FileTransferCoordinatorSnapshotResult(
+                after,
+                null!);
+        }
+
+        return CreateTransitionSnapshot(
+            before,
+            after,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            CreateRuntimeUnlockRetryAttemptedDecisionSnapshots(
+                before,
+                decisionKind,
+                decisionStatus,
+                decisionReason,
+                command,
+                authorityId));
+    }
+
+    private static ImmutableArray<
+        FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateRuntimeUnlockRetryAttemptedDecisionSnapshots(
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferAuthorityId? authorityId)
+    {
+        var descriptors = CreateOperationDescriptors(state)
+            .Where(descriptor => string.Equals(
+                descriptor.Family,
+                "runtime_unlock_retry_lifecycle",
+                StringComparison.Ordinal));
+        var invalidationCommand = command switch
+        {
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand exactCommand =>
+                exactCommand,
+            RuntimeUnlockRetryDispatchScopeInvalidationReceipt exactReceipt =>
+                exactReceipt.Command,
+            _ => null,
+        };
+        if (invalidationCommand is { IsDefault: false } exactInvalidation)
+        {
+            var invalidationOperationKey = CreateCoordinatorOperationKey(
+                "runtime_unlock_retry_lifecycle",
+                "scope_invalidation",
+                exactInvalidation.CommandId.ToString(),
+                exactInvalidation.InvalidationGeneration,
+                "ScopeInvalidation");
+            descriptors = descriptors.Where(descriptor => string.Equals(
+                descriptor.OperationKey,
+                invalidationOperationKey,
+                StringComparison.Ordinal));
+        }
+        else if (authorityId is { IsDefault: false } exactAuthorityId)
+        {
+            descriptors = descriptors.Where(descriptor => string.Equals(
+                descriptor.AuthorityId,
+                exactAuthorityId.ToString(),
+                StringComparison.Ordinal));
+        }
+        else
+        {
+            descriptors = Enumerable.Empty<CoordinatorOperationDescriptor>();
+        }
+
+        var descriptor = descriptors
+            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
+            .FirstOrDefault();
+        var commandFingerprint = CalculateSnapshotFingerprint(command);
+        if (descriptor is not null)
+        {
+            var operation = CreateOperationTransitionSnapshot(
+                descriptor,
+                descriptor.State,
+                descriptor.State,
+                stateApplied: false);
+            return ImmutableArray.Create(operation with
+            {
+                CommandIdentity =
+                    $"{descriptor.AuthorityId}:{decisionKind}",
+                CommandFingerprint = commandFingerprint,
+                ReceiptIdentity =
+                    $"{descriptor.AuthorityId}:{decisionKind}:decision",
+                ReceiptStatus = decisionStatus,
+                ReceiptFingerprint = CalculateSnapshotFingerprint(new
+                {
+                    decisionKind,
+                    decisionStatus,
+                    decisionReason,
+                    command,
+                }),
+                ReceiptValidated = true,
+            });
+        }
+
+        var commandGeneration = command switch
+        {
+            RuntimeUnlockRetryDispatchAuthorityRequest request =>
+                request.DispatchAttemptGeneration,
+            RuntimeUnlockRetryDispatchSuccessorEvaluation evaluation =>
+                evaluation.PredecessorAuthority.DispatchAttemptGeneration,
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand invalidation =>
+                invalidation.InvalidationGeneration,
+            RuntimeUnlockRetryDispatchScopeInvalidationReceipt invalidation =>
+                invalidation.Command?.InvalidationGeneration ?? 0,
+            _ => Math.Max(
+                1,
+                state.PersistentState.RuntimeUnlockRetryLifecycle
+                    .LastAuthorityGeneration + 1),
+        };
+        commandGeneration = Math.Max(1, commandGeneration);
+        var syntheticAuthority =
+            invalidationCommand is { IsDefault: false } exactInvalidationCommand
+                ? exactInvalidationCommand.CommandId.ToString()
+                : authorityId is { IsDefault: false } exact
+                ? exact.ToString()
+                : $"attempt:{commandFingerprint}";
+        var decisionReceipt =
+            new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "decision",
+                $"{syntheticAuthority}:{decisionKind}",
+                commandGeneration,
+                commandFingerprint,
+                $"{syntheticAuthority}:{decisionKind}:decision",
+                commandGeneration,
+                decisionStatus,
+                decisionReason,
+                CalculateSnapshotFingerprint(new
+                {
+                    decisionKind,
+                    decisionStatus,
+                    decisionReason,
+                    command,
+                }),
+                true);
+        return ImmutableArray.Create(
+            new FileTransferCoordinatorOperationTransitionSnapshot(
+                "runtime_unlock_retry_lifecycle",
+                "attempted_decision",
+                CreateCoordinatorOperationKey(
+                    "runtime_unlock_retry_lifecycle",
+                    "attempted_decision",
+                    syntheticAuthority,
+                    commandGeneration,
+                    decisionKind),
+                decisionKind,
+                syntheticAuthority,
+                "(none)",
+                commandGeneration,
+                "None",
+                "None",
+                decisionReceipt.CommandIdentity,
+                decisionReceipt.CommandGeneration,
+                decisionReceipt.CommandFingerprint,
+                decisionReceipt.ReceiptIdentity,
+                decisionReceipt.ReceiptGeneration,
+                decisionReceipt.ReceiptStatus,
+                decisionReceipt.ReceiptFingerprint,
+                true,
+                false,
+                null,
+                null,
+                new FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot(
+                    "attempted_decision",
+                    CreateStateBoundarySnapshot(state),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    CalculateSnapshotFingerprint(null),
+                    0,
+                    false,
+                    RuntimeUnlockRetryReleaseKind.Unknown.ToString(),
+                    "(none)",
+                    0,
+                    "(none)",
+                    RuntimeUnlockRetryDispatchListenerRearmRequirement.None
+                        .ToString(),
+                    RuntimeUnlockRetryDispatchListenerExecutionMode.Default
+                        .ToString(),
+                    false,
+                    "(none)",
+                    ImmutableArray.Create(decisionReceipt))));
+    }
+
     internal static FileTransferCoordinatorSnapshotResult CreateTransitionSnapshot(
         FileTransferCoordinatorState before,
         FileTransferCoordinatorState after,
@@ -261,8 +648,12 @@ internal static partial class FileTransferCoordinator
         var afterBoundary = CreateStateBoundarySnapshot(after);
         var beforeFingerprint = CalculateStateFingerprint(before);
         var afterFingerprint = CalculateStateFingerprint(after);
+        var stateApplied = !string.Equals(
+            beforeFingerprint,
+            afterFingerprint,
+            StringComparison.Ordinal);
         var operations = CreateOperationTransitionSnapshots(before, after);
-        if (!attemptedOperations.IsDefaultOrEmpty)
+        if (!stateApplied && !attemptedOperations.IsDefaultOrEmpty)
         {
             var changedKeys = operations
                 .Select(operation => operation.OperationKey)
@@ -276,10 +667,6 @@ internal static partial class FileTransferCoordinator
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToImmutableArray();
-        var stateApplied = !string.Equals(
-            beforeFingerprint,
-            afterFingerprint,
-            StringComparison.Ordinal);
         var normalizedStatus = NormalizeSnapshotToken(decisionStatus, "Unknown");
         if (stateApplied &&
             normalizedStatus is "Rejected" or "Idempotent")
@@ -838,6 +1225,13 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorState state)
     {
         var operations = CreateOperationDescriptors(state);
+        var retryLifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+        var normalizedRetryLifecycle = retryLifecycle with
+        {
+            AttemptHistory = retryLifecycle.AttemptHistory.IsDefault
+                ? ImmutableArray<RuntimeUnlockRetryLifecycleAttemptSnapshot>.Empty
+                : retryLifecycle.AttemptHistory,
+        };
         var payload = FileTransferCoordinatorTransitionEnvelope
             .SerializeCanonical(
                 new
@@ -874,6 +1268,7 @@ internal static partial class FileTransferCoordinator
                     state.LastRuntimeUnlockPendingPreCommitProbeGeneration,
                     state.CurrentDataSessionIdentity,
                     state.CurrentDataSessionGeneration,
+                    RuntimeUnlockRetryLifecycle = normalizedRetryLifecycle,
                     Operations = operations,
                 },
                 SnapshotFingerprintJsonOptions);
@@ -980,7 +1375,8 @@ internal static partial class FileTransferCoordinator
             operation.ReceiptValidated,
             stateApplied,
             operation.RouteRuntime,
-            operation.RouteTransition);
+            operation.RouteTransition,
+            operation.RuntimeUnlockRetry);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -1053,44 +1449,7 @@ internal static partial class FileTransferCoordinator
                 bootstrapReceipt));
         }
 
-        var retry = persistent.RuntimeUnlockRetryLifecycle.InstalledAttempt ??
-                    persistent.RuntimeUnlockRetryLifecycle.PendingAttempt ??
-                    persistent.RuntimeUnlockRetryLifecycle.RetainedPredecessor ??
-                    persistent.RuntimeUnlockRetryLifecycle.LastTerminalAttempt;
-        if (retry is { } attempt)
-        {
-            builder.Add(new CoordinatorOperationDescriptor(
-                "runtime_unlock_retry_lifecycle",
-                attempt.Authority.ReleaseKind.ToString(),
-                attempt.Authority.AuthorityId.ToString(),
-                attempt.Authority.PredecessorAuthorityId?.ToString() ?? "(none)",
-                attempt.Authority.DispatchAttemptGeneration,
-                attempt.State.ToString(),
-                $"{attempt.Request.RecoveryContractGeneration}:{attempt.Request.DispatchAttemptGeneration}",
-                attempt.Request.DispatchAttemptGeneration,
-                CalculateSnapshotFingerprint(new
-                {
-                    attempt.Authority.AuthorityId,
-                    attempt.Authority.PredecessorAuthorityId,
-                    attempt.Request.RecoveryContractGeneration,
-                    attempt.Request.DispatchAttemptGeneration,
-                    SourcePublicationGeneration =
-                        attempt.Request.SourcePublicationAuthority.RoutePublicationGeneration,
-                    attempt.Request.RetryReason,
-                    attempt.Request.RecoveryReason,
-                }),
-                attempt.InstallReceipt?.Authority.AuthorityId.ToString() ?? "(none)",
-                attempt.InstallReceipt?.InstallGeneration ?? 0,
-                attempt.Settlement?.Outcome.ToString() ?? "(none)",
-                CalculateSnapshotFingerprint(new
-                {
-                    InstallAuthorityId = attempt.InstallReceipt?.Authority.AuthorityId,
-                    attempt.InstallReceipt?.InstallGeneration,
-                    SettlementOutcome = attempt.Settlement?.Outcome,
-                    SettlementReason = attempt.Settlement?.Reason,
-                }),
-                attempt.InstallReceipt is not null));
-        }
+        AddRuntimeUnlockRetryOperationDescriptors(state, builder);
 
         var recovery = persistent.FileTransferReceiveRecovery.CurrentOperation ??
                        persistent.FileTransferReceiveRecovery.LastTerminalOperation;
@@ -1245,6 +1604,364 @@ internal static partial class FileTransferCoordinator
             .OrderBy(GetCoordinatorOperationKey, StringComparer.Ordinal)
             .ToImmutableArray();
     }
+
+    private static void AddRuntimeUnlockRetryOperationDescriptors(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+        AddAttempt("attempt_pending", lifecycle.PendingAttempt);
+        AddAttempt("attempt_installed", lifecycle.InstalledAttempt);
+        AddAttempt("attempt_retained_predecessor", lifecycle.RetainedPredecessor);
+        AddAttempt("attempt_terminal", lifecycle.LastTerminalAttempt);
+
+        if (lifecycle.BoundedClosure is { } closure)
+        {
+            builder.Add(CreateRuntimeUnlockRetryClosureDescriptor(
+                state,
+                closure));
+        }
+
+        var invalidationCommand =
+            lifecycle.PendingScopeInvalidationCommand ??
+            lifecycle.LastScopeInvalidationReceipt?.Command;
+        if (invalidationCommand is not null)
+        {
+            builder.Add(CreateRuntimeUnlockRetryInvalidationDescriptor(
+                state,
+                invalidationCommand,
+                lifecycle.LastScopeInvalidationReceipt));
+        }
+
+        return;
+
+        void AddAttempt(
+            string role,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot? attempt)
+        {
+            if (attempt is { } exact)
+            {
+                builder.Add(CreateRuntimeUnlockRetryAttemptDescriptor(
+                    state,
+                    role,
+                    exact));
+            }
+        }
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRuntimeUnlockRetryAttemptDescriptor(
+            FileTransferCoordinatorState state,
+            string role,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+    {
+        var receipts = CreateRuntimeUnlockRetryReceiptSnapshots(attempt);
+        var latest = receipts.IsDefaultOrEmpty ? null : receipts[^1];
+        var authority = attempt.Authority;
+        var authorityId = authority.AuthorityId.ToString();
+        return new CoordinatorOperationDescriptor(
+            "runtime_unlock_retry_lifecycle",
+            "RetryAttempt",
+            authorityId,
+            authority.PredecessorAuthorityId?.ToString() ?? "(none)",
+            authority.AuthorityGeneration,
+            attempt.State.ToString(),
+            latest?.CommandIdentity ?? $"{authorityId}:authorize",
+            latest?.CommandGeneration ?? authority.AuthorityGeneration,
+            latest?.CommandFingerprint ??
+                CalculateRuntimeUnlockRetryCommandFingerprint(attempt),
+            latest?.ReceiptIdentity ?? "(none)",
+            latest?.ReceiptGeneration ?? 0,
+            latest?.ReceiptStatus ?? "(none)",
+            latest?.ReceiptFingerprint ?? "(none)",
+            latest?.ReceiptValidated ?? false,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "runtime_unlock_retry_lifecycle",
+                role,
+                authorityId,
+                authority.AuthorityGeneration,
+                "RetryAttempt"),
+            RuntimeUnlockRetry: CreateRuntimeUnlockRetrySnapshot(
+                state,
+                role,
+                attempt,
+                receipts));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRuntimeUnlockRetryClosureDescriptor(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryLifecycleBoundedClosure closure)
+    {
+        var attempt = closure.FinalAttempt;
+        var authority = attempt.Authority;
+        var authorityId = authority.AuthorityId.ToString();
+        var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "bounded_closure",
+            $"{authorityId}:successor:{closure.RejectedSuccessorRequest.DispatchAttemptGeneration}",
+            closure.RejectedSuccessorRequest.DispatchAttemptGeneration,
+            CalculateSnapshotFingerprint(closure.RejectedSuccessorRequest),
+            $"{authorityId}:closure:{closure.ClosureGeneration}",
+            closure.ClosureGeneration,
+            "Closed",
+            closure.Reason,
+            CalculateSnapshotFingerprint(closure),
+            !closure.IsDefault &&
+            closure.FinalAttempt.State ==
+                RuntimeUnlockRetryLifecycleAttemptState.Closed);
+        return new CoordinatorOperationDescriptor(
+            "runtime_unlock_retry_lifecycle",
+            "BoundedClosure",
+            authorityId,
+            authority.PredecessorAuthorityId?.ToString() ?? "(none)",
+            closure.ClosureGeneration,
+            "Closed",
+            receipt.CommandIdentity,
+            receipt.CommandGeneration,
+            receipt.CommandFingerprint,
+            receipt.ReceiptIdentity,
+            receipt.ReceiptGeneration,
+            receipt.ReceiptStatus,
+            receipt.ReceiptFingerprint,
+            receipt.ReceiptValidated,
+            OperationRole: "bounded_closure",
+            OperationKey: CreateCoordinatorOperationKey(
+                "runtime_unlock_retry_lifecycle",
+                "bounded_closure",
+                authorityId,
+                closure.ClosureGeneration,
+                "BoundedClosure"),
+            RuntimeUnlockRetry: CreateRuntimeUnlockRetrySnapshot(
+                state,
+                "bounded_closure",
+                attempt,
+                ImmutableArray.Create(receipt)));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRuntimeUnlockRetryInvalidationDescriptor(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchScopeInvalidationCommand command,
+            RuntimeUnlockRetryDispatchScopeInvalidationReceipt? receipt)
+    {
+        var attempt = command.PendingAttempt ??
+                      command.InstalledAttempt ??
+                      command.RetainedPredecessor ??
+                      command.BoundedClosure?.FinalAttempt;
+        var authorityId = attempt?.Authority.AuthorityId.ToString() ??
+                          command.CommandId.ToString();
+        RuntimeUnlockRetryDispatchScopeInvalidationReceipt? exactReceipt =
+            receipt is { } candidate && candidate.Command == command
+                ? candidate
+                : null;
+        var receiptSnapshot = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "scope_invalidation",
+            command.CommandId.ToString(),
+            command.InvalidationGeneration,
+            CalculateSnapshotFingerprint(command),
+            exactReceipt?.Command.CommandId.ToString() ?? "(none)",
+            exactReceipt?.Command.InvalidationGeneration ?? 0,
+            exactReceipt?.Status.ToString() ?? "Pending",
+            exactReceipt?.Reason ?? command.Reason,
+            CalculateSnapshotFingerprint(exactReceipt),
+            exactReceipt?.Accepted == true);
+        return new CoordinatorOperationDescriptor(
+            "runtime_unlock_retry_lifecycle",
+            "ScopeInvalidation",
+            authorityId,
+            attempt?.Authority.PredecessorAuthorityId?.ToString() ?? "(none)",
+            command.InvalidationGeneration,
+            exactReceipt is null ? "Pending" : exactReceipt.Value.Status.ToString(),
+            receiptSnapshot.CommandIdentity,
+            receiptSnapshot.CommandGeneration,
+            receiptSnapshot.CommandFingerprint,
+            receiptSnapshot.ReceiptIdentity,
+            receiptSnapshot.ReceiptGeneration,
+            receiptSnapshot.ReceiptStatus,
+            receiptSnapshot.ReceiptFingerprint,
+            receiptSnapshot.ReceiptValidated,
+            OperationRole: "scope_invalidation",
+            OperationKey: CreateCoordinatorOperationKey(
+                "runtime_unlock_retry_lifecycle",
+                "scope_invalidation",
+                command.CommandId.ToString(),
+                command.InvalidationGeneration,
+                "ScopeInvalidation"),
+            RuntimeUnlockRetry: attempt is { } exactAttempt
+                ? CreateRuntimeUnlockRetrySnapshot(
+                    state,
+                    "scope_invalidation",
+                    exactAttempt,
+                    ImmutableArray.Create(receiptSnapshot))
+                : null);
+    }
+
+    private static FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot
+        CreateRuntimeUnlockRetrySnapshot(
+            FileTransferCoordinatorState state,
+            string role,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot attempt,
+            ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+                receipts)
+    {
+        var authority = attempt.Authority;
+        return new(
+            role,
+            CreateRuntimeUnlockRetrySourceBoundary(state, authority),
+            authority.AuthorityGeneration,
+            authority.RecoveryContractGeneration,
+            authority.DispatchAttemptGeneration,
+            authority.MissingDispatchSuccessorGeneration,
+            authority.RetiredOfferGeneration,
+            attempt.OfferGeneration,
+            CalculateSnapshotFingerprint(attempt.OfferNonce),
+            attempt.DispatchDeadlineUtcMs,
+            attempt.DispatchObserved,
+            authority.ReleaseKind.ToString(),
+            authority.ReleaseAuthorityId?.ToString() ?? "(none)",
+            authority.ReleaseGeneration,
+            authority.ReleaseOutcome,
+            authority.ListenerRearmRequirement.ToString(),
+            authority.ListenerExecutionMode.ToString(),
+            attempt.Request.RequestActivePredecessorSupersession,
+            attempt.SuccessorAuthorityId?.ToString() ?? "(none)",
+            receipts);
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateRuntimeUnlockRetrySourceBoundary(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthority authority)
+        => new(
+            authority.RouteToken,
+            authority.ProtocolVersion,
+            authority.LiveRouteEpoch,
+            authority.RoutePublicationGeneration,
+            authority.RouteCommitGeneration ?? 0,
+            authority.RuntimeGeneration,
+            authority.TerminalGeneration,
+            authority.LegGeneration,
+            authority.TransportEpoch,
+            authority.BridgeRecoveryGeneration,
+            authority.CheckpointGeneration,
+            authority.CheckpointRequestId,
+            authority.DataSessionIdentity,
+            authority.DataSessionGeneration);
+
+    private static ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+        CreateRuntimeUnlockRetryReceiptSnapshots(
+            RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+    {
+        var builder = ImmutableArray.CreateBuilder<
+            FileTransferCoordinatorReceiptTransitionSnapshot>();
+        var authority = attempt.Authority;
+        var authorityId = authority.AuthorityId.ToString();
+        if (attempt.StageStatus is { } stageStatus)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "stage",
+                $"{authorityId}:stage",
+                authority.DispatchAttemptGeneration,
+                CalculateSnapshotFingerprint(attempt.Request),
+                $"{authorityId}:stage",
+                authority.DispatchAttemptGeneration,
+                stageStatus.ToString(),
+                attempt.StageDisposition.ToString(),
+                CalculateSnapshotFingerprint(new
+                {
+                    stageStatus,
+                    attempt.StageDisposition,
+                    attempt.StagedUtcMs,
+                    attempt.StageExpiresUtcMs,
+                }),
+                stageStatus is
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or
+                    RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent));
+        }
+        if (attempt.InstallReceipt is { IsDefault: false } install)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "install",
+                $"{authorityId}:install",
+                install.InstallGeneration,
+                CalculateSnapshotFingerprint(install.Request),
+                $"{authorityId}:install",
+                install.InstallGeneration,
+                attempt.State.ToString(),
+                "retry_dispatch_install_receipt",
+                CalculateSnapshotFingerprint(install),
+                install.Authority == authority &&
+                install.Request == attempt.Request));
+        }
+        if (attempt.State is
+                RuntimeUnlockRetryLifecycleAttemptState.AliasBound or
+                RuntimeUnlockRetryLifecycleAttemptState.SendInFlight or
+                RuntimeUnlockRetryLifecycleAttemptState.Settled &&
+            attempt.OfferGeneration > 0)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "execution",
+                $"{authorityId}:execution",
+                attempt.OfferGeneration,
+                CalculateSnapshotFingerprint(attempt.InstallReceipt),
+                $"{authorityId}:offer:{attempt.OfferGeneration}",
+                attempt.OfferGeneration,
+                attempt.State.ToString(),
+                attempt.DispatchObserved ? "dispatch_observed" : "offer_bound",
+                CalculateSnapshotFingerprint(new
+                {
+                    attempt.OfferGeneration,
+                    attempt.OfferNonce,
+                    attempt.DispatchObserved,
+                    attempt.State,
+                }),
+                !string.IsNullOrWhiteSpace(attempt.OfferNonce)));
+        }
+        if (attempt.Settlement is { IsDefault: false } settlement)
+        {
+            builder.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "settlement",
+                $"{authorityId}:settlement",
+                Math.Max(1, attempt.OfferGeneration),
+                CalculateSnapshotFingerprint(new
+                {
+                    settlement.Authority,
+                    settlement.OfferGeneration,
+                    settlement.OfferNonce,
+                }),
+                $"{authorityId}:settlement",
+                Math.Max(1, attempt.OfferGeneration),
+                settlement.Outcome.ToString(),
+                settlement.Reason,
+                CalculateSnapshotFingerprint(settlement),
+                settlement.Authority == authority &&
+                settlement.OfferGeneration == attempt.OfferGeneration &&
+                string.Equals(
+                    settlement.OfferNonce,
+                    attempt.OfferNonce,
+                    StringComparison.Ordinal) &&
+                settlement.DispatchObserved == attempt.DispatchObserved));
+        }
+        return builder.ToImmutable();
+    }
+
+    private static string CalculateRuntimeUnlockRetryCommandFingerprint(
+        RuntimeUnlockRetryLifecycleAttemptSnapshot attempt)
+        => CalculateSnapshotFingerprint(new
+        {
+            attempt.Request,
+            attempt.Authority,
+            attempt.StageStatus,
+            attempt.StageDisposition,
+            attempt.StagedUtcMs,
+            attempt.StageExpiresUtcMs,
+            attempt.DispatchDeadlineUtcMs,
+            attempt.OfferGeneration,
+            attempt.OfferNonce,
+            attempt.DispatchObserved,
+            attempt.SuccessorAuthorityId,
+        });
 
     private static void AddRouteRuntimeOperationDescriptors(
         FileTransferCoordinatorState state,
@@ -1975,5 +2692,7 @@ internal static partial class FileTransferCoordinator
         string OperationKey = "",
         FileTransferCoordinatorRouteRuntimeOperationSnapshot? RouteRuntime = null,
         FileTransferCoordinatorRouteTransitionOperationSnapshot?
-            RouteTransition = null);
+            RouteTransition = null,
+        FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot?
+            RuntimeUnlockRetry = null);
 }

@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
-$script:FileTransferCoordinatorSnapshotCatalogHash = 'f62968f36d3d19e93805666bd527afacafb19227ef9634f9edf564d921de391e'
+$script:FileTransferCoordinatorSnapshotCatalogHash = '2ba980b5696114cbd09fde978ae85d27270adc08f6caead9bd222c0074e9d0c6'
 $script:FileTransferLegacyV0CatalogVersion = 'legacy-v0-pinned-20260825'
 $script:FileTransferLegacyV0CatalogHash = '7e463c2909cbc4ca5e11cdd50c38e74c3884212a74cefdd6f1544308de4462ee'
 $script:FileTransferCoordinatorEvidenceCatalogCache = $null
@@ -19,6 +19,56 @@ $script:FileTransferCoordinatorSnapshotFamily1 = @(
     'route_runtime',
     'route_transition'
 )
+$script:FileTransferCoordinatorSnapshotFamily2 = @(
+    'runtime_unlock_retry_lifecycle'
+)
+$script:FileTransferCoordinatorSnapshotFamily2EffectKinds = @(
+    'dispatch_stage_observed',
+    'install_committed',
+    'execution_observed',
+    'settlement_observed',
+    'scope_invalidation_applied'
+)
+$script:FileTransferCoordinatorSnapshotFamily2DecisionKinds = @(
+    'AuthorizeRuntimeUnlockRetryDispatch',
+    'ObserveRuntimeUnlockRetryDispatchStage',
+    'IssueRuntimeUnlockRetryDispatchInstallReceipt',
+    'CommitRuntimeUnlockRetryDispatchInstall',
+    'EvaluateRuntimeUnlockRetryDispatchDeadline',
+    'ObserveRuntimeUnlockRetryDispatchExecutionState',
+    'ObserveRuntimeUnlockRetryDispatchSettlement',
+    'PrepareRuntimeUnlockRetryDispatchSuccessor',
+    'CloseRuntimeUnlockRetryDispatchChain',
+    'PrepareRuntimeUnlockRetryDispatchStageExpiry',
+    'InvalidateRuntimeUnlockRetryDispatchPendingAttempt',
+    'PrepareRuntimeUnlockRetryLifecycleScopeInvalidation',
+    'CommitRuntimeUnlockRetryLifecycleScopeInvalidation'
+)
+$script:FileTransferCoordinatorSnapshotFamily2OperationRoles = @(
+    'attempt_pending',
+    'attempt_installed',
+    'attempt_retained_predecessor',
+    'attempt_terminal',
+    'bounded_closure',
+    'scope_invalidation',
+    'attempted_decision'
+)
+$script:FileTransferCoordinatorSnapshotFamily2ReceiptStages = [ordered]@{
+    stage = @('Staged', 'Idempotent', 'Rejected')
+    install = @(
+        'ReceiptIssued', 'Installed', 'AliasBound', 'SendInFlight',
+        'Settled', 'Invalidated', 'Expired', 'Closed')
+    execution = @('AliasBound', 'SendInFlight', 'Settled')
+    settlement = @(
+        'DispatchObserved', 'MissingDispatch', 'Rejected', 'Invalidated',
+        'Expired', 'StaleRejected')
+    bounded_closure = @('Closed')
+    scope_invalidation = @(
+        'Pending', 'Accepted', 'Idempotent', 'Rejected', 'Applied')
+    decision = @(
+        'Accepted', 'Idempotent', 'Rejected', 'Expired', 'Granted', 'Held',
+        'Requested', 'ChainClosed')
+}
 $script:FileTransferCoordinatorSnapshotFamily1EffectKinds = @(
     'pause_installed',
     'physical_send_lease_registered',
@@ -87,6 +137,30 @@ $script:FileTransferCoordinatorSnapshotDecisionCatalog = [ordered]@{
         class = 'publication_authority_missing'
         domain = 'route_runtime'
         phase = 'route_runtime'
+    }
+    retry_missing_dispatch_successor = [ordered]@{
+        family = 'runtime_unlock_retry_lifecycle'
+        class = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
+        domain = 'route_runtime'
+        phase = 'runtime_unlock_retry'
+    }
+    retry_install_incomplete = [ordered]@{
+        family = 'runtime_unlock_retry_lifecycle'
+        class = 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
+        domain = 'route_runtime'
+        phase = 'runtime_unlock_retry'
+    }
+    retry_contract_unsettled = [ordered]@{
+        family = 'runtime_unlock_retry_lifecycle'
+        class = 'runtime_unlock_retry_dispatch_contract_unsettled'
+        domain = 'route_runtime'
+        phase = 'runtime_unlock_retry'
+    }
+    retry_chain_closure = [ordered]@{
+        family = 'runtime_unlock_retry_lifecycle'
+        class = 'runtime_unlock_retry_dispatch_chain_closure_incomplete'
+        domain = 'route_runtime'
+        phase = 'runtime_unlock_retry'
     }
 }
 $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds = @(
@@ -183,6 +257,11 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
         "Family1ReceiptStages=$((@($script:FileTransferCoordinatorSnapshotFamily1ReceiptStages.Keys | ForEach-Object { '{0}:{1}' -f $_, ($script:FileTransferCoordinatorSnapshotFamily1ReceiptStages[$_] -join '|') })) -join ',')"
         "Family1DecisionKinds=$($script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -join ',')"
         "Family1OperationKinds=$((@($script:FileTransferCoordinatorSnapshotFamily1OperationKinds.Keys | ForEach-Object { '{0}:{1}' -f $_, ($script:FileTransferCoordinatorSnapshotFamily1OperationKinds[$_] -join '|') })) -join ',')"
+        "Family2=$($script:FileTransferCoordinatorSnapshotFamily2 -join ',')"
+        "Family2Effects=$($script:FileTransferCoordinatorSnapshotFamily2EffectKinds -join ',')"
+        "Family2DecisionKinds=$($script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -join ',')"
+        "Family2OperationRoles=$($script:FileTransferCoordinatorSnapshotFamily2OperationRoles -join ',')"
+        "Family2ReceiptStages=$((@($script:FileTransferCoordinatorSnapshotFamily2ReceiptStages.Keys | ForEach-Object { '{0}:{1}' -f $_, ($script:FileTransferCoordinatorSnapshotFamily2ReceiptStages[$_] -join '|') })) -join ',')"
         "DecisionCatalog=$((@($script:FileTransferCoordinatorSnapshotDecisionCatalog.Keys | ForEach-Object { $entry = $script:FileTransferCoordinatorSnapshotDecisionCatalog[$_]; '{0}|{1}|{2}|{3}|{4}' -f $_, $entry.family, $entry.class, $entry.domain, $entry.phase })) -join ',')"
     ) -join "`n"
     $actualHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
@@ -221,6 +300,11 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
         Family1ReceiptStages = $script:FileTransferCoordinatorSnapshotFamily1ReceiptStages
         Family1DecisionKinds = $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds
         Family1OperationKinds = $script:FileTransferCoordinatorSnapshotFamily1OperationKinds
+        Family2 = $script:FileTransferCoordinatorSnapshotFamily2
+        Family2EffectKinds = $script:FileTransferCoordinatorSnapshotFamily2EffectKinds
+        Family2DecisionKinds = $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds
+        Family2OperationRoles = $script:FileTransferCoordinatorSnapshotFamily2OperationRoles
+        Family2ReceiptStages = $script:FileTransferCoordinatorSnapshotFamily2ReceiptStages
         DecisionCatalog = $script:FileTransferCoordinatorSnapshotDecisionCatalog
         LegacyV0 = [pscustomobject]@{
             Version = $script:FileTransferLegacyV0CatalogVersion
@@ -298,8 +382,11 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
     $scope = if ($null -ne $Operation.routeRuntime) {
         $Operation.routeRuntime.boundary
     }
-    else {
+    elseif ($null -ne $Operation.routeTransition) {
         $Operation.routeTransition.sourceBoundary
+    }
+    else {
+        $Operation.runtimeUnlockRetry.sourceBoundary
     }
     if ($null -eq $scope) {
         return $false
@@ -358,6 +445,24 @@ function Test-FileTransferCoordinatorSnapshotBoundaryComplete {
         }
     }
     return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotBoundaryEqual {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Left) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Right)) {
+        return $false
+    }
+
+    return (ConvertTo-Json -InputObject $Left -Depth 16 -Compress) -ceq
+        (ConvertTo-Json -InputObject $Right -Depth 16 -Compress)
 }
 
 function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
@@ -436,6 +541,65 @@ function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
         }
         $allowed = @($script:FileTransferCoordinatorSnapshotFamily1ReceiptStages[$stage])
         if ([string]$receipt.receiptStatus -notin $allowed) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ([string]$Operation.family -notin
+        $script:FileTransferCoordinatorSnapshotFamily2) {
+        return $true
+    }
+    $expectedOperationKey = @(
+        [string]$Operation.family,
+        [string]$Operation.operationRole,
+        [string]$Operation.authorityId,
+        ([long]$Operation.operationGeneration).ToString(
+            [System.Globalization.CultureInfo]::InvariantCulture),
+        [string]$Operation.operationKind) -join '|'
+    if ([string]$Operation.operationKey -cne $expectedOperationKey -or
+        [string]$Envelope.decisionKind -notin
+            $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
+        [string]$Operation.operationRole -notin
+            $script:FileTransferCoordinatorSnapshotFamily2OperationRoles -or
+        $null -eq $Operation.runtimeUnlockRetry -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Operation.runtimeUnlockRetry.sourceBoundary)) {
+        return $false
+    }
+
+    $role = [string]$Operation.operationRole
+    $kind = [string]$Operation.operationKind
+    if (($role -like 'attempt_*' -and
+         $role -cne 'attempted_decision' -and
+         $kind -cne 'RetryAttempt') -or
+        ($role -ceq 'bounded_closure' -and $kind -cne 'BoundedClosure') -or
+        ($role -ceq 'scope_invalidation' -and $kind -cne 'ScopeInvalidation') -or
+        ($role -ceq 'attempted_decision' -and
+         $kind -cne [string]$Envelope.decisionKind)) {
+        return $false
+    }
+
+    $states = @(
+        'None', 'Authorized', 'Staged', 'ReceiptIssued', 'Installed',
+        'AliasBound', 'SendInFlight', 'Settled', 'Invalidated', 'Expired',
+        'Closed', 'Pending', 'Accepted', 'Idempotent', 'Rejected')
+    if ([string]$Operation.beforeState -notin $states -or
+        [string]$Operation.afterState -notin $states) {
+        return $false
+    }
+    foreach ($receipt in @($Operation.runtimeUnlockRetry.receipts)) {
+        $stage = [string]$receipt.stage
+        if (-not $script:FileTransferCoordinatorSnapshotFamily2ReceiptStages.Contains($stage) -or
+            [string]$receipt.receiptStatus -notin
+                @($script:FileTransferCoordinatorSnapshotFamily2ReceiptStages[$stage])) {
             return $false
         }
     }
@@ -554,6 +718,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             FirstUnresolvedBoundary = $null
             LegacySelectionCount = 1
             RouteFamilyLegacySelectionCount = 2
+            RuntimeUnlockRetryFamilyLegacySelectionCount = 1
         }
     }
 
@@ -790,6 +955,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
                         break
                     }
+                    if (-not (Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog `
+                            -Envelope $envelope `
+                            -Operation $operation)) {
+                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        break
+                    }
                     if ([string]$operation.family -ceq 'route_runtime' -and
                         ($null -eq $operation.routeRuntime -or
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
@@ -797,12 +968,32 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         [string]$operation.family -ceq 'route_transition' -and
                         ($null -eq $operation.routeTransition -or
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
-                            -Boundary $operation.routeTransition.sourceBoundary))) {
+                            -Boundary $operation.routeTransition.sourceBoundary)) -or
+                        [string]$operation.family -ceq 'runtime_unlock_retry_lifecycle' -and
+                        ($null -eq $operation.runtimeUnlockRetry -or
+                         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                            -Boundary $operation.runtimeUnlockRetry.sourceBoundary))) {
                         $errors.Add("snapshot_operation_scope_incomplete:$($record.LineIndex)")
                         break
                     }
                     if ([string]$operation.family -ceq 'route_transition') {
                         foreach ($receipt in @($operation.routeTransition.receipts)) {
+                            if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
+                                [long]$receipt.commandGeneration -le 0 -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.commandFingerprint) -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptIdentity) -or
+                                [long]$receipt.receiptGeneration -le 0 -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptStatus) -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptFingerprint)) {
+                                $errors.Add("snapshot_operation_receipt_incomplete:$($record.LineIndex)")
+                                break
+                            }
+                        }
+                    }
+                    if ([string]$operation.family -ceq
+                        'runtime_unlock_retry_lifecycle') {
+                        foreach ($receipt in @($operation.runtimeUnlockRetry.receipts)) {
                             if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
                                 [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
                                 [long]$receipt.commandGeneration -le 0 -or
@@ -967,6 +1158,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
             continue
         }
+        if ($effect.Family -in $script:FileTransferCoordinatorSnapshotFamily2 -and
+            $script:FileTransferCoordinatorSnapshotFamily2EffectKinds -notcontains
+                [string]$effect.EffectKind) {
+            $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
+            continue
+        }
         $matches = @(
             $boundaries | Where-Object {
                 $_.coordinatorInstanceId -ceq $effect.CoordinatorInstanceId -and
@@ -992,6 +1189,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                                 [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
                                 [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
                                 [bool]$_.receiptValidated
+                            }).Count -eq 1) -or
+                         ($_.PSObject.Properties.Name -contains
+                            'runtimeUnlockRetry' -and
+                          $null -ne $_.runtimeUnlockRetry -and
+                          @($_.runtimeUnlockRetry.receipts | Where-Object {
+                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
+                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
+                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
+                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
+                                [bool]$_.receiptValidated
                             }).Count -eq 1))
                     }).Count -eq 1
             })
@@ -1003,7 +1210,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
-                if ([string]$operation.family -in $script:FileTransferCoordinatorSnapshotFamily1) {
+                if ([string]$operation.family -in
+                    (@($script:FileTransferCoordinatorSnapshotFamily1) +
+                     @($script:FileTransferCoordinatorSnapshotFamily2))) {
                     [pscustomobject]@{
                         Boundary = $boundary
                         Operation = $operation
@@ -1131,6 +1340,246 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 $latest.Boundary.verdict = 'fail'
                 }
             }
+        }
+    }
+
+    $retryEntries = @($operationHistory | Where-Object {
+            [string]$_.Operation.family -ceq
+                'runtime_unlock_retry_lifecycle' -and
+            [string]$_.Operation.operationRole -ne 'attempted_decision'
+        })
+    $retryAttempts = @($retryEntries | Where-Object {
+            [string]$_.Operation.operationKind -ceq 'RetryAttempt'
+        })
+    foreach ($authorityGroup in @($retryAttempts | Group-Object {
+                "$($_.Boundary.coordinatorInstanceId)|$([string]$_.Operation.authorityId)"
+            })) {
+        $history = @($authorityGroup.Group | Sort-Object {
+                [long]$_.Boundary.decisionUtcMilliseconds
+            }, {
+                [long]$_.Boundary.afterStateGeneration
+            }, {
+                [string]$_.Boundary.boundaryId
+            })
+        if ($history.Count -eq 0) {
+            continue
+        }
+
+        $authorityId = [string]$history[0].Operation.authorityId
+        $instanceId = [string]$history[0].Boundary.coordinatorInstanceId
+        $sourceBoundary = $history[0].Operation.runtimeUnlockRetry.sourceBoundary
+        $exactEffects = @($effects | Where-Object {
+                [string]$_.CoordinatorInstanceId -ceq $instanceId -and
+                [string]$_.AuthorityId -ceq $authorityId
+            })
+        $missingRequiredReceiptEffect = $null
+        foreach ($entry in $history) {
+            foreach ($receipt in @($entry.Operation.runtimeUnlockRetry.receipts)) {
+                if (-not [bool]$receipt.receiptValidated) {
+                    continue
+                }
+                $requiredEffectKind = switch -Exact ([string]$receipt.stage) {
+                    'stage' { 'dispatch_stage_observed'; break }
+                    'install' { 'install_committed'; break }
+                    'execution' {
+                        if ([bool]$entry.Operation.runtimeUnlockRetry.dispatchObserved) {
+                            'execution_observed'
+                        }
+                        break
+                    }
+                    'settlement' { 'settlement_observed'; break }
+                    default { '' }
+                }
+                if ([string]::IsNullOrWhiteSpace($requiredEffectKind)) {
+                    continue
+                }
+                $matchingEffects = @($exactEffects | Where-Object {
+                        [string]$_.EffectKind -ceq $requiredEffectKind -and
+                        [string]$_.ReceiptIdentity -ceq
+                            [string]$receipt.receiptIdentity -and
+                        [long]$_.ReceiptGeneration -eq
+                            [long]$receipt.receiptGeneration -and
+                        [string]$_.ReceiptStatus -ceq
+                            [string]$receipt.receiptStatus -and
+                        [string]$_.ReceiptFingerprint -ceq
+                            [string]$receipt.receiptFingerprint
+                    })
+                if ($matchingEffects.Count -ne 1) {
+                    $missingRequiredReceiptEffect = [pscustomobject]@{
+                        Entry = $entry
+                        Stage = [string]$receipt.stage
+                    }
+                    break
+                }
+            }
+            if ($null -ne $missingRequiredReceiptEffect) {
+                break
+            }
+        }
+        if ($null -ne $missingRequiredReceiptEffect) {
+            $candidate = $missingRequiredReceiptEffect.Entry
+            $candidate.Boundary.taxonomyClass =
+                if ($missingRequiredReceiptEffect.Stage -in @('stage', 'install')) {
+                    'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
+                }
+                else {
+                    'runtime_unlock_retry_dispatch_contract_unsettled'
+                }
+            $candidate.Boundary.domain = 'route_runtime'
+            $candidate.Boundary.phase = 'runtime_unlock_retry'
+            $candidate.Boundary.rawCount = 1
+            $candidate.Boundary.distinctCount = 1
+            $candidate.Boundary.recoveredCount = 0
+            $candidate.Boundary.unresolvedCount = 1
+            $candidate.Boundary.verdict = 'fail'
+        }
+        $missingDispatch = @($history | Where-Object {
+                @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                        [string]$_.stage -ceq 'settlement' -and
+                        [string]$_.receiptStatus -ceq 'MissingDispatch' -and
+                        [bool]$_.receiptValidated
+                    }).Count -eq 1
+            } | Select-Object -First 1) | Select-Object -First 1
+        $closureRejections = @(
+            $history | Where-Object {
+                [string]$_.Boundary.decisionKind -ceq
+                    'PrepareRuntimeUnlockRetryDispatchSuccessor' -and
+                [string]$_.Boundary.decisionStatus -ceq 'Rejected' -and
+                [string]$_.Boundary.decisionReason -ceq
+                    'retry_dispatch_missing_successor_limit_exhausted' -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                    -Left $_.Operation.runtimeUnlockRetry.sourceBoundary `
+                    -Right $sourceBoundary)
+            } | Group-Object {
+                [string]$_.Boundary.boundaryId
+            } | ForEach-Object { $_.Group | Select-Object -First 1 }
+        )
+        foreach ($closureRejection in $closureRejections) {
+            $matchingClosures = @($retryEntries | Where-Object {
+                    [string]$_.Boundary.coordinatorInstanceId -ceq $instanceId -and
+                    [string]$_.Operation.operationRole -ceq 'bounded_closure' -and
+                    [string]$_.Operation.authorityId -ceq $authorityId -and
+                    [string]$_.Operation.afterState -ceq 'Closed' -and
+                    [bool]$_.Operation.receiptValidated -and
+                    [long]$_.Boundary.decisionUtcMilliseconds -ge
+                        [long]$closureRejection.Boundary.decisionUtcMilliseconds -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                        -Left $_.Operation.runtimeUnlockRetry.sourceBoundary `
+                        -Right $sourceBoundary) -and
+                    @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                            [string]$_.stage -ceq 'bounded_closure' -and
+                            [string]$_.receiptStatus -ceq 'Closed' -and
+                            [bool]$_.receiptValidated
+                        }).Count -eq 1
+                })
+            $closureRejection.Boundary.taxonomyClass =
+                'runtime_unlock_retry_dispatch_chain_closure_incomplete'
+            $closureRejection.Boundary.domain = 'route_runtime'
+            $closureRejection.Boundary.phase = 'runtime_unlock_retry'
+            $closureRejection.Boundary.rawCount = 1
+            $closureRejection.Boundary.distinctCount = 1
+            $closureRejection.Boundary.recoveredCount =
+                if ($matchingClosures.Count -eq 1) { 1 } else { 0 }
+            $closureRejection.Boundary.unresolvedCount =
+                if ($matchingClosures.Count -eq 1) { 0 } else { 1 }
+            $closureRejection.Boundary.verdict =
+                if ($matchingClosures.Count -eq 1) { 'pass' } else { 'fail' }
+        }
+        if ($null -ne $missingDispatch) {
+            $successors = @($retryAttempts | Where-Object {
+                    [string]$_.Boundary.coordinatorInstanceId -ceq $instanceId -and
+                    [string]$_.Operation.predecessorAuthorityId -ceq $authorityId -and
+                    [string]$_.Operation.authorityId -cne $authorityId -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                        -Left $_.Operation.runtimeUnlockRetry.sourceBoundary `
+                        -Right $sourceBoundary) -and
+                    [string]$_.Operation.runtimeUnlockRetry.releaseKind -ceq
+                        [string]$history[0].Operation.runtimeUnlockRetry.releaseKind -and
+                    [string]$_.Operation.runtimeUnlockRetry.releaseAuthorityId -ceq
+                        [string]$history[0].Operation.runtimeUnlockRetry.releaseAuthorityId -and
+                    [long]$_.Operation.runtimeUnlockRetry.releaseGeneration -eq
+                        [long]$history[0].Operation.runtimeUnlockRetry.releaseGeneration -and
+                    [long]$_.Boundary.decisionUtcMilliseconds -ge
+                        [long]$missingDispatch.Boundary.decisionUtcMilliseconds
+                })
+            $successorRecovered = $false
+            foreach ($successorGroup in @($successors | Group-Object {
+                        [string]$_.Operation.authorityId
+                    })) {
+                $successorHistory = @($successorGroup.Group)
+                $install = @($successorHistory | Where-Object {
+                        @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                                [string]$_.stage -ceq 'install' -and
+                                [bool]$_.receiptValidated
+                            }).Count -eq 1
+                    })
+                $dispatch = @($successorHistory | Where-Object {
+                        [bool]$_.Operation.runtimeUnlockRetry.dispatchObserved -and
+                        @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                                [string]$_.stage -ceq 'execution' -and
+                                [string]$_.receiptReason -ceq 'dispatch_observed' -and
+                                [bool]$_.receiptValidated
+                            }).Count -eq 1
+                    })
+                $dispatchEffects = @($effects | Where-Object {
+                        [string]$_.CoordinatorInstanceId -ceq $instanceId -and
+                        [string]$_.AuthorityId -ceq
+                            [string]$successorHistory[0].Operation.authorityId -and
+                        [string]$_.EffectKind -ceq 'execution_observed'
+                    })
+                if ($install.Count -gt 0 -and $dispatch.Count -gt 0 -and
+                    $dispatchEffects.Count -eq 1) {
+                    $successorRecovered = $true
+                    break
+                }
+            }
+            $closed = @($retryEntries | Where-Object {
+                    [string]$_.Boundary.coordinatorInstanceId -ceq $instanceId -and
+                    [string]$_.Operation.operationRole -ceq 'bounded_closure' -and
+                    [string]$_.Operation.authorityId -ceq $authorityId -and
+                    [string]$_.Operation.afterState -ceq 'Closed' -and
+                    [bool]$_.Operation.receiptValidated
+                }).Count -gt 0
+            if (-not $closed -and $closureRejections.Count -eq 0) {
+                $missingDispatch.Boundary.taxonomyClass =
+                    'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
+                $missingDispatch.Boundary.domain = 'route_runtime'
+                $missingDispatch.Boundary.phase = 'runtime_unlock_retry'
+                $missingDispatch.Boundary.rawCount = 1
+                $missingDispatch.Boundary.distinctCount = 1
+                $missingDispatch.Boundary.recoveredCount =
+                    if ($successorRecovered) { 1 } else { 0 }
+                $missingDispatch.Boundary.unresolvedCount =
+                    if ($successorRecovered) { 0 } else { 1 }
+                $missingDispatch.Boundary.verdict =
+                    if ($successorRecovered) { 'pass' } else { 'fail' }
+            }
+        }
+
+        $latest = $history[-1]
+        $latestState = [string]$latest.Operation.afterState
+        if ($latestState -in @(
+                'Authorized', 'Staged', 'ReceiptIssued', 'Installed',
+                'AliasBound', 'SendInFlight')) {
+            $hasInstall = @($history | Where-Object {
+                    @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                            [string]$_.stage -ceq 'install' -and
+                            [bool]$_.receiptValidated
+                        }).Count -eq 1
+                }).Count -gt 0
+            $latest.Boundary.taxonomyClass = if ($hasInstall) {
+                'runtime_unlock_retry_dispatch_contract_unsettled'
+            }
+            else {
+                'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
+            }
+            $latest.Boundary.domain = 'route_runtime'
+            $latest.Boundary.phase = 'runtime_unlock_retry'
+            $latest.Boundary.rawCount = 1
+            $latest.Boundary.distinctCount = 1
+            $latest.Boundary.recoveredCount = 0
+            $latest.Boundary.unresolvedCount = 1
+            $latest.Boundary.verdict = 'fail'
         }
     }
 
@@ -1323,6 +1772,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     Sort-Object -Unique)
                 $authoritativeFamilies -notcontains $_
             }).Count
+        RuntimeUnlockRetryFamilyLegacySelectionCount = if (
+            @($streams.Values | ForEach-Object {
+                    $_.AuthoritativeFamilies
+                } | Sort-Object -Unique) -contains
+                'runtime_unlock_retry_lifecycle') {
+            0
+        }
+        else {
+            1
+        }
         LegacySelectionCount = if ($mode -eq 'SnapshotV1Authoritative') {
             0
         }
@@ -1391,11 +1850,21 @@ function Get-FileTransferCoordinatorSnapshotCorrelationResult {
             [int]$_.Boundary.unresolvedCount -gt 0 })
     [object[]]$recovered = @($records | Where-Object {
             [int]$_.Boundary.recoveredCount -gt 0 })
+    $rawCount = 0
+    $distinctCount = 0
+    $recoveredCount = 0
+    $unresolvedCount = 0
+    foreach ($boundary in $boundaries) {
+        $rawCount += [int]$boundary.rawCount
+        $distinctCount += [int]$boundary.distinctCount
+        $recoveredCount += [int]$boundary.recoveredCount
+        $unresolvedCount += [int]$boundary.unresolvedCount
+    }
     [pscustomobject]@{
-        RawCount = [int](@($boundaries | Measure-Object -Property rawCount -Sum).Sum)
-        DistinctCount = [int](@($boundaries | Measure-Object -Property distinctCount -Sum).Sum)
-        RecoveredCount = [int](@($boundaries | Measure-Object -Property recoveredCount -Sum).Sum)
-        UnresolvedCount = [int](@($boundaries | Measure-Object -Property unresolvedCount -Sum).Sum)
+        RawCount = $rawCount
+        DistinctCount = $distinctCount
+        RecoveredCount = $recoveredCount
+        UnresolvedCount = $unresolvedCount
         Verdict = if ($unresolved.Count -gt 0) { 'fail' } else { 'pass' }
         CandidateRecords = $records
         RecoveredCandidateRecords = $recovered
@@ -1427,7 +1896,9 @@ function Compare-FileTransferCoordinatorSnapshotEvaluations {
             'EffectCount',
             'BoundaryCount',
             'BoundaryHash',
-            'LegacySelectionCount')) {
+            'LegacySelectionCount',
+            'RouteFamilyLegacySelectionCount',
+            'RuntimeUnlockRetryFamilyLegacySelectionCount')) {
         if ([string]$Full.$field -cne [string]$Compact.$field) {
             $reasons.Add("snapshot_full_compact_$($field.ToLowerInvariant())_mismatch")
         }
