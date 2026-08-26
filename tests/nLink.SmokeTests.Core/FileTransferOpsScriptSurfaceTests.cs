@@ -1136,6 +1136,230 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_CoordinatorSnapshotFallbackBootstrapRolloverIsExactAndTotal()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+            function New-Scope([string]$route,[int]$protocol,[long]$epoch) {
+                [ordered]@{
+                    route=$route; protocolVersion=$protocol
+                    liveRouteEpoch=$epoch; routePublicationGeneration=3L
+                    routeCommitGeneration=2L; runtimeGeneration=4L
+                    terminalGeneration=0L; legGeneration=4L
+                    transportEpoch=0L; bridgeRecoveryGeneration=0L
+                    checkpointGeneration=0L; checkpointRequestId='(none)'
+                    dataSessionIdentity='data-session-1'; dataSessionGeneration=1L
+                }
+            }
+            $sourceScope = New-Scope 'file_tuna_v4' 4 3
+
+            function New-BootstrapOperation(
+                [string]$authority,
+                [long]$generation,
+                [string]$beforeState,
+                [string]$afterState,
+                [bool]$delivered,
+                [object]$source = $sourceScope) {
+                $receipt = if ($delivered) {
+                    @([ordered]@{
+                        stage='fallback_v6_bootstrap'
+                        commandIdentity=$authority; commandGeneration=$generation
+                        commandFingerprint="command-$authority"
+                        receiptIdentity=$authority; receiptGeneration=$generation
+                        receiptStatus='Delivered'; receiptReason='delivered'
+                        receiptFingerprint="receipt-$authority"
+                        receiptValidated=$true
+                    })
+                }
+                else { @() }
+                [ordered]@{
+                    family='route_transition'
+                    operationRole='fallback_v6_bootstrap'
+                    operationKey="route_transition|fallback_v6_bootstrap|$authority|$generation|FallbackV6ProofBootstrap"
+                    operationKind='FallbackV6ProofBootstrap'
+                    authorityId=$authority; predecessorAuthorityId='(none)'
+                    operationGeneration=$generation
+                    beforeState=$beforeState; afterState=$afterState
+                    commandIdentity=$authority; commandGeneration=$generation
+                    commandFingerprint="command-$authority"
+                    receiptIdentity=if ($delivered) { $authority } else { '(none)' }
+                    receiptGeneration=if ($delivered) { $generation } else { 0L }
+                    receiptStatus=if ($delivered) { 'Delivered' } else { '(none)' }
+                    receiptFingerprint=if ($delivered) { "receipt-$authority" } else { '(none)' }
+                    receiptValidated=$delivered; stateApplied=$true
+                    routeRuntime=$null
+                    routeTransition=[ordered]@{
+                        role='fallback_v6_bootstrap'
+                        transitionKind='TunaV4ToPostTunaFallbackV6'
+                        sourceBoundary=$source
+                        targetBoundary=(New-Scope 'post_tuna_fallback_v6' 6 $generation)
+                        sourceTransport='Tuna'
+                        proofBoundaryKind='file_transfer_v4_state_frame_received'
+                        proofAdmissionMode='fallback_v6_proof_bootstrap'
+                        proofBoundaryFingerprint="proof-$authority"
+                        durableCheckpointFingerprint="checkpoint-$authority"
+                        targetRoute='post_tuna_fallback_v6'; targetProtocolVersion=6
+                        targetTransport='RegularNkn'; handoffKind='TunaToNormalFallback'
+                        dispositionKind='(none)'; retainedFrameType='(none)'
+                        retainedFrameFingerprint='(none)'; receipts=@($receipt)
+                    }
+                }
+            }
+
+            function New-TransitionLine(
+                [string]$prefix,
+                [string]$id,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [long]$time,
+                [string]$kind,
+                [string]$status,
+                [object[]]$operations) {
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId=($prefix -replace '^.*coordinator_instance_id=([^;]+).*$','$1')
+                    sessionId='session-1'; transferId='transfer-1'
+                    direction=($prefix -replace '^.*direction=([^;]+).*$','$1')
+                    transitionId=$id; decisionKind=$kind
+                    decisionStatus=$status; decisionReason='test'
+                    decisionUtcMilliseconds=$time
+                    aggregate=[ordered]@{
+                        beforeStateGeneration=$beforeGeneration
+                        afterStateGeneration=$afterGeneration
+                        beforeStateFingerprint=$beforeHash
+                        afterStateFingerprint=$afterHash
+                        beforeBoundary=$sourceScope; afterBoundary=$sourceScope
+                        changedFamilies=@('route_transition')
+                        operations=$operations
+                    }
+                }
+                $json=$envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash=Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload=[Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $prefix; transition_id=$id; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+
+            function New-BootstrapStream([string]$direction,[string]$variant) {
+                $instance="coordinator-$direction-$variant"
+                $prefix="snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$instance; session_id=session-1; transfer_id=transfer-1; direction=$direction"
+                $start="event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=0; initial_state_hash=h0; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                $gen1Pending=New-BootstrapOperation 'bootstrap-1' 1 'None' 'Pending' $false
+                $gen1Delivered=New-BootstrapOperation 'bootstrap-1' 1 'Pending' 'Delivered' $true
+                $gen1Retired=New-BootstrapOperation 'bootstrap-1' 1 'Delivered' 'None' $true
+                $gen2Pending=New-BootstrapOperation 'bootstrap-2' 2 'None' 'Pending' $false
+                $gen2Delivered=New-BootstrapOperation 'bootstrap-2' 2 'Pending' 'Delivered' $true
+                $lines=@(
+                    $start
+                    (New-TransitionLine $prefix 'transition-1' 0 1 'h0' 'h1' 1 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($gen1Pending))
+                    (New-TransitionLine $prefix 'transition-2' 1 2 'h1' 'h2' 2 'ApplyFileTransferFallbackV6ProofBootstrapReceipt' 'Accepted' @($gen1Delivered))
+                )
+                if ($variant -ceq 'complete') {
+                    $lines += New-TransitionLine $prefix 'transition-3' 2 3 'h2' 'h3' 3 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($gen1Retired,$gen2Pending)
+                    $lines += New-TransitionLine $prefix 'transition-4' 3 4 'h3' 'h4' 4 'ApplyFileTransferFallbackV6ProofBootstrapReceipt' 'Accepted' @($gen2Delivered)
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=4; final_state_hash=h4; transition_count=4; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'missing-successor') {
+                    $lines += New-TransitionLine $prefix 'transition-3' 2 3 'h2' 'h3' 3 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($gen1Retired)
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=h3; transition_count=3; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'ambiguous-successor') {
+                    $gen3Pending=New-BootstrapOperation 'bootstrap-3' 3 'None' 'Pending' $false
+                    $lines += New-TransitionLine $prefix 'transition-3' 2 3 'h2' 'h3' 3 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($gen1Retired,$gen2Pending,$gen3Pending)
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=h3; transition_count=3; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'mutated-successor') {
+                    $mutated=New-Scope 'file_tuna_v4' 4 4
+                    $mutatedPending=New-BootstrapOperation 'bootstrap-2' 2 'None' 'Pending' $false $mutated
+                    $lines += New-TransitionLine $prefix 'transition-3' 2 3 'h2' 'h3' 3 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($gen1Retired,$mutatedPending)
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=h3; transition_count=3; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'regressed-successor') {
+                    $regressedPending=New-BootstrapOperation 'bootstrap-2' 1 'None' 'Pending' $false
+                    $lines += New-TransitionLine $prefix 'transition-3' 2 3 'h2' 'h3' 3 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($gen1Retired,$regressedPending)
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=h3; transition_count=3; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'missing-delivery-receipt') {
+                    $missingReceipt=New-BootstrapOperation 'bootstrap-1' 1 'Pending' 'Delivered' $false
+                    $lines=@($start,$lines[1],(New-TransitionLine $prefix 'transition-2' 1 2 'h1' 'h2' 2 'ApplyFileTransferFallbackV6ProofBootstrapReceipt' 'Accepted' @($missingReceipt)))
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=2; final_state_hash=h2; transition_count=2; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'retirement-without-delivery') {
+                    $pendingRetired=New-BootstrapOperation 'bootstrap-1' 1 'Pending' 'None' $false
+                    $lines=@($start,$lines[1],(New-TransitionLine $prefix 'transition-2' 1 2 'h1' 'h2' 2 'IssueFileTransferFallbackV6ProofBootstrap' 'Accepted' @($pendingRetired,$gen2Pending)))
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=2; final_state_hash=h2; transition_count=2; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'invalidation') {
+                    $lines += New-TransitionLine $prefix 'transition-3' 2 3 'h2' 'h3' 3 'InvalidateFileTransferRouteTransition' 'Invalidated' @($gen1Retired)
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=h3; transition_count=3; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                elseif ($variant -ceq 'pending') {
+                    $lines=@($start,$lines[1])
+                    $lines += "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=1; final_state_hash=h1; transition_count=1; emitted_family_coverage=route_runtime,route_transition; shadow_family_coverage=; authoritative_family_coverage=route_runtime,route_transition; authority_effect=none"
+                }
+                return @($lines)
+            }
+
+            foreach ($direction in @('outbound','inbound')) {
+                $compact=@(New-BootstrapStream $direction 'complete')
+                $full=@('event=unrelated') + $compact + @('event=other')
+                $fullEvaluation=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $full
+                $compactEvaluation=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $compact
+                $parity=Compare-FileTransferCoordinatorSnapshotEvaluations -Full $fullEvaluation -Compact $compactEvaluation
+                if ($fullEvaluation.ArtifactEvidenceVerdict -ne 'pass' -or
+                    $null -ne $fullEvaluation.FirstUnresolvedBoundary -or
+                    $parity.Verdict -ne 'pass' -or
+                    $fullEvaluation.BoundaryHash -cne $compactEvaluation.BoundaryHash) {
+                    throw "A valid $direction bootstrap rollover did not close identically: $($fullEvaluation | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                $duplicate=Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@($compact[0..2]) + @($compact[2]) + @($compact[3..5]))
+                if ($duplicate.ArtifactEvidenceVerdict -ne 'pass') {
+                    throw "A byte-identical bootstrap duplicate did not coalesce for $direction."
+                }
+            }
+
+            foreach ($variant in @('missing-successor','ambiguous-successor','mutated-successor','regressed-successor','missing-delivery-receipt','retirement-without-delivery')) {
+                $evaluation=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(New-BootstrapStream 'outbound' $variant)
+                if ($evaluation.ArtifactEvidenceVerdict -ne 'fail' -or
+                    $evaluation.ArtifactEvidenceFailureReason -notlike 'snapshot_fallback_v6_bootstrap_*') {
+                    throw "Malformed bootstrap variant $variant did not fail closed: $($evaluation | ConvertTo-Json -Depth 8 -Compress)"
+                }
+            }
+            $invalidated=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(New-BootstrapStream 'outbound' 'invalidation')
+            if ($invalidated.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $invalidated.FirstUnresolvedBoundary) {
+                throw 'An exact typed bootstrap invalidation did not close.'
+            }
+            $pending=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(New-BootstrapStream 'outbound' 'pending')
+            if ($pending.ArtifactEvidenceVerdict -ne 'pass' -or
+                $pending.FirstUnresolvedBoundary.taxonomyClass -ne
+                    'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing' -or
+                $pending.FirstUnresolvedBoundary.unresolvedCount -ne 1) {
+                throw 'A genuinely pending bootstrap did not remain an unresolved runtime boundary.'
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Coordinator bootstrap rollover validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public async Task FileTransferOps_LegacyV0CatalogIsPinnedAndRegistered()
     {
         if (!OperatingSystem.IsWindows())

@@ -1294,6 +1294,151 @@ function Test-FileTransferCoordinatorRouteTransitionOperationClosed {
     return $false
 }
 
+function Test-FileTransferCoordinatorFallbackV6BootstrapLineageEqual {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    if ($null -eq $Left.routeTransition -or
+        $null -eq $Right.routeTransition -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $Left.routeTransition.sourceBoundary `
+            -Right $Right.routeTransition.sourceBoundary)) {
+        return $false
+    }
+
+    foreach ($name in @(
+            'transitionKind', 'sourceTransport', 'proofAdmissionMode',
+            'targetRoute', 'targetProtocolVersion', 'targetTransport',
+            'handoffKind')) {
+        if ([string]$Left.routeTransition.$name -cne
+            [string]$Right.routeTransition.$name) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$History
+    )
+
+    $ordered = @($History | Sort-Object {
+            [long]$_.Boundary.decisionUtcMilliseconds
+        }, {
+            [long]$_.Boundary.afterStateGeneration
+        }, {
+            [string]$_.Boundary.boundaryId
+        })
+    if ($ordered.Count -eq 0) {
+        return [pscustomobject]@{
+            Closed = $false
+            Candidate = $null
+            StructuralFailure = 'history_missing'
+        }
+    }
+
+    $latest = $ordered[-1]
+    $latestState = [string]$latest.Operation.afterState
+    $hasValidatedDelivery = @(
+        $latest.Operation.routeTransition.receipts | Where-Object {
+            [string]$_.stage -ceq 'fallback_v6_bootstrap' -and
+            [string]$_.receiptStatus -ceq 'Delivered' -and
+            [bool]$_.receiptValidated
+        }).Count -eq 1
+
+    if ($latestState -ceq 'Delivered') {
+        return [pscustomobject]@{
+            Closed = $hasValidatedDelivery
+            Candidate = if ($hasValidatedDelivery) { $null } else { $latest }
+            StructuralFailure = if ($hasValidatedDelivery) {
+                ''
+            }
+            else {
+                'delivered_receipt_missing'
+            }
+        }
+    }
+    if ($latestState -ceq 'Pending') {
+        $candidate = @($ordered | Where-Object {
+                [string]$_.Operation.afterState -ceq 'Pending'
+            } | Select-Object -First 1)
+        return [pscustomobject]@{
+            Closed = $false
+            Candidate = if ($candidate.Count -eq 1) {
+                $candidate[0]
+            }
+            else {
+                $latest
+            }
+            StructuralFailure = ''
+        }
+    }
+    if ($latestState -cne 'None') {
+        return [pscustomobject]@{
+            Closed = $false
+            Candidate = $latest
+            StructuralFailure = 'state_invalid'
+        }
+    }
+
+    $explicitInvalidation =
+        [string]$latest.Boundary.decisionKind -ceq
+            'InvalidateFileTransferRouteTransition' -and
+        [string]$latest.Boundary.decisionStatus -ceq 'Invalidated'
+    if ($explicitInvalidation) {
+        return [pscustomobject]@{
+            Closed = $true
+            Candidate = $null
+            StructuralFailure = ''
+        }
+    }
+
+    if ([string]$latest.Operation.beforeState -cne 'Delivered' -or
+        -not $hasValidatedDelivery) {
+        return [pscustomobject]@{
+            Closed = $false
+            Candidate = $latest
+            StructuralFailure = 'retirement_without_delivery'
+        }
+    }
+
+    $successors = @($latest.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'route_transition' -and
+            [string]$_.operationRole -ceq 'fallback_v6_bootstrap' -and
+            [string]$_.operationKind -ceq 'FallbackV6ProofBootstrap' -and
+            [string]$_.authorityId -cne
+                [string]$latest.Operation.authorityId -and
+            [long]$_.operationGeneration -gt
+                [long]$latest.Operation.operationGeneration -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Pending' -and
+            (Test-FileTransferCoordinatorFallbackV6BootstrapLineageEqual `
+                -Left $latest.Operation `
+                -Right $_)
+        })
+    if ($successors.Count -eq 1) {
+        return [pscustomobject]@{
+            Closed = $true
+            Candidate = $null
+            StructuralFailure = ''
+        }
+    }
+
+    return [pscustomobject]@{
+        Closed = $false
+        Candidate = $latest
+        StructuralFailure = if ($successors.Count -eq 0) {
+            'successor_missing_or_mutated'
+        }
+        else {
+            'successor_ambiguous'
+        }
+    }
+}
+
 function Get-FileTransferCoordinatorSnapshotEvaluation {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Lines)
@@ -2154,12 +2299,15 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($family -ceq 'route_transition') {
             $isBootstrap = [string]$latest.Operation.operationRole -ceq
                 'fallback_v6_bootstrap'
+            $bootstrapLifecycle = if ($isBootstrap) {
+                Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle `
+                    -History $history
+            }
+            else {
+                $null
+            }
             $closed = if ($isBootstrap) {
-                [string]$latest.Operation.afterState -ceq 'Delivered' -and
-                @($latest.Operation.routeTransition.receipts | Where-Object {
-                        [string]$_.stage -ceq 'fallback_v6_bootstrap' -and
-                        [bool]$_.receiptValidated
-                    }).Count -eq 1
+                [bool]$bootstrapLifecycle.Closed
             }
             else {
                 Test-FileTransferCoordinatorRouteTransitionOperationClosed `
@@ -2177,11 +2325,28 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 $candidate = if ($rejected.Count -gt 0) {
                     $rejected[0]
                 }
+                elseif ($isBootstrap) {
+                    $bootstrapLifecycle.Candidate
+                }
                 else {
-                    @($history | Where-Object {
+                    $ordinaryCandidates = @($history | Where-Object {
                             [string]$_.Operation.afterState -in @(
                                 'Prepared', 'Draining', 'Committed', 'Invalidated')
-                        } | Select-Object -First 1)[0]
+                        } | Select-Object -First 1)
+                    if ($ordinaryCandidates.Count -eq 1) {
+                        $ordinaryCandidates[0]
+                    }
+                    else {
+                        $errors.Add(
+                            "snapshot_route_transition_candidate_missing:$($latest.Boundary.boundaryId)")
+                        $latest
+                    }
+                }
+                if ($isBootstrap -and $rejected.Count -eq 0 -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        [string]$bootstrapLifecycle.StructuralFailure)) {
+                    $errors.Add(
+                        "snapshot_fallback_v6_bootstrap_$($bootstrapLifecycle.StructuralFailure):$($candidate.Boundary.boundaryId)")
                 }
                 if ($null -ne $candidate) {
                     $class = 'filetransfer_route_transition_incomplete'
