@@ -47934,6 +47934,21 @@ function Get-FileTransferRegularV4FrontierRepairLifecycleProof {
             $frontier -lt 0) {
             return $false
         }
+        foreach ($requiredScopeField in @(
+                'runtime_generation',
+                'terminal_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'bridge_decision_generation')) {
+            $scopeValue = Get-FileTransferEventField `
+                -Event $Stall `
+                -Name $requiredScopeField `
+                -Default ''
+            if ([string]::IsNullOrWhiteSpace($scopeValue) -or
+                $scopeValue -in @('(none)', 'none', '(missing)', '__missing__')) {
+                return $false
+            }
+        }
 
         $settlement = @($SettlementDispositionProof.DistinctAcceptedEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$Stall.Sequence -and
@@ -67412,13 +67427,15 @@ function Get-FileTransferRecoveryFailureClassification {
         $regularV4FrontierRepairAuthorityGrantedEvents.Count -eq 0 -and
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
     $regularV4FrontierRepairStalled =
-        $hasRegularOnlyRouteEvidence -and
+        $regularV4FrontierRepairUnresolvedStalledEvents.Count -gt 0 -or
         (
-            $regularV4FrontierRepairSettlementDispositionUnverifiableEvents.Count -gt 0 -or
-            $regularV4FrontierRepairUnresolvedStalledEvents.Count -gt 0 -or
+            $hasRegularOnlyRouteEvidence -and
             (
-                $regularV4FrontierRepairUnresolvedDispatchEvents.Count -gt 0 -and
-                ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
+                $regularV4FrontierRepairSettlementDispositionUnverifiableEvents.Count -gt 0 -or
+                (
+                    $regularV4FrontierRepairUnresolvedDispatchEvents.Count -gt 0 -and
+                    ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
+                )
             )
         )
     $regularV4FrontierRepairSendDeferred =

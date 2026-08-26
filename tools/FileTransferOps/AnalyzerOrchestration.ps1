@@ -3103,6 +3103,22 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'scheduled_runtime_unlock_handoff_not_started'
         }) | Out-Null
     }
+    foreach ($candidateEvent in @(
+            Get-FileTransferCompactIndexEventsByName `
+                -Index $Index `
+                -Name 'runtime_unlock_retry_dispatch_authority_rejected' |
+                Where-Object {
+                    (Get-FileTransferEventField `
+                        -Event $_ `
+                        -Name 'decision_reason' `
+                        -Default '') -eq 'retry_dispatch_successor_attempt_mismatch'
+                })) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_successor_attempt_mismatch'
+            Event = $candidateEvent
+            Reason = 'retry_dispatch_successor_attempt_mismatch'
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($runtimeUnlockUncommittedTunaFallbackHandoffSuppressionProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_precommit_fallback_recovery_handoff_suppressed'

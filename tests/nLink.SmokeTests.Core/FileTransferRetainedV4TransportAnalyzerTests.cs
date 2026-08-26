@@ -4516,6 +4516,39 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("filetransfer_regular_v4_frontier_repair_stalled", verdict["first_proof_chain_failure_event"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_UnresolvedRegularV4StallBeforeLaterFallback_RemainsFirstBoundary(bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_stall_before_fallback";
+        const string regularScope = "route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=1; route_commit_generation=0";
+        const string fallbackScope = "route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=2";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; {regularScope}"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=42:12:42:12; {regularScope}; target_transport=regular_nkn; reason=repeated_frontier_repair_without_progress; frontier_chunk_index=42; durable_received_highest_chunk_index=278; requested_chunk_count=12"),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; {fallbackScope}")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: compact
+                ? new Dictionary<string, string> { ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1" }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("regular_v4_frontier_repair_stalled", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_regular_v4_frontier_repair_stalled", verdict["first_proof_chain_failure_event"]);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RegularV4PressureAuthorityLifecycleSplit_FullCompactParity()

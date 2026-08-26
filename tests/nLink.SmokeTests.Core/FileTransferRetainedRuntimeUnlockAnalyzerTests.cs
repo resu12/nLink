@@ -7398,9 +7398,12 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockRetrySuccessorAttemptMismatch_PrecedesLaterFallbackSymptoms()
+    public async Task AnalyzeRetained_RuntimeUnlockRetrySuccessorAttemptMismatch_PrecedesLaterFallbackSymptoms(
+        bool compact)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -7423,12 +7426,18 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
                     dispatchAttemptGeneration: 5,
                     missingDispatchSuccessorGeneration: 2,
                     suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch")),
-            ["-LiveRouteProofMode", "None"]);
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
 
         Assert.Equal(0, result.Script.ExitCode);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal(compact ? "INCONCLUSIVE" : "FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
         Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["recovery_failure_class"]);
         Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_class"]);
         Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", verdict["first_proof_chain_failure_event"]);
@@ -7436,7 +7445,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("2", verdict["first_proof_chain_failure_sequence"]);
         Assert.Equal("2", verdict["first_proof_chain_failure_line_number"]);
         Assert.Equal("nlink.log", Path.GetFileName(verdict["first_proof_chain_failure_source_path"]));
-        Assert.Equal("2", verdict["runtime_unlock_retry_dispatch_successor_attempt_mismatch_count"]);
+        if (!compact)
+        {
+            Assert.Equal("2", verdict["runtime_unlock_retry_dispatch_successor_attempt_mismatch_count"]);
+        }
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
         Assert.Equal(verdict["first_proof_chain_failure_class"], stability["first_proof_chain_failure_class"]);
@@ -7450,13 +7462,16 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal(verdict["first_proof_chain_failure_sequence"], ledger["first_proof_chain_failure_sequence"]);
         Assert.Equal(verdict["first_proof_chain_failure_line_number"], ledger["first_proof_chain_failure_line_number"]);
 
-        await using var ledgerStream = File.OpenRead(Path.Combine(result.ArtifactDir, "phase0-invariant-ledger.json"));
-        using var ledgerJson = await JsonDocument.ParseAsync(ledgerStream);
-        Assert.Equal(
-            "runtime_unlock_retry_dispatch_successor_attempt_mismatch",
-            ledgerJson.RootElement.GetProperty("first_proof_chain_failure_class").GetString());
-        Assert.Equal("2", ledgerJson.RootElement.GetProperty("first_proof_chain_failure_sequence").GetString());
-        Assert.Equal("2", ledgerJson.RootElement.GetProperty("first_proof_chain_failure_line_number").GetString());
+        if (!compact)
+        {
+            await using var ledgerStream = File.OpenRead(Path.Combine(result.ArtifactDir, "phase0-invariant-ledger.json"));
+            using var ledgerJson = await JsonDocument.ParseAsync(ledgerStream);
+            Assert.Equal(
+                "runtime_unlock_retry_dispatch_successor_attempt_mismatch",
+                ledgerJson.RootElement.GetProperty("first_proof_chain_failure_class").GetString());
+            Assert.Equal("2", ledgerJson.RootElement.GetProperty("first_proof_chain_failure_sequence").GetString());
+            Assert.Equal("2", ledgerJson.RootElement.GetProperty("first_proof_chain_failure_line_number").GetString());
+        }
     }
 
     [Fact]

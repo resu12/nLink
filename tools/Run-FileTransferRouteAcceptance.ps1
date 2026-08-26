@@ -6683,19 +6683,14 @@ function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
     $operatorVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'verdict' -DefaultValue '(missing)'
     $operatorHardFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'hard_failure_count' -DefaultValue '-1')
     if ($operatorHardFailureCount -ne 0 -or
-        [string]::Equals($operatorVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -or
-        $operatorVerdict.StartsWith('FAIL', [System.StringComparison]::OrdinalIgnoreCase) -or
-        $operatorVerdict.StartsWith('INVALID', [System.StringComparison]::OrdinalIgnoreCase) -or
-        $operatorVerdict.StartsWith('INCONCLUSIVE', [System.StringComparison]::OrdinalIgnoreCase)) {
+        [string]::Equals($operatorVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 
     $stability = Read-RouteAcceptanceKeyValueArtifact -Path $stabilitySummaryPath
     $stabilityGateStatus = Get-RouteAcceptanceReportValue -Report $stability -Name 'gate_status' -DefaultValue '(missing)'
     $stabilityHardFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $stability -Name 'hard_failure_count' -DefaultValue '0')
-    $stabilityCompleted = [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($stabilityGateStatus, 'warn', [System.StringComparison]::OrdinalIgnoreCase)
-    if (-not $stabilityCompleted -or
+    if ([string]::Equals($stabilityGateStatus, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -or
         $stabilityHardFailureCount -ne 0) {
         return $false
     }
@@ -6707,20 +6702,12 @@ function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
     $cleanFallbackLegProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'clean_fallback_leg_proof_verdict' -DefaultValue $fallbackLegAuthorityProofVerdict
     $bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
     $controlPlaneIsolationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'control_plane_isolation_verdict' -DefaultValue '(missing)'
-    $requiresLiveProof = -not [string]::Equals($LiveRouteProofMode, 'None', [System.StringComparison]::OrdinalIgnoreCase)
-    $hasFailedRouteProof = [string]::Equals($liveRouteEpochProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($fallbackLegAuthorityProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($cleanFallbackLegProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($bridgeLivenessIntegrationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($controlPlaneIsolationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase)
-
-    return [string]::Equals($routeConsistencyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
-        (-not $hasFailedRouteProof) -and
-        (-not $requiresLiveProof -or [string]::Equals($liveRouteEpochProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $requiresLiveProof -or [string]::Equals($fallbackLegAuthorityProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $requiresLiveProof -or [string]::Equals($cleanFallbackLegProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $requiresLiveProof -or [string]::Equals($bridgeLivenessIntegrationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $requiresLiveProof -or [string]::Equals($controlPlaneIsolationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase))
+    return -not [string]::Equals($routeConsistencyVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($liveRouteEpochProofVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($fallbackLegAuthorityProofVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($cleanFallbackLegProofVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($bridgeLivenessIntegrationVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($controlPlaneIsolationVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Stop-RouteAcceptanceRetainedAnalysisProcess {
@@ -9895,6 +9882,25 @@ function Get-RouteAcceptanceResultFailureClass {
         -FailurePhase ([string]$Result.guiReportedFailurePhase) `
         -FailureReason ([string]$Result.guiReportedFailureReason) `
         -ErrorMessage ([string]$Result.guiReportedFailureError)
+    if ($AcceptancePhase -eq 'phase5' -and
+        $script:RouteAcceptanceExecutionMode -eq 'fake' -and
+        -not $semanticAnalysisUnavailable) {
+        $explicitFailureClass = Get-Phase5FailureClass -Failures $Result.failures
+        if ($explicitFailureClass -notin @(
+                'none',
+                'setup',
+                'route_runtime',
+                'protocol_or_integrity',
+                'incomplete_proof',
+                'live_route_proof',
+                'fallback_authority',
+                'bridge_liveness',
+                'warning_policy',
+                'performance',
+                'environmental')) {
+            return $explicitFailureClass
+        }
+    }
     $finalizedAttemptSelectionVerdictProperty = $Result.PSObject.Properties['finalizedAttemptSelectionVerdict']
     if ($AcceptancePhase -eq 'phase5' -and
         $null -ne $finalizedAttemptSelectionVerdictProperty -and

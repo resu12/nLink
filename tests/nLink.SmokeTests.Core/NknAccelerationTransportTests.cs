@@ -13517,7 +13517,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             using var host = new NknSignalingTransport(
                 hostClient,
                 options,
-                new NknIdentity("host-post-tuna-post-commit-invalidation-id", hostClient.Address));
+                new NknIdentity("host-post-tuna-post-commit-invalidation-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(
+                    canListen: true,
+                    failedDialAttemptsBeforeSuccess: 0));
             using var helper = new NknSignalingTransport(
                 helperClient,
                 options,
@@ -13540,6 +13544,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 transferId,
                 "runtime_unlock_offer_send_not_observed",
                 "fallback_paired_tail_yield");
+            await host.DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
             await barrierEntered.Task.WaitAsync(cts.Token);
 
             TrackAuthorizedRegularV4RouteForTests(host, transferId, liveRouteEpoch: 2);
