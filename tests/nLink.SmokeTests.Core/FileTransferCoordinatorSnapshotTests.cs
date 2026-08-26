@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core.FileTransfer;
@@ -8,6 +10,81 @@ namespace NLink.SmokeTests;
 [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
 public sealed class FileTransferCoordinatorSnapshotTests
 {
+    [Theory]
+    [InlineData("route_runtime", "runtime_owner", "RuntimeOwner", "authority-route")]
+    [InlineData("route_transition", "current", "RegularV4ToTunaV4", "authority-transition")]
+    [InlineData("runtime_unlock_retry_lifecycle", "attempted_decision", "RetryAttempt", "authority-retry")]
+    [InlineData("receive_recovery", "operation_current", "BridgeReceiveStallRecovery", "authority-recovery")]
+    [InlineData("fallback_tail_yield", "yield_current", "Quiescent", "authority-yield")]
+    [InlineData("regular_v4_frontier_repair_pressure", "repair_authority_current", "V4Repair", "authority-pressure")]
+    [InlineData("responder_probe_handoff", "handoff_current", "post_fallback_v6_paired", "authority-handoff")]
+    [InlineData("route_runtime", "attempted_decision", "StartTransfer", "(none)")]
+    public void EvidenceProjection_RebuildsOperationKeyFromSanitizedIdentity(
+        string family,
+        string role,
+        string kind,
+        string authorityId)
+    {
+        var state = EmptyState() with
+        {
+            PersistentState = EmptyState().PersistentState with
+            {
+                CoordinatorInstanceId = "coordinator-evidence-test",
+            },
+        };
+        var decision = FileTransferCoordinator.Apply(
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                FileTransferRouteResolver.Resolve(
+                    FileTransferRoute.RegularNknV4Fast),
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.RegularNkn,
+                "snapshot_evidence_test",
+                FileTransferLegState.Active,
+                CanSendData: true,
+                CommittedChunkIndex: 0,
+                HighestObservedChunkIndex: -1,
+                TransportEpochId: 0,
+                BridgeRecoveryGeneration: 0),
+            state);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            decision.SnapshotEnvelope);
+        var template = envelope.Aggregate.Operations[0];
+        var operation = template with
+        {
+            Family = family,
+            OperationRole = role,
+            OperationKey = "raw-operation-key-must-not-be-projected",
+            OperationKind = kind,
+            AuthorityId = authorityId,
+            OperationGeneration = 7,
+        };
+        var projected = SessionFileTransferService
+            .CreateCoordinatorSnapshotEvidenceForTesting(
+            envelope with
+            {
+                Aggregate = envelope.Aggregate with
+                {
+                    Operations = ImmutableArray.Create(operation),
+                },
+            });
+
+        var projectedOperation = Assert.Single(projected.Aggregate.Operations);
+        var projectedAuthority = authorityId == "(none)"
+            ? authorityId
+            : "fte1-" + Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(authorityId)))
+                .ToLowerInvariant()[..24];
+        Assert.Equal(projectedAuthority, projectedOperation.AuthorityId);
+        Assert.Equal(
+            $"{family}|{role}|{projectedAuthority}|7|{kind}",
+            projectedOperation.OperationKey);
+        Assert.DoesNotContain(
+            "raw-operation-key-must-not-be-projected",
+            projectedOperation.OperationKey,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void CoordinatorApply_AuthorsRouteRuntimeEnvelopeWhenInstanceIsCurrent()
     {

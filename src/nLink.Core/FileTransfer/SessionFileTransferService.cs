@@ -1333,6 +1333,7 @@ public sealed partial class SessionFileTransferService :
                 OfferedDataProtocolVersion = routeSelection.ProtocolVersion,
                 NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion,
             };
+            StartCoordinatorSnapshotStreamLocked(context);
             context.RoutePublicationAuthorityForwarder =
                 (token, publicationReason) => ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
                     context,
@@ -3074,7 +3075,6 @@ public sealed partial class SessionFileTransferService :
                 context.NegotiatedDataProtocolVersion = acceptedProtocolVersion.Value;
                 context.State = FileTransferTransferState.PreparingMetadata;
                 context.StatusMessage = "Preparing file metadata.";
-                StartCoordinatorSnapshotStreamLocked(context);
             }
         }
 

@@ -43,18 +43,22 @@ public sealed partial class SessionFileTransferService
         var state = CreateCoordinatorStateLocked(context);
         var fingerprint =
             FileTransferCoordinator.CalculateSnapshotStateFingerprint(state);
-        context.CoordinatorPersistentState =
-            context.CoordinatorPersistentState with
-            {
-                SnapshotStateFingerprint = fingerprint,
-            };
-        context.CoordinatorSnapshotEmitter.Start(
+        if (!context.CoordinatorSnapshotEmitter.Start(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Outbound,
             state.PersistentState.SnapshotStateGeneration,
-            fingerprint);
+            fingerprint))
+        {
+            return;
+        }
+
+        context.CoordinatorPersistentState =
+            context.CoordinatorPersistentState with
+            {
+                SnapshotStateFingerprint = fingerprint,
+            };
     }
 
     private static void StartCoordinatorSnapshotStreamLocked(
@@ -63,18 +67,22 @@ public sealed partial class SessionFileTransferService
         var state = CreateCoordinatorStateLocked(context);
         var fingerprint =
             FileTransferCoordinator.CalculateSnapshotStateFingerprint(state);
-        context.CoordinatorPersistentState =
-            context.CoordinatorPersistentState with
-            {
-                SnapshotStateFingerprint = fingerprint,
-            };
-        context.CoordinatorSnapshotEmitter.Start(
+        if (!context.CoordinatorSnapshotEmitter.Start(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Inbound,
             state.PersistentState.SnapshotStateGeneration,
-            fingerprint);
+            fingerprint))
+        {
+            return;
+        }
+
+        context.CoordinatorPersistentState =
+            context.CoordinatorPersistentState with
+            {
+                SnapshotStateFingerprint = fingerprint,
+            };
     }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
@@ -93,6 +101,9 @@ public sealed partial class SessionFileTransferService
             decisionStatus,
             decisionReason);
         AssertNoAuthoritativeFamilyOperations(snapshot.Envelope);
+        context.CoordinatorSnapshotEmitter.ValidateEnvelope(
+            snapshot.Envelope,
+            snapshot.State);
         context.CoordinatorPersistentState = snapshot.State.PersistentState;
         context.CoordinatorSnapshotEmitter.Enqueue(snapshot.Envelope);
         return snapshot.State;
@@ -114,6 +125,9 @@ public sealed partial class SessionFileTransferService
             decisionStatus,
             decisionReason);
         AssertNoAuthoritativeFamilyOperations(snapshot.Envelope);
+        context.CoordinatorSnapshotEmitter.ValidateEnvelope(
+            snapshot.Envelope,
+            snapshot.State);
         context.CoordinatorPersistentState = snapshot.State.PersistentState;
         context.CoordinatorSnapshotEmitter.Enqueue(snapshot.Envelope);
         return snapshot.State;
@@ -785,6 +799,7 @@ public sealed partial class SessionFileTransferService
                 "Coordinator-authored snapshot envelope is missing or does not match its decision state.");
         }
 
+        emitter.ValidateEnvelope(envelope, state);
         adopt(state);
         emitter.Enqueue(envelope);
         return state;
@@ -1684,6 +1699,11 @@ public sealed partial class SessionFileTransferService
             exact.Authority.TransitionGeneration);
     }
 
+    internal static FileTransferCoordinatorTransitionEnvelope
+        CreateCoordinatorSnapshotEvidenceForTesting(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        => CoordinatorSnapshotStreamEmitter.CreateEvidenceEnvelope(envelope);
+
     private sealed class CoordinatorSnapshotStreamEmitter
     {
         private readonly ConcurrentQueue<string> pending = new();
@@ -1691,6 +1711,10 @@ public sealed partial class SessionFileTransferService
         private int drainScheduled;
         private bool started;
         private bool completed;
+        private string coordinatorInstanceId = "(none)";
+        private string sessionId = "(none)";
+        private string transferId = "(none)";
+        private string direction = "(none)";
         private long transitionCount;
         private long finalGeneration;
         private string finalHash = "(none)";
@@ -1699,7 +1723,7 @@ public sealed partial class SessionFileTransferService
         private readonly HashSet<string> authorityEffectMessages =
             new(StringComparer.Ordinal);
 
-        internal void Start(
+        internal bool Start(
             string coordinatorInstanceId,
             string sessionId,
             string transferId,
@@ -1707,9 +1731,10 @@ public sealed partial class SessionFileTransferService
             long initialGeneration,
             string initialHash)
         {
+            bool didStart;
             lock (stateGate)
             {
-                StartLocked(
+                didStart = StartLocked(
                     coordinatorInstanceId,
                     sessionId,
                     transferId,
@@ -1718,7 +1743,31 @@ public sealed partial class SessionFileTransferService
                     initialHash);
             }
 
-            ScheduleDrain();
+            if (didStart)
+            {
+                ScheduleDrain();
+            }
+            return didStart;
+        }
+
+        internal void ValidateEnvelope(
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            FileTransferCoordinatorState state)
+        {
+            lock (stateGate)
+            {
+                ValidateEnvelopeTailLocked(envelope);
+                if (envelope.Aggregate.AfterStateGeneration !=
+                        state.PersistentState.SnapshotStateGeneration ||
+                    !string.Equals(
+                        envelope.Aggregate.AfterStateFingerprint,
+                        state.PersistentState.SnapshotStateFingerprint,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Coordinator snapshot envelope does not match its returned decision state.");
+                }
+            }
         }
 
         internal void Enqueue(FileTransferCoordinatorTransitionEnvelope envelope)
@@ -1741,6 +1790,8 @@ public sealed partial class SessionFileTransferService
                         envelope.Aggregate.BeforeStateFingerprint);
                 }
 
+                ValidateEnvelopeTailLocked(envelope);
+
                 var evidenceEnvelope = CreateEvidenceEnvelope(envelope);
                 var payloadHash = evidenceEnvelope.CalculatePayloadSha256();
                 pending.Enqueue(
@@ -1758,14 +1809,14 @@ public sealed partial class SessionFileTransferService
                 transitionCount++;
                 finalGeneration = envelope.Aggregate.AfterStateGeneration;
                 finalHash = EvidenceToken(envelope.Aggregate.AfterStateFingerprint);
-                IndexAuthorityEffectBindingsLocked(envelope);
+                IndexAuthorityEffectBindingsLocked(envelope, evidenceEnvelope);
 
             }
 
             ScheduleDrain();
         }
 
-        private void StartLocked(
+        private bool StartLocked(
             string coordinatorInstanceId,
             string sessionId,
             string transferId,
@@ -1775,10 +1826,14 @@ public sealed partial class SessionFileTransferService
         {
             if (started || completed)
             {
-                return;
+                return false;
             }
 
             started = true;
+            this.coordinatorInstanceId = coordinatorInstanceId;
+            this.sessionId = sessionId;
+            this.transferId = transferId;
+            this.direction = direction;
             finalGeneration = initialGeneration;
             finalHash = EvidenceToken(initialHash);
             pending.Enqueue(
@@ -1794,6 +1849,29 @@ public sealed partial class SessionFileTransferService
                 $"emitted_family_coverage={CoordinatorSnapshotEmittedFamilyCoverage}; " +
                 $"shadow_family_coverage={CoordinatorSnapshotShadowFamilyCoverage}; " +
                 $"authoritative_family_coverage={CoordinatorSnapshotAuthoritativeFamilyCoverage}; authority_effect=none");
+            return true;
+        }
+
+        private void ValidateEnvelopeTailLocked(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        {
+            if (!started || completed ||
+                !string.Equals(
+                    envelope.CoordinatorInstanceId,
+                    coordinatorInstanceId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(envelope.SessionId, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(envelope.TransferId, transferId, StringComparison.Ordinal) ||
+                !string.Equals(envelope.Direction, direction, StringComparison.Ordinal) ||
+                envelope.Aggregate.BeforeStateGeneration != finalGeneration ||
+                !string.Equals(
+                    EvidenceToken(envelope.Aggregate.BeforeStateFingerprint),
+                    finalHash,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Coordinator snapshot envelope is not contiguous with the emitted stream tail.");
+            }
         }
 
         internal void Complete(
@@ -1889,8 +1967,8 @@ public sealed partial class SessionFileTransferService
                 $"snapshot_catalog_hash={CoordinatorSnapshotCatalogHash}; " +
                 $"coordinator_instance_id={EvidenceToken(coordinatorInstanceId)}; session_id={EvidenceToken(sessionId)}; " +
                 $"transfer_id={EvidenceToken(transferId)}; direction={direction.ToString().ToLowerInvariant()}; " +
-                $"transition_id={EvidenceToken(transitionId)}; coordinator_state_generation={boundStateGeneration}; " +
-                $"operation_family={family}; operation_key={EvidenceToken(operationKey)}; " +
+                $"transition_id={transitionId}; coordinator_state_generation={boundStateGeneration}; " +
+                $"operation_family={family}; operation_key={operationKey}; " +
                 $"operation_authority_id={EvidenceToken(authorityId)}; operation_generation={operationGeneration}; " +
                 $"effect_kind={effectKind}; effect_identity={EvidenceToken(effectIdentity ?? receiptIdentity)}; " +
                 $"effect_generation={(effectGeneration > 0 ? effectGeneration : receiptGeneration)}; " +
@@ -1917,10 +1995,16 @@ public sealed partial class SessionFileTransferService
         }
 
         private void IndexAuthorityEffectBindingsLocked(
-            FileTransferCoordinatorTransitionEnvelope envelope)
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            FileTransferCoordinatorTransitionEnvelope evidenceEnvelope)
         {
-            foreach (var operation in envelope.Aggregate.Operations)
+            for (var operationIndex = 0;
+                 operationIndex < envelope.Aggregate.Operations.Length;
+                 operationIndex++)
             {
+                var operation = envelope.Aggregate.Operations[operationIndex];
+                var evidenceOperation =
+                    evidenceEnvelope.Aggregate.Operations[operationIndex];
                 var scope = operation.RouteRuntime?.Boundary ??
                             operation.RouteTransition?.SourceBoundary ??
                             operation.RuntimeUnlockRetry?.SourceBoundary ??
@@ -1938,7 +2022,9 @@ public sealed partial class SessionFileTransferService
                         operation.ReceiptGeneration,
                         operation.ReceiptStatus,
                         operation.ReceiptFingerprint,
-                        scope);
+                        scope,
+                        evidenceEnvelope.TransitionId,
+                        evidenceOperation.OperationKey);
                 }
 
                 var typedReceipts = operation.RouteTransition?.Receipts ??
@@ -1963,7 +2049,9 @@ public sealed partial class SessionFileTransferService
                         receipt.ReceiptGeneration,
                         receipt.ReceiptStatus,
                         receipt.ReceiptFingerprint,
-                        scope);
+                        scope,
+                        evidenceEnvelope.TransitionId,
+                        evidenceOperation.OperationKey);
                 }
             }
         }
@@ -1975,7 +2063,9 @@ public sealed partial class SessionFileTransferService
             long receiptGeneration,
             string receiptStatus,
             string receiptFingerprint,
-            FileTransferCoordinatorStateBoundarySnapshot? scope)
+            FileTransferCoordinatorStateBoundarySnapshot? scope,
+            string evidenceTransitionId,
+            string evidenceOperationKey)
         {
             var key = CreateAuthorityEffectBindingKey(
                 operation.Family,
@@ -1986,9 +2076,9 @@ public sealed partial class SessionFileTransferService
                 receiptStatus,
                 receiptFingerprint);
             authorityEffectBindings[key] = new(
-                envelope.TransitionId,
+                evidenceTransitionId,
                 envelope.Aggregate.AfterStateGeneration,
-                operation.OperationKey,
+                evidenceOperationKey,
                 scope);
         }
 
@@ -2018,7 +2108,7 @@ public sealed partial class SessionFileTransferService
             string OperationKey,
             FileTransferCoordinatorStateBoundarySnapshot? Scope);
 
-        private static FileTransferCoordinatorTransitionEnvelope
+        internal static FileTransferCoordinatorTransitionEnvelope
             CreateEvidenceEnvelope(
                 FileTransferCoordinatorTransitionEnvelope envelope)
             => envelope with
@@ -2046,10 +2136,17 @@ public sealed partial class SessionFileTransferService
         private static FileTransferCoordinatorOperationTransitionSnapshot
             CreateEvidenceOperation(
                 FileTransferCoordinatorOperationTransitionSnapshot operation)
-            => operation with
+        {
+            var authorityId = EvidenceToken(operation.AuthorityId);
+            return operation with
             {
-                OperationKey = EvidenceToken(operation.OperationKey),
-                AuthorityId = EvidenceToken(operation.AuthorityId),
+                OperationKey = CreateEvidenceOperationKey(
+                    operation.Family,
+                    operation.OperationRole,
+                    authorityId,
+                    operation.OperationGeneration,
+                    operation.OperationKind),
+                AuthorityId = authorityId,
                 PredecessorAuthorityId = EvidenceToken(
                     operation.PredecessorAuthorityId),
                 CommandIdentity = EvidenceToken(operation.CommandIdentity),
@@ -2200,6 +2297,22 @@ public sealed partial class SessionFileTransferService
                         }
                         : null,
             };
+        }
+
+        private static string CreateEvidenceOperationKey(
+            string family,
+            string role,
+            string authorityId,
+            long operationGeneration,
+            string operationKind)
+            => string.Join(
+                "|",
+                family,
+                role,
+                authorityId,
+                operationGeneration.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                operationKind);
 
         private static FileTransferCoordinatorReceiptTransitionSnapshot
             CreateEvidenceReceipt(

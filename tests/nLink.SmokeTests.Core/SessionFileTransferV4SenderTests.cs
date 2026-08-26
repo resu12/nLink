@@ -8382,6 +8382,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         serviceType
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        StartCoordinatorSnapshotStreamForTest(context);
 
         var createState = serviceType
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
@@ -8417,6 +8418,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     checkpoint));
         var command = Assert.IsType<
             FileTransferFallbackV6ProofBootstrapCommand>(issued.Command);
+        AdoptCoordinatorDecisionForTest(context, issued);
         var deliveredProof = new FileTransferFrontierRequestFrameV6
         {
             SessionId = state.SessionId,
@@ -8441,10 +8443,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(
             FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied,
             delivered.Status);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            delivered.State.PersistentState);
+        AdoptCoordinatorDecisionForTest(context, delivered);
 
         var recoveredEpoch = new LiveRouteEpoch
         {
@@ -8661,10 +8660,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     checkpoint));
         var command = Assert.IsType<
             FileTransferFallbackV6ProofBootstrapCommand>(issued.Command);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            issued.State.PersistentState);
+        AdoptCoordinatorDecisionForTest(context, issued);
 
         var recoveredEpoch = new LiveRouteEpoch
         {
@@ -8917,10 +8913,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 "FileTransferRouteTransitionExecution"));
 
         Assert.Equal(peerRequest.TransportEpoch, command.TargetTransportEpoch);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            issued.State.PersistentState);
+        AdoptCoordinatorDecisionForTest(context, issued);
         serviceType.GetMethod(
                 "TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked",
                 BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -31892,6 +31885,33 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 candidate.GetParameters().Length == 1 &&
                 candidate.GetParameters()[0].ParameterType == context.GetType());
         return Assert.IsType<FileTransferCoordinatorState>(method.Invoke(null, [context]));
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorDecisionForTest(
+        object context,
+        FileTransferFallbackV6ProofBootstrapDecision decision)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "AdoptCoordinatorStateLocked" &&
+                candidate.GetParameters().Length == 2 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters()[1].ParameterType ==
+                    typeof(FileTransferFallbackV6ProofBootstrapDecision));
+        return Assert.IsType<FileTransferCoordinatorState>(
+            method.Invoke(null, [context, decision]));
+    }
+
+    private static void StartCoordinatorSnapshotStreamForTest(object context)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "StartCoordinatorSnapshotStreamLocked" &&
+                candidate.GetParameters().Length == 1 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType());
+        method.Invoke(null, [context]);
     }
 
     private static void ApplyCoordinatorActionDecisionForTest(
