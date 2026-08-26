@@ -135,7 +135,7 @@ public sealed class FileTransferCoordinatorSnapshotTests
         Assert.Equal(0, snapshot.Envelope.Aggregate.BeforeStateGeneration);
         Assert.Equal(1, snapshot.Envelope.Aggregate.AfterStateGeneration);
         Assert.Equal(
-            "SnapshotV1Shadow",
+            "SnapshotV1Authoritative",
             snapshot.Envelope.SnapshotSelectionMode);
         Assert.Equal("Accepted", snapshot.Envelope.DecisionStatus);
         Assert.Equal(

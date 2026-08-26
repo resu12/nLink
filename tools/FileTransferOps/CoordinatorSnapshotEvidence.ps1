@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
-$script:FileTransferCoordinatorSnapshotCatalogHash = 'f8efc491c4524deae00d40f31cd818e4fcc36daae1e007d286997fce2c52e519'
+$script:FileTransferCoordinatorSnapshotCatalogHash = '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2'
 $script:FileTransferLegacyV0CatalogVersion = 'legacy-v0-pinned-20260825'
 $script:FileTransferLegacyV0CatalogHash = 'a2ad4a9853c5a9551c98e59c11c5d71e1a35b0b5b0ff3229da1f4d6f295083ac'
 $script:FileTransferCoordinatorEvidenceCatalogCache = $null
@@ -31,6 +31,59 @@ $script:FileTransferCoordinatorSnapshotFamily4 = @(
 $script:FileTransferCoordinatorSnapshotFamily5 = @(
     'regular_v4_frontier_repair_pressure'
 )
+$script:FileTransferCoordinatorSnapshotFamily6 = @(
+    'responder_probe_handoff'
+)
+$script:FileTransferCoordinatorSnapshotFamily6DecisionKinds = @(
+    'ObserveRuntimeUnlockResponderPeerProbeHandoff',
+    'BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff',
+    'HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork',
+    'InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff'
+)
+$script:FileTransferCoordinatorSnapshotFamily6OperationRoles = @(
+    'admission_attempt',
+    'precommit_current',
+    'precommit_terminal',
+    'peer_acceptance_attempt',
+    'convergence_current',
+    'convergence_terminal',
+    'probe_adoption_pending',
+    'probe_adoption_terminal',
+    'owner_work_hold',
+    'handoff_current',
+    'handoff_terminal',
+    'route_transition_handoff_pending',
+    'attempted_decision'
+)
+$script:FileTransferCoordinatorSnapshotFamily6EffectKinds = @(
+    'answer_acceptance_observed',
+    'semantic_answer_ack_retained',
+    'peer_probe_received',
+    'peer_probe_ack_delivered',
+    'convergence_observed',
+    'convergence_invalidated',
+    'probe_adoption_requested',
+    'probe_adoption_applied',
+    'paired_offer_binding_applied',
+    'responder_transaction_lease_installed',
+    'handoff_bound',
+    'handoff_held',
+    'handoff_rechecked',
+    'handoff_invalidated',
+    'route_transition_handoff_supplied',
+    'precommit_sidecar_failure_observed',
+    'precommit_sidecar_rollback_processed'
+)
+$script:FileTransferCoordinatorSnapshotFamily6ReceiptStages = [ordered]@{
+    attempted_decision = @(
+        'Accepted', 'Idempotent', 'Held', 'Rejected', 'Invalidated',
+        'Prepared', 'Draining', 'Committed')
+    handoff_bind = @('Accepted', 'Idempotent')
+    handoff_hold = @('Held')
+    handoff_invalidation = @('Invalidated')
+    route_transition_prepare_handoff = @(
+        'Prepared', 'Idempotent', 'Rejected', 'Invalidated')
+}
 $script:FileTransferCoordinatorSnapshotFamily5DecisionKinds = @(
     'StageRegularV4FrontierRepairPressureBinding',
     'CommitRegularV4FrontierRepairPressureBinding',
@@ -372,6 +425,12 @@ $script:FileTransferCoordinatorSnapshotDecisionCatalog = [ordered]@{
         domain = 'route_runtime'
         phase = 'runtime_unlock_initial_activation'
     }
+    responder_probe_handoff = [ordered]@{
+        family = 'responder_probe_handoff'
+        class = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing'
+        domain = 'route_runtime'
+        phase = 'runtime_unlock_retry'
+    }
 }
 $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds = @(
     'StartTransfer',
@@ -484,6 +543,11 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
         "Family5Effects=$($script:FileTransferCoordinatorSnapshotFamily5EffectKinds -join ',')"
         "Family5DecisionKinds=$($script:FileTransferCoordinatorSnapshotFamily5DecisionKinds -join ',')"
         "Family5OperationRoles=$($script:FileTransferCoordinatorSnapshotFamily5OperationRoles -join ',')"
+        "Family6=$($script:FileTransferCoordinatorSnapshotFamily6 -join ',')"
+        "Family6Effects=$($script:FileTransferCoordinatorSnapshotFamily6EffectKinds -join ',')"
+        "Family6DecisionKinds=$($script:FileTransferCoordinatorSnapshotFamily6DecisionKinds -join ',')"
+        "Family6OperationRoles=$($script:FileTransferCoordinatorSnapshotFamily6OperationRoles -join ',')"
+        "Family6ReceiptStages=$((@($script:FileTransferCoordinatorSnapshotFamily6ReceiptStages.Keys | ForEach-Object { '{0}:{1}' -f $_, ($script:FileTransferCoordinatorSnapshotFamily6ReceiptStages[$_] -join '|') })) -join ',')"
         "DecisionCatalog=$((@($script:FileTransferCoordinatorSnapshotDecisionCatalog.Keys | ForEach-Object { $entry = $script:FileTransferCoordinatorSnapshotDecisionCatalog[$_]; '{0}|{1}|{2}|{3}|{4}' -f $_, $entry.family, $entry.class, $entry.domain, $entry.phase })) -join ',')"
     ) -join "`n"
     $actualHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
@@ -539,6 +603,11 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
         Family5EffectKinds = $script:FileTransferCoordinatorSnapshotFamily5EffectKinds
         Family5DecisionKinds = $script:FileTransferCoordinatorSnapshotFamily5DecisionKinds
         Family5OperationRoles = $script:FileTransferCoordinatorSnapshotFamily5OperationRoles
+        Family6 = $script:FileTransferCoordinatorSnapshotFamily6
+        Family6EffectKinds = $script:FileTransferCoordinatorSnapshotFamily6EffectKinds
+        Family6DecisionKinds = $script:FileTransferCoordinatorSnapshotFamily6DecisionKinds
+        Family6OperationRoles = $script:FileTransferCoordinatorSnapshotFamily6OperationRoles
+        Family6ReceiptStages = $script:FileTransferCoordinatorSnapshotFamily6ReceiptStages
         DecisionCatalog = $script:FileTransferCoordinatorSnapshotDecisionCatalog
         LegacyV0 = [pscustomobject]@{
             Version = $script:FileTransferLegacyV0CatalogVersion
@@ -633,6 +702,11 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
             'regularV4FrontierRepairPressure' -and
         $null -ne $Operation.regularV4FrontierRepairPressure) {
         $Operation.regularV4FrontierRepairPressure.sourceBoundary
+    }
+    elseif ($Operation.PSObject.Properties.Name -contains
+            'responderProbeHandoff' -and
+        $null -ne $Operation.responderProbeHandoff) {
+        $Operation.responderProbeHandoff.sourceBoundary
     }
     else {
         $Operation.runtimeUnlockRetry.sourceBoundary
@@ -1052,6 +1126,99 @@ function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ([string]$Operation.family -notin
+        $script:FileTransferCoordinatorSnapshotFamily6) {
+        return $true
+    }
+    $expectedOperationKey = @(
+        [string]$Operation.family,
+        [string]$Operation.operationRole,
+        [string]$Operation.authorityId,
+        ([long]$Operation.operationGeneration).ToString(
+            [System.Globalization.CultureInfo]::InvariantCulture),
+        [string]$Operation.operationKind) -join '|'
+    $knownAtomicDecision =
+        [string]$Envelope.decisionKind -in
+            $script:FileTransferCoordinatorSnapshotFamily6DecisionKinds -or
+        [string]$Envelope.decisionKind -in
+            $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
+        [string]$Envelope.decisionKind -in
+            $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
+        [string]$Envelope.decisionKind -in
+            $script:FileTransferCoordinatorSnapshotFamily4DecisionKinds -or
+        [string]$Envelope.decisionKind -in @(
+            'StartTransfer', 'RoutePublication', 'RouteCommitPublication',
+            'Terminalized', 'CoordinatorDecision', 'CoordinatorAction',
+            'LegacyFamilyCoordinatorDecision',
+            'LegacyFamilyCoordinatorActionDecision')
+    if ([string]$Operation.operationKey -cne $expectedOperationKey -or
+        -not $knownAtomicDecision -or
+        [string]$Operation.operationRole -notin
+            $script:FileTransferCoordinatorSnapshotFamily6OperationRoles -or
+        $null -eq $Operation.responderProbeHandoff) {
+        return $false
+    }
+
+    $payload = $Operation.responderProbeHandoff
+    if ([string]$payload.transitionMode -notin @(
+            'initial_regular_v4', 'post_fallback_v6_paired') -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $payload.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $payload.effectiveBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $payload.targetBoundary)) {
+        return $false
+    }
+    foreach ($name in @(
+            'role', 'ackMessageId', 'ackSourceFingerprint',
+            'peerProbeFrameFingerprint', 'probeId', 'probeState',
+            'probeTransport', 'ownerKey', 'pairKey',
+            'pairedReleaseAuthorityId', 'handoffAuthorityId',
+            'linkedTransitionAuthorityId', 'decisionStatus',
+            'decisionReason')) {
+        if ($payload.PSObject.Properties.Name -notcontains $name -or
+            [string]::IsNullOrWhiteSpace([string]$payload.$name)) {
+            return $false
+        }
+    }
+    if ($payload.PSObject.Properties.Name -notcontains 'receipts') {
+        return $false
+    }
+    if ([string]$payload.transitionMode -ceq 'initial_regular_v4') {
+        if ([long]$payload.sourceBoundary.transportEpoch -ne 0 -or
+            [int]$payload.sourceBoundary.bridgeRecoveryGeneration -ne 0 -or
+            [int]$payload.sourceBoundary.checkpointGeneration -ne 0 -or
+            [string]$payload.pairedReleaseAuthorityId -cne '(none)') {
+            return $false
+        }
+    }
+    elseif ([string]$Operation.receiptStatus -notin @(
+            'Rejected', 'Invalidated') -and
+        ([string]$payload.pairedReleaseAuthorityId -ceq '(none)' -or
+         [int]$payload.pairedReleaseGeneration -le 0 -or
+         [long]$payload.pairingGeneration -le 0 -or
+         [string]$payload.pairKey -ceq '(none)')) {
+        return $false
+    }
+    foreach ($receipt in @($payload.receipts)) {
+        $stage = [string]$receipt.stage
+        if (-not $script:FileTransferCoordinatorSnapshotFamily6ReceiptStages.Contains($stage) -or
+            [string]$receipt.receiptStatus -notin
+                @($script:FileTransferCoordinatorSnapshotFamily6ReceiptStages[$stage]) -or
+            -not [bool]$receipt.receiptValidated) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function ConvertFrom-FileTransferCoordinatorSnapshotPayload {
     param([Parameter(Mandatory = $true)][string]$Payload)
 
@@ -1168,6 +1335,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             ReceiveRecoveryFamilyLegacySelectionCount = 1
             FallbackTailYieldFamilyLegacySelectionCount = 1
             RegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1
+            ResponderProbeHandoffFamilyLegacySelectionCount = 1
         }
     }
 
@@ -1428,6 +1596,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
                         break
                     }
+                    if (-not (Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog `
+                            -Envelope $envelope `
+                            -Operation $operation)) {
+                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        break
+                    }
                     if ([string]$operation.family -ceq 'route_runtime' -and
                         ($null -eq $operation.routeRuntime -or
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
@@ -1460,7 +1634,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
                             -Boundary $operation.regularV4FrontierRepairPressure.sourceBoundary) -or
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
-                            -Boundary $operation.regularV4FrontierRepairPressure.effectiveBoundary))) {
+                            -Boundary $operation.regularV4FrontierRepairPressure.effectiveBoundary)) -or
+                        [string]$operation.family -ceq
+                            'responder_probe_handoff' -and
+                        ($null -eq $operation.responderProbeHandoff -or
+                         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                            -Boundary $operation.responderProbeHandoff.sourceBoundary) -or
+                         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                            -Boundary $operation.responderProbeHandoff.effectiveBoundary) -or
+                         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                            -Boundary $operation.responderProbeHandoff.targetBoundary))) {
                         $errors.Add("snapshot_operation_scope_incomplete:$($record.LineIndex)")
                         break
                     }
@@ -1717,6 +1900,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
             continue
         }
+        if ($effect.Family -in $script:FileTransferCoordinatorSnapshotFamily6 -and
+            $script:FileTransferCoordinatorSnapshotFamily6EffectKinds -notcontains
+                [string]$effect.EffectKind) {
+            $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
+            continue
+        }
         $matches = @(
             $boundaries | Where-Object {
                 $_.coordinatorInstanceId -ceq $effect.CoordinatorInstanceId -and
@@ -1779,6 +1968,17 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             'regularV4FrontierRepairPressure' -and
                           $null -ne $_.regularV4FrontierRepairPressure -and
                           @($_.regularV4FrontierRepairPressure.receipts |
+                            Where-Object {
+                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
+                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
+                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
+                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
+                                [bool]$_.receiptValidated
+                            }).Count -eq 1) -or
+                         ($_.PSObject.Properties.Name -contains
+                            'responderProbeHandoff' -and
+                          $null -ne $_.responderProbeHandoff -and
+                          @($_.responderProbeHandoff.receipts |
                             Where-Object {
                                 [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
                                 [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
@@ -1872,6 +2072,53 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies `
+                    -contains 'responder_probe_handoff' -and
+                @($_.operations | Where-Object {
+                        [string]$_.family -ceq 'responder_probe_handoff'
+                    }).Count -gt 0
+            })) {
+        foreach ($operation in @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq 'responder_probe_handoff' -and
+                    [bool]$_.receiptValidated
+                })) {
+            $requiredEffect = if (
+                [string]$operation.operationRole -ceq
+                    'route_transition_handoff_pending') {
+                'route_transition_handoff_supplied'
+            }
+            elseif ([string]$operation.receiptStatus -ceq 'Invalidated') {
+                'handoff_invalidated'
+            }
+            elseif ([string]$boundary.decisionKind -ceq
+                'BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff') {
+                'handoff_bound'
+            }
+            elseif ([string]$boundary.decisionKind -ceq
+                'HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork') {
+                'handoff_held'
+            }
+            else {
+                'convergence_observed'
+            }
+            $matchingEffects = @($effects | Where-Object {
+                    [string]$_.CoordinatorInstanceId -ceq
+                        [string]$boundary.coordinatorInstanceId -and
+                    [string]$_.TransitionId -ceq
+                        [string]$boundary.boundaryId -and
+                    [string]$_.Family -ceq 'responder_probe_handoff' -and
+                    [string]$_.OperationKey -ceq
+                        [string]$operation.operationKey -and
+                    [string]$_.EffectKind -ceq $requiredEffect
+                })
+            if ($matchingEffects.Count -ne 1) {
+                $errors.Add(
+                    "snapshot_responder_probe_handoff_required_effect_missing:$($boundary.boundaryId):$requiredEffect")
+            }
+        }
+    }
+
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
@@ -1880,7 +2127,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                      @($script:FileTransferCoordinatorSnapshotFamily2) +
                      @($script:FileTransferCoordinatorSnapshotFamily3) +
                      @($script:FileTransferCoordinatorSnapshotFamily4) +
-                     @($script:FileTransferCoordinatorSnapshotFamily5))) {
+                     @($script:FileTransferCoordinatorSnapshotFamily5) +
+                     @($script:FileTransferCoordinatorSnapshotFamily6))) {
                     [pscustomobject]@{
                         Boundary = $boundary
                         Operation = $operation
@@ -2009,6 +2257,113 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 }
             }
         }
+    }
+
+    $responderEntries = @($operationHistory | Where-Object {
+            [string]$_.Operation.family -ceq 'responder_probe_handoff'
+        })
+    foreach ($lineageGroup in @($responderEntries | Group-Object {
+                $payload = $_.Operation.responderProbeHandoff
+                $source = ConvertTo-Json -InputObject $payload.sourceBoundary `
+                    -Depth 16 -Compress
+                @(
+                    [string]$_.Boundary.coordinatorInstanceId,
+                    [string]$payload.transitionMode,
+                    [long]$payload.transactionGeneration,
+                    [long]$payload.offerGeneration,
+                    [long]$payload.pendingAnswerAckGeneration,
+                    [string]$payload.payerDecisionId,
+                    [long]$payload.launchGeneration,
+                    [long]$payload.tunaPathLeaseGeneration,
+                    [string]$payload.tunaPathLeaseListenerRunId,
+                    [string]$payload.ackMessageId,
+                    [string]$payload.ackSourceFingerprint,
+                    [string]$payload.peerProbeFrameFingerprint,
+                    [string]$payload.probeId,
+                    [string]$payload.pairKey,
+                    [string]$payload.pairedReleaseAuthorityId,
+                    $source) -join '|'
+            })) {
+        $history = @($lineageGroup.Group | Sort-Object {
+                [long]$_.Boundary.decisionUtcMilliseconds
+            }, {
+                [long]$_.Boundary.afterStateGeneration
+            }, {
+                [string]$_.Boundary.boundaryId
+            })
+        if ($history.Count -eq 0) {
+            continue
+        }
+
+        $prepared = @($history | Where-Object {
+                [string]$_.Operation.operationRole -ceq
+                    'route_transition_handoff_pending' -and
+                [string]$_.Operation.receiptStatus -in @(
+                    'Prepared', 'Idempotent', 'Committed') -and
+                [bool]$_.Operation.receiptValidated -and
+                [string]$_.Operation.responderProbeHandoff.linkedTransitionAuthorityId `
+                    -notin @('', '(none)') -and
+                [long]$_.Operation.responderProbeHandoff.linkedTransitionGeneration `
+                    -gt 0
+            })
+        $incidentEntries = @($history | Where-Object {
+                [string]$_.Operation.receiptStatus -in @(
+                    'Rejected', 'Held')
+            })
+        if ($incidentEntries.Count -eq 0 -and $prepared.Count -eq 0) {
+            $incidentEntries = @($history | Where-Object {
+                    [string]$_.Boundary.decisionKind -ceq
+                        'BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff' -and
+                    [string]$_.Operation.receiptStatus -in @(
+                        'Accepted', 'Idempotent')
+                })
+        }
+        if ($incidentEntries.Count -eq 0) {
+            continue
+        }
+
+        $candidate = $incidentEntries[0]
+        $candidateTime =
+            [long]$candidate.Boundary.decisionUtcMilliseconds
+        $poison = @($history | Where-Object {
+                [long]$_.Boundary.decisionUtcMilliseconds -gt $candidateTime -and
+                [string]$_.Operation.receiptStatus -ceq 'Invalidated'
+            } | Select-Object -First 1) | Select-Object -First 1
+        $recovery = @($prepared | Where-Object {
+                [long]$_.Boundary.decisionUtcMilliseconds -ge $candidateTime -and
+                ($null -eq $poison -or
+                 [long]$_.Boundary.decisionUtcMilliseconds -lt
+                    [long]$poison.Boundary.decisionUtcMilliseconds)
+            } | Select-Object -First 1) | Select-Object -First 1
+        $recovered = $null -ne $recovery
+        $reason = [string]$candidate.Boundary.decisionReason
+        $variant = if ($reason -like '*initial*scope*' -or
+            $reason -like '*initial*peer*acceptance*') {
+            'initial_activation_peer_acceptance_scope_rejected'
+        }
+        elseif ($reason -like '*ack*before*probe*' -or
+            $reason -like '*adoption*recheck*') {
+            'ack_before_probe_adoption_recheck_missing'
+        }
+        elseif ($reason -like '*binding*' -or
+            $reason -like '*probe_mismatch*' -or
+            $reason -like '*admission*') {
+            'binding_missing'
+        }
+        else {
+            'after_bound_handoff_missing'
+        }
+        $candidate.Boundary.taxonomyClass =
+            'runtime_unlock_responder_acked_probe_route_transition_handoff_missing'
+        $candidate.Boundary | Add-Member -NotePropertyName variant `
+            -NotePropertyValue $variant -Force
+        $candidate.Boundary.domain = 'route_runtime'
+        $candidate.Boundary.phase = 'runtime_unlock_retry'
+        $candidate.Boundary.rawCount = $incidentEntries.Count
+        $candidate.Boundary.distinctCount = 1
+        $candidate.Boundary.recoveredCount = if ($recovered) { 1 } else { 0 }
+        $candidate.Boundary.unresolvedCount = if ($recovered) { 0 } else { 1 }
+        $candidate.Boundary.verdict = if ($recovered) { 'pass' } else { 'fail' }
     }
 
     $regularV4PressureEntries = @($operationHistory | Where-Object {
@@ -3039,6 +3394,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         else {
             1
         }
+        ResponderProbeHandoffFamilyLegacySelectionCount = if (
+            @($streams.Values | ForEach-Object {
+                    $_.AuthoritativeFamilies
+                } | Sort-Object -Unique) -contains
+                'responder_probe_handoff') {
+            0
+        }
+        else {
+            1
+        }
         LegacySelectionCount = if ($mode -eq 'SnapshotV1Authoritative') {
             0
         }
@@ -3117,6 +3482,40 @@ function Get-FileTransferCoordinatorSnapshotCorrelationResult {
         $recoveredCount += [int]$boundary.recoveredCount
         $unresolvedCount += [int]$boundary.unresolvedCount
     }
+    [object[]]$initialResponderRecords = @($records | Where-Object {
+            $_.Boundary.PSObject.Properties.Name -contains 'variant' -and
+            [string]$_.Boundary.variant -ceq
+                'initial_activation_peer_acceptance_scope_rejected'
+        })
+    [object[]]$ackBeforeProbeRecords = @($records | Where-Object {
+            $_.Boundary.PSObject.Properties.Name -contains 'variant' -and
+            [string]$_.Boundary.variant -ceq
+                'ack_before_probe_adoption_recheck_missing'
+        })
+    [object[]]$bindingMissingRecords = @($records | Where-Object {
+            $_.Boundary.PSObject.Properties.Name -contains 'variant' -and
+            [string]$_.Boundary.variant -ceq 'binding_missing'
+        })
+    [object[]]$afterBoundRecords = @($records | Where-Object {
+            $_.Boundary.PSObject.Properties.Name -contains 'variant' -and
+            [string]$_.Boundary.variant -ceq 'after_bound_handoff_missing'
+        })
+    function Get-SnapshotCorrelationVariantCount {
+        param(
+            [object[]]$VariantRecords,
+            [ValidateSet('raw', 'distinct', 'recovered', 'unresolved')]
+            [string]$Kind)
+        $total = 0
+        foreach ($record in @($VariantRecords)) {
+            $total += switch ($Kind) {
+                'raw' { [int]$record.Boundary.rawCount }
+                'distinct' { [int]$record.Boundary.distinctCount }
+                'recovered' { [int]$record.Boundary.recoveredCount }
+                'unresolved' { [int]$record.Boundary.unresolvedCount }
+            }
+        }
+        return $total
+    }
     [pscustomobject]@{
         RawCount = $rawCount
         DistinctCount = $distinctCount
@@ -3130,6 +3529,46 @@ function Get-FileTransferCoordinatorSnapshotCorrelationResult {
         RecoveredCandidateEvents = @($recovered | ForEach-Object { $_.Event })
         UnresolvedCandidateEvents = @($unresolved | ForEach-Object { $_.Event })
         AuthoritativeRecords = @($records | ForEach-Object { $_.Event })
+        InitialActivationPeerAcceptanceScopeRejectedRawCount =
+            Get-SnapshotCorrelationVariantCount $initialResponderRecords raw
+        InitialActivationPeerAcceptanceScopeRejectedDistinctCount =
+            Get-SnapshotCorrelationVariantCount $initialResponderRecords distinct
+        InitialActivationPeerAcceptanceScopeRejectedRecoveredCount =
+            Get-SnapshotCorrelationVariantCount $initialResponderRecords recovered
+        InitialActivationPeerAcceptanceScopeRejectedUnresolvedCount =
+            Get-SnapshotCorrelationVariantCount $initialResponderRecords unresolved
+        InitialActivationPeerAcceptanceScopeRejectedVerdict = if (
+            (Get-SnapshotCorrelationVariantCount $initialResponderRecords unresolved) -gt 0) { 'fail' } else { 'pass' }
+        AckBeforeProbeAdoptionRecheckMissingRawCount =
+            Get-SnapshotCorrelationVariantCount $ackBeforeProbeRecords raw
+        AckBeforeProbeAdoptionRecheckMissingDistinctCount =
+            Get-SnapshotCorrelationVariantCount $ackBeforeProbeRecords distinct
+        AckBeforeProbeAdoptionRecheckMissingRecoveredCount =
+            Get-SnapshotCorrelationVariantCount $ackBeforeProbeRecords recovered
+        AckBeforeProbeAdoptionRecheckMissingUnresolvedCount =
+            Get-SnapshotCorrelationVariantCount $ackBeforeProbeRecords unresolved
+        AckBeforeProbeAdoptionRecheckMissingVerdict = if (
+            (Get-SnapshotCorrelationVariantCount $ackBeforeProbeRecords unresolved) -gt 0) { 'fail' } else { 'pass' }
+        BindingMissingRawCount =
+            Get-SnapshotCorrelationVariantCount $bindingMissingRecords raw
+        BindingMissingDistinctCount =
+            Get-SnapshotCorrelationVariantCount $bindingMissingRecords distinct
+        BindingMissingRecoveredCount =
+            Get-SnapshotCorrelationVariantCount $bindingMissingRecords recovered
+        BindingMissingUnresolvedCount =
+            Get-SnapshotCorrelationVariantCount $bindingMissingRecords unresolved
+        BindingMissingVerdict = if (
+            (Get-SnapshotCorrelationVariantCount $bindingMissingRecords unresolved) -gt 0) { 'fail' } else { 'pass' }
+        AfterBoundHandoffMissingRawCount =
+            Get-SnapshotCorrelationVariantCount $afterBoundRecords raw
+        AfterBoundHandoffMissingDistinctCount =
+            Get-SnapshotCorrelationVariantCount $afterBoundRecords distinct
+        AfterBoundHandoffMissingRecoveredCount =
+            Get-SnapshotCorrelationVariantCount $afterBoundRecords recovered
+        AfterBoundHandoffMissingUnresolvedCount =
+            Get-SnapshotCorrelationVariantCount $afterBoundRecords unresolved
+        AfterBoundHandoffMissingVerdict = if (
+            (Get-SnapshotCorrelationVariantCount $afterBoundRecords unresolved) -gt 0) { 'fail' } else { 'pass' }
         Source = 'SnapshotAuthorityV1'
     }
 }
@@ -3158,7 +3597,8 @@ function Compare-FileTransferCoordinatorSnapshotEvaluations {
             'RuntimeUnlockRetryFamilyLegacySelectionCount',
             'ReceiveRecoveryFamilyLegacySelectionCount',
             'FallbackTailYieldFamilyLegacySelectionCount',
-            'RegularV4FrontierRepairPressureFamilyLegacySelectionCount')) {
+            'RegularV4FrontierRepairPressureFamilyLegacySelectionCount',
+            'ResponderProbeHandoffFamilyLegacySelectionCount')) {
         if ([string]$Full.$field -cne [string]$Compact.$field) {
             $reasons.Add("snapshot_full_compact_$($field.ToLowerInvariant())_mismatch")
         }

@@ -992,6 +992,137 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "Regular-V4 pressure full/compact parity failed: $($pressureFull | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            $responderScope = [ordered]@{}
+            foreach ($entry in $receiveScope.GetEnumerator()) {
+                $responderScope[$entry.Key] = $entry.Value
+            }
+            $responderScope.route = 'post_tuna_fallback_v6'
+            $responderScope.protocolVersion = 6
+            $responderScope.liveRouteEpoch = 2L
+            $responderScope.routePublicationGeneration = 3L
+            $responderScope.runtimeGeneration = 3L
+            $responderScope.legGeneration = 3L
+            function New-ResponderReceipt([string]$stage, [string]$status) {
+                [ordered]@{
+                    stage=$stage; commandIdentity="responder-$stage-command"
+                    commandGeneration=1L; commandFingerprint="responder-$stage-command-fingerprint"
+                    receiptIdentity="responder-$stage-receipt"; receiptGeneration=1L
+                    receiptStatus=$status; receiptReason="responder_$stage"
+                    receiptFingerprint="responder-$stage-receipt-fingerprint"
+                    receiptValidated=$true
+                }
+            }
+            function New-ResponderOperation(
+                [string]$role,
+                [string]$status,
+                [string]$stage,
+                [string]$linkedTransitionAuthorityId,
+                [long]$linkedTransitionGeneration,
+                [bool]$stateApplied) {
+                $receipt = New-ResponderReceipt $stage $status
+                $authority = 'responder-handoff-1'
+                [ordered]@{
+                    family='responder_probe_handoff'; operationRole=$role
+                    operationKey="responder_probe_handoff|$role|$authority|1|post_fallback_v6_paired"
+                    operationKind='post_fallback_v6_paired'; authorityId=$authority
+                    predecessorAuthorityId='(none)'; operationGeneration=1L
+                    beforeState='Accepted'; afterState=$status
+                    commandIdentity=$receipt.commandIdentity; commandGeneration=1L
+                    commandFingerprint=$receipt.commandFingerprint
+                    receiptIdentity=$receipt.receiptIdentity; receiptGeneration=1L
+                    receiptStatus=$status; receiptFingerprint=$receipt.receiptFingerprint
+                    receiptValidated=$true; stateApplied=$stateApplied
+                    responderProbeHandoff=[ordered]@{
+                        role=$role; transitionMode='post_fallback_v6_paired'
+                        sourceBoundary=$responderScope; effectiveBoundary=$responderScope
+                        targetBoundary=$responderScope; transactionGeneration=1L
+                        offerGeneration=2L; pendingAnswerAckGeneration=2L
+                        payerDecisionId=3L; launchGeneration=4L
+                        tunaPathLeaseGeneration=5L
+                        tunaPathLeaseListenerRunId='listener-5'; lanes='file'
+                        ackMessageId='ack-1'; ackSourceFingerprint='ack-fingerprint-1'
+                        peerProbeFrameFingerprint='probe-fingerprint-1'
+                        probeId='probe-1'; probeState='Acked'; probeTransport='tuna'
+                        probeAckedUtcMs=100L; admissionGeneration=1
+                        pendingPreCommitGeneration=1; ownerKey='owner-1'; pairKey='pair-1'
+                        localProofIdentity='local-proof-1'; localProofFingerprint='local-fingerprint-1'
+                        peerProofIdentity='peer-proof-1'; peerProofFingerprint='peer-fingerprint-1'
+                        pairedReleaseAuthorityId='paired-release-1'; pairedReleaseGeneration=1
+                        pairingGeneration=1L; handoffAuthorityId=$authority; handoffGeneration=1
+                        linkedTransitionAuthorityId=$linkedTransitionAuthorityId
+                        linkedTransitionGeneration=$linkedTransitionGeneration
+                        decisionStatus=$status; decisionReason="responder_$stage"
+                        receipts=@($receipt)
+                    }
+                }
+            }
+            function New-ResponderEnvelopeLine(
+                [string]$transitionId,
+                [string]$decisionKind,
+                [string]$decisionStatus,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [long]$time,
+                [object]$operation) {
+                $aggregate = [ordered]@{
+                    beforeStateGeneration=$beforeGeneration; afterStateGeneration=$afterGeneration
+                    beforeStateFingerprint=$beforeHash; afterStateFingerprint=$afterHash
+                    beforeBoundary=$responderScope; afterBoundary=$responderScope
+                    changedFamilies=@('responder_probe_handoff'); operations=@($operation)
+                }
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Authoritative'
+                    coordinatorInstanceId='coordinator-responder'; sessionId='session-receive'
+                    transferId='transfer-receive'; direction='inbound'
+                    decisionUtcMilliseconds=$time; transitionId=$transitionId
+                    decisionKind=$decisionKind; decisionStatus=$decisionStatus
+                    decisionReason="responder_$decisionStatus"; aggregate=$aggregate
+                }
+                $json = $envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $responderPrefix; transition_id=$transitionId; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+            function New-ResponderEffect(
+                [string]$transitionId,
+                [string]$role,
+                [string]$stage,
+                [string]$status,
+                [string]$kind,
+                [long]$generation) {
+                "event=filetransfer_coordinator_authority_effect; $responderPrefix; transition_id=$transitionId; coordinator_state_generation=$generation; operation_family=responder_probe_handoff; operation_key=responder_probe_handoff|$role|responder-handoff-1|1|post_fallback_v6_paired; operation_authority_id=responder-handoff-1; operation_generation=1; effect_kind=$kind; effect_identity=responder-$transitionId-effect; effect_generation=1; receipt_identity=responder-$stage-receipt; receipt_generation=1; receipt_status=$status; receipt_fingerprint=responder-$stage-receipt-fingerprint; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; route_publication_generation=3; route_commit_generation=0; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=4; checkpoint_request_id=root-checkpoint; data_session_identity=receive-data-session; data_session_generation=5; authority_effect=applied"
+            }
+            $responderCoverage = 'route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff'
+            $responderPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-responder; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
+            $responderStart = "event=filetransfer_coordinator_snapshot_stream_started; $responderPrefix; initial_state_generation=0; initial_state_hash=responder-before; emitted_family_coverage=$responderCoverage; shadow_family_coverage=; authoritative_family_coverage=$responderCoverage; authority_effect=none"
+            $heldOperation = New-ResponderOperation 'owner_work_hold' 'Held' 'handoff_hold' '(none)' 0L $false
+            $heldTransition = New-ResponderEnvelopeLine 'responder-held' 'HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork' 'Held' 0L 0L 'responder-before' 'responder-before' 60L $heldOperation
+            $heldEffect = New-ResponderEffect 'responder-held' 'owner_work_hold' 'handoff_hold' 'Held' 'handoff_held' 0L
+            $preparedOperation = New-ResponderOperation 'route_transition_handoff_pending' 'Prepared' 'route_transition_prepare_handoff' 'route-transition-1' 1L $true
+            $preparedTransition = New-ResponderEnvelopeLine 'responder-prepared' 'PrepareFileTransferRouteTransition' 'Accepted' 0L 1L 'responder-before' 'responder-after' 61L $preparedOperation
+            $preparedEffect = New-ResponderEffect 'responder-prepared' 'route_transition_handoff_pending' 'route_transition_prepare_handoff' 'Prepared' 'route_transition_handoff_supplied' 1L
+            $responderEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $responderPrefix; final_state_generation=1; final_state_hash=responder-after; transition_count=2; emitted_family_coverage=$responderCoverage; shadow_family_coverage=; authoritative_family_coverage=$responderCoverage; authority_effect=none"
+            $responderFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=irrelevant',$responderStart,$heldTransition,$heldEffect,$preparedTransition,$preparedEffect,$responderEnd)
+            $responderCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($responderStart,$heldTransition,$heldEffect,$preparedTransition,$preparedEffect,$responderEnd)
+            $responderParity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $responderFull -Compact $responderCompact
+            $responderCorrelation = Get-FileTransferCoordinatorSnapshotCorrelationResult -Evaluation $responderFull -Family 'responder_probe_handoff' -TaxonomyClasses @('runtime_unlock_responder_acked_probe_route_transition_handoff_missing')
+            if ($responderFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $responderFull.Mode -ne 'SnapshotV1Authoritative' -or
+                $responderFull.LegacySelectionCount -ne 0 -or
+                $responderFull.ResponderProbeHandoffFamilyLegacySelectionCount -ne 0 -or
+                $null -ne $responderFull.FirstUnresolvedBoundary -or
+                $responderCorrelation.RawCount -ne 1 -or
+                $responderCorrelation.DistinctCount -ne 1 -or
+                $responderCorrelation.RecoveredCount -ne 1 -or
+                $responderCorrelation.UnresolvedCount -ne 0 -or
+                $responderParity.Verdict -ne 'pass' -or
+                $responderFull.BoundaryHash -ne $responderCompact.BoundaryHash) {
+                throw "Responder full/compact authoritative parity failed: $($responderFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'
@@ -1148,6 +1279,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             Assert.Contains("coordinator_snapshot_receive_recovery_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count", text, StringComparison.Ordinal);
+            Assert.Contains("coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_boundary_hash", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_catalog_hash", text, StringComparison.Ordinal);
         }
@@ -1185,6 +1317,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             acceptanceText,
             StringComparison.Ordinal);
         Assert.Contains(
+            "coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount",
+            acceptanceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "-Family 'fallback_tail_yield'",
             guiText,
             StringComparison.Ordinal);
@@ -1194,6 +1330,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             StringComparison.Ordinal);
         Assert.Contains(
             "CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount",
+            guiText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount",
             guiText,
             StringComparison.Ordinal);
     }
@@ -1326,7 +1466,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $script:family3 = $false
             $script:family4 = $false
             $script:family5 = $false
+            $script:family6 = $false
             function Get-FileTransferCoordinatorSnapshotEvaluation {
+                if ($script:family6) {
+                    return [pscustomobject]@{
+                        Mode = 'SnapshotV1Authoritative'
+                        ArtifactEvidenceVerdict = 'pass'
+                        TransitionCount = 6L
+                        ResponderProbeHandoffFamilyLegacySelectionCount = 0L
+                        FirstUnresolvedBoundary = [pscustomobject]@{
+                            boundaryId = 'responder-boundary-6'
+                            boundaryHash = 'responder-boundary-hash-6'
+                            families = @('responder_probe_handoff')
+                            taxonomyClass = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing'
+                            phase = 'runtime_unlock_retry'
+                            decisionReason = 'runtime_unlock_responder_peer_probe_handoff_owner_work_pending'
+                            variant = 'after_bound_handoff_missing'
+                            rawCount = 1
+                            distinctCount = 1
+                            recoveredCount = 0
+                            unresolvedCount = 1
+                            writer = 'writer-helper'
+                            writerSequence = 7947L
+                        }
+                    }
+                }
                 if ($script:family5) {
                     return [pscustomobject]@{
                         Mode = 'SnapshotV1Shadow'
@@ -1423,7 +1587,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     'runtime_unlock_retry_lifecycle',
                     'receive_recovery',
                     'fallback_tail_yield',
-                    'regular_v4_frontier_repair_pressure')
+                    'regular_v4_frontier_repair_pressure',
+                    'responder_probe_handoff')
             }
 
             $root = Join-Path ([IO.Path]::GetTempPath()) (
@@ -1492,6 +1657,29 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     $family5.CoordinatorWriterSequence -ne 40653L -or
                     $family5.CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount -ne 0L) {
                     throw "GUI did not preserve the Family 5 shared boundary: $($family5 | ConvertTo-Json -Compress)"
+                }
+                $script:family5 = $false
+                $script:family6 = $true
+                $family6 = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'scenario failed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($family6.ClassificationSource -ne 'coordinator_snapshot_authority_v1' -or
+                    $family6.FailureClass -ne 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing' -or
+                    $family6.Phase -ne 'runtime_unlock_retry' -or
+                    $family6.Reason -ne 'runtime_unlock_responder_peer_probe_handoff_owner_work_pending' -or
+                    $family6.FailureVariant -ne 'after_bound_handoff_missing' -or
+                    $family6.CoordinatorBoundaryId -ne 'responder-boundary-6' -or
+                    $family6.CoordinatorBoundaryHash -ne 'responder-boundary-hash-6' -or
+                    $family6.CoordinatorRawCount -ne 1 -or
+                    $family6.CoordinatorDistinctCount -ne 1 -or
+                    $family6.CoordinatorRecoveredCount -ne 0 -or
+                    $family6.CoordinatorUnresolvedCount -ne 1 -or
+                    $family6.CoordinatorWriter -ne 'writer-helper' -or
+                    $family6.CoordinatorWriterSequence -ne 7947L -or
+                    $family6.CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount -ne 0L) {
+                    throw "GUI did not preserve the Family 6 shared boundary: $($family6 | ConvertTo-Json -Compress)"
                 }
             }
             finally {

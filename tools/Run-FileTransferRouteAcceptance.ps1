@@ -1702,6 +1702,7 @@ function New-RouteAcceptanceRunResult {
         coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount = 1L
         coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = 1L
         coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1L
+        coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = 1L
         coordinatorSnapshotFullCompactParityVerdict = 'missing'
         coordinatorSnapshotFullCompactParityFailureReason = ''
         coordinatorSnapshotFullBoundaryHash = ''
@@ -3471,6 +3472,7 @@ function Assert-Phase4RouteSummary {
     $Result.coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_receive_recovery_family_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count' -DefaultValue '1')
+    $Result.coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotFullCompactParityVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_verdict' -DefaultValue 'missing'
     $Result.coordinatorSnapshotFullCompactParityFailureReason = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_failure_reason' -DefaultValue ''
     $Result.coordinatorSnapshotFullBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_boundary_hash' -DefaultValue ''
@@ -6673,6 +6675,20 @@ function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
         return $false
     }
     if (-not [string]::Equals([string]$snapshotParity.Verdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$snapshotFull.Mode, 'SnapshotV1Authoritative', [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$snapshotCompact.Mode, 'SnapshotV1Authoritative', [System.StringComparison]::Ordinal) -or
+        -not [bool]$snapshotFull.StreamComplete -or
+        -not [bool]$snapshotCompact.StreamComplete -or
+        [long]$snapshotFull.LegacySelectionCount -ne 0 -or
+        [long]$snapshotCompact.LegacySelectionCount -ne 0 -or
+        [long]$snapshotFull.RouteFamilyLegacySelectionCount -ne 0 -or
+        [long]$snapshotFull.RuntimeUnlockRetryFamilyLegacySelectionCount -ne 0 -or
+        [long]$snapshotFull.ReceiveRecoveryFamilyLegacySelectionCount -ne 0 -or
+        [long]$snapshotFull.FallbackTailYieldFamilyLegacySelectionCount -ne 0 -or
+        [long]$snapshotFull.RegularV4FrontierRepairPressureFamilyLegacySelectionCount -ne 0 -or
+        [long]$snapshotFull.ResponderProbeHandoffFamilyLegacySelectionCount -ne 0 -or
+        -not [string]::Equals([string]$snapshotFull.ContractVersion, [string]$snapshotCompact.ContractVersion, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals([string]$snapshotFull.CatalogHash, [string]$snapshotCompact.CatalogHash, [System.StringComparison]::Ordinal) -or
         -not [string]::Equals([string]$snapshotFull.BoundaryHash, [string]$snapshotCompact.BoundaryHash, [System.StringComparison]::Ordinal) -or
         -not [string]::Equals([string]$snapshotFull.ArtifactEvidenceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals([string]$snapshotCompact.ArtifactEvidenceVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -10674,6 +10690,7 @@ function New-RouteAcceptanceSummaryRunDto {
         coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount
         coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount
         coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount
+        coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = [long]$Result.coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount
         coordinatorSnapshotFullCompactParityVerdict = [string]$Result.coordinatorSnapshotFullCompactParityVerdict
         coordinatorSnapshotFullCompactParityFailureReason = [string]$Result.coordinatorSnapshotFullCompactParityFailureReason
         coordinatorSnapshotFullBoundaryHash = [string]$Result.coordinatorSnapshotFullBoundaryHash
@@ -12663,6 +12680,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.coordinator_snapshot_receive_recovery_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotReceiveRecoveryFamilyLegacySelectionCount)
         $textLines += ("{0}.coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount)
         $textLines += ("{0}.coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount)
+        $textLines += ("{0}.coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count={1}" -f $prefix, $result.coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount)
         $textLines += ("{0}.coordinator_snapshot_full_compact_parity_verdict={1}" -f $prefix, $result.coordinatorSnapshotFullCompactParityVerdict)
         $textLines += ("{0}.coordinator_snapshot_full_compact_parity_failure_reason={1}" -f $prefix, $result.coordinatorSnapshotFullCompactParityFailureReason)
         $textLines += ("{0}.coordinator_snapshot_full_boundary_hash={1}" -f $prefix, $result.coordinatorSnapshotFullBoundaryHash)

@@ -24794,6 +24794,17 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var preMutationAdmission = GetPrivatePropertyValue(
             context,
             "RuntimeUnlockAdmissionToken");
+        void AssertPersistentStateUnchanged(
+            FileTransferCoordinatorPersistentState expected)
+        {
+            var current = CreateCoordinatorStateForTest(context);
+            var expectedState = current with { PersistentState = expected };
+            Assert.Equal(
+                FileTransferCoordinator.CalculateSnapshotStateFingerprint(
+                    expectedState),
+                FileTransferCoordinator.CalculateSnapshotStateFingerprint(
+                    current));
+        }
         var scopeMutations = new[]
         {
             peerReceiveScope with
@@ -24931,11 +24942,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 GetPrivatePropertyValue(
                     context,
                     "RuntimeUnlockAdmissionToken"));
-            Assert.Equal(
-                preMutationPersistent,
-                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState"));
+            AssertPersistentStateUnchanged(preMutationPersistent);
             Assert.Equal(
                 preMutationAdmissionGeneration,
                 GetPrivateProperty<int>(
@@ -25044,11 +25051,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 GetPrivatePropertyValue(
                     context,
                     "RuntimeUnlockAdmissionToken"));
-            Assert.Equal(
-                preMutationPersistent,
-                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState"));
+            AssertPersistentStateUnchanged(preMutationPersistent);
             Assert.Equal(
                 preMutationAdmissionGeneration,
                 GetPrivateProperty<int>(
@@ -25110,11 +25113,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             GetPrivatePropertyValue(
                 context,
                 "RuntimeUnlockAdmissionToken"));
-        Assert.Equal(
-            missingPairPersistent,
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                context,
-                "CoordinatorPersistentState"));
+        AssertPersistentStateUnchanged(missingPairPersistent);
         Assert.Equal(
             preMutationAdmissionGeneration,
             GetPrivateProperty<int>(

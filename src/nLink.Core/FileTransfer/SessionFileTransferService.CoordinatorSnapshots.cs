@@ -12,16 +12,16 @@ public sealed partial class SessionFileTransferService
         "snapshot-authority-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "f8efc491c4524deae00d40f31cd818e4fcc36daae1e007d286997fce2c52e519";
+        "17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
 
     private const string CoordinatorSnapshotShadowFamilyCoverage =
         "";
 
     private const string CoordinatorSnapshotAuthoritativeFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
 
     private static void InitializeCoordinatorSnapshotState(
         OutboundTransferContext context)
@@ -41,26 +41,40 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context)
     {
         var state = CreateCoordinatorStateLocked(context);
+        var fingerprint =
+            FileTransferCoordinator.CalculateSnapshotStateFingerprint(state);
+        context.CoordinatorPersistentState =
+            context.CoordinatorPersistentState with
+            {
+                SnapshotStateFingerprint = fingerprint,
+            };
         context.CoordinatorSnapshotEmitter.Start(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Outbound,
             state.PersistentState.SnapshotStateGeneration,
-            FileTransferCoordinator.CalculateSnapshotStateFingerprint(state));
+            fingerprint);
     }
 
     private static void StartCoordinatorSnapshotStreamLocked(
         InboundTransferContext context)
     {
         var state = CreateCoordinatorStateLocked(context);
+        var fingerprint =
+            FileTransferCoordinator.CalculateSnapshotStateFingerprint(state);
+        context.CoordinatorPersistentState =
+            context.CoordinatorPersistentState with
+            {
+                SnapshotStateFingerprint = fingerprint,
+            };
         context.CoordinatorSnapshotEmitter.Start(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Inbound,
             state.PersistentState.SnapshotStateGeneration,
-            FileTransferCoordinator.CalculateSnapshotStateFingerprint(state));
+            fingerprint);
     }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
@@ -151,6 +165,29 @@ public sealed partial class SessionFileTransferService
             context.TransferId,
             FileTransferDirection.Inbound,
             state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        EnqueueResponderProbeHandoffDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        InboundTransferContext context,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        EnqueueResponderProbeHandoffDecisionAuthorityEffect(
+            context,
             decision.SnapshotEnvelope);
         return state;
     }
@@ -449,7 +486,6 @@ public sealed partial class SessionFileTransferService
             FileTransferDirection.Outbound,
             state.PersistentState.SnapshotStateGeneration,
             decision.SnapshotEnvelope);
-
         return state;
     }
 
@@ -494,6 +530,9 @@ public sealed partial class SessionFileTransferService
             context.TransferId,
             FileTransferDirection.Inbound,
             state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        EnqueueResponderProbeHandoffDecisionAuthorityEffect(
+            context,
             decision.SnapshotEnvelope);
 
         return state;
@@ -578,6 +617,9 @@ public sealed partial class SessionFileTransferService
                 state.PersistentState.SnapshotStateGeneration,
                 decision.SnapshotEnvelope);
         }
+        EnqueueResponderProbeHandoffDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
         return state;
     }
 
@@ -601,7 +643,8 @@ public sealed partial class SessionFileTransferService
                     "runtime_unlock_retry_lifecycle" or
                     "receive_recovery" or
                     "fallback_tail_yield" or
-                    "regular_v4_frontier_repair_pressure")
+                    "regular_v4_frontier_repair_pressure" or
+                    "responder_probe_handoff")
             .Select(operation => operation.OperationKey)
             .ToArray();
         if (authoritativeOperations.Length > 0)
@@ -611,6 +654,107 @@ public sealed partial class SessionFileTransferService
                 "its Coordinator-authored snapshot envelope: " +
                 string.Join(",", authoritativeOperations));
         }
+    }
+
+    private static void EnqueueResponderProbeHandoffDecisionAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var responderOperations = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "responder_probe_handoff" &&
+                operation.ResponderProbeHandoff is not null)
+            .ToArray();
+        if (responderOperations.Length == 0)
+        {
+            return;
+        }
+        var matches = responderOperations
+            .SelectMany(operation => operation.ResponderProbeHandoff!.Receipts
+                .Where(receipt => receipt.ReceiptValidated)
+                .Select(receipt =>
+                {
+                    var effectKind = operation.OperationRole ==
+                        "route_transition_handoff_pending"
+                        ? "route_transition_handoff_supplied"
+                        : string.Equals(
+                            operation.ReceiptStatus,
+                            "Invalidated",
+                            StringComparison.Ordinal)
+                            ? "handoff_invalidated"
+                        : envelope.DecisionKind switch
+                        {
+                            nameof(FileTransferCoordinator.BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff) =>
+                                "handoff_bound",
+                            nameof(FileTransferCoordinator.HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork) =>
+                                "handoff_held",
+                            nameof(FileTransferCoordinator.InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff) =>
+                                "handoff_invalidated",
+                            _ => "convergence_observed",
+                        };
+                    return (
+                        Operation: operation,
+                        Receipt: receipt,
+                        EffectKind: effectKind);
+                }))
+            .ToArray();
+        if (matches.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var match in matches)
+        {
+            context.CoordinatorSnapshotEmitter.EnqueueAuthorityEffect(
+                context.CoordinatorInstanceId,
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Inbound,
+                context.CoordinatorPersistentState.SnapshotStateGeneration,
+                match.Operation.Family,
+                match.Operation.AuthorityId,
+                match.Operation.OperationGeneration,
+                match.Receipt.ReceiptIdentity,
+                match.Receipt.ReceiptGeneration,
+                match.Receipt.ReceiptStatus,
+                match.Receipt.ReceiptFingerprint,
+                match.EffectKind,
+                $"{match.Operation.OperationKey}:{match.EffectKind}",
+                Math.Max(1, match.Receipt.ReceiptGeneration));
+        }
+    }
+
+    private static void RecordResponderProbeHandoffAttemptSnapshotLocked(
+        InboundTransferContext context,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+        string status,
+        string reason)
+    {
+        var snapshot = FileTransferCoordinator
+            .CreateResponderProbeHandoffAttemptSnapshot(
+                CreateCoordinatorStateLocked(context),
+                observation,
+                "ObserveRuntimeUnlockResponderPeerProbeHandoff",
+                status,
+                reason);
+        _ = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            snapshot.State,
+            snapshot.Envelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        EnqueueResponderProbeHandoffDecisionAuthorityEffect(
+            context,
+            snapshot.Envelope);
     }
 
     private static FileTransferCoordinatorState AdoptCoordinatorAuthoredEnvelopeLocked(
@@ -1640,7 +1784,7 @@ public sealed partial class SessionFileTransferService
             pending.Enqueue(
                 "event=filetransfer_coordinator_snapshot_stream_started; " +
                 $"snapshot_contract_version={FileTransferCoordinatorTransitionEnvelope.CurrentContractVersion}; " +
-                "snapshot_selection_mode=SnapshotV1Shadow; " +
+                "snapshot_selection_mode=SnapshotV1Authoritative; " +
                 $"snapshot_catalog_version={CoordinatorSnapshotCatalogVersion}; " +
                 $"snapshot_catalog_hash={CoordinatorSnapshotCatalogHash}; " +
                 $"coordinator_instance_id={EvidenceToken(coordinatorInstanceId)}; " +
@@ -1669,7 +1813,7 @@ public sealed partial class SessionFileTransferService
                 pending.Enqueue(
                     "event=filetransfer_coordinator_snapshot_stream_completed; " +
                     $"snapshot_contract_version={FileTransferCoordinatorTransitionEnvelope.CurrentContractVersion}; " +
-                    "snapshot_selection_mode=SnapshotV1Shadow; " +
+                    "snapshot_selection_mode=SnapshotV1Authoritative; " +
                     $"snapshot_catalog_version={CoordinatorSnapshotCatalogVersion}; " +
                     $"snapshot_catalog_hash={CoordinatorSnapshotCatalogHash}; " +
                     $"coordinator_instance_id={EvidenceToken(coordinatorInstanceId)}; " +
@@ -1740,7 +1884,7 @@ public sealed partial class SessionFileTransferService
                 var message =
                     "event=filetransfer_coordinator_authority_effect; " +
                 $"snapshot_contract_version={FileTransferCoordinatorTransitionEnvelope.CurrentContractVersion}; " +
-                "snapshot_selection_mode=SnapshotV1Shadow; " +
+                "snapshot_selection_mode=SnapshotV1Authoritative; " +
                 $"snapshot_catalog_version={CoordinatorSnapshotCatalogVersion}; " +
                 $"snapshot_catalog_hash={CoordinatorSnapshotCatalogHash}; " +
                 $"coordinator_instance_id={EvidenceToken(coordinatorInstanceId)}; session_id={EvidenceToken(sessionId)}; " +
@@ -1781,7 +1925,10 @@ public sealed partial class SessionFileTransferService
                             operation.RouteTransition?.SourceBoundary ??
                             operation.RuntimeUnlockRetry?.SourceBoundary ??
                             operation.ReceiveRecovery?.SourceBoundary ??
-                            operation.FallbackTailYield?.SourceBoundary;
+                            operation.FallbackTailYield?.SourceBoundary ??
+                            operation.RegularV4FrontierRepairPressure
+                                ?.SourceBoundary ??
+                            operation.ResponderProbeHandoff?.SourceBoundary;
                 if (operation.ReceiptValidated)
                 {
                     IndexAuthorityEffectBindingLocked(
@@ -1798,6 +1945,9 @@ public sealed partial class SessionFileTransferService
                                     operation.RuntimeUnlockRetry?.Receipts ??
                                     operation.ReceiveRecovery?.Receipts ??
                                     operation.FallbackTailYield?.Receipts ??
+                                    operation.RegularV4FrontierRepairPressure
+                                        ?.Receipts ??
+                                    operation.ResponderProbeHandoff?.Receipts ??
                                     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
                                         .Empty;
                 foreach (var receipt in typedReceipts)
@@ -1945,6 +2095,110 @@ public sealed partial class SessionFileTransferService
                             .ToImmutableArray(),
                     }
                     : null,
+                ReceiveRecovery = operation.ReceiveRecovery is { } recovery
+                    ? recovery with
+                    {
+                        SourceBoundary = CreateEvidenceBoundary(
+                            recovery.SourceBoundary),
+                        EffectiveBoundary = CreateEvidenceBoundary(
+                            recovery.EffectiveBoundary),
+                        ProofIdentity = EvidenceToken(recovery.ProofIdentity),
+                        HeldRetryAuthorityId = EvidenceToken(
+                            recovery.HeldRetryAuthorityId),
+                        ReservedRetryAuthorityId = EvidenceToken(
+                            recovery.ReservedRetryAuthorityId),
+                        Receipts = recovery.Receipts
+                            .Select(CreateEvidenceReceipt)
+                            .ToImmutableArray(),
+                    }
+                    : null,
+                FallbackTailYield = operation.FallbackTailYield is { } yield
+                    ? yield with
+                    {
+                        SourceBoundary = CreateEvidenceBoundary(
+                            yield.SourceBoundary),
+                        EffectiveBoundary = CreateEvidenceBoundary(
+                            yield.EffectiveBoundary),
+                        TargetBoundary = CreateEvidenceBoundary(
+                            yield.TargetBoundary),
+                        OwnerKey = EvidenceToken(yield.OwnerKey),
+                        PairKey = EvidenceToken(yield.PairKey),
+                        LocalProofIdentity = EvidenceToken(
+                            yield.LocalProofIdentity),
+                        LocalProofFingerprint = EvidenceToken(
+                            yield.LocalProofFingerprint),
+                        PeerProofIdentity = EvidenceToken(
+                            yield.PeerProofIdentity),
+                        PeerProofFingerprint = EvidenceToken(
+                            yield.PeerProofFingerprint),
+                        PairedReleaseAuthorityId = EvidenceToken(
+                            yield.PairedReleaseAuthorityId),
+                        FailedPredecessorAuthorityId = EvidenceToken(
+                            yield.FailedPredecessorAuthorityId),
+                        Receipts = yield.Receipts
+                            .Select(CreateEvidenceReceipt)
+                            .ToImmutableArray(),
+                    }
+                    : null,
+                RegularV4FrontierRepairPressure =
+                    operation.RegularV4FrontierRepairPressure is
+                        { } pressure
+                        ? pressure with
+                        {
+                            SourceBoundary = CreateEvidenceBoundary(
+                                pressure.SourceBoundary),
+                            EffectiveBoundary = CreateEvidenceBoundary(
+                                pressure.EffectiveBoundary),
+                            RepairKey = EvidenceToken(pressure.RepairKey),
+                            SuccessorAuthorityId = EvidenceToken(
+                                pressure.SuccessorAuthorityId),
+                            RecoveryAuthorityId = EvidenceToken(
+                                pressure.RecoveryAuthorityId),
+                            Receipts = pressure.Receipts
+                                .Select(CreateEvidenceReceipt)
+                                .ToImmutableArray(),
+                        }
+                        : null,
+                ResponderProbeHandoff =
+                    operation.ResponderProbeHandoff is { } responder
+                        ? responder with
+                        {
+                            SourceBoundary = CreateEvidenceBoundary(
+                                responder.SourceBoundary),
+                            EffectiveBoundary = CreateEvidenceBoundary(
+                                responder.EffectiveBoundary),
+                            TargetBoundary = CreateEvidenceBoundary(
+                                responder.TargetBoundary),
+                            TunaPathLeaseListenerRunId = EvidenceToken(
+                                responder.TunaPathLeaseListenerRunId),
+                            AckMessageId = EvidenceToken(
+                                responder.AckMessageId),
+                            AckSourceFingerprint = EvidenceToken(
+                                responder.AckSourceFingerprint),
+                            PeerProbeFrameFingerprint = EvidenceToken(
+                                responder.PeerProbeFrameFingerprint),
+                            ProbeId = EvidenceToken(responder.ProbeId),
+                            OwnerKey = EvidenceToken(responder.OwnerKey),
+                            PairKey = EvidenceToken(responder.PairKey),
+                            LocalProofIdentity = EvidenceToken(
+                                responder.LocalProofIdentity),
+                            LocalProofFingerprint = EvidenceToken(
+                                responder.LocalProofFingerprint),
+                            PeerProofIdentity = EvidenceToken(
+                                responder.PeerProofIdentity),
+                            PeerProofFingerprint = EvidenceToken(
+                                responder.PeerProofFingerprint),
+                            PairedReleaseAuthorityId = EvidenceToken(
+                                responder.PairedReleaseAuthorityId),
+                            HandoffAuthorityId = EvidenceToken(
+                                responder.HandoffAuthorityId),
+                            LinkedTransitionAuthorityId = EvidenceToken(
+                                responder.LinkedTransitionAuthorityId),
+                            Receipts = responder.Receipts
+                                .Select(CreateEvidenceReceipt)
+                                .ToImmutableArray(),
+                        }
+                        : null,
             };
 
         private static FileTransferCoordinatorReceiptTransitionSnapshot
@@ -1972,6 +2226,10 @@ public sealed partial class SessionFileTransferService
             var normalized = string.IsNullOrWhiteSpace(value)
                 ? "(none)"
                 : value;
+            if (string.Equals(normalized, "(none)", StringComparison.Ordinal))
+            {
+                return normalized;
+            }
             return "fte1-" + Convert.ToHexString(
                     SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))
                 .ToLowerInvariant()[..24];

@@ -167,6 +167,48 @@ internal sealed record
         ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
             Receipts);
 
+internal sealed record
+    FileTransferCoordinatorResponderProbeHandoffOperationSnapshot(
+        string Role,
+        string TransitionMode,
+        FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+        FileTransferCoordinatorStateBoundarySnapshot EffectiveBoundary,
+        FileTransferCoordinatorStateBoundarySnapshot TargetBoundary,
+        long TransactionGeneration,
+        long OfferGeneration,
+        long PendingAnswerAckGeneration,
+        long PayerDecisionId,
+        long LaunchGeneration,
+        long TunaPathLeaseGeneration,
+        string TunaPathLeaseListenerRunId,
+        string Lanes,
+        string AckMessageId,
+        string AckSourceFingerprint,
+        string PeerProbeFrameFingerprint,
+        string ProbeId,
+        string ProbeState,
+        string ProbeTransport,
+        long ProbeAckedUtcMs,
+        int AdmissionGeneration,
+        int PendingPreCommitGeneration,
+        string OwnerKey,
+        string PairKey,
+        string LocalProofIdentity,
+        string LocalProofFingerprint,
+        string PeerProofIdentity,
+        string PeerProofFingerprint,
+        string PairedReleaseAuthorityId,
+        int PairedReleaseGeneration,
+        long PairingGeneration,
+        string HandoffAuthorityId,
+        int HandoffGeneration,
+        string LinkedTransitionAuthorityId,
+        long LinkedTransitionGeneration,
+        string DecisionStatus,
+        string DecisionReason,
+        ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+            Receipts);
+
 internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     string Family,
     string OperationRole,
@@ -195,7 +237,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     FileTransferCoordinatorFallbackTailYieldOperationSnapshot?
         FallbackTailYield = null,
     FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot?
-        RegularV4FrontierRepairPressure = null);
+        RegularV4FrontierRepairPressure = null,
+    FileTransferCoordinatorResponderProbeHandoffOperationSnapshot?
+        ResponderProbeHandoff = null);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -329,6 +373,196 @@ internal readonly record struct
 internal static partial class FileTransferCoordinator
 {
     private static long lastSnapshotDecisionUtcMilliseconds;
+
+    internal static
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
+        FinalizeResponderProbeHandoffSnapshot(
+            FileTransferCoordinatorState before,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
+                decision,
+            string decisionKind,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation
+                observation)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var attempted = CreateResponderProbeHandoffAttemptSnapshot(
+            before,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            observation,
+            decision.Authority);
+        var beforeHandoff = before.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        var afterHandoff = decision.State.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        var handoffStateApplied = beforeHandoff != afterHandoff;
+        var operations = ImmutableArray.CreateBuilder<
+            FileTransferCoordinatorOperationTransitionSnapshot>();
+        operations.Add(attempted);
+        var resultingAuthority = decision.State.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+            .CurrentAuthority ??
+            decision.State.PersistentState
+                .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .LastTerminalAuthority;
+        if (resultingAuthority is { } exactAuthority &&
+            decision.Status is not
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Idempotent and not
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                    .Rejected)
+        {
+            var role = decision.Status switch
+            {
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                        .Held =>
+                    "owner_work_hold",
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                        .Invalidated =>
+                    "handoff_terminal",
+                _ => "handoff_current",
+            };
+            var descriptor = CreateResponderProbeHandoffDescriptor(
+                decision.State,
+                exactAuthority,
+                role,
+                decision.Status.ToString(),
+                decision.Reason);
+            operations.Add(CreateOperationTransitionSnapshot(
+                descriptor,
+                before.PersistentState
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                    .LastStatus?.ToString() ?? "None",
+                descriptor.State,
+                stateApplied: handoffStateApplied));
+        }
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            operations.ToImmutable(),
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative,
+            suppliedOperationsAreComplete: true);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static FileTransferCoordinatorSnapshotResult
+        CreateResponderProbeHandoffAttemptSnapshot(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation
+                observation,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason)
+    {
+        var operation = CreateResponderProbeHandoffAttemptSnapshot(
+            state,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            observation,
+            state.PersistentState
+                .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .CurrentAuthority);
+        return CreateTransitionSnapshot(
+            state,
+            state,
+            state.PersistentState.CoordinatorInstanceId!,
+            state.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            ImmutableArray.Create(operation),
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative);
+    }
+
+    private static FileTransferCoordinatorOperationTransitionSnapshot
+        CreateResponderProbeHandoffAttemptSnapshot(
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation
+                observation,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+                authority)
+    {
+        var authorityId = authority?.AuthorityId.ToString() ??
+            $"attempt:{CalculateSnapshotFingerprint(observation)[..16]}";
+        var generation = Math.Max(
+            1,
+            authority?.AuthorityGeneration ??
+            state.PersistentState
+                .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                .LastAuthorityGeneration + 1);
+        var role = decisionStatus switch
+        {
+            "Held" => "owner_work_hold",
+            "Invalidated" => "handoff_terminal",
+            "Accepted" or "Idempotent" => "peer_acceptance_attempt",
+            _ => "attempted_decision",
+        };
+        var receipt = CreateResponderProbeHandoffReceipt(
+            authorityId,
+            generation,
+            decisionKind,
+            decisionStatus,
+            decisionReason,
+            observation);
+        return new FileTransferCoordinatorOperationTransitionSnapshot(
+            "responder_probe_handoff",
+            role,
+            CreateCoordinatorOperationKey(
+                "responder_probe_handoff",
+                role,
+                authorityId,
+                generation,
+                decisionKind),
+            decisionKind,
+            authorityId,
+            "(none)",
+            generation,
+            "None",
+            decisionStatus,
+            receipt.CommandIdentity,
+            receipt.CommandGeneration,
+            receipt.CommandFingerprint,
+            receipt.ReceiptIdentity,
+            receipt.ReceiptGeneration,
+            receipt.ReceiptStatus,
+            receipt.ReceiptFingerprint,
+            true,
+            false,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            CreateResponderProbeHandoffSnapshot(
+                state,
+                role,
+                observation,
+                authority,
+                decisionStatus,
+                decisionReason,
+                ImmutableArray.Create(receipt)));
+    }
 
     internal static RegularV4FrontierRepairPressureBindingDecision
         FinalizeRegularV4FrontierRepairPressureSnapshot(
@@ -1451,7 +1685,8 @@ internal static partial class FileTransferCoordinator
         ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>
             attemptedOperations = default,
         FileTransferCoordinatorSnapshotSelectionMode selectionMode =
-            FileTransferCoordinatorSnapshotSelectionMode.Shadow)
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative,
+        bool suppliedOperationsAreComplete = false)
     {
         ArgumentNullException.ThrowIfNull(before);
         ArgumentNullException.ThrowIfNull(after);
@@ -1480,14 +1715,37 @@ internal static partial class FileTransferCoordinator
 
         var beforeBoundary = CreateStateBoundarySnapshot(before);
         var afterBoundary = CreateStateBoundarySnapshot(after);
-        var beforeFingerprint = CalculateStateFingerprint(before);
-        var afterFingerprint = CalculateStateFingerprint(after);
-        var stateApplied = !string.Equals(
-            beforeFingerprint,
-            afterFingerprint,
-            StringComparison.Ordinal);
-        var operations = CreateOperationTransitionSnapshots(before, after);
-        if (!stateApplied && !attemptedOperations.IsDefaultOrEmpty)
+        var operations = suppliedOperationsAreComplete
+            ? (attemptedOperations.IsDefault
+                ? ImmutableArray<
+                    FileTransferCoordinatorOperationTransitionSnapshot>.Empty
+                : attemptedOperations)
+            : ReferenceEquals(before, after)
+            ? ImmutableArray<
+                FileTransferCoordinatorOperationTransitionSnapshot>.Empty
+            : CreateOperationTransitionSnapshots(before, after);
+        var beforeFingerprint = string.IsNullOrWhiteSpace(
+            before.PersistentState.SnapshotStateFingerprint)
+            ? CalculateStateFingerprint(before)
+            : before.PersistentState.SnapshotStateFingerprint!;
+        var stateApplied = operations.Any(operation => operation.StateApplied) ||
+            beforeBoundary != afterBoundary ||
+            (!ReferenceEquals(before, after) &&
+             !string.Equals(
+                 CalculateStateFingerprint(before),
+                 CalculateStateFingerprint(after),
+                 StringComparison.Ordinal));
+        var afterFingerprint = stateApplied
+            ? CalculateSnapshotFingerprint(new
+            {
+                PreviousStateFingerprint = beforeFingerprint,
+                Boundary = afterBoundary,
+                Operations = operations.Where(operation =>
+                    operation.StateApplied).ToImmutableArray(),
+            })
+            : beforeFingerprint;
+        if (!suppliedOperationsAreComplete &&
+            !attemptedOperations.IsDefaultOrEmpty)
         {
             var changedKeys = operations
                 .Select(operation => operation.OperationKey)
@@ -1511,14 +1769,17 @@ internal static partial class FileTransferCoordinator
         var afterStateGeneration = stateApplied
             ? checked(beforeStateGeneration + 1)
             : beforeStateGeneration;
-        var stampedState = after with
-        {
-            PersistentState = after.PersistentState with
+        var stampedState = stateApplied
+            ? after with
             {
-                CoordinatorInstanceId = coordinatorInstanceId,
-                SnapshotStateGeneration = afterStateGeneration,
-            },
-        };
+                PersistentState = after.PersistentState with
+                {
+                    CoordinatorInstanceId = coordinatorInstanceId,
+                    SnapshotStateGeneration = afterStateGeneration,
+                    SnapshotStateFingerprint = afterFingerprint,
+                },
+            }
+            : after;
         if (!stateApplied &&
             string.Equals(normalizedStatus, "Accepted", StringComparison.Ordinal))
         {
@@ -1595,7 +1856,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorDecision decision,
         string coordinatorInstanceId,
         FileTransferCoordinatorSnapshotSelectionMode selectionMode =
-            FileTransferCoordinatorSnapshotSelectionMode.Shadow)
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative)
         => CreateTransitionSnapshot(
             before,
             decision.State,
@@ -1619,7 +1880,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorEvent coordinatorEvent,
         string coordinatorInstanceId,
         FileTransferCoordinatorSnapshotSelectionMode selectionMode =
-            FileTransferCoordinatorSnapshotSelectionMode.Shadow)
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative)
     {
         ArgumentNullException.ThrowIfNull(decision);
         var rejected = decision.TerminalMutationRejected ||
@@ -1648,7 +1909,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorActionDecision decision,
         string coordinatorInstanceId,
         FileTransferCoordinatorSnapshotSelectionMode selectionMode =
-            FileTransferCoordinatorSnapshotSelectionMode.Shadow)
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative)
         => CreateTransitionSnapshot(
             before,
             decision.State,
@@ -1665,7 +1926,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorActionRequest request,
         string coordinatorInstanceId,
         FileTransferCoordinatorSnapshotSelectionMode selectionMode =
-            FileTransferCoordinatorSnapshotSelectionMode.Shadow)
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative)
         => CreateTransitionSnapshot(
             before,
             decision.State,
@@ -1898,6 +2159,43 @@ internal static partial class FileTransferCoordinator
                                 attemptedReceipt,
                                 receiptStatus is not "Rejected" and not
                                     "(none)"))));
+        var attemptedOperations = ImmutableArray.Create(attemptedOperation);
+        if (authority?.ProofBoundary is
+            FileTransferTunaActivationTransitionProofBoundary activation)
+        {
+            var responderObservation =
+                activation.InitialResponderPeerProbeObservation ??
+                activation.ResponderPeerProbeHandoffAuthority?.Observation;
+            if (responderObservation is not null)
+            {
+                var responderOperation =
+                    CreateResponderProbeHandoffAttemptSnapshot(
+                        decision.State,
+                        operationKind,
+                        decision.Status.ToString(),
+                        decision.Reason,
+                        responderObservation,
+                        activation.ResponderPeerProbeHandoffAuthority);
+                const string responderRole =
+                    "route_transition_handoff_pending";
+                attemptedOperations = attemptedOperations.Add(
+                    responderOperation with
+                    {
+                        OperationRole = responderRole,
+                        OperationKey = CreateCoordinatorOperationKey(
+                            "responder_probe_handoff",
+                            responderRole,
+                            responderOperation.AuthorityId,
+                            responderOperation.OperationGeneration,
+                            operationKind),
+                        ResponderProbeHandoff =
+                            responderOperation.ResponderProbeHandoff! with
+                            {
+                                Role = responderRole,
+                            },
+                    });
+            }
+        }
         var snapshot = CreateTransitionSnapshot(
             before,
             decision.State,
@@ -1906,7 +2204,8 @@ internal static partial class FileTransferCoordinator
             operationKind,
             decision.Status.ToString(),
             decision.Reason,
-            ImmutableArray.Create(attemptedOperation));
+            attemptedOperations,
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative);
         return decision with
         {
             State = snapshot.State,
@@ -2058,7 +2357,11 @@ internal static partial class FileTransferCoordinator
     private static string CalculateStateFingerprint(
         FileTransferCoordinatorState state)
     {
-        var operations = CreateOperationDescriptors(state);
+        var operations = CreateOperationDescriptors(
+            state,
+            includeResponderProbeHandoff: false);
+        var responderHandoff = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
         var retryLifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
         var normalizedRetryLifecycle = retryLifecycle with
         {
@@ -2103,6 +2406,27 @@ internal static partial class FileTransferCoordinator
                     state.CurrentDataSessionIdentity,
                     state.CurrentDataSessionGeneration,
                     RuntimeUnlockRetryLifecycle = normalizedRetryLifecycle,
+                    ResponderProbeHandoff = new
+                    {
+                        CurrentAuthorityId = responderHandoff.CurrentAuthority
+                            ?.AuthorityId.ToString() ?? "(none)",
+                        CurrentAuthorityGeneration = responderHandoff
+                            .CurrentAuthority?.AuthorityGeneration ?? 0,
+                        CurrentAckFingerprint = responderHandoff
+                            .CurrentAuthority?.Observation
+                            .AckSourceFingerprint ?? "(none)",
+                        CurrentProbeFingerprint = responderHandoff
+                            .CurrentAuthority?.Observation
+                            .PeerProbeFrameFingerprint ?? "(none)",
+                        TerminalAuthorityId = responderHandoff
+                            .LastTerminalAuthority?.AuthorityId.ToString() ??
+                            "(none)",
+                        TerminalAuthorityGeneration = responderHandoff
+                            .LastTerminalAuthority?.AuthorityGeneration ?? 0,
+                        Status = responderHandoff.LastStatus?.ToString() ??
+                            "(none)",
+                        Reason = responderHandoff.LastReason ?? "(none)",
+                    },
                     Operations = operations,
                 },
                 SnapshotFingerprintJsonOptions);
@@ -2213,7 +2537,8 @@ internal static partial class FileTransferCoordinator
             operation.RuntimeUnlockRetry,
             operation.ReceiveRecovery,
             operation.FallbackTailYield,
-            operation.RegularV4FrontierRepairPressure);
+            operation.RegularV4FrontierRepairPressure,
+            operation.ResponderProbeHandoff);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -2239,7 +2564,9 @@ internal static partial class FileTransferCoordinator
     }
 
     private static ImmutableArray<CoordinatorOperationDescriptor>
-        CreateOperationDescriptors(FileTransferCoordinatorState state)
+        CreateOperationDescriptors(
+            FileTransferCoordinatorState state,
+            bool includeResponderProbeHandoff = true)
     {
         var persistent = state.PersistentState;
         var builder = ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
@@ -2294,43 +2621,228 @@ internal static partial class FileTransferCoordinator
         AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
 
         var handoff = persistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
-        if (handoff.CurrentAuthority is { } handoffAuthority)
+        if (includeResponderProbeHandoff &&
+            handoff.CurrentAuthority is { } handoffAuthority)
         {
-            builder.Add(new CoordinatorOperationDescriptor(
-                "responder_probe_handoff",
-                "ResponderPeerProbeRouteTransitionHandoff",
-                handoffAuthority.AuthorityId.ToString(),
-                "(none)",
-                handoffAuthority.AuthorityGeneration,
+            builder.Add(CreateResponderProbeHandoffDescriptor(
+                state,
+                handoffAuthority,
+                handoff.LastStatus ==
+                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
+                        .Held
+                    ? "owner_work_hold"
+                    : "handoff_current",
                 handoff.LastStatus?.ToString() ?? "Accepted",
-                handoffAuthority.Observation.ProbeId,
-                handoffAuthority.AuthorityGeneration,
-                CalculateSnapshotFingerprint(new
-                {
-                    handoffAuthority.Observation.ProbeId,
-                    handoffAuthority.Observation.TransactionGeneration,
-                    handoffAuthority.Observation.OfferGeneration,
-                    handoffAuthority.Observation.LaunchGeneration,
-                    handoffAuthority.Observation.TunaPathLeaseGeneration,
-                }),
-                handoffAuthority.AuthorityId.ToString(),
-                handoffAuthority.AuthorityGeneration,
-                handoff.LastStatus?.ToString() ?? "Accepted",
-                CalculateSnapshotFingerprint(new
-                {
-                    handoffAuthority.AuthorityId,
-                    handoffAuthority.AuthorityGeneration,
-                    handoffAuthority.Observation.ProbeId,
-                    handoff.LastStatus,
-                    handoff.LastReason,
-                }),
-                true));
+                handoff.LastReason ??
+                    "runtime_unlock_responder_peer_probe_handoff_bound"));
+        }
+        if (includeResponderProbeHandoff &&
+            handoff.LastTerminalAuthority is { } terminalAuthority &&
+            (handoff.CurrentAuthority is null ||
+             handoff.CurrentAuthority.Value.AuthorityId !=
+                 terminalAuthority.AuthorityId))
+        {
+            builder.Add(CreateResponderProbeHandoffDescriptor(
+                state,
+                terminalAuthority,
+                "handoff_terminal",
+                handoff.LastStatus?.ToString() ?? "Invalidated",
+                handoff.LastReason ??
+                    "runtime_unlock_responder_peer_probe_handoff_invalidated"));
         }
 
         return builder
             .OrderBy(GetCoordinatorOperationKey, StringComparer.Ordinal)
             .ToImmutableArray();
     }
+
+    private static CoordinatorOperationDescriptor
+        CreateResponderProbeHandoffDescriptor(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority
+                authority,
+            string role,
+            string status,
+            string reason)
+    {
+        var observation = authority.Observation;
+        var receipt = CreateResponderProbeHandoffReceipt(
+            authority.AuthorityId.ToString(),
+            authority.AuthorityGeneration,
+            "ResponderPeerProbeRouteTransitionHandoff",
+            status,
+            reason,
+            observation);
+        return new CoordinatorOperationDescriptor(
+            "responder_probe_handoff",
+            "ResponderPeerProbeRouteTransitionHandoff",
+            authority.AuthorityId.ToString(),
+            "(none)",
+            authority.AuthorityGeneration,
+            status,
+            receipt.CommandIdentity,
+            receipt.CommandGeneration,
+            receipt.CommandFingerprint,
+            receipt.ReceiptIdentity,
+            receipt.ReceiptGeneration,
+            receipt.ReceiptStatus,
+            receipt.ReceiptFingerprint,
+            receipt.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "responder_probe_handoff",
+                role,
+                authority.AuthorityId.ToString(),
+                authority.AuthorityGeneration,
+                "ResponderPeerProbeRouteTransitionHandoff"),
+            ResponderProbeHandoff: CreateResponderProbeHandoffSnapshot(
+                state,
+                role,
+                observation,
+                authority,
+                status,
+                reason,
+                ImmutableArray.Create(receipt)));
+    }
+
+    private static FileTransferCoordinatorReceiptTransitionSnapshot
+        CreateResponderProbeHandoffReceipt(
+            string authorityId,
+            long generation,
+            string decisionKind,
+            string status,
+            string reason,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation
+                observation)
+    {
+        var stage = status switch
+        {
+            "Held" => "handoff_hold",
+            "Invalidated" => "handoff_invalidation",
+            "Accepted" or "Idempotent" => "handoff_bind",
+            _ => "attempted_decision",
+        };
+        var commandFingerprint = CalculateSnapshotFingerprint(observation);
+        return new FileTransferCoordinatorReceiptTransitionSnapshot(
+            stage,
+            $"{authorityId}:{decisionKind}",
+            generation,
+            commandFingerprint,
+            $"{authorityId}:{decisionKind}:decision",
+            generation,
+            status,
+            reason,
+            CalculateSnapshotFingerprint(new
+            {
+                decisionKind,
+                status,
+                reason,
+                observation,
+            }),
+            true);
+    }
+
+    private static FileTransferCoordinatorResponderProbeHandoffOperationSnapshot
+        CreateResponderProbeHandoffSnapshot(
+            FileTransferCoordinatorState state,
+            string role,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation
+                observation,
+            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+                authority,
+            string status,
+            string reason,
+            ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+                receipts)
+    {
+        var source = CreateResponderProbeHandoffBoundary(
+            observation.PeerReceiveScope);
+        var effective = CreateStateBoundarySnapshot(state);
+        var target = effective with
+        {
+            Route = FileTransferRouteResolver.FileTunaV4Token,
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+        };
+        var release = observation.ResponderTransitionMode ==
+            RuntimeUnlockResponderPeerProbeTransitionMode.PostFallbackV6Paired
+                ? authority?.PairedRelease ??
+                  state.PersistentState.FallbackTailYield.CurrentOperation
+                      ?.PairedRelease
+                : null;
+        var pendingPreCommitGeneration =
+            authority?.PendingPreCommitProbe.PendingGeneration ??
+            state.CurrentRuntimeUnlockPendingPreCommitProbe
+                ?.PendingGeneration ??
+            0;
+        var linkedTransition = state.PersistentState.FileTransferRouteTransition
+            .CurrentOperation?.Authority;
+        return new(
+            role,
+            observation.ResponderTransitionMode switch
+            {
+                RuntimeUnlockResponderPeerProbeTransitionMode.InitialRegularV4 =>
+                    "initial_regular_v4",
+                RuntimeUnlockResponderPeerProbeTransitionMode
+                        .PostFallbackV6Paired =>
+                    "post_fallback_v6_paired",
+                _ => "none",
+            },
+            source,
+            effective,
+            target,
+            observation.TransactionGeneration,
+            observation.OfferGeneration,
+            observation.PendingAnswerAckGeneration,
+            observation.PayerDecisionId,
+            observation.LaunchGeneration,
+            observation.TunaPathLeaseGeneration,
+            observation.TunaPathLeaseListenerRunId ?? "(none)",
+            observation.Lanes,
+            observation.AckMessageId ?? "(none)",
+            observation.AckSourceFingerprint ?? "(none)",
+            observation.PeerProbeFrameFingerprint ?? "(none)",
+            observation.ProbeId,
+            observation.ProbeState.ToString(),
+            observation.ProbeTransport.ToString(),
+            observation.ProbeAckedUtcMs,
+            observation.PeerReceiveScope.Admission.AdmissionGeneration,
+            pendingPreCommitGeneration,
+            release?.LocalProof.Decision.OwnerKey ?? "(none)",
+            release?.LocalProof.Decision.PairKey ?? "(none)",
+            release?.LocalProof.ProofIdentity ?? "(none)",
+            release?.LocalProof.FrameFingerprint ?? "(none)",
+            release?.PeerProof.ObservationIdentity ?? "(none)",
+            release?.PeerProof.Proof.FrameFingerprint ?? "(none)",
+            release?.ReleaseAuthorityId.ToString() ?? "(none)",
+            release?.ReleaseGeneration ?? 0,
+            release?.PairingGeneration ?? 0,
+            authority?.AuthorityId.ToString() ?? "(none)",
+            authority?.AuthorityGeneration ?? 0,
+            linkedTransition?.AuthorityId.ToString() ?? "(none)",
+            linkedTransition?.TransitionGeneration ?? 0,
+            status,
+            reason,
+            receipts);
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateResponderProbeHandoffBoundary(
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope scope)
+        => new(
+            scope.RuntimeOwner.RouteToken,
+            scope.RuntimeOwner.ProtocolVersion,
+            scope.RuntimeOwner.LiveRouteEpoch,
+            scope.RoutePublication.PublicationGeneration,
+            scope.RoutePublication.RouteCommitGeneration ?? 0,
+            scope.RuntimeOwner.RuntimeGeneration,
+            scope.TerminalGeneration,
+            scope.LegGeneration,
+            scope.TransportEpoch,
+            scope.BridgeRecoveryGeneration,
+            scope.CheckpointGeneration,
+            scope.CheckpointRequestId,
+            scope.DataSessionIdentity,
+            scope.DataSessionGeneration);
 
     private static void
         AddRegularV4FrontierRepairPressureOperationDescriptors(
@@ -5133,5 +5645,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorFallbackTailYieldOperationSnapshot?
             FallbackTailYield = null,
         FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot?
-            RegularV4FrontierRepairPressure = null);
+            RegularV4FrontierRepairPressure = null,
+        FileTransferCoordinatorResponderProbeHandoffOperationSnapshot?
+            ResponderProbeHandoff = null);
 }

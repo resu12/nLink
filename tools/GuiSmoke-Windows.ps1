@@ -5384,7 +5384,8 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         [string]$CoordinatorWriter = '(none)',
         [object]$CoordinatorWriterSequence = 0L,
         [object]$CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = 1L,
-        [object]$CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1L
+        [object]$CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1L,
+        [object]$CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = 1L
     )
 
     return [pscustomobject]@{
@@ -5404,6 +5405,8 @@ function New-TunaGuiFileTransferFailureClassificationResult {
             $CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount
         CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount =
             $CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount
+        CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount =
+            $CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount
         RouteMode = $RouteMode
         ClassificationSource = $ClassificationSource
         ClassificationComplete = $ClassificationComplete
@@ -6192,6 +6195,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'regular_v4_frontier_repair_pressure')
+    $snapshotResponderProbeHandoffAuthoritative =
+        $snapshotEvaluatorAvailable -and
+        (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'responder_probe_handoff')
     if ($coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
         $coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
         if ($null -ne $TestMetrics) {
@@ -6230,7 +6238,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ($snapshotFallbackTailYieldAuthoritative -and
          $boundaryFamilies -contains 'fallback_tail_yield') -or
         ($snapshotRegularV4PressureAuthoritative -and
-         $boundaryFamilies -contains 'regular_v4_frontier_repair_pressure'))
+         $boundaryFamilies -contains 'regular_v4_frontier_repair_pressure') -or
+        ($snapshotResponderProbeHandoffAuthoritative -and
+         $boundaryFamilies -contains 'responder_probe_handoff'))
     if ($snapshotOwnsBoundary) {
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase ([string]$boundary.phase) `
@@ -6260,6 +6270,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
                     -InputObject $coordinatorSnapshotEvaluation `
                     -Name 'RegularV4FrontierRepairPressureFamilyLegacySelectionCount' `
+                    -Default 1L)) `
+            -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount `
+                ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $coordinatorSnapshotEvaluation `
+                    -Name 'ResponderProbeHandoffFamilyLegacySelectionCount' `
                     -Default 1L))
     }
     if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative') {
@@ -18144,7 +18159,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_runtime_unlock_responder_peer_probe_route_transition_handoff_decided',
             'filetransfer_runtime_unlock_admission_granted',
             'filetransfer_fallback_tail_pairing_committed',
-            'filetransfer_route_transition_prepared', 'filetransfer_route_transition_draining',
+            'filetransfer_route_transition_prepared', 'filetransfer_route_transition_pause_bound',
+            'filetransfer_route_transition_draining',
+            'filetransfer_route_transition_drain_receipt_decided',
             'filetransfer_route_transition_committed', 'filetransfer_route_transition_disposition_applied',
             'filetransfer_live_route_epoch_recovered',
             'filetransfer_runtime_started', 'filetransfer_runtime_owner_changed',

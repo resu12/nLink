@@ -3258,12 +3258,7 @@ public sealed partial class SessionFileTransferService
                 observation,
                 admissionToken,
                 pendingPreCommit);
-        var bindingState = AdoptCoordinatorStateLocked(
-            context,
-            binding.State,
-            "RuntimeUnlockResponderPeerProbeHandoffBound",
-            binding.Status.ToString(),
-            binding.Reason);
+        var bindingState = AdoptCoordinatorStateLocked(context, binding);
         if (!binding.Accepted || binding.Authority is not { } authority)
         {
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
@@ -3272,7 +3267,8 @@ public sealed partial class SessionFileTransferService
                 binding.Authority,
                 null,
                 binding.Status.ToString(),
-                binding.Reason);
+                binding.Reason,
+                snapshotAttemptAlreadyRecorded: true);
             return binding.Status ==
                 RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held;
         }
@@ -3285,19 +3281,15 @@ public sealed partial class SessionFileTransferService
                     bindingState,
                     authority,
                     "runtime_unlock_responder_peer_probe_handoff_owner_work_pending");
-            _ = AdoptCoordinatorStateLocked(
-                context,
-                held.State,
-                "RuntimeUnlockResponderPeerProbeHandoffHeld",
-                held.Status.ToString(),
-                held.Reason);
+            _ = AdoptCoordinatorStateLocked(context, held);
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
                 context,
                 observation,
                 held.Authority,
                 null,
                 held.Status.ToString(),
-                held.Reason);
+                held.Reason,
+                snapshotAttemptAlreadyRecorded: true);
             return held.Status ==
                 RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held;
         }
@@ -3308,7 +3300,8 @@ public sealed partial class SessionFileTransferService
             authority,
             null,
             binding.Status.ToString(),
-            binding.Reason);
+            binding.Reason,
+            snapshotAttemptAlreadyRecorded: true);
         return TryPrepareInboundPostTunaFallbackToTunaRouteTransitionLocked(
             context,
             snapshot,
@@ -3443,12 +3436,7 @@ public sealed partial class SessionFileTransferService
                 observation,
                 authority.RuntimeUnlockAdmission,
                 authority.PendingPreCommitProbe);
-        _ = AdoptCoordinatorStateLocked(
-            context,
-            binding.State,
-            "RuntimeUnlockResponderPeerProbeHandoffBound",
-            binding.Status.ToString(),
-            binding.Reason);
+        _ = AdoptCoordinatorStateLocked(context, binding);
         if (!binding.Accepted || binding.Authority is not { } currentAuthority)
         {
             LogRuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
@@ -3457,7 +3445,8 @@ public sealed partial class SessionFileTransferService
                 binding.Authority,
                 null,
                 binding.Status.ToString(),
-                binding.Reason);
+                binding.Reason,
+                snapshotAttemptAlreadyRecorded: true);
             return false;
         }
 
@@ -3467,7 +3456,8 @@ public sealed partial class SessionFileTransferService
             currentAuthority,
             null,
             binding.Status.ToString(),
-            binding.Reason);
+            binding.Reason,
+            snapshotAttemptAlreadyRecorded: true);
         return TryPrepareInboundPostTunaFallbackToTunaRouteTransitionLocked(
             context,
             snapshot,
@@ -3483,8 +3473,17 @@ public sealed partial class SessionFileTransferService
                 responderAuthority,
             FileTransferRouteTransitionAuthority? transitionAuthority,
             string status,
-            string decisionReason)
+            string decisionReason,
+            bool snapshotAttemptAlreadyRecorded = false)
     {
+        if (!snapshotAttemptAlreadyRecorded)
+        {
+            RecordResponderProbeHandoffAttemptSnapshotLocked(
+                context,
+                observation,
+                status,
+                decisionReason);
+        }
         var owner = context.CurrentRuntimeOwner;
         var publication = context.CurrentRoutePublicationToken;
         var leg = context.CurrentTransferLeg;

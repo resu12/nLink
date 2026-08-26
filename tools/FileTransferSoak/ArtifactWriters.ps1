@@ -63791,6 +63791,10 @@ function Get-FileTransferRecoveryFailureClassification {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'regular_v4_frontier_repair_pressure'
+    $snapshotResponderProbeHandoffAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'responder_probe_handoff'
     $snapshotRuntimeUnlockRetryProof =
         Get-FileTransferCoordinatorSnapshotCorrelationResult `
             -Evaluation $coordinatorSnapshotEvaluation `
@@ -64017,8 +64021,18 @@ function Get-FileTransferRecoveryFailureClassification {
             -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
     $runtimeUnlockPreCommitProbeStartHandoffProof =
         Get-FileTransferRuntimeUnlockPreCommitProbeStartHandoffCorrelation -Events $events
-    $runtimeUnlockResponderPeerProbeHandoffProof =
-        Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation -Events $events
+    $runtimeUnlockResponderPeerProbeHandoffProof = if (
+        $snapshotResponderProbeHandoffAuthoritative) {
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'responder_probe_handoff' `
+            -TaxonomyClasses @(
+                'runtime_unlock_responder_acked_probe_route_transition_handoff_missing')
+    }
+    else {
+        Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation `
+            -Events $events
+    }
     $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation `
             -Events $legacyRuntimeUnlockRegularV4RecoveryLeaseEvents `
@@ -72276,6 +72290,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount)
         ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount)
         ("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count={0}" -f $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount)
+        ("coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count={0}" -f $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount)
     ) + $verdictLines
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
     $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
@@ -72297,6 +72312,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount)
         ("fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount)
         ("regular_v4_frontier_repair_pressure_family_legacy_selection_count={0}" -f $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount)
+        ("responder_probe_handoff_family_legacy_selection_count={0}" -f $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount)
     ) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transfer-terminal-summary.txt' -Lines (New-FileTransferTerminalSummaryLines -Summary $Summary -GateResult $GateResult) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-summary.txt' -Lines (New-FileTransferThroughputSummaryLines -Summary $Summary) | Out-Null
@@ -72326,6 +72342,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount)
         ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount)
         ("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count={0}" -f $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount)
+        ("coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count={0}" -f $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount)
     )
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines $routeConsistencyLines | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null

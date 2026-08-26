@@ -4867,7 +4867,8 @@ public sealed class FileTransferCoordinatorTests
         var grantedOperation = Assert.Single(
             grantEnvelope.Aggregate.Operations,
             operation => operation.Family ==
-                "runtime_unlock_retry_lifecycle");
+                "runtime_unlock_retry_lifecycle" &&
+                operation.OperationRole == "attempt_pending");
         Assert.Equal("attempt_pending", grantedOperation.OperationRole);
         Assert.Equal("RetryAttempt", grantedOperation.OperationKind);
         Assert.Equal(
@@ -17849,6 +17850,7 @@ public sealed class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
     public void FileTransferRouteTransition_InitialResponderObservationUsesOnlyRegularV4AuthorityMode()
     {
         var regular = FileTransferRouteResolver.Resolve(
@@ -19162,12 +19164,21 @@ public sealed class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
     public void FileTransferRouteTransition_InboundResponderAckedProbeUsesPairedReceiptWithoutPhase2Release()
     {
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
         var state = ActiveFallbackStateWithoutCheckpoint(
             FileTransferDirection.Inbound);
+        state = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    "responder-probe-handoff-snapshot-coordinator",
+            },
+        };
         var owner = state.CurrentRuntimeOwner!.Value;
         var leg = state.CurrentLeg!;
         var publication = FileTransferCoordinator.AuthorizeAction(
@@ -19298,6 +19309,18 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted,
             bound.Status);
+        var boundEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                bound.SnapshotEnvelope);
+        Assert.Equal(
+            "SnapshotV1Authoritative",
+            boundEnvelope.SnapshotSelectionMode);
+        Assert.Contains(
+            boundEnvelope.Aggregate.Operations,
+            operation => operation.Family == "responder_probe_handoff" &&
+                         operation.OperationRole == "handoff_current" &&
+                         operation.ResponderProbeHandoff is not null);
+        Assert.NotEmpty(boundEnvelope.ToBase64UrlPayload());
         var responderAuthority = Assert.IsType<
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority>(
             bound.Authority);
@@ -19311,6 +19334,25 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Idempotent,
             duplicate.Status);
         Assert.Equal(responderAuthority, duplicate.Authority);
+        Assert.Equal(
+            bound.State.PersistentState.SnapshotStateGeneration,
+            duplicate.State.PersistentState.SnapshotStateGeneration);
+        var held = FileTransferCoordinator
+            .HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork(
+                bound.State,
+                responderAuthority,
+                "runtime_unlock_responder_peer_probe_handoff_owner_work_pending");
+        Assert.Equal(
+            bound.State.PersistentState.SnapshotStateGeneration + 1,
+            held.State.PersistentState.SnapshotStateGeneration);
+        var duplicateHeld = FileTransferCoordinator
+            .HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork(
+                held.State,
+                responderAuthority,
+                "runtime_unlock_responder_peer_probe_handoff_owner_work_pending");
+        Assert.Equal(
+            held.State.PersistentState.SnapshotStateGeneration,
+            duplicateHeld.State.PersistentState.SnapshotStateGeneration);
 
         var observationMutations =
             new RuntimeUnlockResponderPeerProbeRouteTransitionObservation[]

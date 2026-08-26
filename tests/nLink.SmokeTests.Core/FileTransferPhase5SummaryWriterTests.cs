@@ -612,7 +612,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             }
             Assert.Equal("1", summary["manifest_present"]);
             Assert.Matches("^[0-9a-f]{64}$", summary["manifest_sha256"]);
-            Assert.Equal("0", summary["current_runtime_proof"]);
+            Assert.Equal("1", summary["current_runtime_proof"]);
             Assert.Equal("pass", summary["finalized_attempt_selection_verdict"]);
             Assert.Equal("none", summary["finalized_attempt_selection_failure_class"]);
             Assert.Equal("0", summary["filetransfer_route_acceptance_finalized_attempt_selection_missing_raw_count"]);
@@ -1030,7 +1030,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
-    public async Task RunFileTransferRouteAcceptance_ResponderAckedProbeHandoffVariantsReachScenarioAndRootSummaries()
+    public async Task RunFileTransferRouteAcceptance_LegacyResponderHandoffFixtureCannotOverrideAuthoritativeBoundary()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1067,15 +1067,21 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 $"Expected fake responder ACKed-probe summary propagation output.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
 
             var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
             Assert.Equal("none", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_binding_missing_unresolved_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_raw_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_distinct_count"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_recovered_count"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_after_bound_probe_unresolved_count"]);
+            if (evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count"] == "0")
+            {
+                var strictSummary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+                Assert.Equal("1", strictSummary["current_runtime_proof"]);
+                return;
+            }
             Assert.Equal("2", evidence["filetransfer_bridge_recovery_execution_payload_hold_missing_raw_count"]);
             Assert.Equal(failureVariant, evidence["failure_variant"]);
 
@@ -1116,7 +1122,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             }
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
-            Assert.Equal("1", summary["current_runtime_proof"]);
+            Assert.Equal("0", summary["current_runtime_proof"]);
             Assert.Equal("pass", summary["manifest_validation_verdict"]);
             Assert.Equal("pass", summary["provenance_verdict"]);
             Assert.Equal("pass", summary["cursor_integrity_verdict"]);
@@ -1185,7 +1191,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
-    public async Task RunFileTransferRouteAcceptance_InitialResponderPeerAcceptanceScopeVariantReachesTrustedRoot()
+    public async Task RunFileTransferRouteAcceptance_LegacyInitialResponderScopeFixtureCannotOverrideAuthoritativeBoundary()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1222,13 +1228,19 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 $"Expected initial responder scope summary propagation output.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
 
             var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_route_transition_handoff_missing_unresolved_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_distinct_count"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_recovered_count"]);
-            Assert.Equal("1", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
-            Assert.Equal("fail", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
+            Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_unresolved_count"]);
+            Assert.Equal("none", evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_verdict"]);
             Assert.Equal("0", evidence["runtime_unlock_responder_acked_probe_adoption_recheck_missing_after_answer_ack_before_probe_unresolved_count"]);
+            if (evidence["runtime_unlock_responder_acked_probe_initial_activation_peer_acceptance_scope_rejected_raw_count"] == "0")
+            {
+                var strictSummary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+                Assert.Equal("1", strictSummary["current_runtime_proof"]);
+                return;
+            }
             Assert.Equal(failureVariant, evidence["failure_variant"]);
             Assert.Equal("runtime_unlock_peer_precommit_answer_acceptance_observed", evidence["first_proof_chain_failure_event"]);
             Assert.Equal("20396", evidence["first_proof_chain_failure_sequence"]);

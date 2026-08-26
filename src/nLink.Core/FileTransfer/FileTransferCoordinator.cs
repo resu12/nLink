@@ -281,6 +281,12 @@ internal readonly record struct
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
 
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
+
     public bool Accepted =>
         Status is
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted or
@@ -293,6 +299,8 @@ internal readonly record struct
             CurrentAuthority = null,
         RuntimeUnlockResponderPeerProbeRouteTransitionObservation?
             LastInvalidatedObservation = null,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
+            LastTerminalAuthority = null,
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus?
             LastStatus = null,
         string? LastReason = null,
@@ -2634,6 +2642,8 @@ internal readonly record struct FileTransferCoordinatorPersistentState(
     internal string? CoordinatorInstanceId { get; init; }
 
     internal long SnapshotStateGeneration { get; init; }
+
+    internal string? SnapshotStateFingerprint { get; init; }
 
     private readonly RuntimeUnlockRetryLifecycleSubstate?
         runtimeUnlockRetryLifecycle;
@@ -7893,7 +7903,7 @@ internal static partial class FileTransferCoordinator
             decision.RuntimeUnlockCommitRejectedReason ??
             decision.Reason,
             attemptedOperations,
-            selectionMode: FileTransferCoordinatorSnapshotSelectionMode.Shadow);
+            selectionMode: FileTransferCoordinatorSnapshotSelectionMode.Authoritative);
         return decision with
         {
             State = snapshot.State,
@@ -27630,6 +27640,7 @@ internal static partial class FileTransferCoordinator
                     substate with
                     {
                         CurrentAuthority = null,
+                        LastTerminalAuthority = substate.CurrentAuthority,
                         LastInvalidatedObservation =
                             substate.CurrentAuthority?.Observation ??
                             substate.LastInvalidatedObservation,
@@ -27651,13 +27662,18 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockAdmissionToken admission,
             RuntimeUnlockPendingPreCommitProbeRequest pendingPreCommitProbe)
     {
+        var snapshotBefore = state;
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision Decision(
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus status,
             string reason,
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
                 authority,
             FileTransferCoordinatorState nextState)
-            => new(status, reason, authority) { State = nextState };
+            => FinalizeResponderProbeHandoffSnapshot(
+                snapshotBefore,
+                new(status, reason, authority) { State = nextState },
+                nameof(BindRuntimeUnlockResponderPeerProbeRouteTransitionHandoff),
+                observation);
 
         state =
             InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
@@ -27713,6 +27729,7 @@ internal static partial class FileTransferCoordinator
                         substate with
                         {
                             CurrentAuthority = null,
+                            LastTerminalAuthority = existing,
                             LastStatus =
                                 RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
                                     .Invalidated,
@@ -27737,26 +27754,12 @@ internal static partial class FileTransferCoordinator
                 out var operation,
                 out var rejectionReason))
         {
-            var rejected = state with
-            {
-                PersistentState = state.PersistentState with
-                {
-                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoff =
-                        substate with
-                        {
-                            LastStatus =
-                                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
-                                    .Rejected,
-                            LastReason = rejectionReason,
-                        },
-                },
-            };
             return Decision(
                 RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
                     .Rejected,
                 rejectionReason,
                 null,
-                rejected);
+                state);
         }
 
         if (operation.PairingState !=
@@ -27823,6 +27826,7 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority authority,
             string reason)
     {
+        var snapshotBefore = state;
         state =
             InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
                 state);
@@ -27831,13 +27835,17 @@ internal static partial class FileTransferCoordinator
                 authority,
                 out var rejectionReason))
         {
-            return new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
-                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
-                rejectionReason,
-                null)
-            {
-                State = state,
-            };
+            return FinalizeResponderProbeHandoffSnapshot(
+                snapshotBefore,
+                new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                    RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
+                    rejectionReason,
+                    null)
+                {
+                    State = state,
+                },
+                nameof(HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork),
+                authority.Observation);
         }
 
         var normalizedReason = string.IsNullOrWhiteSpace(reason)
@@ -27859,13 +27867,17 @@ internal static partial class FileTransferCoordinator
                     },
             },
         };
-        return new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
-            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held,
-            normalizedReason,
-            authority)
-        {
-            State = held,
-        };
+        return FinalizeResponderProbeHandoffSnapshot(
+            snapshotBefore,
+            new RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held,
+                normalizedReason,
+                authority)
+            {
+                State = held,
+            },
+            nameof(HoldRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForOwnerWork),
+            authority.Observation);
     }
 
     internal static
@@ -27875,13 +27887,18 @@ internal static partial class FileTransferCoordinator
             RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
             string reason)
     {
+        var snapshotBefore = state;
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision Decision(
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus status,
             string decisionReason,
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority?
                 authority,
             FileTransferCoordinatorState nextState)
-            => new(status, decisionReason, authority) { State = nextState };
+            => FinalizeResponderProbeHandoffSnapshot(
+                snapshotBefore,
+                new(status, decisionReason, authority) { State = nextState },
+                nameof(InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoff),
+                observation);
 
         state =
             InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
@@ -27955,6 +27972,7 @@ internal static partial class FileTransferCoordinator
                     substate with
                     {
                         CurrentAuthority = null,
+                        LastTerminalAuthority = substate.CurrentAuthority,
                         LastStatus =
                             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus
                                 .Invalidated,

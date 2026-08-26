@@ -1005,6 +1005,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
             -Family 'regular_v4_frontier_repair_pressure'
+    $snapshotResponderProbeHandoffAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'responder_probe_handoff'
     $snapshotRegularV4PressureProof =
         Get-FileTransferCoordinatorSnapshotCorrelationResult `
             -Evaluation $snapshotEvaluation `
@@ -1384,9 +1388,18 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_epoch_terminal')
     )
-    $runtimeUnlockResponderPeerProbeHandoffProof =
+    $runtimeUnlockResponderPeerProbeHandoffProof = if (
+        $snapshotResponderProbeHandoffAuthoritative) {
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $snapshotEvaluation `
+            -Family 'responder_probe_handoff' `
+            -TaxonomyClasses @(
+                'runtime_unlock_responder_acked_probe_route_transition_handoff_missing')
+    }
+    else {
         Get-FileTransferRuntimeUnlockResponderPeerProbeHandoffCorrelation `
             -Events $runtimeUnlockResponderPeerProbeHandoffEvents
+    }
     $runtimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
     [object[]]$runtimeUnlockRetryDispatchUnobservedGrantEvents = @(
         $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedGrantEvents
@@ -4776,6 +4789,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount),
         ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount),
         ("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count={0}" -f $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount),
+        ("coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count={0}" -f $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount),
         ("selected_routes={0}" -f $selectedRouteText),
         ("selected_route_sequence={0}" -f $selectedRouteText),
         ("selected_route_changes={0}" -f $selectedRouteText),
@@ -6121,6 +6135,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         coordinator_snapshot_receive_recovery_family_legacy_selection_count = $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
         coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
         coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count = $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount
+        coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count = $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount
         coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
         coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
         coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
@@ -10050,6 +10065,7 @@ function Invoke-FileTransferRetainedAnalysis {
             coordinator_snapshot_receive_recovery_family_legacy_selection_count = $fullSnapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
             coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $fullSnapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
             coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count = $fullSnapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount
+            coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count = $fullSnapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount
             coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
             coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
             coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
