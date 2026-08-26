@@ -650,6 +650,170 @@ function Get-FileTransferCoordinatorSnapshotEventName {
     return $match.Groups[1].Value
 }
 
+function Get-FileTransferCoordinatorSnapshotLineTimestampMilliseconds {
+    param([Parameter(Mandatory = $true)][string]$Line)
+
+    $match = [regex]::Match(
+        $Line,
+        '^\[(?<timestamp>[^\]]+)\]',
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) {
+        return [long]::MaxValue
+    }
+    try {
+        return [DateTimeOffset]::Parse(
+            $match.Groups['timestamp'].Value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal
+        ).ToUnixTimeMilliseconds()
+    }
+    catch {
+        return [long]::MaxValue
+    }
+}
+
+function ConvertTo-FileTransferCoordinatorSnapshotValidationFailures {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Errors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Records,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Boundaries
+    )
+
+    $recordsByLineIndex = @{}
+    foreach ($record in @($Records)) {
+        if ($null -eq $record -or
+            $record.PSObject.Properties.Name -notcontains 'LineIndex') {
+            continue
+        }
+        $recordsByLineIndex[[long]$record.LineIndex] = $record
+    }
+    $boundariesById = @{}
+    foreach ($boundary in @($Boundaries)) {
+        if ($null -eq $boundary -or
+            $boundary.PSObject.Properties.Name -notcontains 'boundaryId' -or
+            [string]::IsNullOrWhiteSpace([string]$boundary.boundaryId)) {
+            continue
+        }
+        $boundariesById[[string]$boundary.boundaryId] = $boundary
+    }
+
+    $failures = [System.Collections.Generic.List[object]]::new()
+    foreach ($errorText in @($Errors)) {
+        $parts = @([string]$errorText -split ':')
+        $lineIndex = -1L
+        $lineMatch = [regex]::Match([string]$errorText, ':(?<line>[0-9]+)$')
+        if ($lineMatch.Success) {
+            [void][long]::TryParse($lineMatch.Groups['line'].Value, [ref]$lineIndex)
+        }
+        $record = if ($recordsByLineIndex.ContainsKey($lineIndex)) {
+            $recordsByLineIndex[$lineIndex]
+        }
+        else {
+            $null
+        }
+        $line = if ($null -ne $record) { [string]$record.Line } else { '' }
+        $transitionId = if ($null -ne $record) {
+            Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'transition_id'
+        }
+        else {
+            @($parts | Where-Object {
+                    -not [string]::IsNullOrWhiteSpace([string]$_) -and
+                    $boundariesById.ContainsKey([string]$_)
+                } |
+                Select-Object -First 1) | Select-Object -First 1
+        }
+        $boundary = if (-not [string]::IsNullOrWhiteSpace($transitionId) -and
+            $boundariesById.ContainsKey($transitionId)) {
+            $boundariesById[$transitionId]
+        }
+        else {
+            $null
+        }
+        $instanceId = if ($null -ne $record) {
+            [string]$record.CoordinatorInstanceId
+        }
+        elseif ($null -ne $boundary) {
+            [string]$boundary.coordinatorInstanceId
+        }
+        else {
+            '(artifact)'
+        }
+        $writer = if ($null -ne $record) {
+            Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'log_writer_id' -Default '(unknown)'
+        }
+        elseif ($null -ne $boundary) { [string]$boundary.writer }
+        else { '(unknown)' }
+        $writerSequence = 0L
+        if ($null -ne $record) {
+            [void][long]::TryParse(
+                (Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'log_writer_sequence' -Default '0'),
+                [ref]$writerSequence)
+        }
+        elseif ($null -ne $boundary) {
+            $writerSequence = [long]$boundary.writerSequence
+        }
+        $decisionUtcMilliseconds = if ($null -ne $boundary) {
+            [long]$boundary.decisionUtcMilliseconds
+        }
+        elseif ($null -ne $record) {
+            Get-FileTransferCoordinatorSnapshotLineTimestampMilliseconds -Line $line
+        }
+        else { [long]::MaxValue }
+        $stateGeneration = 0L
+        if ($null -ne $record) {
+            [void][long]::TryParse(
+                (Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'coordinator_state_generation' -Default '0'),
+                [ref]$stateGeneration)
+        }
+        elseif ($null -ne $boundary) {
+            $stateGeneration = [long]$boundary.afterStateGeneration
+        }
+        $eventName = if ($null -ne $record) { [string]$record.EventName }
+            elseif ($null -ne $boundary) { 'filetransfer_coordinator_transition_snapshot' }
+            else { '(artifact)' }
+        $effectIdentity = if ($null -ne $record) {
+            Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'effect_identity' -Default '(none)'
+        }
+        else { '(none)' }
+        $operationKey = if ($null -ne $record) {
+            Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'operation_key' -Default '(none)'
+        }
+        else { '(none)' }
+        $family = if ($null -ne $record) {
+            Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'operation_family' -Default '(none)'
+        }
+        else { '(none)' }
+        $reason = $parts[0]
+        $identity = "$reason|$instanceId|$transitionId|$eventName|$effectIdentity|$operationKey"
+        $failures.Add([pscustomobject][ordered]@{
+                FailureText = [string]$errorText
+                Reason = $reason
+                EventName = $eventName
+                LineIndex = $lineIndex
+                Writer = $writer
+                WriterSequence = $writerSequence
+                DecisionUtcMilliseconds = $decisionUtcMilliseconds
+                CoordinatorInstanceId = $instanceId
+                TransitionId = if ([string]::IsNullOrWhiteSpace($transitionId)) {
+                    '(none)'
+                } else { $transitionId }
+                EffectIdentity = $effectIdentity
+                OperationKey = $operationKey
+                Family = $family
+                StateGeneration = $stateGeneration
+                Boundary = $boundary
+                Identity = $identity
+            }) | Out-Null
+    }
+
+    return @($failures | Sort-Object `
+            DecisionUtcMilliseconds,
+            Writer,
+            WriterSequence,
+            LineIndex,
+            Identity)
+}
+
 function Get-FileTransferCoordinatorSnapshotObjectProperty {
     param(
         $InputObject,
@@ -3420,37 +3584,85 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $validationFailures = @(
+        ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
+            -Errors @($errors) `
+            -Records @($records) `
+            -Boundaries @($boundaries))
+    $orderedErrorTexts = @($validationFailures | ForEach-Object {
+            [string]$_.FailureText
+        })
+
     $firstUnresolvedBoundary = $null
-    if ($errors.Count -gt 0) {
-        $normalizedFailureReason = [regex]::Replace(
-            [string]$errors[0],
-            ':\d+$',
-            '')
-        $failureIdentity = "coordinator_snapshot_evidence|$mode|$normalizedFailureReason"
+    if ($validationFailures.Count -gt 0) {
+        $firstFailure = $validationFailures[0]
+        $normalizedFailureReason = [string]$firstFailure.Reason
+        $failureIdentity = "coordinator_snapshot_evidence|$mode|$($firstFailure.Identity)"
         $failureHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
             [System.Text.UTF8Encoding]::new($false).GetBytes($failureIdentity))
+        $sourceBoundary = $firstFailure.Boundary
+        $matchingFailureCount = @($validationFailures | Where-Object {
+                [string]$_.Reason -ceq $normalizedFailureReason
+            }).Count
+        $failureVariant = if (
+            $normalizedFailureReason -ceq 'snapshot_authority_effect_unbound' -and
+            [string]$firstFailure.OperationKey -cmatch '\|\[redacted\]$') {
+            'structural_operation_key_tail_redacted_by_generic_long_token_filter'
+        }
+        else {
+            '(none)'
+        }
         $firstUnresolvedBoundary = [pscustomobject][ordered]@{
             boundaryId = $failureHash
             boundaryHash = $failureHash
-            coordinatorInstanceId = '(artifact)'
-            evidenceLineIndex = -1
-            writer = '(unknown)'
-            writerSequence = 0
-            decisionUtcMilliseconds = 0L
-            beforeStateGeneration = 0L
-            afterStateGeneration = 0L
-            beforeStateHash = '(none)'
-            afterStateHash = '(none)'
+            coordinatorInstanceId = [string]$firstFailure.CoordinatorInstanceId
+            evidenceLineIndex = [long]$firstFailure.LineIndex
+            writer = [string]$firstFailure.Writer
+            writerSequence = [long]$firstFailure.WriterSequence
+            decisionUtcMilliseconds = [long]$firstFailure.DecisionUtcMilliseconds
+            beforeStateGeneration = if ($null -ne $sourceBoundary) {
+                [long]$sourceBoundary.beforeStateGeneration
+            }
+            else {
+                0L
+            }
+            afterStateGeneration = if ($null -ne $sourceBoundary) {
+                [long]$sourceBoundary.afterStateGeneration
+            }
+            else {
+                [long]$firstFailure.StateGeneration
+            }
+            beforeStateHash = if ($null -ne $sourceBoundary) {
+                [string]$sourceBoundary.beforeStateHash
+            }
+            else {
+                '(none)'
+            }
+            afterStateHash = if ($null -ne $sourceBoundary) {
+                [string]$sourceBoundary.afterStateHash
+            }
+            else {
+                '(none)'
+            }
             decisionKind = 'ArtifactEvidenceValidation'
             decisionStatus = 'Rejected'
             decisionReason = $normalizedFailureReason
-            families = @()
+            eventName = [string]$firstFailure.EventName
+            variant = $failureVariant
+            referencedTransitionId = [string]$firstFailure.TransitionId
+            effectIdentity = [string]$firstFailure.EffectIdentity
+            families = if ([string]$firstFailure.Family -in @('', '(none)')) {
+                @()
+            }
+            else {
+                @([string]$firstFailure.Family)
+            }
             operations = @()
             verdict = 'fail'
             taxonomyClass = 'filetransfer_coordinator_snapshot_evidence_invalid'
             domain = 'evidence_harness'
             phase = 'evidence_finalization'
-            rawCount = $errors.Count
+            rawCount = $matchingFailureCount
             distinctCount = 1
             recoveredCount = 0
             unresolvedCount = 1
@@ -3505,7 +3717,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         CatalogHash = $catalog.Hash
         StreamComplete = @($streams.Values | Where-Object { -not $_.Completed }).Count -eq 0
         ArtifactEvidenceVerdict = $artifactVerdict
-        ArtifactEvidenceFailureReason = ($errors -join ';')
+        ArtifactEvidenceFailureReason = ($orderedErrorTexts -join ';')
         TransitionCount = $seenTransitions.Count
         EffectCount = $effects.Count
         BoundaryCount = $boundaries.Count

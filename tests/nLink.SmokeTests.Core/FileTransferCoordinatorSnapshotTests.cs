@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -83,6 +84,67 @@ public sealed class FileTransferCoordinatorSnapshotTests
             "raw-operation-key-must-not-be-projected",
             projectedOperation.OperationKey,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EvidenceProjection_LongFamily5OperationKeySurvivesOperationalRedaction()
+    {
+        var state = EmptyState() with
+        {
+            PersistentState = EmptyState().PersistentState with
+            {
+                CoordinatorInstanceId = "coordinator-family5-redaction-test",
+            },
+        };
+        var decision = FileTransferCoordinator.Apply(
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                FileTransferRouteResolver.Resolve(
+                    FileTransferRoute.RegularNknV4Fast),
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.RegularNkn,
+                "snapshot_family5_redaction_test",
+                FileTransferLegState.Active,
+                CanSendData: true,
+                CommittedChunkIndex: 0,
+                HighestObservedChunkIndex: -1,
+                TransportEpochId: 0,
+                BridgeRecoveryGeneration: 0),
+            state);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            decision.SnapshotEnvelope);
+        var template = envelope.Aggregate.Operations[0];
+        var projected = SessionFileTransferService
+            .CreateCoordinatorSnapshotEvidenceForTesting(
+                envelope with
+                {
+                    Aggregate = envelope.Aggregate with
+                    {
+                        Operations = ImmutableArray.Create(template with
+                        {
+                            Family =
+                                "regular_v4_frontier_repair_pressure",
+                            OperationRole = "attempted_decision",
+                            OperationKind = nameof(
+                                FileTransferCoordinator
+                                    .StageRegularV4FrontierRepairPressureBinding),
+                            AuthorityId = "family5-pressure-authority",
+                            OperationGeneration = 2,
+                        }),
+                    },
+                });
+        var operation = Assert.Single(projected.Aggregate.Operations);
+        var logLine = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key={operation.OperationKey}; " +
+            $"operation_authority_id={operation.AuthorityId}; " +
+            "authority_effect=applied");
+
+        Assert.Contains(
+            $"operation_key={operation.OperationKey}",
+            logLine,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("[redacted]", logLine, StringComparison.Ordinal);
     }
 
     [Fact]

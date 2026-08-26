@@ -142,6 +142,73 @@ public sealed class DiagnosticsRedactorTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesOnlyCanonicalCoordinatorOperationKeys()
+    {
+        const string authority = "fte1-0123456789abcdef01234567";
+        const string operationKey =
+            "regular_v4_frontier_repair_pressure|attempted_decision|" +
+            authority +
+            "|2|StageRegularV4FrontierRepairPressureBinding";
+        var canonical = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key={operationKey}; secret=do-not-keep");
+
+        Assert.Contains(
+            $"operation_key={operationKey}",
+            canonical,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-keep", canonical, StringComparison.Ordinal);
+
+        const string noAuthorityKey =
+            "receive_recovery|attempted_decision|(none)|0|" +
+            "EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold";
+        var noAuthority = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_transition_snapshot; " +
+            $"operation_key={noAuthorityKey}");
+        Assert.Contains(
+            $"operation_key={noAuthorityKey}",
+            noAuthority,
+            StringComparison.Ordinal);
+
+        var malformedAuthority = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            "operation_key=regular_v4_frontier_repair_pressure|" +
+            "attempted_decision|raw-authority|2|" +
+            "StageRegularV4FrontierRepairPressureBinding");
+        Assert.DoesNotContain(
+            "StageRegularV4FrontierRepairPressureBinding",
+            malformedAuthority,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", malformedAuthority, StringComparison.Ordinal);
+
+        var negativeGeneration = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key=regular_v4_frontier_repair_pressure|" +
+            $"attempted_decision|{authority}|-1|" +
+            "StageRegularV4FrontierRepairPressureBinding");
+        Assert.DoesNotContain(
+            "StageRegularV4FrontierRepairPressureBinding",
+            negativeGeneration,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", negativeGeneration, StringComparison.Ordinal);
+
+        var extraComponent = SensitiveDataRedactor.Redact(
+            "event=filetransfer_coordinator_authority_effect; " +
+            $"operation_key={operationKey}|unexpected");
+        Assert.DoesNotContain(
+            operationKey,
+            extraComponent,
+            StringComparison.Ordinal);
+        Assert.Contains("[redacted]", extraComponent, StringComparison.Ordinal);
+
+        var unrelated = SensitiveDataRedactor.Redact(
+            $"event=unrelated; operation_key={operationKey}");
+        Assert.DoesNotContain(operationKey, unrelated, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", unrelated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsRedactor_Redacts_Seeds_PrivateKeys_AndWalletSecrets()
     {
         var sample = string.Join(Environment.NewLine, new[]

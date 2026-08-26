@@ -306,6 +306,48 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw 'A generation-stamped effect without an exact receipt binding did not fail closed.'
             }
 
+            $locatedUnboundEffect =
+                '[2026-01-01 00:00:01Z] [INFO] [FileTransferCoordinator] ' +
+                ($effect -replace
+                    'operation_key=route_runtime\|route_publication\|authority-1\|1\|RoutePublication',
+                    'operation_key=route_runtime|route_publication|authority-1|1|[redacted]') +
+                '; log_writer_id=writer-helper; log_writer_sequence=249'
+            $laterTransitionFailure =
+                '[2026-01-01 00:00:02Z] [INFO] [FileTransferCoordinator] ' +
+                ($transition -replace 'snapshot_contract_version=1', 'snapshot_contract_version=2') +
+                '; log_writer_id=writer-sender; log_writer_sequence=9286'
+            $orderedFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                'event=irrelevant',
+                $start,
+                $transition,
+                $locatedUnboundEffect,
+                $laterTransitionFailure,
+                $completed)
+            $orderedCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,
+                $transition,
+                $locatedUnboundEffect,
+                $laterTransitionFailure,
+                $completed)
+            if ($orderedFull.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_authority_effect_unbound' -or
+                $orderedFull.FirstUnresolvedBoundary.eventName -ne
+                    'filetransfer_coordinator_authority_effect' -or
+                $orderedFull.FirstUnresolvedBoundary.writer -ne 'writer-helper' -or
+                $orderedFull.FirstUnresolvedBoundary.writerSequence -ne 249L -or
+                $orderedFull.FirstUnresolvedBoundary.rawCount -ne 1 -or
+                $orderedFull.FirstUnresolvedBoundary.variant -ne
+                    'structural_operation_key_tail_redacted_by_generic_long_token_filter' -or
+                -not $orderedFull.ArtifactEvidenceFailureReason.StartsWith(
+                    'snapshot_authority_effect_unbound:',
+                    [StringComparison]::Ordinal) -or
+                $orderedFull.BoundaryHash -ne $orderedCompact.BoundaryHash -or
+                $orderedFull.FirstUnresolvedBoundary.boundaryHash -ne
+                    $orderedCompact.FirstUnresolvedBoundary.boundaryHash -or
+                $orderedCompact.FirstUnresolvedBoundary.writerSequence -ne 249L) {
+                throw "Snapshot validation failures were not arbitrated by exact evidence location: $($orderedFull | ConvertTo-Json -Depth 8 -Compress) / $($orderedCompact | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $duplicateEffect = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($start, $transition, $effect, $effect, $completed)
             if ($duplicateEffect.ArtifactEvidenceVerdict -ne 'pass' -or $duplicateEffect.EffectCount -ne 1) {
                 throw 'A byte-equivalent authority-effect duplicate did not coalesce.'

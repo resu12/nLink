@@ -101,7 +101,10 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\b(?<key>authority_id|predecessor_authority_id|successor_authority_id|requested_predecessor_authority_id|release_authority_id|retained_predecessor_authority_id|current_authority_id|current_successor_authority_id|receive_recovery_operation_authority_id|recovery_liveness_lease_authority_id|retry_authority_id)=(?<value>fta[0-9]+-[A-Za-z0-9._/:-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex AuthorityIdKeyValueRegex();
 
-    [GeneratedRegex(@"\b(?<key>snapshot_catalog_hash|coordinator_instance_id|session_id|transfer_id|transition_id|snapshot_sha256|snapshot_payload|initial_state_hash|final_state_hash|operation_key|operation_authority_id|effect_identity|receipt_identity|receipt_fingerprint|checkpoint_request_id|data_session_identity)=(?<value>fte1-[a-f0-9]{24}|[a-f0-9]{64}|[A-Za-z0-9_-]+)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\boperation_key=(?<value>[A-Za-z0-9._/:-]+\|[A-Za-z0-9._/:-]+\|(?:fte1-[a-f0-9]{24}|\(none\))\|[0-9]+\|[A-Za-z0-9._/:-]+)(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex SnapshotEvidenceOperationKeyValueRegex();
+
+    [GeneratedRegex(@"\b(?<key>snapshot_catalog_hash|coordinator_instance_id|session_id|transfer_id|transition_id|snapshot_sha256|snapshot_payload|initial_state_hash|final_state_hash|operation_authority_id|effect_identity|receipt_identity|receipt_fingerprint|checkpoint_request_id|data_session_identity)=(?<value>fte1-[a-f0-9]{24}|[a-f0-9]{64}|[A-Za-z0-9_-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceKeyValueRegex();
 
     [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})(?<separator>\s*[:=])", RegexOptions.CultureInvariant)]
@@ -172,7 +175,16 @@ public static partial class SensitiveDataRedactor
             return text;
         }
 
-        return SnapshotEvidenceKeyValueRegex().Replace(text, match =>
+        var protectedText = SnapshotEvidenceOperationKeyValueRegex().Replace(
+            text,
+            match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"operation_key={placeholder}";
+            });
+
+        return SnapshotEvidenceKeyValueRegex().Replace(protectedText, match =>
         {
             var placeholder = $"SEVP{protectedValues.Count}";
             protectedValues.Add(match.Groups["value"].Value);
