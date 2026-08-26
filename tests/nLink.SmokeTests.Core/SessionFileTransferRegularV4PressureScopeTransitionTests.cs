@@ -1096,6 +1096,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             direction,
             "completed_unproven_successor");
+        if (direction == FileTransferDirection.Outbound)
+        {
+            StartCoordinatorSnapshotStreamForTest(context);
+        }
 
         Assert.True(
             InvokeReceiveRecovery(

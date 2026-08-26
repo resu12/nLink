@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using NLink.Core.FileTransfer;
 
@@ -4734,6 +4735,209 @@ public sealed class FileTransferCoordinatorTests
             } && operation.AfterState.StartsWith(
                 "Invalidated:",
                 StringComparison.Ordinal));
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "ReceiveRecoveryOperation")]
+    public void RuntimeUnlockInitialActivationReceiveRecoveryHold_NoCurrentRecoveryProjectsOnlyFamilyAttempt()
+    {
+        var testCase = CreateNoCurrentRecoverySnapshotAttemptTestCase();
+        var state = testCase.State;
+        var request = testCase.Request;
+        var fingerprint = testCase.Fingerprint;
+
+        var decision = FileTransferCoordinator
+            .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                state,
+                request);
+
+        Assert.Equal(
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Released,
+            decision.Decision.Status);
+        Assert.Equal(
+            "runtime_unlock_initial_activation_receive_recovery_not_blocked",
+            decision.Decision.Reason);
+        Assert.Same(state, decision.State);
+        Assert.Equal(
+            state.PersistentState.SnapshotStateGeneration,
+            decision.State.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(
+            fingerprint,
+            decision.State.PersistentState.SnapshotStateFingerprint);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            decision.SnapshotEnvelope);
+        Assert.Equal(0, envelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(0, envelope.Aggregate.AfterStateGeneration);
+        Assert.Equal(
+            envelope.Aggregate.BeforeStateFingerprint,
+            envelope.Aggregate.AfterStateFingerprint);
+        Assert.Equal("Released", envelope.DecisionStatus);
+        var operation = Assert.Single(envelope.Aggregate.Operations);
+        Assert.Equal("receive_recovery", operation.Family);
+        Assert.Equal("attempted_decision", operation.OperationRole);
+        var receipt = Assert.Single(operation.ReceiveRecovery!.Receipts);
+        Assert.Equal("attempted_decision", receipt.Stage);
+        Assert.Equal("Released", receipt.ReceiptStatus);
+
+        var duplicate = FileTransferCoordinator
+            .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                decision.State,
+                request);
+        var duplicateEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                duplicate.SnapshotEnvelope);
+        Assert.Equal(0, duplicateEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(0, duplicateEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Single(duplicateEnvelope.Aggregate.Operations);
+        Assert.All(
+            duplicateEnvelope.Aggregate.Operations,
+            exact => Assert.Equal("receive_recovery", exact.Family));
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public void SnapshotAttemptBuilders_UseOnlyFamilyLocalDescriptors()
+    {
+        var repoRoot = FindRepoRootForSnapshotTests();
+        var source = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "src",
+            "nLink.Core",
+            "FileTransfer",
+            "FileTransferCoordinator.Snapshots.cs"));
+        var expectations = new Dictionary<string, string>(
+            StringComparer.Ordinal)
+        {
+            ["CreateRegularV4PressureAttemptedDecisionSnapshots"] =
+                "AddRegularV4FrontierRepairPressureOperationDescriptors(",
+            ["CreateFallbackTailYieldAttemptedDecisionSnapshots"] =
+                "AddFallbackTailYieldOperationDescriptors(",
+            ["CreateReceiveRecoveryAttemptedDecisionSnapshots"] =
+                "AddReceiveRecoveryOperationDescriptors(",
+            ["CreateRuntimeUnlockRetryAttemptedDecisionSnapshots"] =
+                "AddRuntimeUnlockRetryOperationDescriptors(",
+        };
+
+        foreach (var (method, familyCollector) in expectations)
+        {
+            var start = source.IndexOf(
+                $"{method}(",
+                StringComparison.Ordinal);
+            Assert.True(start >= 0, $"Missing attempted builder {method}.");
+            var commandFingerprint = source.IndexOf(
+                "var commandFingerprint",
+                start,
+                StringComparison.Ordinal);
+            Assert.True(
+                commandFingerprint > start,
+                $"Could not bound attempted builder {method}.");
+            var projectionPrefix = source[start..commandFingerprint];
+            Assert.Contains(familyCollector, projectionPrefix);
+            Assert.DoesNotContain(
+                "CreateOperationDescriptors(",
+                projectionPrefix,
+                StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public async Task SnapshotAttemptProjection_ConstrainedStackChildProcessSurvives()
+    {
+        if (string.Equals(
+                Environment.GetEnvironmentVariable(
+                    "NLINK_SNAPSHOT_STACK_CHILD"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRootForSnapshotTests();
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ??
+                "dotnet",
+            WorkingDirectory = repoRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("test");
+        startInfo.ArgumentList.Add(Path.Combine(
+            repoRoot,
+            "tests",
+            "nLink.SmokeTests.Core",
+            "nLink.SmokeTests.Core.csproj"));
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("Release");
+        startInfo.ArgumentList.Add("--no-build");
+        startInfo.ArgumentList.Add("--no-restore");
+        startInfo.ArgumentList.Add("--filter");
+        startInfo.ArgumentList.Add(
+            "FullyQualifiedName=NLink.SmokeTests.FileTransferCoordinatorTests.SnapshotAttemptProjection_ConstrainedStackChild");
+        startInfo.Environment["NLINK_SNAPSHOT_STACK_CHILD"] = "1";
+
+        using var process = Process.Start(startInfo) ??
+            throw new InvalidOperationException(
+                "Could not start constrained-stack snapshot child.");
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        await process.WaitForExitAsync(timeout.Token);
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+        Assert.True(
+            process.ExitCode == 0,
+            $"Constrained-stack snapshot child exited {process.ExitCode}.{Environment.NewLine}{stdout}{Environment.NewLine}{stderr}");
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public void SnapshotAttemptProjection_ConstrainedStackChild()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable(
+                    "NLINK_SNAPSHOT_STACK_CHILD"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var testCase = CreateNoCurrentRecoverySnapshotAttemptTestCase();
+        Exception? failure = null;
+        var completed = false;
+        var thread = new Thread(
+            () =>
+            {
+                try
+                {
+                    var decision = FileTransferCoordinator
+                        .EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
+                            testCase.State,
+                            testCase.Request);
+                    completed = decision.Decision.Status ==
+                            RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus
+                                .Released &&
+                        decision.State.PersistentState
+                            .SnapshotStateGeneration == 0 &&
+                        decision.SnapshotEnvelope?.Aggregate.Operations.Length ==
+                            1 &&
+                        decision.SnapshotEnvelope.Aggregate.Operations[0]
+                            .Family == "receive_recovery";
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            },
+            maxStackSize: 1024 * 1024);
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(30)));
+        Assert.Null(failure);
+        Assert.True(completed);
     }
 
     [Fact]
@@ -22641,6 +22845,81 @@ public sealed class FileTransferCoordinatorTests
     private static RegularV4FrontierRepairPressureSubstate PressureState(
         FileTransferCoordinatorState state)
         => FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(state);
+
+    private static NoCurrentRecoverySnapshotAttemptTestCase
+        CreateNoCurrentRecoverySnapshotAttemptTestCase()
+    {
+        var recoveryFixture = CreateReceiveRecoveryOperationFixture();
+        var request = CreateInitialActivationReceiveRecoveryHoldRequest(
+            recoveryFixture.Decision.State,
+            payerDecisionId: 46321);
+        request = request with
+        {
+            ExpectedScope = request.ExpectedScope with
+            {
+                ExpectedExecutionCommand = null,
+            },
+        };
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var fallbackSource = ActiveFallbackStateWithoutCheckpoint() with
+        {
+            CurrentDataSessionIdentity = "unrelated-fallback-data-session",
+            CurrentDataSessionGeneration = 7,
+        };
+        var unrelatedFallback = MarkFallbackTailQuiescent(
+            fallbackSource,
+            fallback,
+            fallbackSource.CurrentLeg!.TransportEpochId,
+            committedChunk: 5,
+            highestObservedChunk: 5);
+        var state = recoveryFixture.State with
+        {
+            PersistentState = recoveryFixture.State.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    "receive-recovery-no-current-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+                FallbackTailYield = unrelatedFallback.State.PersistentState
+                    .FallbackTailYield,
+            },
+        };
+        var fingerprint =
+            FileTransferCoordinator.CalculateSnapshotStateFingerprint(state);
+        state = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                SnapshotStateFingerprint = fingerprint,
+            },
+        };
+        return new NoCurrentRecoverySnapshotAttemptTestCase(
+            state,
+            request,
+            fingerprint);
+    }
+
+    private sealed record NoCurrentRecoverySnapshotAttemptTestCase(
+        FileTransferCoordinatorState State,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+        string Fingerprint);
+
+    private static string FindRepoRootForSnapshotTests()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "nLink.sln")) &&
+                File.Exists(Path.Combine(current.FullName, "VERSION")))
+            {
+                return current.FullName;
+            }
+
+            current = current.Parent;
+        }
+
+        throw new InvalidOperationException("Could not locate repo root.");
+    }
 
     private static FileTransferCoordinatorEvent CoordinatorEvent(
         FileTransferCoordinatorEventKind kind,

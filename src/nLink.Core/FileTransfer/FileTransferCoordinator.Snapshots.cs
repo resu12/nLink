@@ -657,11 +657,13 @@ internal static partial class FileTransferCoordinator
                 "recovery_handoff_prepared",
             _ => "attempted_decision",
         };
-        var descriptors = CreateOperationDescriptors(state)
-            .Where(descriptor => string.Equals(
-                descriptor.Family,
-                "regular_v4_frontier_repair_pressure",
-                StringComparison.Ordinal));
+        var descriptorBuilder =
+            ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
+        AddRegularV4FrontierRepairPressureOperationDescriptors(
+            state,
+            descriptorBuilder);
+        IEnumerable<CoordinatorOperationDescriptor> descriptors =
+            descriptorBuilder;
         if (authorityId is { IsDefault: false } exactAuthority)
         {
             descriptors = descriptors.Where(descriptor => string.Equals(
@@ -880,11 +882,11 @@ internal static partial class FileTransferCoordinator
             object? command,
             FileTransferAuthorityId? authorityId)
     {
-        var descriptors = CreateOperationDescriptors(state)
-            .Where(descriptor => string.Equals(
-                descriptor.Family,
-                "fallback_tail_yield",
-                StringComparison.Ordinal));
+        var descriptorBuilder =
+            ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
+        AddFallbackTailYieldOperationDescriptors(state, descriptorBuilder);
+        IEnumerable<CoordinatorOperationDescriptor> descriptors =
+            descriptorBuilder;
         if (authorityId is { IsDefault: false } exactAuthority)
         {
             descriptors = descriptors.Where(descriptor => string.Equals(
@@ -1170,11 +1172,11 @@ internal static partial class FileTransferCoordinator
             object? command,
             FileTransferReceiveRecoveryOperationAuthority? authority)
     {
-        var descriptors = CreateOperationDescriptors(state)
-            .Where(descriptor => string.Equals(
-                descriptor.Family,
-                "receive_recovery",
-                StringComparison.Ordinal));
+        var descriptorBuilder =
+            ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
+        AddReceiveRecoveryOperationDescriptors(state, descriptorBuilder);
+        IEnumerable<CoordinatorOperationDescriptor> descriptors =
+            descriptorBuilder;
         if (authority is { IsDefault: false } exactAuthority)
         {
             descriptors = descriptors.Where(descriptor => string.Equals(
@@ -1514,11 +1516,11 @@ internal static partial class FileTransferCoordinator
             object? command,
             FileTransferAuthorityId? authorityId)
     {
-        var descriptors = CreateOperationDescriptors(state)
-            .Where(descriptor => string.Equals(
-                descriptor.Family,
-                "runtime_unlock_retry_lifecycle",
-                StringComparison.Ordinal));
+        var descriptorBuilder =
+            ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
+        AddRuntimeUnlockRetryOperationDescriptors(state, descriptorBuilder);
+        IEnumerable<CoordinatorOperationDescriptor> descriptors =
+            descriptorBuilder;
         var invalidationCommand = command switch
         {
             RuntimeUnlockRetryDispatchScopeInvalidationCommand exactCommand =>
