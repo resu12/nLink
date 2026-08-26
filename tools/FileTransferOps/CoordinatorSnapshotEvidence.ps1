@@ -1111,10 +1111,14 @@ function Test-FileTransferCoordinatorSnapshotFamily3OperationCatalog {
             [System.Globalization.CultureInfo]::InvariantCulture),
         [string]$Operation.operationKind) -join '|'
     $decisionKind = [string]$Envelope.decisionKind
+    $isExactPressureRecoveryHandoffCommit =
+        $decisionKind -ceq
+            'CommitRegularV4FrontierRepairPressureRecoveryHandoff'
     $knownAtomicDecision =
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
-        $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds
+        $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
+        $isExactPressureRecoveryHandoffCommit
     if ([string]$Operation.operationKey -cne $expectedOperationKey -or
         -not $knownAtomicDecision -or
         [string]$Operation.operationRole -notin

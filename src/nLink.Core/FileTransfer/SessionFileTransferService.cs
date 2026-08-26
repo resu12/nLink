@@ -7739,7 +7739,7 @@ public sealed partial class SessionFileTransferService :
         var state = AdoptCoordinatorStateLocked(context, decision);
         EnqueueReceiveRecoveryDecisionAuthorityEffect(
             context,
-            decision.SnapshotEnvelope);
+            decision);
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,
@@ -7901,7 +7901,7 @@ public sealed partial class SessionFileTransferService :
         var state = AdoptCoordinatorStateLocked(context, decision);
         EnqueueReceiveRecoveryDecisionAuthorityEffect(
             context,
-            decision.SnapshotEnvelope);
+            decision);
         var current = state.PersistentState.FileTransferReceiveRecovery;
         LogReceiveRecoveryOperationTransitions(
             previous,

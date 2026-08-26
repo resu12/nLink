@@ -1144,6 +1144,15 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "data_session_identity=",
             log,
             StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            CountOccurrences(
+                log,
+                "effect_kind=proof_publication_delivered;"));
+        Assert.Contains(
+            "operation_key=receive_recovery|proof_publication_terminal|",
+            log,
+            StringComparison.Ordinal);
 
         transport.RaiseReceiveRecoveryProof(
             command,
@@ -1170,6 +1179,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             StringComparison.Ordinal);
         Assert.Contains(
             "event=filetransfer_receive_recovery_operation_closure_adopted;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            CountOccurrences(log, "effect_kind=receive_proof_observed;"));
+        Assert.Contains(
+            "operation_key=receive_recovery|operation_current|",
             log,
             StringComparison.Ordinal);
     }

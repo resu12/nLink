@@ -11151,8 +11151,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     'clean_fallback_leg_proof_verdict=pass',
                     'bridge_liveness_integration_verdict=pass',
                     'control_plane_isolation_verdict=pass')
-                '{"BoundaryHash":"","ArtifactEvidenceVerdict":"pass"}' | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-full-summary.json')
-                '{"BoundaryHash":"","ArtifactEvidenceVerdict":"pass"}' | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-compact-summary.json')
+                $snapshot = '{"Mode":"SnapshotV1Authoritative","StreamComplete":true,"ContractVersion":1,"CatalogHash":"catalog-hash","BoundaryHash":"","ArtifactEvidenceVerdict":"pass","LegacySelectionCount":0,"RouteFamilyLegacySelectionCount":0,"RuntimeUnlockRetryFamilyLegacySelectionCount":0,"ReceiveRecoveryFamilyLegacySelectionCount":0,"FallbackTailYieldFamilyLegacySelectionCount":0,"RegularV4FrontierRepairPressureFamilyLegacySelectionCount":0,"ResponderProbeHandoffFamilyLegacySelectionCount":0}'
+                $snapshot | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-full-summary.json')
+                $snapshot | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-compact-summary.json')
                 '{"Verdict":"pass"}' | Set-Content -LiteralPath (Join-Path $root 'filetransfer-coordinator-snapshot-parity-summary.json')
                 $log = Join-Path $root 'filetransfer-retained-log-slice.log'
                 Set-Content -LiteralPath $log -Value 'event=proof'

@@ -612,7 +612,7 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             }
             Assert.Equal("1", summary["manifest_present"]);
             Assert.Matches("^[0-9a-f]{64}$", summary["manifest_sha256"]);
-            Assert.Equal("1", summary["current_runtime_proof"]);
+            Assert.Equal("0", summary["current_runtime_proof"]);
             Assert.Equal("pass", summary["finalized_attempt_selection_verdict"]);
             Assert.Equal("none", summary["finalized_attempt_selection_failure_class"]);
             Assert.Equal("0", summary["filetransfer_route_acceptance_finalized_attempt_selection_missing_raw_count"]);

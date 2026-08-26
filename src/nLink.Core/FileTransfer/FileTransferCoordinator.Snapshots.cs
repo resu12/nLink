@@ -41,6 +41,23 @@ internal sealed record FileTransferCoordinatorReceiptTransitionSnapshot(
     string ReceiptFingerprint,
     bool ReceiptValidated);
 
+internal sealed record FileTransferCoordinatorAuthorityEffectBinding(
+    string EffectKind,
+    string Family,
+    string OperationKey,
+    string OperationKind,
+    string OperationRole,
+    string AuthorityId,
+    long OperationGeneration,
+    string ReceiptStage,
+    string CommandIdentity,
+    long CommandGeneration,
+    string CommandFingerprint,
+    string ReceiptIdentity,
+    long ReceiptGeneration,
+    string ReceiptStatus,
+    string ReceiptFingerprint);
+
 internal sealed record FileTransferCoordinatorRouteRuntimeOperationSnapshot(
     string Role,
     FileTransferCoordinatorStateBoundarySnapshot Boundary,
@@ -1060,7 +1077,138 @@ internal static partial class FileTransferCoordinator
         {
             State = snapshot.State,
             SnapshotEnvelope = snapshot.Envelope,
+            SnapshotAuthorityEffectBinding =
+                CreateReceiveRecoveryAuthorityEffectBinding(
+                    snapshot.Envelope,
+                    decisionKind,
+                    command),
         };
+    }
+
+    private static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateReceiveRecoveryAuthorityEffectBinding(
+            FileTransferCoordinatorTransitionEnvelope? envelope,
+            string decisionKind,
+            object? command)
+    {
+        if (envelope is null ||
+            envelope.DecisionStatus is not ("Accepted" or "Idempotent"))
+        {
+            return null;
+        }
+
+        var matches = decisionKind switch
+        {
+            nameof(ApplyReceiveRecoveryProofStatePublicationReceipt)
+                when command is
+                    FileTransferReceiveRecoveryProofStatePublicationReceipt
+                        publicationReceipt =>
+                GetReceiveRecoveryProofPublicationEffectMatches(
+                    envelope,
+                    publicationReceipt),
+            nameof(ObserveReceiveRecoveryProof)
+                when command is FileTransferReceiveRecoveryProof proof =>
+                GetReceiveRecoveryProofEffectMatches(envelope, proof),
+            _ => [],
+        };
+        if (matches.Length != 1)
+        {
+            return null;
+        }
+
+        var match = matches[0];
+        var effectKind = decisionKind ==
+            nameof(ApplyReceiveRecoveryProofStatePublicationReceipt)
+                ? "proof_publication_delivered"
+                : "receive_proof_observed";
+        return new FileTransferCoordinatorAuthorityEffectBinding(
+            effectKind,
+            match.Operation.Family,
+            match.Operation.OperationKey,
+            match.Operation.OperationKind,
+            match.Operation.OperationRole,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.Stage,
+            match.Receipt.CommandIdentity,
+            match.Receipt.CommandGeneration,
+            match.Receipt.CommandFingerprint,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint);
+    }
+
+    private static (FileTransferCoordinatorOperationTransitionSnapshot Operation,
+        FileTransferCoordinatorReceiptTransitionSnapshot Receipt)[]
+        GetReceiveRecoveryProofPublicationEffectMatches(
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            FileTransferReceiveRecoveryProofStatePublicationReceipt receipt)
+    {
+        var authorityId = receipt.Command.Authority.AuthorityId.ToString();
+        var generation = receipt.Command.PublicationGeneration;
+        var commandFingerprint = CalculateSnapshotFingerprint(receipt.Command);
+        var receiptFingerprint = CalculateSnapshotFingerprint(receipt);
+        return envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "receive_recovery" &&
+                operation.OperationKind == "ProofPublication" &&
+                operation.OperationRole == "proof_publication_terminal" &&
+                operation.AuthorityId == authorityId &&
+                operation.OperationGeneration == generation &&
+                operation.ReceiveRecovery is not null)
+            .SelectMany(operation => operation.ReceiveRecovery!.Receipts
+                .Where(candidate =>
+                    candidate.ReceiptValidated &&
+                    candidate.Stage == "proof_publication_terminal" &&
+                    candidate.CommandGeneration == generation &&
+                    candidate.ReceiptGeneration == generation &&
+                    candidate.CommandFingerprint == commandFingerprint &&
+                    candidate.ReceiptFingerprint == receiptFingerprint &&
+                    candidate.ReceiptStatus == receipt.Outcome.ToString())
+                .Select(candidate =>
+                    (Operation: operation, Receipt: candidate)))
+            .ToArray();
+    }
+
+    private static (FileTransferCoordinatorOperationTransitionSnapshot Operation,
+        FileTransferCoordinatorReceiptTransitionSnapshot Receipt)[]
+        GetReceiveRecoveryProofEffectMatches(
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            FileTransferReceiveRecoveryProof proof)
+    {
+        var authority = proof.Authority;
+        var authorityId = authority.AuthorityId.ToString();
+        var proofFingerprint = CalculateSnapshotFingerprint(proof);
+        return envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "receive_recovery" &&
+                operation.OperationKind ==
+                    authority.BridgeRecoveryDecision.RecoveryKind.ToString() &&
+                operation.OperationRole is
+                    "operation_current" or "operation_terminal" &&
+                operation.AuthorityId == authorityId &&
+                operation.OperationGeneration ==
+                    authority.OperationGeneration &&
+                operation.ReceiveRecovery is
+                {
+                    ProofIdentity: var proofIdentity,
+                    ProofObservedUtcMs: var proofObservedUtcMs,
+                } &&
+                proofIdentity == proof.ProofIdentity &&
+                proofObservedUtcMs == proof.ObservedUtcMs)
+            .SelectMany(operation => operation.ReceiveRecovery!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    ((receipt.Stage == "operation" &&
+                      receipt.ReceiptFingerprint == proofFingerprint) ||
+                     (receipt.Stage == "attempted_decision" &&
+                      receipt.CommandFingerprint == proofFingerprint &&
+                      receipt.ReceiptStatus == envelope.DecisionStatus &&
+                      receipt.ReceiptReason == envelope.DecisionReason)))
+                .Select(receipt =>
+                    (Operation: operation, Receipt: receipt)))
+            .ToArray();
     }
 
     internal static

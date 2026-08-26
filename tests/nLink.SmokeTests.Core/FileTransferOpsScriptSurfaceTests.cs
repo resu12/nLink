@@ -859,6 +859,78 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw 'An unknown receive-recovery role did not fail artifact evidence.'
             }
 
+            $pressureHandoffOperation = New-ReceiveRecoveryOperation 'operation_current' 'None' 'Issued:None' 'Issued' 'None' '(none)'
+            $pressureHandoffTransition = New-ReceiveRecoveryEnvelopeLine `
+                'receive-pressure-handoff' 0L 1L 'receive-before' `
+                'receive-issued-hash' $pressureHandoffOperation 32L `
+                'CommitRegularV4FrontierRepairPressureRecoveryHandoff' `
+                'Committed' `
+                'regular_v4_frontier_repair_pressure_recovery_handoff_committed'
+            $pressureHandoffFull = Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines @('event=irrelevant',$receiveStart,'event=other',$pressureHandoffTransition,$receiveIncompleteEnd)
+            $pressureHandoffCompact = Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines @($receiveStart,$pressureHandoffTransition,$receiveIncompleteEnd)
+            $pressureHandoffParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+                -Full $pressureHandoffFull `
+                -Compact $pressureHandoffCompact
+            if ($pressureHandoffFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $pressureHandoffCompact.ArtifactEvidenceVerdict -ne 'pass' -or
+                $pressureHandoffParity.Verdict -ne 'pass' -or
+                $pressureHandoffFull.BoundaryHash -cne
+                    $pressureHandoffCompact.BoundaryHash -or
+                $pressureHandoffFull.FirstUnresolvedBoundary.taxonomyClass -ne
+                    'filetransfer_receive_recovery_operation_incomplete') {
+                throw "An exact Family 5/3 pressure-recovery handoff did not validate with full/compact parity: $($pressureHandoffFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            foreach ($unrelatedFamily5Decision in @(
+                    'StageRegularV4FrontierRepairPressureBinding',
+                    'CommitRegularV4FrontierRepairPressureBinding',
+                    'PrepareRegularV4FrontierRepairPressureSettlement',
+                    'CommitRegularV4FrontierRepairPressureSettlement',
+                    'PrepareRegularV4FrontierRepairPressureRecoveryHandoff')) {
+                $unrelatedTransition = New-ReceiveRecoveryEnvelopeLine `
+                    "receive-unrelated-$unrelatedFamily5Decision" 0L 1L `
+                    'receive-before' 'receive-issued-hash' `
+                    (New-ReceiveRecoveryOperation 'operation_current' 'None' 'Issued:None' 'Issued' 'None' '(none)') `
+                    32L $unrelatedFamily5Decision 'Accepted' 'unrelated_family5_decision'
+                $unrelatedEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines @($receiveStart,$unrelatedTransition,$receiveIncompleteEnd)
+                if ($unrelatedEvaluation.ArtifactEvidenceVerdict -ne 'fail' -or
+                    $unrelatedEvaluation.FirstUnresolvedBoundary.decisionReason -ne
+                        'snapshot_operation_catalog_mismatch') {
+                    throw "An unrelated Family 5 decision admitted a Family 3 mutation: $unrelatedFamily5Decision"
+                }
+            }
+
+            $mutatedPressureHandoffOperation = New-ReceiveRecoveryOperation 'operation_current' 'None' 'Issued:None' 'Issued' 'None' '(none)'
+            $mutatedPressureHandoffOperation.operationKey =
+                'receive_recovery|operation_current|wrong-authority|1|BridgeReceiveStallRecovery'
+            $mutatedPressureHandoffTransition = New-ReceiveRecoveryEnvelopeLine `
+                'receive-pressure-handoff-mutated' 0L 1L 'receive-before' `
+                'receive-issued-hash' $mutatedPressureHandoffOperation 32L `
+                'CommitRegularV4FrontierRepairPressureRecoveryHandoff' `
+                'Committed' `
+                'regular_v4_frontier_repair_pressure_recovery_handoff_committed'
+            if ((Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines @($receiveStart,$mutatedPressureHandoffTransition,$receiveIncompleteEnd)).ArtifactEvidenceVerdict -ne 'fail') {
+                throw 'A mutated Family 3 operation key under the exact pressure handoff did not fail closed.'
+            }
+
+            $incompletePressureHandoffOperation = New-ReceiveRecoveryOperation 'operation_current' 'None' 'Issued:None' 'Issued' 'None' '(none)'
+            $incompletePressureHandoffOperation.receiveRecovery.sourceBoundary =
+                [ordered]@{ route='regular_nkn_v4_fast' }
+            $incompletePressureHandoffTransition = New-ReceiveRecoveryEnvelopeLine `
+                'receive-pressure-handoff-incomplete' 0L 1L 'receive-before' `
+                'receive-issued-hash' $incompletePressureHandoffOperation 32L `
+                'CommitRegularV4FrontierRepairPressureRecoveryHandoff' `
+                'Committed' `
+                'regular_v4_frontier_repair_pressure_recovery_handoff_committed'
+            if ((Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines @($receiveStart,$incompletePressureHandoffTransition,$receiveIncompleteEnd)).ArtifactEvidenceVerdict -ne 'fail') {
+                throw 'An incomplete Family 3 scope under the exact pressure handoff did not fail closed.'
+            }
+
             function New-FallbackTailReceipt([string]$stage) {
                 [ordered]@{
                     stage=$stage; commandIdentity="fallback-$stage-command"

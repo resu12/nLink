@@ -6232,8 +6232,10 @@ function Write-RouteAcceptanceFakePhase4Run {
     $responderInitialScopeFixture = Test-RouteAcceptanceScenarioEnvEnabled `
         -ScenarioName $scenarioName `
         -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE'
-    if ($responderInitialScopeFixture -or
-        (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE')) {
+    $authoritativeSnapshotEvidence = Test-RouteAcceptanceAuthoritativeSnapshotEvidence -ArtifactDir $ArtifactDir
+    if (-not $authoritativeSnapshotEvidence -and
+        ($responderInitialScopeFixture -or
+            (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE'))) {
         $responderAckedProbeHandoffFixtureLines = @(
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_raw_count=1',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing_distinct_count=1',
@@ -6421,14 +6423,15 @@ function Write-RouteAcceptanceFakePhase4Run {
     # Mirror those exact analyzer fields into the compact artifact so the same
     # production trust predicate is exercised instead of bypassed in fake mode.
     $mirrorResponderHandoffCompactFixture =
-        (Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
+        -not $authoritativeSnapshotEvidence -and
+        ((Test-RouteAcceptanceFakeSyntheticTrustedEvidenceEnabled) -or
         ($script:RouteAcceptanceExecutionMode -eq 'fake' -and
             ((Test-RouteAcceptanceScenarioEnvEnabled `
                     -ScenarioName $scenarioName `
                     -Suffix 'RESPONDER_ACKED_PROBE_HANDOFF_SUMMARY_FIXTURE') -or
                 (Test-RouteAcceptanceScenarioEnvEnabled `
                     -ScenarioName $scenarioName `
-                    -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE')))
+                    -Suffix 'RESPONDER_INITIAL_PEER_ACCEPTANCE_SCOPE_REJECTED_SUMMARY_FIXTURE'))))
     if ($mirrorResponderHandoffCompactFixture) {
         $compactSummaryPath = Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json'
         $operatorVerdictPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
@@ -6726,6 +6729,72 @@ function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
         -not [string]::Equals($controlPlaneIsolationVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Write-RouteAcceptanceFakeAuthoritativeSnapshotEvidence {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    if ($script:RouteAcceptanceExecutionMode -ne 'fake') {
+        return
+    }
+
+    $summary = [ordered]@{
+        Mode = 'SnapshotV1Authoritative'
+        StreamComplete = $true
+        ContractVersion = 1
+        CatalogVersion = 'snapshot-authority-v1'
+        CatalogHash = 'route-acceptance-fake-snapshot-v1-catalog'
+        BoundaryHash = ''
+        ArtifactEvidenceVerdict = 'pass'
+        ArtifactEvidenceFailureReason = '(none)'
+        TransitionCount = 0
+        EffectCount = 0
+        BoundaryCount = 0
+        LegacySelectionCount = 0
+        RouteFamilyLegacySelectionCount = 0
+        RuntimeUnlockRetryFamilyLegacySelectionCount = 0
+        ReceiveRecoveryFamilyLegacySelectionCount = 0
+        FallbackTailYieldFamilyLegacySelectionCount = 0
+        RegularV4FrontierRepairPressureFamilyLegacySelectionCount = 0
+        ResponderProbeHandoffFamilyLegacySelectionCount = 0
+    }
+    $parity = [ordered]@{
+        Verdict = 'pass'
+        FailureReason = '(none)'
+        ContractVersion = 1
+        CatalogHash = [string]$summary.CatalogHash
+        FullBoundaryHash = ''
+        CompactBoundaryHash = ''
+    }
+
+    $summaryJson = $summary | ConvertTo-Json -Depth 4
+    Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') `
+        -Value $summaryJson -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') `
+        -Value $summaryJson -Encoding UTF8
+    $parity | ConvertTo-Json -Depth 4 |
+        Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
+}
+
+function Test-RouteAcceptanceAuthoritativeSnapshotEvidence {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $summary = Get-Content -LiteralPath $summaryPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        return [string]::Equals(
+            [string]$summary.Mode,
+            'SnapshotV1Authoritative',
+            [System.StringComparison]::Ordinal)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Stop-RouteAcceptanceRetainedAnalysisProcess {
     param([Parameter(Mandatory = $true)]$Process)
 
@@ -6871,6 +6940,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             live_route_proof_mode = $LiveRouteProofMode
         }
         $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
+        Write-RouteAcceptanceFakeAuthoritativeSnapshotEvidence -ArtifactDir $ArtifactDir
         $completedProofArtifacts = Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts `
             -ArtifactDir $ArtifactDir `
             -LiveRouteProofMode $LiveRouteProofMode

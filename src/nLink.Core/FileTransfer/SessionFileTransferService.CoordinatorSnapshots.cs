@@ -1063,6 +1063,42 @@ public sealed partial class SessionFileTransferService
 
     private static void EnqueueReceiveRecoveryDecisionAuthorityEffect(
         OutboundTransferContext context,
+        FileTransferReceiveRecoveryDecision decision)
+    {
+        if (decision.SnapshotAuthorityEffectBinding is { } exact)
+        {
+            EnqueueReceiveRecoveryAuthorityEffect(
+                context,
+                decision.SnapshotEnvelope,
+                exact);
+            return;
+        }
+
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+    }
+
+    private static void EnqueueReceiveRecoveryDecisionAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferReceiveRecoveryDecision decision)
+    {
+        if (decision.SnapshotAuthorityEffectBinding is { } exact)
+        {
+            EnqueueReceiveRecoveryAuthorityEffect(
+                context,
+                decision.SnapshotEnvelope,
+                exact);
+            return;
+        }
+
+        EnqueueReceiveRecoveryDecisionAuthorityEffect(
+            context,
+            decision.SnapshotEnvelope);
+    }
+
+    private static void EnqueueReceiveRecoveryDecisionAuthorityEffect(
+        OutboundTransferContext context,
         FileTransferCoordinatorTransitionEnvelope? envelope)
     {
         var effect = GetReceiveRecoveryDecisionEffect(envelope);
@@ -1150,10 +1186,6 @@ public sealed partial class SessionFileTransferService
                 ("operation_current", "execution_started"),
             nameof(FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt) =>
                 ("operation_current", "execution_receipt_observed"),
-            nameof(FileTransferCoordinator.ObserveReceiveRecoveryProof) =>
-                ("operation_current", "receive_proof_observed"),
-            nameof(FileTransferCoordinator.ApplyReceiveRecoveryProofStatePublicationReceipt) =>
-                ("proof_publication_terminal", "proof_publication_delivered"),
             nameof(FileTransferCoordinator.ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt) =>
                 ("checkpoint_delivery_terminal", "checkpoint_delivery_observed"),
             nameof(FileTransferCoordinator.ReserveReceiveRecoveryFallbackCheckpointDeliveryResume) =>
@@ -1174,6 +1206,95 @@ public sealed partial class SessionFileTransferService
                 ("initial_activation_envelope_refresh", "initial_activation_envelope_refresh_observed"),
             _ => null,
         };
+    }
+
+    private static void EnqueueReceiveRecoveryAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        FileTransferCoordinatorAuthorityEffectBinding binding)
+        => EnqueueReceiveRecoveryAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope,
+            binding);
+
+    private static void EnqueueReceiveRecoveryAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        FileTransferCoordinatorAuthorityEffectBinding binding)
+        => EnqueueReceiveRecoveryAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope,
+            binding);
+
+    private static void EnqueueReceiveRecoveryAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope,
+        FileTransferCoordinatorAuthorityEffectBinding binding)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == binding.Family &&
+                operation.OperationKey == binding.OperationKey &&
+                operation.OperationKind == binding.OperationKind &&
+                operation.OperationRole == binding.OperationRole &&
+                operation.AuthorityId == binding.AuthorityId &&
+                operation.OperationGeneration == binding.OperationGeneration &&
+                operation.ReceiveRecovery is not null)
+            .SelectMany(operation => operation.ReceiveRecovery!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    receipt.Stage == binding.ReceiptStage &&
+                    receipt.CommandIdentity == binding.CommandIdentity &&
+                    receipt.CommandGeneration == binding.CommandGeneration &&
+                    receipt.CommandFingerprint == binding.CommandFingerprint &&
+                    receipt.ReceiptIdentity == binding.ReceiptIdentity &&
+                    receipt.ReceiptGeneration == binding.ReceiptGeneration &&
+                    receipt.ReceiptStatus == binding.ReceiptStatus &&
+                    receipt.ReceiptFingerprint == binding.ReceiptFingerprint)
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            return;
+        }
+
+        var match = matches[0];
+        emitter.EnqueueAuthorityEffect(
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            stateGeneration,
+            match.Operation.Family,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint,
+            binding.EffectKind,
+            $"{match.Operation.OperationKey}:{binding.EffectKind}",
+            match.Receipt.ReceiptGeneration);
     }
 
     private static void EnqueueRegularV4PressureDecisionAuthorityEffect(

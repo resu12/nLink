@@ -2586,6 +2586,13 @@ internal readonly record struct FileTransferReceiveRecoveryDecision(
         init;
     }
 
+    public FileTransferCoordinatorAuthorityEffectBinding?
+        SnapshotAuthorityEffectBinding
+    {
+        get;
+        init;
+    }
+
     public FileTransferReceiveRecoveryFallbackCheckpointFrontierRequestHold?
         FallbackCheckpointFrontierRequestHold
     {
