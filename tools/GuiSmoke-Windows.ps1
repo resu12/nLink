@@ -1108,6 +1108,36 @@ function Wait-BannerGone {
     })
 }
 
+function Invoke-GuiSmokePhysicalClick {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element)
+
+    try {
+        $clickablePoint = [System.Windows.Point]::new()
+        if ($Element.TryGetClickablePoint([ref]$clickablePoint)) {
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$clickablePoint.X, [int]$clickablePoint.Y)
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+            return $true
+        }
+    }
+    catch {}
+
+    try {
+        $rect = $Element.Current.BoundingRectangle
+        if (-not $rect.IsEmpty) {
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(
+                [int]($rect.Left + ($rect.Width / 2)),
+                [int]($rect.Top + ($rect.Height / 2)))
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+            return $true
+        }
+    }
+    catch {}
+
+    return $false
+}
+
 function Click-Element {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element)
     if (-not $Element.Current.IsEnabled) {
@@ -5474,6 +5504,12 @@ function Get-TunaGuiExplicitFailureClassification {
     if ($failureClassMatch.Success) {
         $failureClass = $failureClassMatch.Groups['value'].Value.ToLowerInvariant()
         switch ($failureClass) {
+            'filetransfer_gui_nkn_direct_connect_chat_submission_missing' {
+                return [pscustomobject]@{
+                    Phase = 'preflight_gui_interaction'
+                    Reason = 'nkn_direct_connect_chat_submit_not_ready'
+                }
+            }
             'terminal_before_fallback_switch_off' {
                 return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
             }
@@ -38302,6 +38338,34 @@ function Helper-SendChatMessage {
     Click-Element $sendBtn
 }
 
+function Write-GuiSmokeChatSubmissionDecision {
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Outcome,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [Parameter(Mandatory = $true)]$State
+    )
+
+    Write-Host ("[GUI Smoke] event=gui_smoke_chat_submission_decided; method={0}; outcome={1}; reason={2}; window_process_id={3}; window_handle={4}; draft_fingerprint={5}; draft_length={6}; focus_attempt_count={7}; elapsed_ms={8}; set_foreground_succeeded={9}; input_click_attempted={10}; exact_focus_observed={11}; draft_match={12}; send_button_available={13}; send_button_enabled={14}; enter_dispatch_started={15}; button_invocation_started={16}; authority_effect=none" -f `
+        $Method,
+        $Outcome,
+        $Reason,
+        $State.WindowProcessId,
+        $State.WindowHandle,
+        $State.DraftFingerprint,
+        $State.DraftLength,
+        $State.FocusAttempts,
+        $State.ElapsedMilliseconds,
+        $(if ($State.SetForegroundSucceeded) { 1 } else { 0 }),
+        $(if ($State.InputClickAttempted) { 1 } else { 0 }),
+        $(if ($State.ExactFocusObserved) { 1 } else { 0 }),
+        $(if ($State.DraftMatched) { 1 } else { 0 }),
+        $(if ($State.SendButtonAvailable) { 1 } else { 0 }),
+        $(if ($State.SendButtonEnabled) { 1 } else { 0 }),
+        $(if ($State.EnterDispatchStarted) { 1 } else { 0 }),
+        $(if ($State.ButtonInvocationStarted) { 1 } else { 0 })) -ForegroundColor DarkGray
+}
+
 function Send-ChatMessage {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
@@ -38315,26 +38379,206 @@ function Send-ChatMessage {
     Set-Text -Element $chatInput -Text $Text
 
     if ($UseEnter) {
+        $windowProcessId = 0
+        $windowHandle = 0L
         try {
-            $windowHandle = [IntPtr]::new([int64]$Window.Current.NativeWindowHandle)
-            [void][Win32GuiSmoke]::SetForegroundWindow($windowHandle)
-        } catch {}
+            $windowProcessId = [int]$Window.Current.ProcessId
+            $windowHandle = [int64]$Window.Current.NativeWindowHandle
+        }
+        catch {
+            throw 'failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=chat_submit_paths_unavailable; detail=chat_window_identity_unavailable'
+        }
 
-        [void](Wait-Until -TimeoutMs 1000 -PollMs 50 -OnTimeoutMessage 'Window did not become ready for Enter send within 1000 ms.' -Condition {
+        if ($windowProcessId -le 0 -or $windowHandle -eq 0L) {
+            throw 'failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=chat_submit_paths_unavailable; detail=chat_window_identity_invalid'
+        }
+
+        $draftFingerprint = Get-GuiSmokeStringHashPrefix -Value $Text -Length 16
+        $focusStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $focusAttempts = 0
+        $setForegroundSucceeded = $false
+        $inputClickAttempted = $false
+        $exactFocusObserved = $false
+        $draftMatched = $true
+        $sendButtonAvailable = $false
+        $sendButtonEnabled = $false
+        $enterDispatchStarted = $false
+        $buttonInvocationStarted = $false
+        $focusDeadline = [DateTimeOffset]::UtcNow.AddMilliseconds(5000)
+
+        while ([DateTimeOffset]::UtcNow -lt $focusDeadline) {
+            Assert-GuiSmokeScenarioDeadline
+            $focusAttempts++
+            $currentWindow = Get-NLinkMainWindowElementByProcessId `
+                -ProcessId $windowProcessId `
+                -PreferredNativeHandle $windowHandle
+            if ($null -eq $currentWindow) {
+                Start-Sleep -Milliseconds 50
+                continue
+            }
+
             try {
-                $chatInput.SetFocus()
-                $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                if ($focused -and [System.Windows.Automation.Automation]::Compare($focused, $chatInput)) {
-                    return $true
+                if ([int]$currentWindow.Current.ProcessId -ne $windowProcessId -or
+                    [int64]$currentWindow.Current.NativeWindowHandle -ne $windowHandle) {
+                    Start-Sleep -Milliseconds 50
+                    continue
+                }
+
+                $currentChatInput = Find-VisibleByAutomationIdOrName `
+                    -Root $currentWindow `
+                    -AutomationId 'Chat.Input' `
+                    -FallbackControlType ([System.Windows.Automation.ControlType]::Edit)
+                if ($null -eq $currentChatInput -or
+                    [int]$currentChatInput.Current.ProcessId -ne $windowProcessId -or
+                    -not $currentChatInput.Current.IsEnabled -or
+                    $currentChatInput.Current.IsOffscreen) {
+                    Start-Sleep -Milliseconds 50
+                    continue
+                }
+
+                $draftState = Test-ElementValueMatchesText -Element $currentChatInput -ExpectedText $Text
+                if (-not $draftState.IsMatch) {
+                    $draftMatched = $false
+                    break
+                }
+
+                try {
+                    $setForegroundSucceeded = [Win32GuiSmoke]::SetForegroundWindow([IntPtr]::new($windowHandle)) -or $setForegroundSucceeded
+                }
+                catch {}
+                try {
+                    $currentChatInput.SetFocus()
+                }
+                catch {}
+                $focused = $null
+                try {
+                    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+                }
+                catch {}
+                $focusedMatches = $false
+                try {
+                    $focusedMatches = $focused -and [System.Windows.Automation.Automation]::Compare($focused, $currentChatInput)
+                }
+                catch {}
+                if ($focusedMatches) {
+                    $exactFocusObserved = $true
+                    break
+                }
+
+                if (-not $inputClickAttempted) {
+                    $inputClickAttempted = $true
+                    [void](Invoke-GuiSmokePhysicalClick -Element $currentChatInput)
                 }
             }
             catch {}
 
-            return $null
-        })
+            Start-Sleep -Milliseconds 50
+        }
 
-        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-        return
+        $decisionState = [pscustomobject]@{
+            WindowProcessId = $windowProcessId
+            WindowHandle = $windowHandle
+            DraftFingerprint = $draftFingerprint
+            DraftLength = $Text.Length
+            FocusAttempts = $focusAttempts
+            ElapsedMilliseconds = $focusStopwatch.ElapsedMilliseconds
+            SetForegroundSucceeded = $setForegroundSucceeded
+            InputClickAttempted = $inputClickAttempted
+            ExactFocusObserved = $exactFocusObserved
+            DraftMatched = $draftMatched
+            SendButtonAvailable = $sendButtonAvailable
+            SendButtonEnabled = $sendButtonEnabled
+            EnterDispatchStarted = $enterDispatchStarted
+            ButtonInvocationStarted = $buttonInvocationStarted
+        }
+
+        if ($exactFocusObserved -and $draftMatched) {
+            $enterDispatchStarted = $true
+            $decisionState.EnterDispatchStarted = $true
+            try {
+                [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                Write-GuiSmokeChatSubmissionDecision `
+                    -Method 'enter' `
+                    -Outcome 'sent' `
+                    -Reason 'exact_chat_input_focus_acquired' `
+                    -State $decisionState
+                return
+            }
+            catch {
+                Write-GuiSmokeChatSubmissionDecision `
+                    -Method 'enter' `
+                    -Outcome 'failed' `
+                    -Reason 'enter_dispatch_failed_ambiguous' `
+                    -State $decisionState
+                throw 'failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=chat_submit_paths_unavailable; detail=enter_dispatch_failed_ambiguous'
+            }
+        }
+
+        if ($draftMatched) {
+            try {
+                $currentWindow = Get-NLinkMainWindowElementByProcessId `
+                    -ProcessId $windowProcessId `
+                    -PreferredNativeHandle $windowHandle
+                if ($currentWindow -and
+                    [int]$currentWindow.Current.ProcessId -eq $windowProcessId -and
+                    [int64]$currentWindow.Current.NativeWindowHandle -eq $windowHandle) {
+                    $currentChatInput = Find-VisibleByAutomationIdOrName `
+                        -Root $currentWindow `
+                        -AutomationId 'Chat.Input' `
+                        -FallbackControlType ([System.Windows.Automation.ControlType]::Edit)
+                    $currentSendButton = Find-VisibleByAutomationIdOrName `
+                        -Root $currentWindow `
+                        -AutomationId 'Chat.Send' `
+                        -FallbackName 'Send' `
+                        -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+                    $sendButtonAvailable = $null -ne $currentSendButton
+                    $sendButtonEnabled = $sendButtonAvailable -and $currentSendButton.Current.IsEnabled
+                    $decisionState.SendButtonAvailable = $sendButtonAvailable
+                    $decisionState.SendButtonEnabled = $sendButtonEnabled
+                    $fallbackDraftMatches = $currentChatInput -and
+                        [int]$currentChatInput.Current.ProcessId -eq $windowProcessId -and
+                        $currentChatInput.Current.IsEnabled -and
+                        -not $currentChatInput.Current.IsOffscreen -and
+                        (Test-ElementValueMatchesText -Element $currentChatInput -ExpectedText $Text).IsMatch
+                    $fallbackButtonMatches = $sendButtonAvailable -and
+                        [int]$currentSendButton.Current.ProcessId -eq $windowProcessId -and
+                        $currentSendButton.Current.IsEnabled -and
+                        -not $currentSendButton.Current.IsOffscreen
+                    if ($fallbackDraftMatches -and $fallbackButtonMatches) {
+                        $buttonInvocationStarted = $true
+                        $decisionState.ButtonInvocationStarted = $true
+                        $decisionState.ElapsedMilliseconds = $focusStopwatch.ElapsedMilliseconds
+                        Click-Element $currentSendButton
+                        Write-GuiSmokeChatSubmissionDecision `
+                            -Method 'send_button' `
+                            -Outcome 'sent' `
+                            -Reason 'exact_focus_timeout_button_fallback' `
+                            -State $decisionState
+                        return
+                    }
+                }
+            }
+            catch {
+                if ($buttonInvocationStarted) {
+                    Write-GuiSmokeChatSubmissionDecision `
+                        -Method 'send_button' `
+                        -Outcome 'failed' `
+                        -Reason 'send_button_invoke_failed_ambiguous' `
+                        -State $decisionState
+                    throw 'failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=chat_submit_paths_unavailable; detail=send_button_invoke_failed_ambiguous'
+                }
+            }
+        }
+
+        $failureSubreason = if (-not $draftMatched) { 'chat_input_draft_mutated' } else { 'chat_submit_paths_unavailable' }
+        $decisionState.ElapsedMilliseconds = $focusStopwatch.ElapsedMilliseconds
+        $decisionState.DraftMatched = $draftMatched
+        Write-GuiSmokeChatSubmissionDecision `
+            -Method 'none' `
+            -Outcome 'failed' `
+            -Reason $failureSubreason `
+            -State $decisionState
+        throw "failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=$failureSubreason; detail=connected_chat_submission_unavailable"
     }
 
     $sendBtn = Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Chat.Send.' -Condition {

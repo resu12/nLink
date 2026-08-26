@@ -50,7 +50,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public void GuiSmoke_EnterSendFocusesExactChatInputBeforeSendingKey()
+    public void GuiSmoke_EnterSendReacquiresExactChatInputBeforeSendingKeyAndUsesBoundedButtonFallback()
     {
         var repoRoot = FindRepoRoot();
         var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
@@ -61,14 +61,55 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(functionEnd > functionStart, "Expected to locate the end of Send-ChatMessage.");
 
         var functionBody = scriptText[functionStart..functionEnd];
-        var setFocusIndex = functionBody.IndexOf("$chatInput.SetFocus()", StringComparison.Ordinal);
-        var exactFocusIndex = functionBody.IndexOf("[System.Windows.Automation.Automation]::Compare($focused, $chatInput)", StringComparison.Ordinal);
+        var reacquireWindowIndex = functionBody.IndexOf("Get-NLinkMainWindowElementByProcessId", StringComparison.Ordinal);
+        var reacquireInputIndex = functionBody.IndexOf("$currentChatInput = Find-VisibleByAutomationIdOrName", StringComparison.Ordinal);
+        var draftMatchIndex = functionBody.IndexOf("Test-ElementValueMatchesText -Element $currentChatInput -ExpectedText $Text", StringComparison.Ordinal);
+        var setFocusIndex = functionBody.IndexOf("$currentChatInput.SetFocus()", StringComparison.Ordinal);
+        var exactFocusIndex = functionBody.IndexOf("[System.Windows.Automation.Automation]::Compare($focused, $currentChatInput)", StringComparison.Ordinal);
         var enterIndex = functionBody.IndexOf("[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')", StringComparison.Ordinal);
+        var buttonFallbackIndex = functionBody.IndexOf("Click-Element $currentSendButton", StringComparison.Ordinal);
 
+        Assert.True(reacquireWindowIndex >= 0, "Expected Enter send to reacquire the original process/window on every focus attempt.");
+        Assert.True(reacquireInputIndex > reacquireWindowIndex, "Expected Enter send to reacquire Chat.Input from the current window.");
+        Assert.True(draftMatchIndex > reacquireInputIndex, "Expected exact draft validation before focus acquisition.");
         Assert.True(setFocusIndex >= 0, "Expected Enter send to focus Chat.Input explicitly.");
         Assert.True(exactFocusIndex > setFocusIndex, "Expected exact Chat.Input focus validation after focus acquisition.");
         Assert.True(enterIndex > exactFocusIndex, "Expected Enter only after exact Chat.Input focus validation.");
+        Assert.True(buttonFallbackIndex > enterIndex, "Expected the exact Send-button fallback only after the Enter focus path exits without dispatch.");
+        Assert.Contains("$focusDeadline = [DateTimeOffset]::UtcNow.AddMilliseconds(5000)", functionBody, StringComparison.Ordinal);
+        Assert.Contains("Invoke-GuiSmokePhysicalClick -Element $currentChatInput", functionBody, StringComparison.Ordinal);
+        Assert.Contains("$enterDispatchStarted = $true", functionBody, StringComparison.Ordinal);
+        Assert.Contains("$buttonInvocationStarted = $true", functionBody, StringComparison.Ordinal);
+        Assert.Contains("event=gui_smoke_chat_submission_decided", scriptText, StringComparison.Ordinal);
+        Assert.Contains("failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing", functionBody, StringComparison.Ordinal);
+        Assert.Contains("'chat_input_draft_mutated'", functionBody, StringComparison.Ordinal);
+        Assert.Contains("failure_subreason=$failureSubreason", functionBody, StringComparison.Ordinal);
         Assert.DoesNotContain("$focused.Current.ProcessId -eq $Window.Current.ProcessId", functionBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmoke_NknDirectConnectChatSubmissionFailureHasExplicitPreflightClassification()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            $result = Get-TunaGuiExplicitFailureClassification -ErrorMessage 'failure_class=filetransfer_gui_nkn_direct_connect_chat_submission_missing; failure_reason=nkn_direct_connect_chat_submit_not_ready; failure_subreason=chat_submit_paths_unavailable'
+            if ($result.Phase -ne 'preflight_gui_interaction') { throw "unexpected phase: $($result.Phase)" }
+            if ($result.Reason -ne 'nkn_direct_connect_chat_submit_not_ready') { throw "unexpected reason: $($result.Reason)" }
+            Write-Output 'gui-chat-submission-classification-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Chat-submission classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-chat-submission-classification-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

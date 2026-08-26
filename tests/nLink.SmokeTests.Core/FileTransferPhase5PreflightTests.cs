@@ -312,6 +312,150 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5PreflightChatSubmissionFailureRetriesOnceBeforeMatrix()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-preflight-chat-submit-retry-pass");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-preflight-chat-submit-retry-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL_ONCE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "nkn_direct_connect_chat_submit_not_ready";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_SUBREASON"] = "chat_input_exact_focus_timeout";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.Contains("retrying from a clean preflight artifact directory", result.Stdout, StringComparison.Ordinal);
+            var attempts = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-attempts.txt");
+            Assert.Equal("PASS", attempts["verdict"]);
+            Assert.Equal("2", attempts["attempt_count"]);
+            Assert.Equal("1", attempts["retry_used"]);
+            Assert.Equal("2", attempts["selected_attempt"]);
+            Assert.Equal("nkn_direct_connect_chat_submit_not_ready", attempts["first_failure_reason"]);
+            Assert.Equal("chat_input_exact_focus_timeout", attempts["first_failure_subreason"]);
+            Assert.True(File.Exists(Path.Combine(runRoot, "preflight-bridge-ready-attempt-1", "phase5-bridge-readiness-preflight-summary.txt")));
+
+            var first = ReadArtifactReport(
+                Path.Combine(runRoot, "preflight-bridge-ready-attempt-1"),
+                "phase5-bridge-readiness-preflight-summary.txt");
+            Assert.Equal("preflight_gui_interaction", first["failure_class"]);
+            Assert.Equal("nkn_direct_connect_chat_submit_not_ready", first["failure_reason"]);
+            Assert.Equal("chat_input_exact_focus_timeout", first["failure_subreason"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5FilteredPersistentChatSubmissionFailureIsNotQuarantined()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-preflight-chat-submit-hard-fail");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-preflight-chat-submit-hard-fail");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "nkn_direct_connect_chat_submit_not_ready";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_SUBREASON"] = "chat_submit_paths_unavailable";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.False(File.Exists(Path.Combine(runRoot, "phase5-bridge-readiness-preflight-quarantine.txt")));
+            Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")));
+
+            var attempts = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-attempts.txt");
+            Assert.Equal("FAIL", attempts["verdict"]);
+            Assert.Equal("2", attempts["attempt_count"]);
+            Assert.Equal("1", attempts["retry_used"]);
+            Assert.Equal("nkn_direct_connect_chat_submit_not_ready", attempts["final_failure_reason"]);
+            Assert.Equal("chat_submit_paths_unavailable", attempts["final_failure_subreason"]);
+            Assert.Equal("nkn_direct_connect_chat_submit_not_ready", attempts["first_failure_reason"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("preflight_gui_interaction", summary["preflight_failure_class"]);
+            Assert.Equal("nkn_direct_connect_chat_submit_not_ready", summary["preflight_failure_reason"]);
+            Assert.Equal("chat_submit_paths_unavailable", summary["preflight_failure_subreason"]);
+            Assert.Equal("2", summary["preflight_attempt_count"]);
+            Assert.Equal("0", summary["run_count"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    public async Task RunFileTransferRouteAcceptance_PreflightReclassifiesHistoricalEnterFocusTimeoutAsGuiInteraction()
+    {
+        var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var classBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Get-Phase5BridgeReadinessPreflightFailureClass",
+            "Get-Phase5BridgeReadinessPreflightFailureSubreason");
+        var subreasonBody = ExtractPowerShellFunctionBody(
+            scriptText,
+            "Get-Phase5BridgeReadinessPreflightFailureSubreason",
+            "Invoke-Phase5BridgeReadinessPreflight");
+        var harness = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-Phase5BridgeReadinessPreflightFailureClass { {{classBody}} }
+            function Get-Phase5BridgeReadinessPreflightFailureSubreason { {{subreasonBody}} }
+            $output = '[GUI Smoke] FAIL: Window did not become ready for Enter send within 1000 ms.'
+            $class = Get-Phase5BridgeReadinessPreflightFailureClass -FailureReason 'nkn_direct_connect_preflight_failed' -OutputText $output
+            $subreason = Get-Phase5BridgeReadinessPreflightFailureSubreason -OutputText $output
+            if ($class -ne 'preflight_gui_interaction') { throw "unexpected class: $class" }
+            if ($subreason -ne 'chat_input_exact_focus_timeout') { throw "unexpected subreason: $subreason" }
+            Write-Output 'historical-chat-focus-timeout-classification-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(harness, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Historical focus-timeout classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("historical-chat-focus-timeout-classification-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5PreflightBootstrapFailureRetriesOnceThenRunsMatrix()
     {
         if (!OperatingSystem.IsWindows())
@@ -553,6 +697,10 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         Assert.Contains("HostByAddressAsync failed", scriptText, StringComparison.Ordinal);
         Assert.Contains("preflight_helpee_invite_bootstrap", scriptText, StringComparison.Ordinal);
         Assert.Contains("preflight_bridge_bootstrap", scriptText, StringComparison.Ordinal);
+        Assert.Contains("preflight_gui_interaction", scriptText, StringComparison.Ordinal);
+        Assert.Contains("nkn_direct_connect_chat_submit_not_ready", scriptText, StringComparison.Ordinal);
+        Assert.Contains("chat_input_exact_focus_timeout", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Window did not become ready for Enter send", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-Phase5BridgeReadinessPreflightRetryableFailure", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-Phase5BridgeReadinessPreflightQuarantinableFailure", scriptText, StringComparison.Ordinal);
         Assert.Contains("Get-RouteAcceptanceRetainedMarkerIndex", scriptText, StringComparison.Ordinal);

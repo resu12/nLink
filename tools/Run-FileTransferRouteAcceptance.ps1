@@ -7492,6 +7492,13 @@ function Get-Phase5BridgeReadinessPreflightFailureClass {
         [string]$OutputText = ''
     )
 
+    if ([string]::Equals($FailureReason, 'nkn_direct_connect_chat_submit_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputText.IndexOf('filetransfer_gui_nkn_direct_connect_chat_submission_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('gui_smoke_chat_submission_decided', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Window did not become ready for Enter send', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'preflight_gui_interaction'
+    }
+
     if ([string]::Equals($FailureReason, 'helper_bootstrap_window_ownership', [System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals($FailureReason, 'helper_identity_window_ownership_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -or
         $OutputText.IndexOf('Timed out waiting for current helper identity bootstrap UI before clipboard fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -7568,6 +7575,10 @@ function Get-Phase5BridgeReadinessPreflightFailureSubreason {
 
     if ($combined.IndexOf('helpee_invite_bootstrap_bridge_before_ready_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         return 'helpee_invite_host_before_bridge_ready'
+    }
+
+    if ($combined.IndexOf('Window did not become ready for Enter send', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'chat_input_exact_focus_timeout'
     }
 
     if ($combined.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -7770,7 +7781,13 @@ function Invoke-Phase5BridgeReadinessPreflight {
     if ($exitCode -ne 0) {
         $joined = $outputLines -join "`n"
         $failureSubreason = Get-Phase5BridgeReadinessPreflightFailureSubreason -OutputText $joined
-        if ($joined.IndexOf('Timed out waiting for current helper identity bootstrap UI before clipboard fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        if ($joined.IndexOf('failure_reason=nkn_direct_connect_chat_submit_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('filetransfer_gui_nkn_direct_connect_chat_submission_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('gui_smoke_chat_submission_decided', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Window did not become ready for Enter send', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = 'nkn_direct_connect_chat_submit_not_ready'
+        }
+        elseif ($joined.IndexOf('Timed out waiting for current helper identity bootstrap UI before clipboard fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('helper_identity_window_ownership_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('helper_identity_clipboard_stale', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'helper_bootstrap_window_ownership'
@@ -7968,7 +7985,8 @@ function Test-Phase5BridgeReadinessPreflightRetryableFailure {
     }
 
     $reason = [string]$PreflightResult.FailureReason
-    return $reason -eq 'helpee_invite_readiness_timeout' -or
+    return $reason -eq 'nkn_direct_connect_chat_submit_not_ready' -or
+        $reason -eq 'helpee_invite_readiness_timeout' -or
         $reason -eq 'helpee_invite_connection_failed_before_ready' -or
         $reason -eq 'helpee_request_flow_not_enabled_after_identity_paste' -or
         $reason -eq 'nkn_bridge_start_failure' -or
