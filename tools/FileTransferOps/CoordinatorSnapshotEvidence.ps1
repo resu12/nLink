@@ -1243,6 +1243,7 @@ function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
     $decisionKind = [string]$Envelope.decisionKind
     $knownAtomicDecision =
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily5DecisionKinds -or
+        $decisionKind -ceq 'RepairReplay' -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
@@ -1292,6 +1293,175 @@ function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
         }
     }
     return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotFamily5RepairReplayScope {
+    param([Parameter(Mandatory = $true)]$Operation)
+
+    if ($null -eq $Operation.regularV4FrontierRepairPressure) {
+        return $false
+    }
+    $payload = $Operation.regularV4FrontierRepairPressure
+    $source = $payload.sourceBoundary
+    $effective = $payload.effectiveBoundary
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $source) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $effective) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $source -Right $effective) -or
+        [int]$source.protocolVersion -ne 4 -or
+        [long]$source.routePublicationGeneration -le 0) {
+        return $false
+    }
+
+    switch ([string]$source.route) {
+        'regular_nkn_v4_fast' {
+            return [string]$payload.targetTransport -ceq 'RegularNkn'
+        }
+        'file_tuna_v4' {
+            return [long]$source.routeCommitGeneration -gt 0 -and
+                [string]$payload.targetTransport -ceq 'Tuna'
+        }
+        default {
+            return $false
+        }
+    }
+}
+
+function Get-FileTransferCoordinatorSnapshotFamily5RepairReplayFailure {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ([string]$Envelope.decisionKind -cne 'RepairReplay') {
+        return ''
+    }
+
+    $operations = @($Envelope.aggregate.operations | Where-Object {
+            [string]$_.family -ceq
+                'regular_v4_frontier_repair_pressure'
+        })
+    $beforeBoundary = $Envelope.aggregate.beforeBoundary
+    $afterBoundary = $Envelope.aggregate.afterBoundary
+    $v4Boundary =
+        (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $beforeBoundary) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $afterBoundary) -and
+        [int]$beforeBoundary.protocolVersion -eq 4 -and
+        [int]$afterBoundary.protocolVersion -eq 4 -and
+        [string]$beforeBoundary.route -ceq [string]$afterBoundary.route -and
+        [string]$afterBoundary.route -in @(
+            'regular_nkn_v4_fast', 'file_tuna_v4') -and
+        [long]$afterBoundary.routePublicationGeneration -gt 0 -and
+        ([string]$afterBoundary.route -cne 'file_tuna_v4' -or
+         [long]$afterBoundary.routeCommitGeneration -gt 0)
+    if (-not $v4Boundary -and $operations.Count -eq 0) {
+        return ''
+    }
+    $attempts = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'attempted_decision'
+        })
+    $decisionStatus = [string]$Envelope.decisionStatus
+    $stateChanged = [string]$Envelope.aggregate.beforeStateFingerprint -cne
+        [string]$Envelope.aggregate.afterStateFingerprint
+    $attemptValid = $attempts.Count -eq 1 -and
+        [string]$attempts[0].operationKind -ceq 'RepairReplay' -and
+        -not [bool]$attempts[0].stateApplied -and
+        [bool]$attempts[0].receiptValidated -and
+        [string]$attempts[0].receiptStatus -ceq $decisionStatus -and
+        [string]$attempts[0].regularV4FrontierRepairPressure.role -ceq
+            'attempted_decision' -and
+        @($attempts[0].regularV4FrontierRepairPressure.receipts).Count -eq 1 -and
+        [string]$attempts[0].regularV4FrontierRepairPressure.receipts[0].stage `
+            -ceq 'attempted_decision'
+
+    if ($decisionStatus -in @('Idempotent', 'Rejected')) {
+        if ($stateChanged -or
+            [long]$Envelope.aggregate.beforeStateGeneration -ne
+                [long]$Envelope.aggregate.afterStateGeneration -or
+            -not $attemptValid -or
+            @($operations | Where-Object { [bool]$_.stateApplied }).Count -ne
+                0) {
+            return 'snapshot_regular_v4_repair_replay_attempt_invalid'
+        }
+        return ''
+    }
+
+    if ($decisionStatus -cne 'Accepted' -or -not $stateChanged -or
+        [long]$Envelope.aggregate.afterStateGeneration -ne
+            ([long]$Envelope.aggregate.beforeStateGeneration + 1L) -or
+        -not $attemptValid) {
+        return 'snapshot_regular_v4_repair_replay_authority_transition_missing'
+    }
+
+    $successors = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_current' -and
+            [bool]$_.stateApplied -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Authorized'
+        })
+    if ($successors.Count -ne 1) {
+        return 'snapshot_regular_v4_repair_replay_authority_transition_missing'
+    }
+    $successor = $successors[0]
+    if ([string]$successor.operationKind -notin @(
+            'V4Repair', 'PeerSilenceReplay',
+            'TransportRebindSafetyReplay') -or
+        [long]$successor.operationGeneration -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$successor.authorityId) -or
+        [string]$successor.authorityId -ceq '(none)' -or
+        -not (Test-FileTransferCoordinatorSnapshotFamily5RepairReplayScope `
+            -Operation $successor) -or
+        [string]$successor.regularV4FrontierRepairPressure.bindingState -cne
+            'Authorized' -or
+        [long]$successor.regularV4FrontierRepairPressure.pressureInstallGeneration `
+            -ne 0 -or
+        [bool]$successor.receiptValidated -or
+        [string]$successor.receiptIdentity -cne '(none)') {
+        return 'snapshot_regular_v4_repair_replay_authority_transition_invalid'
+    }
+
+    $retired = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_current' -and
+            [bool]$_.stateApplied -and
+            [string]$_.beforeState -ceq 'Authorized' -and
+            [string]$_.afterState -ceq 'None'
+        })
+    $predecessorId = [string]$successor.predecessorAuthorityId
+    if ($predecessorId -ceq '(none)') {
+        if ($retired.Count -ne 0) {
+            return 'snapshot_regular_v4_repair_replay_authority_transition_invalid'
+        }
+    }
+    else {
+        $matchingRetired = @($retired | Where-Object {
+                [string]$_.authorityId -ceq $predecessorId
+            })
+        if ($retired.Count -ne 1 -or $matchingRetired.Count -ne 1) {
+            return 'snapshot_regular_v4_repair_replay_authority_transition_missing'
+        }
+        $predecessor = $matchingRetired[0]
+        if ([string]$predecessor.authorityId -ceq
+                [string]$successor.authorityId -or
+            [long]$successor.operationGeneration -ne
+                ([long]$predecessor.operationGeneration + 1L) -or
+            [string]$predecessor.operationKind -cne
+                [string]$successor.operationKind -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $predecessor.regularV4FrontierRepairPressure.sourceBoundary `
+                -Right $successor.regularV4FrontierRepairPressure.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $predecessor.regularV4FrontierRepairPressure.effectiveBoundary `
+                -Right $successor.regularV4FrontierRepairPressure.effectiveBoundary)) {
+            return 'snapshot_regular_v4_repair_replay_authority_transition_invalid'
+        }
+    }
+
+    $allowedOperationCount = 1 + $retired.Count + $attempts.Count
+    if ($operations.Count -ne $allowedOperationCount) {
+        return 'snapshot_regular_v4_repair_replay_authority_transition_invalid'
+    }
+    return ''
 }
 
 function Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog {
@@ -2046,6 +2216,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_operation_validated_receipt_incomplete:$($record.LineIndex)")
                         break
                     }
+                }
+                $repairReplayFailure =
+                    Get-FileTransferCoordinatorSnapshotFamily5RepairReplayFailure `
+                        -Envelope $envelope
+                if (-not [string]::IsNullOrWhiteSpace($repairReplayFailure)) {
+                    $errors.Add("$repairReplayFailure`:$($record.LineIndex)")
                 }
                 $decisionUtcMilliseconds = 0L
                 if ($envelope.PSObject.Properties.Name -contains 'decisionUtcMilliseconds') {
@@ -3612,6 +3788,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $normalizedFailureReason -ceq 'snapshot_authority_effect_unbound' -and
             [string]$firstFailure.OperationKey -cmatch '\|\[redacted\]$') {
             'structural_operation_key_tail_redacted_by_generic_long_token_filter'
+        }
+        elseif ($normalizedFailureReason -ceq
+            'snapshot_regular_v4_repair_replay_authority_transition_missing') {
+            'accepted_v4_repair_replay_changed_state_without_atomic_successor_operation'
         }
         else {
             '(none)'

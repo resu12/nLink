@@ -5356,6 +5356,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 FileTransferCoordinatorActionKind.RoutePublication,
                 reason));
         SetPrivateProperty(context, "LastRoutePublicationGeneration", publicationGeneration);
+        StartCoordinatorSnapshotStreamForTest(context);
         return leg;
     }
 

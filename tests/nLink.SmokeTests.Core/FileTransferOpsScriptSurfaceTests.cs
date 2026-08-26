@@ -1106,6 +1106,117 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "Regular-V4 pressure full/compact parity failed: $($pressureFull | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            function New-RepairReplayPayload([string]$role, [object[]]$receipts) {
+                [ordered]@{
+                    role=$role; sourceBoundary=$receiveScope
+                    effectiveBoundary=$receiveScope; repairKind='V4Repair'
+                    repairKey='(none)'; frontierChunkIndex=0L
+                    durableReceivedHighestChunkIndex=-1L; pendingRepairCount=0
+                    targetTransport='RegularNkn'; pressureReason='repair_authorized'
+                    decisionGeneration=1L; pressureInstallGeneration=0L
+                    bindingState='Authorized'; settlementOutcome='(none)'
+                    settlementReason='(none)'; currentAuthorityCleared=$false
+                    retainedPredecessorCleared=$false
+                    successorAuthorityId='(none)'; recoveryAuthorityId='(none)'
+                    recoveryOperationGeneration=0L; recoveryKind='(none)'
+                    receipts=$receipts
+                }
+            }
+            $repairAuthority = 'fta2-repair_replay-authority-snapshot'
+            $repairCurrent = [ordered]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_current'
+                operationKey="regular_v4_frontier_repair_pressure|repair_authority_current|$repairAuthority|1|V4Repair"
+                operationKind='V4Repair'; authorityId=$repairAuthority
+                predecessorAuthorityId='(none)'; operationGeneration=1L
+                beforeState='None'; afterState='Authorized'
+                commandIdentity=$repairAuthority; commandGeneration=1L
+                commandFingerprint='repair-authority-command'
+                receiptIdentity='(none)'; receiptGeneration=0L
+                receiptStatus='(none)'; receiptFingerprint='(none)'
+                receiptValidated=$false; stateApplied=$true
+                regularV4FrontierRepairPressure=(New-RepairReplayPayload `
+                    'repair_authority_current' @())
+            }
+            $repairAttemptReceipt = [ordered]@{
+                stage='attempted_decision'; commandIdentity="$repairAuthority`:RepairReplay"
+                commandGeneration=1L; commandFingerprint='repair-attempt-command'
+                receiptIdentity="$repairAuthority`:RepairReplay:decision"
+                receiptGeneration=1L; receiptStatus='Accepted'
+                receiptReason='accepted'; receiptFingerprint='repair-attempt-receipt'
+                receiptValidated=$true
+            }
+            $repairAttempt = [ordered]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='attempted_decision'
+                operationKey="regular_v4_frontier_repair_pressure|attempted_decision|$repairAuthority|1|RepairReplay"
+                operationKind='RepairReplay'; authorityId=$repairAuthority
+                predecessorAuthorityId='(none)'; operationGeneration=1L
+                beforeState='Authorized'; afterState='Authorized'
+                commandIdentity=$repairAttemptReceipt.commandIdentity
+                commandGeneration=1L; commandFingerprint=$repairAttemptReceipt.commandFingerprint
+                receiptIdentity=$repairAttemptReceipt.receiptIdentity
+                receiptGeneration=1L; receiptStatus='Accepted'
+                receiptFingerprint=$repairAttemptReceipt.receiptFingerprint
+                receiptValidated=$true; stateApplied=$false
+                regularV4FrontierRepairPressure=(New-RepairReplayPayload `
+                    'attempted_decision' @($repairAttemptReceipt))
+            }
+            $repairAggregate = [ordered]@{
+                beforeStateGeneration=0L; afterStateGeneration=1L
+                beforeStateFingerprint='repair-before'; afterStateFingerprint='repair-after'
+                beforeBoundary=$receiveScope; afterBoundary=$receiveScope
+                changedFamilies=@('regular_v4_frontier_repair_pressure')
+                operations=@($repairCurrent,$repairAttempt)
+            }
+            $repairEnvelope = [ordered]@{
+                snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Shadow'
+                coordinatorInstanceId='coordinator-repair'; sessionId='session-receive'
+                transferId='transfer-receive'; direction='inbound'
+                decisionUtcMilliseconds=45L; transitionId='repair-authorized'
+                decisionKind='RepairReplay'; decisionStatus='Accepted'
+                decisionReason='accepted'; aggregate=$repairAggregate
+            }
+            $repairJson = $repairEnvelope | ConvertTo-Json -Depth 32 -Compress
+            $repairBytes = [Text.UTF8Encoding]::new($false).GetBytes($repairJson)
+            $repairHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $repairBytes
+            $repairPayload = [Convert]::ToBase64String($repairBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $repairPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-repair; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
+            $repairStart = "event=filetransfer_coordinator_snapshot_stream_started; $repairPrefix; initial_state_generation=0; initial_state_hash=repair-before; emitted_family_coverage=regular_v4_frontier_repair_pressure; shadow_family_coverage=; authoritative_family_coverage=regular_v4_frontier_repair_pressure; authority_effect=none"
+            $repairTransition = "event=filetransfer_coordinator_transition_snapshot; $repairPrefix; transition_id=repair-authorized; before_state_generation=0; after_state_generation=1; snapshot_sha256=$repairHash; snapshot_payload=$repairPayload; authority_effect=none"
+            $repairEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $repairPrefix; final_state_generation=1; final_state_hash=repair-after; transition_count=1; emitted_family_coverage=regular_v4_frontier_repair_pressure; shadow_family_coverage=; authoritative_family_coverage=regular_v4_frontier_repair_pressure; authority_effect=none"
+            $repairFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=irrelevant',$repairStart,$repairTransition,$repairEnd)
+            $repairCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($repairStart,$repairTransition,$repairEnd)
+            $repairParity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $repairFull -Compact $repairCompact
+            if ($repairFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $repairFull.FirstUnresolvedBoundary -ne $null -or
+                $repairParity.Verdict -ne 'pass' -or
+                $repairFull.BoundaryHash -ne $repairCompact.BoundaryHash) {
+                throw "RepairReplay authorization full/compact parity failed: $($repairFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $malformedRepairAggregate = [ordered]@{}
+            foreach ($entry in $repairAggregate.GetEnumerator()) {
+                $malformedRepairAggregate[$entry.Key] = $entry.Value
+            }
+            $malformedRepairAggregate.operations = @()
+            $malformedRepairAggregate.changedFamilies = @()
+            $malformedRepairEnvelope = [ordered]@{}
+            foreach ($entry in $repairEnvelope.GetEnumerator()) {
+                $malformedRepairEnvelope[$entry.Key] = $entry.Value
+            }
+            $malformedRepairEnvelope.aggregate = $malformedRepairAggregate
+            $malformedRepairJson = $malformedRepairEnvelope | ConvertTo-Json -Depth 32 -Compress
+            $malformedRepairBytes = [Text.UTF8Encoding]::new($false).GetBytes($malformedRepairJson)
+            $malformedRepairHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $malformedRepairBytes
+            $malformedRepairPayload = [Convert]::ToBase64String($malformedRepairBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $malformedRepairTransition = "event=filetransfer_coordinator_transition_snapshot; $repairPrefix; transition_id=repair-authorized; before_state_generation=0; after_state_generation=1; snapshot_sha256=$malformedRepairHash; snapshot_payload=$malformedRepairPayload; authority_effect=none"
+            $malformedRepair = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($repairStart,$malformedRepairTransition,$repairEnd)
+            if ($malformedRepair.FirstUnresolvedBoundary.decisionReason -ne
+                'snapshot_regular_v4_repair_replay_authority_transition_missing') {
+                throw "Malformed RepairReplay authorization did not fail closed: $($malformedRepair | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $responderScope = [ordered]@{}
             foreach ($entry in $receiveScope.GetEnumerator()) {
                 $responderScope[$entry.Key] = $entry.Value

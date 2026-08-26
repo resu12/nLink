@@ -2078,16 +2078,46 @@ internal static partial class FileTransferCoordinator
         string coordinatorInstanceId,
         FileTransferCoordinatorSnapshotSelectionMode selectionMode =
             FileTransferCoordinatorSnapshotSelectionMode.Authoritative)
-        => CreateTransitionSnapshot(
+    {
+        var decisionStatus = !decision.Accepted
+            ? "Rejected"
+            : ReferenceEquals(before, decision.State)
+                ? "Idempotent"
+                : "Accepted";
+        var attemptedOperations = CreateRouteRuntimeAttemptSnapshots(
+            before,
+            decision,
+            request);
+        if (IsRegularV4RepairReplaySnapshotRequest(
+                before,
+                decision.State,
+                decision.RepairReplayDecision,
+                request))
+        {
+            var repairAuthority = decision.RepairReplayDecision?.AuthorityId ??
+                decision.State.CurrentRepairReplayDecision?.AuthorityId ??
+                before.CurrentRepairReplayDecision?.AuthorityId;
+            attemptedOperations = attemptedOperations.AddRange(
+                CreateRegularV4PressureAttemptedDecisionSnapshots(
+                    decision.State,
+                    decision.Kind.ToString(),
+                    decisionStatus,
+                    decision.RejectionReason,
+                    request,
+                    repairAuthority));
+        }
+
+        return CreateTransitionSnapshot(
             before,
             decision.State,
             coordinatorInstanceId,
             before.PersistentState.SnapshotStateGeneration,
             decision.Kind.ToString(),
-            decision.Accepted ? "Accepted" : "Rejected",
+            decisionStatus,
             decision.RejectionReason,
-            CreateRouteRuntimeAttemptSnapshots(before, decision, request),
+            attemptedOperations,
             selectionMode: selectionMode);
+    }
 
     private static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -3020,9 +3050,12 @@ internal static partial class FileTransferCoordinator
             pressure.RetainedPredecessorBinding?.Authority.AuthorityId,
         };
         if (state.CurrentRepairReplayDecision is { } currentRepair &&
-            pressureAuthorityIds.Any(candidate =>
-                candidate is { IsDefault: false } exact &&
-                exact == currentRepair.AuthorityId))
+            (pressureAuthorityIds.Any(candidate =>
+                 candidate is { IsDefault: false } exact &&
+                 exact == currentRepair.AuthorityId) ||
+             IsCurrentV4FrontierRepairReplaySnapshotCandidate(
+                 state,
+                 currentRepair)))
         {
             builder.Add(CreateRegularV4PressureRepairAuthorityDescriptor(
                 state,
@@ -3087,6 +3120,102 @@ internal static partial class FileTransferCoordinator
                     receipt));
             }
         }
+    }
+
+    private static bool IsRegularV4RepairReplaySnapshotRequest(
+        FileTransferCoordinatorState before,
+        FileTransferCoordinatorState after,
+        RepairReplayDecision? decision,
+        FileTransferCoordinatorActionRequest request)
+    {
+        if (request.Kind != FileTransferCoordinatorActionKind.RepairReplay ||
+            request.RepairReplayKind is not (
+                RepairReplayKind.V4Repair or
+                RepairReplayKind.PeerSilenceReplay or
+                RepairReplayKind.TransportRebindSafetyReplay))
+        {
+            return false;
+        }
+
+        if (decision is { } accepted &&
+            IsCurrentV4FrontierRepairReplaySnapshotCandidate(after, accepted))
+        {
+            return true;
+        }
+
+        if (after.CurrentRepairReplayDecision is { } current &&
+            IsCurrentV4FrontierRepairReplaySnapshotCandidate(after, current))
+        {
+            return true;
+        }
+
+        if (before.CurrentRepairReplayDecision is { } prior &&
+            IsCurrentV4FrontierRepairReplaySnapshotCandidate(before, prior))
+        {
+            return true;
+        }
+
+        return IsCurrentV4FrontierRepairReplaySnapshotScope(after, request) ||
+            IsCurrentV4FrontierRepairReplaySnapshotScope(before, request);
+    }
+
+    private static bool IsCurrentV4FrontierRepairReplaySnapshotScope(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request)
+    {
+        var route = request.Route ?? state.RouteSelection.Route;
+        var protocolVersion = request.ProtocolVersion ??
+            state.RouteSelection.ProtocolVersion;
+        var publication = request.RoutePublicationToken ??
+            state.CurrentRoutePublicationToken;
+        var expectedTransport = route switch
+        {
+            FileTransferRoute.RegularNknV4Fast =>
+                FileTransferTransportKind.RegularNkn,
+            FileTransferRoute.FileTunaV4 => FileTransferTransportKind.Tuna,
+            _ => FileTransferTransportKind.Unknown,
+        };
+        return protocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+               expectedTransport != FileTransferTransportKind.Unknown &&
+               publication is { IsDefault: false } exactPublication &&
+               state.CurrentRoutePublicationToken == exactPublication &&
+               exactPublication.ProtocolVersion ==
+                   FileTransferProtocol.ProtocolVersionV4 &&
+               exactPublication.TargetTransport == expectedTransport &&
+               (route != FileTransferRoute.FileTunaV4 ||
+                exactPublication.RouteCommitGeneration is > 0);
+    }
+
+    private static bool IsCurrentV4FrontierRepairReplaySnapshotCandidate(
+        FileTransferCoordinatorState state,
+        RepairReplayDecision repair)
+    {
+        if (repair.RepairKind is not (
+                RepairReplayKind.V4Repair or
+                RepairReplayKind.PeerSilenceReplay or
+                RepairReplayKind.TransportRebindSafetyReplay) ||
+            repair.CurrentProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV4 ||
+            !IsRepairReplayDecisionCurrent(state, repair, out _) ||
+            repair.RoutePublicationToken is not { IsDefault: false }
+                publication)
+        {
+            return false;
+        }
+
+        var expectedTransport = repair.CurrentRoute switch
+        {
+            FileTransferRoute.RegularNknV4Fast =>
+                FileTransferTransportKind.RegularNkn,
+            FileTransferRoute.FileTunaV4 => FileTransferTransportKind.Tuna,
+            _ => FileTransferTransportKind.Unknown,
+        };
+        return expectedTransport != FileTransferTransportKind.Unknown &&
+               publication.ProtocolVersion ==
+                   FileTransferProtocol.ProtocolVersionV4 &&
+               publication.TargetTransport == expectedTransport &&
+               (repair.CurrentRoute != FileTransferRoute.FileTunaV4 ||
+                publication.RouteCommitGeneration is > 0);
     }
 
     private static CoordinatorOperationDescriptor
