@@ -6644,9 +6644,7 @@ internal static partial class FileTransferCoordinator
             pauseBindReceipt.Command,
             authority,
             pauseBindReceipt,
-            pauseBindReceipt.Status.ToString(),
-            pauseBindReceipt.Reason,
-            authority.Direction.ToString());
+            operationRole: authority.Direction.ToString());
     }
 
     private static FileTransferRouteTransitionDecision
@@ -6917,9 +6915,8 @@ internal static partial class FileTransferCoordinator
             pauseRebindReceipt.Command,
             decision.Authority ?? pauseRebindReceipt.Command.Authority,
             pauseRebindReceipt,
-            pauseRebindReceipt.Status.ToString(),
-            pauseRebindReceipt.Reason,
-            pauseRebindReceipt.Command.Authority.Direction.ToString());
+            operationRole:
+                pauseRebindReceipt.Command.Authority.Direction.ToString());
     }
 
     private static FileTransferRouteTransitionDecision
@@ -7114,9 +7111,7 @@ internal static partial class FileTransferCoordinator
             drainReceipt.Command,
             authority,
             drainReceipt,
-            drainReceipt.Outcome.ToString(),
-            drainReceipt.Reason,
-            authority.Direction.ToString());
+            operationRole: authority.Direction.ToString());
     }
 
     private static FileTransferRouteTransitionDecision CommitFileTransferRouteTransitionCore(
@@ -7537,9 +7532,7 @@ internal static partial class FileTransferCoordinator
             receipt.Command,
             receipt.Command.Authority,
             receipt,
-            receipt.Status.ToString(),
-            receipt.Reason,
-            receipt.Command.Authority.Direction.ToString());
+            operationRole: receipt.Command.Authority.Direction.ToString());
     }
 
     private static FileTransferRouteTransitionDecision
@@ -7770,9 +7763,7 @@ internal static partial class FileTransferCoordinator
             receipt.Command,
             receipt.Command.Authority,
             receipt,
-            receipt.Status.ToString(),
-            receipt.Reason,
-            receipt.Command.Authority.Direction.ToString());
+            operationRole: receipt.Command.Authority.Direction.ToString());
     }
 
     private static FileTransferRouteTransitionDecision

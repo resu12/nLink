@@ -2227,8 +2227,6 @@ internal static partial class FileTransferCoordinator
             object attemptedCommand,
             FileTransferRouteTransitionAuthority? attemptedAuthority = null,
             object? attemptedReceipt = null,
-            string receiptStatus = "(none)",
-            string receiptReason = "(none)",
             string operationRole = "attempt")
     {
         operationRole = NormalizeSnapshotToken(operationRole, "attempt")
@@ -2266,9 +2264,17 @@ internal static partial class FileTransferCoordinator
         var targetTransport = authority?.TargetTransport.ToString() ??
                               GetSnapshotTransport(before.RouteSelection.Route)
                                   .ToString();
-        var receiptIdentity = attemptedReceipt is null
-            ? "(none)"
-            : $"{authorityId}:{operationKind}";
+        var attemptedReceiptSnapshot =
+            CreateRouteTransitionAttemptedReceiptSnapshot(
+                operationKind,
+                authority,
+                operationGeneration,
+                attemptedCommand,
+                attemptedReceipt);
+        var attemptCommandIdentity = attemptedReceiptSnapshot?.CommandIdentity ??
+                                     $"{authorityId}:{operationKind}";
+        var attemptCommandFingerprint =
+            attemptedReceiptSnapshot?.CommandFingerprint ?? commandFingerprint;
         var attemptedOperation =
             new FileTransferCoordinatorOperationTransitionSnapshot(
                 "route_transition",
@@ -2285,15 +2291,14 @@ internal static partial class FileTransferCoordinator
                     decision.State.PersistentState.FileTransferRouteTransition
                         .LastTerminalOperation?.State.ToString() ??
                     "None",
-                $"{authorityId}:{operationKind}",
+                attemptCommandIdentity,
                 operationGeneration,
-                commandFingerprint,
-                receiptIdentity,
-                attemptedReceipt is null ? 0 : operationGeneration,
-                attemptedReceipt is null ? "(none)" : receiptStatus,
-                CalculateSnapshotFingerprint(attemptedReceipt),
-                attemptedReceipt is not null &&
-                receiptStatus is not "Rejected" and not "(none)",
+                attemptCommandFingerprint,
+                attemptedReceiptSnapshot?.ReceiptIdentity ?? "(none)",
+                attemptedReceiptSnapshot?.ReceiptGeneration ?? 0,
+                attemptedReceiptSnapshot?.ReceiptStatus ?? "(none)",
+                attemptedReceiptSnapshot?.ReceiptFingerprint ?? "(none)",
+                attemptedReceiptSnapshot?.ReceiptValidated ?? false,
                 false,
                 null,
                 new(
@@ -2323,23 +2328,11 @@ internal static partial class FileTransferCoordinator
                         "(none)",
                     CalculateSnapshotFingerprint(
                         decision.RetainedFrameApplyCommand?.FrameIdentity),
-                    attemptedReceipt is null
+                    attemptedReceiptSnapshot is null
                         ? ImmutableArray<
                             FileTransferCoordinatorReceiptTransitionSnapshot>
                             .Empty
-                        : ImmutableArray.Create(
-                            CreateRouteTransitionReceiptSnapshot(
-                                operationKind,
-                                $"{authorityId}:{operationKind}",
-                                operationGeneration,
-                                attemptedCommand,
-                                receiptIdentity,
-                                operationGeneration,
-                                receiptStatus,
-                                receiptReason,
-                                attemptedReceipt,
-                                receiptStatus is not "Rejected" and not
-                                    "(none)"))));
+                        : ImmutableArray.Create(attemptedReceiptSnapshot)));
         var attemptedOperations = ImmutableArray.Create(attemptedOperation);
         if (authority?.ProofBoundary is
             FileTransferTunaActivationTransitionProofBoundary activation)
@@ -2392,6 +2385,115 @@ internal static partial class FileTransferCoordinator
             State = snapshot.State,
             SnapshotEnvelope = snapshot.Envelope,
         };
+    }
+
+    private static FileTransferCoordinatorReceiptTransitionSnapshot?
+        CreateRouteTransitionAttemptedReceiptSnapshot(
+            string operationKind,
+            FileTransferRouteTransitionAuthority? authority,
+            long operationGeneration,
+            object attemptedCommand,
+            object? attemptedReceipt)
+    {
+        if (attemptedReceipt is null)
+        {
+            return null;
+        }
+        if (authority is null)
+        {
+            throw new InvalidOperationException(
+                "A route-transition attempted receipt requires exact authority.");
+        }
+
+        var authorityId = authority.Value.AuthorityId.ToString();
+        var snapshot = (operationKind, attemptedReceipt) switch
+        {
+            (nameof(BeginFileTransferRouteTransitionPhysicalDrain),
+                FileTransferRouteTransitionPauseBindReceipt receipt) =>
+                CreateRouteTransitionReceiptSnapshot(
+                    "pause_bind",
+                    $"{authorityId}:pause_bind",
+                    operationGeneration,
+                    receipt.Command,
+                    $"{authorityId}:pause_bind",
+                    operationGeneration,
+                    receipt.Status.ToString(),
+                    receipt.Reason,
+                    receipt,
+                    receipt.Status is
+                        FileTransferRouteTransitionPauseBindStatus.Installed or
+                        FileTransferRouteTransitionPauseBindStatus.Idempotent),
+            (nameof(CommitFileTransferRouteTransitionSupersession),
+                FileTransferRouteTransitionPauseBindReceipt receipt) =>
+                CreateRouteTransitionReceiptSnapshot(
+                    "pause_rebind",
+                    $"{authorityId}:pause_rebind",
+                    operationGeneration,
+                    receipt.Command,
+                    $"{authorityId}:pause_rebind",
+                    operationGeneration,
+                    receipt.Status.ToString(),
+                    receipt.Reason,
+                    receipt,
+                    receipt.Status is
+                        FileTransferRouteTransitionPauseBindStatus.Installed or
+                        FileTransferRouteTransitionPauseBindStatus.Idempotent),
+            (nameof(CommitFileTransferRouteTransition),
+                FileTransferRouteTransitionPhysicalDrainReceipt receipt) =>
+                CreateRouteTransitionReceiptSnapshot(
+                    "drain",
+                    $"{authorityId}:drain",
+                    operationGeneration,
+                    receipt.Command,
+                    $"{authorityId}:drain",
+                    operationGeneration,
+                    receipt.Outcome.ToString(),
+                    receipt.Reason,
+                    receipt,
+                    receipt.Outcome ==
+                        FileTransferRouteTransitionPhysicalDrainOutcome.Completed),
+            (nameof(ApplyFileTransferRouteTransitionRetainedFrameReceipt),
+                FileTransferRouteTransitionRetainedFrameApplyReceipt receipt) =>
+                CreateRouteTransitionReceiptSnapshot(
+                    "retained_frame",
+                    $"{authorityId}:retained_frame",
+                    operationGeneration,
+                    receipt.Command,
+                    $"{authorityId}:retained_frame",
+                    operationGeneration,
+                    receipt.Status.ToString(),
+                    receipt.Reason,
+                    receipt,
+                    receipt.Status is
+                        FileTransferRouteTransitionRetainedFrameApplyStatus.Applied or
+                        FileTransferRouteTransitionRetainedFrameApplyStatus.Idempotent),
+            (nameof(ApplyFileTransferRouteTransitionDispositionReceipt),
+                FileTransferRouteTransitionDispositionReceipt receipt) =>
+                CreateRouteTransitionReceiptSnapshot(
+                    "disposition",
+                    $"{authorityId}:{receipt.Command.Kind}",
+                    operationGeneration,
+                    receipt.Command,
+                    $"{authorityId}:{receipt.Command.Kind}",
+                    operationGeneration,
+                    receipt.Status.ToString(),
+                    receipt.Reason,
+                    receipt,
+                    receipt.Status is
+                        FileTransferRouteTransitionDispositionApplyStatus.Applied or
+                        FileTransferRouteTransitionDispositionApplyStatus.Idempotent),
+            _ => throw new InvalidOperationException(
+                $"Route-transition decision {operationKind} supplied an unsupported attempted receipt {attemptedReceipt.GetType().Name}."),
+        };
+        if (!string.Equals(
+                snapshot.CommandFingerprint,
+                CalculateSnapshotFingerprint(attemptedCommand),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Route-transition attempted command does not match its typed receipt.");
+        }
+        return snapshot;
     }
 
     private static FileTransferFallbackV6ProofBootstrapDecision

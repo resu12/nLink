@@ -446,6 +446,33 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     receipts=$routeReceipts
                 }
             }
+            $routeAttemptOperation = [ordered]@{
+                family='route_transition'; operationRole='outbound'
+                operationKey='route_transition|outbound|transition-authority|1|CommitFileTransferRouteTransition'
+                operationKind='CommitFileTransferRouteTransition'; authorityId='transition-authority'
+                predecessorAuthorityId='(none)'; operationGeneration=1L
+                beforeState='Current'; afterState='Committed'
+                commandIdentity='transition-authority:drain'; commandGeneration=1L
+                commandFingerprint='drain-command'; receiptIdentity='transition-authority:drain'
+                receiptGeneration=1L; receiptStatus='Completed'; receiptFingerprint='drain-receipt'
+                receiptValidated=$true; stateApplied=$false; routeRuntime=$null
+                routeTransition=[ordered]@{
+                    role='outbound'; transitionKind='RegularV4ToTunaV4'
+                    sourceBoundary=$routeScope; targetBoundary=$targetScope; sourceTransport='RegularNkn'
+                    proofBoundaryKind='RuntimeUnlock'; proofAdmissionMode='runtime_unlock_precommit'; proofBoundaryFingerprint='proof'
+                    durableCheckpointFingerprint='checkpoint'; targetRoute='file_tuna_v4'
+                    targetProtocolVersion=4; targetTransport='Tuna'; handoffKind='NormalToTuna'
+                    dispositionKind='Committed'; retainedFrameFingerprint='(none)'
+                    retainedFrameType='(none)'
+                    receipts=@([ordered]@{
+                        stage='drain'; commandIdentity='transition-authority:drain'
+                        commandGeneration=1L; commandFingerprint='drain-command'
+                        receiptIdentity='transition-authority:drain'; receiptGeneration=1L
+                        receiptStatus='Completed'; receiptReason='drain_completed'
+                        receiptFingerprint='drain-receipt'; receiptValidated=$true
+                    })
+                }
+            }
             $routeCommitOperation = [ordered]@{
                 family='route_runtime'; operationRole='route_commit'
                 operationKey='route_runtime|route_commit|commit:1|1|RouteCommit'; operationKind='RouteCommit'
@@ -473,7 +500,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 beforeStateFingerprint='route-before'; afterStateFingerprint='route-after'
                 beforeBoundary=$routeScope; afterBoundary=$routeScope
                 changedFamilies=@('route_runtime','route_transition')
-                operations=@($routeOperation,$routeCommitOperation,$routePublicationOperation)
+                operations=@($routeOperation,$routeAttemptOperation,$routeCommitOperation,$routePublicationOperation)
             }
             $routeEnvelope = [ordered]@{
                 snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Shadow'
@@ -507,6 +534,37 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $closedRoute = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@($routeStart,$routeTransition) + $routeEffects + @($routeCompleted))
             if ($closedRoute.ArtifactEvidenceVerdict -ne 'pass' -or $null -ne $closedRoute.FirstUnresolvedBoundary) {
                 throw "An exact committed route-transition boundary did not close: $($closedRoute | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $malformedAttemptEnvelope = $routeEnvelope |
+                ConvertTo-Json -Depth 32 -Compress |
+                ConvertFrom-Json
+            $malformedAttempt = @(
+                $malformedAttemptEnvelope.aggregate.operations |
+                    Where-Object { -not [bool]$_.stateApplied })[0]
+            $malformedAttempt.routeTransition.receipts[0].stage =
+                'CommitFileTransferRouteTransition'
+            $malformedAttemptJson = $malformedAttemptEnvelope |
+                ConvertTo-Json -Depth 32 -Compress
+            $malformedAttemptBytes =
+                [Text.UTF8Encoding]::new($false).GetBytes($malformedAttemptJson)
+            $malformedAttemptHash =
+                Get-FileTransferCoordinatorSnapshotSha256 `
+                    -Bytes $malformedAttemptBytes
+            $malformedAttemptPayload =
+                [Convert]::ToBase64String($malformedAttemptBytes).
+                    TrimEnd('=').Replace('+','-').Replace('/','_')
+            $malformedAttemptTransition = "event=filetransfer_coordinator_transition_snapshot; $routePrefix; transition_id=transition-route; before_state_generation=0; after_state_generation=1; snapshot_sha256=$malformedAttemptHash; snapshot_payload=$malformedAttemptPayload; authority_effect=none"
+            $malformedAttemptResult =
+                Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines (@($routeStart,$malformedAttemptTransition) +
+                        $routeEffects + @($routeCompleted))
+            if ($malformedAttemptResult.ArtifactEvidenceVerdict -ne 'fail' -or
+                $malformedAttemptResult.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_operation_catalog_mismatch' -or
+                $malformedAttemptResult.FirstUnresolvedBoundary.variant -ne
+                    'route_transition_attempt_receipt_stage_projected_as_decision_kind_instead_of_typed_stage' -or
+                $malformedAttemptResult.FirstUnresolvedBoundary.rawCount -ne 1) {
+                throw "A decision-kind route attempt receipt did not fail at its exact typed stage: $($malformedAttemptResult | ConvertTo-Json -Depth 8 -Compress)"
             }
             $missingDisposition = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@($routeStart,$routeTransition) + @($routeEffects | Where-Object { $_ -notlike '*effect_kind=route_transition_disposition_applied*' }) + @($routeCompleted))
             if ($missingDisposition.ArtifactEvidenceVerdict -ne 'pass' -or

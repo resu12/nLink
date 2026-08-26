@@ -1205,6 +1205,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Get-FileTransferLiveRouteEpochProof `
             -TransferEvents $routeChronologyEvents `
             -Mode $LiveRouteProofMode
+    $compactFallbackAuthorityProof =
+        Get-FileTransferFallbackLegAuthorityProof `
+            -TransferEvents @($Index.AllEvents)
+    $compactBridgeLivenessProof =
+        Get-FileTransferBridgeLivenessIntegrationProof `
+            -Summary ([pscustomobject]@{
+                AllEvents = @($Index.AllEvents)
+                GlobalEvents = @()
+                TransferEvents = @()
+            })
     $selectedRouteChanges = @(Get-FileTransferCompactRouteChanges -Events $routeEvents)
     $liveRouteChanges = @($compactLiveRouteProof.RouteChanges)
 
@@ -1230,6 +1240,94 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $activeFileTunaV6Count = @($routeEvents | Where-Object {
             (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
         }).Count
+
+    [string[]]$compactWarningGateEventNames = @(
+        'filetransfer_route_selected',
+        'filetransfer_route_transitioned',
+        'filetransfer_live_route_epoch_started',
+        'filetransfer_live_route_epoch_recovered',
+        'filetransfer_runtime_started',
+        'filetransfer_binary_frame_sent',
+        'filetransfer_binary_frame_received',
+        'file_transfer_inbound_terminal',
+        'file_transfer_outbound_terminal',
+        'transfer_terminal',
+        'screenshare_bridge_transport_health_summary',
+        'screenshare_bridge_media_send_summary',
+        'screenshare_bridge_queue_state',
+        'nkn_bridge_receive_stall_detected',
+        'nkn_bridge_receive_stall_recovery_started',
+        'nkn_bridge_receive_stall_recovery_completed',
+        'nkn_bridge_receive_stall_recovery_failed',
+        'nkn_bridge_receive_stall_recovery_cooldown_bypassed',
+        'nkn_bridge_receive_stall_recovery_unproven',
+        'nkn_bridge_receive_stall_recovery_receive_resumed',
+        'nkn_bridge_control_receive_degraded',
+        'nkn_bridge_control_receive_recovery_suppressed',
+        'nkn_bridge_inbound_delivery_failed',
+        'nkn_bridge_inbound_delivery_summary',
+        'filetransfer_v6_chunk_batch_send_timeout',
+        'filetransfer_v6_post_tuna_fallback_send_timeout_requeued',
+        'filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued',
+        'filetransfer_v6_frontier_request_sent',
+        'filetransfer_v6_post_tuna_fallback_frontier_rescue_requested',
+        'filetransfer_v6_post_tuna_fallback_frontier_rescue_widened',
+        'filetransfer_v6_frontier_request_duplicate_ignored',
+        'filetransfer_v6_receiver_state_deferred',
+        'filetransfer_v6_receiver_state_coalesced',
+        'filetransfer_session_degraded_entered',
+        'filetransfer_bulk_unhealthy_detected',
+        'filetransfer_bulk_fallback_entered',
+        'filetransfer_receiver_buffer_pressure_entered',
+        'filetransfer_frontier_gap_repair_requested',
+        'filetransfer_repair_set_requested',
+        'filetransfer_request_timeout_detected',
+        'filetransfer_v4_reorder_policy_decision',
+        'filetransfer_reorder_pressure',
+        'filetransfer_chunk_retry_requested')
+    [object[]]$compactWarningGateEvents = @(
+        Get-FileTransferCompactIndexEventsByNamesOrdered `
+            -Index $Index `
+            -Names $compactWarningGateEventNames
+    )
+    $compactWarningCap = $null
+    $compactWarningGate = $null
+    if (@($compactWarningGateEvents | Where-Object {
+                $_.EventName -like 'screenshare_bridge_*' -or
+                $_.EventName -like 'nkn_bridge_*' -or
+                $_.EventName -like 'filetransfer_v6_*' -or
+                $_.EventName -in @(
+                    'filetransfer_session_degraded_entered',
+                    'filetransfer_bulk_unhealthy_detected',
+                    'filetransfer_bulk_fallback_entered',
+                    'filetransfer_receiver_buffer_pressure_entered',
+                    'filetransfer_frontier_gap_repair_requested',
+                    'filetransfer_repair_set_requested',
+                    'filetransfer_request_timeout_detected',
+                    'filetransfer_v4_reorder_policy_decision',
+                    'filetransfer_reorder_pressure',
+                    'filetransfer_chunk_retry_requested')
+            }).Count -gt 0) {
+        [string[]]$compactWarningLogFiles = @(
+            $compactWarningGateEvents |
+                ForEach-Object { [string]$_.FilePath } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+        if ($compactWarningLogFiles.Count -eq 0) {
+            $compactWarningLogFiles = @('(compact_index)')
+        }
+        $compactWarningSummary =
+            New-FileTransferRetainedSummary `
+                -Events $compactWarningGateEvents `
+                -LogFiles $compactWarningLogFiles `
+                -AllTransfers
+        $compactWarningGate =
+            Get-FileTransferStabilizationGateResult `
+                -Summary $compactWarningSummary `
+                -LiveRouteProofMode $LiveRouteProofMode
+        $compactWarningCap = Get-FileTransferGateWarningCap -GateResult $compactWarningGate
+    }
     $probeAckCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'runtime_unlock_precommit_probe_acked'
     $pairedCommitCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'runtime_unlock_paired_commit_confirmed'
     $fallbackYieldCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_fallback_tail_quiescent_yield_granted'
@@ -3053,6 +3151,29 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -LiveRouteProofMode $LiveRouteProofMode
             }
     $compactProofChainCandidates = New-Object System.Collections.Generic.List[object]
+    foreach ($candidateEvent in @($routeEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
+            })) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'active_file_tuna_v6_evidence'
+            Event = $candidateEvent
+            Reason = 'active_file_tuna_v6_evidence'
+        }) | Out-Null
+    }
+    if ($compactBridgeLivenessProof.TimeoutDuringValidRecoveryCount -gt 0) {
+        [object[]]$fallbackControlPlaneStarvationEvents = @(
+            $compactBridgeLivenessProof.EvidenceEvents |
+                Where-Object { $_.EventName -eq 'session_liveness_timeout' } |
+                Select-Object -First 1
+        )
+        foreach ($candidateEvent in $fallbackControlPlaneStarvationEvents) {
+            $compactProofChainCandidates.Add([pscustomobject]@{
+                Class = 'fallback_control_plane_starvation'
+                Event = $candidateEvent
+                Reason = 'fallback_control_plane_starvation'
+            }) | Out-Null
+        }
+    }
     foreach ($candidateEvent in @(
             $postFallbackProbeSidecarRecoveryClassification.
                 RuntimeUnlockProbeRecoveryAuthorityLostUnresolvedEvents)) {
@@ -3890,6 +4011,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     if ($externalTransportRawCount -gt 0) {
         $warningKinds.Add('external_transport_churn') | Out-Null
     }
+    if ($null -ne $compactWarningGate) {
+        foreach ($warningText in @($compactWarningGate.Warnings)) {
+            $warningKind = Get-FileTransferWarningKindToken -WarningText ([string]$warningText)
+            if (-not [string]::IsNullOrWhiteSpace($warningKind) -and
+                -not $warningKinds.Contains($warningKind)) {
+                $warningKinds.Add($warningKind) | Out-Null
+            }
+        }
+    }
 
     $verdict = 'PASS'
     $gateStatus = 'pass'
@@ -3911,6 +4041,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $verdict = 'INCONCLUSIVE_PROGRESS_TIMEOUT'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'bridge_liveness'
+    }
+    elseif ($null -ne $compactWarningCap -and
+        @($compactWarningCap.ExceededKinds).Count -gt 0) {
+        $verdict = 'FAIL_EXTERNAL_TRANSPORT_CHURN'
+        $gateStatus = 'fail'
+        $acceptanceFailureClass = 'warning_policy'
     }
     elseif ($warningKinds.Count -gt 0) {
         $verdict = 'WARN_EXTERNAL_TRANSPORT'
@@ -4204,6 +4340,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
     $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } else { 'none' }
     $liveRouteProofVerdict = [string]$compactLiveRouteProof.Verdict
+    $warningCapPolicy = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.Policy } else { 'strict_small' }
+    $warningCapCountLimit = if ($null -ne $compactWarningCap) { [int]$compactWarningCap.CountLimit } else { 3 }
+    $warningCapRateLimit = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.RateLimitPerSecond } else { '0.05' }
+    $warningKindCounts = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.KindCounts } else { '(none)' }
+    $warningKindRawCounts = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.RawKindCounts } else { '(none)' }
+    $warningKindRates = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.KindRatesPerSecond } else { '(none)' }
+    $warningCapContexts = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.KindContexts } else { '(none)' }
+    $warningCapExceededKinds = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.ExceededKindsText } else { '(none)' }
+    $warningCapExceededContexts = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.ExceededContextsText } else { '(none)' }
+    $warningCapExemptedKinds = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.ExemptedKindsText } else { '(none)' }
     $selectedRouteDetailLines = New-Object System.Collections.Generic.List[string]
     $selectedRouteDetailLines.Add(("route_selected_count={0}" -f $selectedRouteChanges.Count)) | Out-Null
     for ($i = 0; $i -lt $selectedRouteChanges.Count; $i++) {
@@ -4237,6 +4383,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("hard_failure_count={0}" -f $hardFailureCount),
         ("warning_count={0}" -f $warningKinds.Count),
         ("warning_kinds={0}" -f ($(if ($warningKinds.Count -gt 0) { $warningKinds -join ',' } else { '(none)' }))),
+        ("warning_cap_policy={0}" -f $warningCapPolicy),
+        ("warning_cap_count_limit={0}" -f $warningCapCountLimit),
+        ("warning_cap_rate_limit_per_second={0}" -f $warningCapRateLimit),
+        ("warning_kind_counts={0}" -f $warningKindCounts),
+        ("warning_kind_raw_event_counts={0}" -f $warningKindRawCounts),
+        ("warning_kind_rates_per_second={0}" -f $warningKindRates),
+        ("warning_cap_contexts={0}" -f $warningCapContexts),
+        ("warning_cap_exceeded_kinds={0}" -f $warningCapExceededKinds),
+        ("warning_cap_exceeded_contexts={0}" -f $warningCapExceededContexts),
+        ("warning_cap_exempted_kinds={0}" -f $warningCapExemptedKinds),
         ("recovery_failure_class={0}" -f $recoveryFailureClass),
         ("failure_variant={0}" -f $failureVariant),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
@@ -4760,7 +4916,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("session_liveness_timeout_after_terminal_count={0}" -f $postTerminalLivenessTimeoutCount),
         'runtime_fallback_arbitration_verdict=pass',
         'control_plane_isolation_verdict=pass',
-        'bridge_liveness_integration_verdict=pass',
+        ("bridge_liveness_integration_verdict={0}" -f $compactBridgeLivenessProof.Verdict),
         '',
         'hard_failures:',
         ($(if ($hardFailureCount -gt 0) { 'gui_summary_hard_failure' } else { '(none)' })),
@@ -5215,12 +5371,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.DistinctCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.RecoveredCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailTransportEpochReauthorizationProof.UnresolvedCount),
-        'fallback_leg_authority_proof_verdict=pass',
-        'clean_fallback_leg_proof_verdict=pass',
+        ("fallback_leg_authority_proof_verdict={0}" -f $compactFallbackAuthorityProof.Verdict),
+        ("clean_fallback_leg_proof_verdict={0}" -f $compactFallbackAuthorityProof.Verdict),
         ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailQuiescenceVerdict),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailPairedYieldVerdict),
         'control_plane_isolation_verdict=pass',
-        'bridge_liveness_integration_verdict=pass',
+        ("bridge_liveness_integration_verdict={0}" -f $compactBridgeLivenessProof.Verdict),
+        ("bridge_liveness_stale_deferral_count={0}" -f $compactBridgeLivenessProof.StaleDeferralCount),
+        ("session_liveness_timeout_during_valid_recovery_count={0}" -f $compactBridgeLivenessProof.TimeoutDuringValidRecoveryCount),
         ("runtime_unlock_probe_commit_verdict={0}" -f $runtimeUnlockProbeCommitVerdict),
         ("control_plane_stale_send_retired_count={0}" -f $retiredStaleSendCount),
         ("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $nonCurrentSendCount),

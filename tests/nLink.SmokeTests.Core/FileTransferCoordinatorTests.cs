@@ -18902,9 +18902,16 @@ public sealed class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_TunaFallbackCommitsAndAppliesRetainedFrameOnce()
     {
         var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var snapshotState = setup.State with
+        {
+            PersistentState = setup.State.PersistentState with
+            {
+                CoordinatorInstanceId = "route-transition-attempt-receipts",
+            },
+        };
         var activationPrepared =
             FileTransferCoordinator.PrepareFileTransferRouteTransition(
-                setup.State,
+                snapshotState,
                 setup.Request);
         var activationAuthority = activationPrepared.Authority!.Value;
         var emptyFingerprint =
@@ -18921,6 +18928,11 @@ public sealed class FileTransferCoordinatorTests
                 capturedThroughPhysicalSendGeneration: 0,
                 capturedPhysicalSendLeaseIds: [],
                 emptyFingerprint);
+        AssertRouteTransitionAttemptReceipt(
+            activationDraining,
+            nameof(FileTransferCoordinator
+                .BeginFileTransferRouteTransitionPhysicalDrain),
+            "pause_bind");
         var activationDrain = activationDraining.DrainCommand!.Value;
         var activationCommitted =
             FileTransferCoordinator.CommitFileTransferRouteTransition(
@@ -18934,6 +18946,10 @@ public sealed class FileTransferCoordinatorTests
                     FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
                     "physical_drain_completed"),
                 setup.FinalProof);
+        AssertRouteTransitionAttemptReceipt(
+            activationCommitted,
+            nameof(FileTransferCoordinator.CommitFileTransferRouteTransition),
+            "drain");
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Committed,
             activationCommitted.Status);
@@ -18947,14 +18963,19 @@ public sealed class FileTransferCoordinatorTests
         var activationDisposition =
             Assert.IsType<FileTransferRouteTransitionDispositionCommand>(
                 activationCommitted.DispositionCommand);
-        var tunaState = FileTransferCoordinator
+        var activationApplied = FileTransferCoordinator
             .ApplyFileTransferRouteTransitionDispositionReceipt(
                 activationCommitted.State,
                 new FileTransferRouteTransitionDispositionReceipt(
                     activationDisposition,
                     FileTransferRouteTransitionDispositionApplyStatus.Applied,
-                    "filetransfer_route_transition_committed"))
-            .State;
+                    "filetransfer_route_transition_committed"));
+        AssertRouteTransitionAttemptReceipt(
+            activationApplied,
+            nameof(FileTransferCoordinator
+                .ApplyFileTransferRouteTransitionDispositionReceipt),
+            "disposition");
+        var tunaState = activationApplied.State;
         var tunaOwner = tunaState.CurrentRuntimeOwner!.Value;
         var tunaPublication = tunaState.CurrentRoutePublicationToken!.Value;
         var tunaCommit = tunaState.CurrentRouteCommit!.Value;
@@ -19103,6 +19124,11 @@ public sealed class FileTransferCoordinatorTests
                 frameCommand,
                 FileTransferRouteTransitionRetainedFrameApplyStatus.Applied,
                 "filetransfer_route_transition_retained_frame_applied"));
+        AssertRouteTransitionAttemptReceipt(
+            applied,
+            nameof(FileTransferCoordinator
+                .ApplyFileTransferRouteTransitionRetainedFrameReceipt),
+            "retained_frame");
         Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, applied.Status);
         var duplicateCommit = FileTransferCoordinator.CommitFileTransferRouteTransition(
             applied.State,
@@ -20529,8 +20555,16 @@ public sealed class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_UncommittedTunaFallbackSupersedesExactDrain()
     {
         var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var snapshotState = setup.State with
+        {
+            PersistentState = setup.State.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    "route-transition-supersession-attempt-receipt",
+            },
+        };
         var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
-            setup.State,
+            snapshotState,
             setup.Request);
         var predecessor = prepared.Authority!.Value;
         long[] capturedLeaseIds = [3, 7];
@@ -20624,6 +20658,11 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Draining,
             superseded.Status);
+        AssertRouteTransitionAttemptReceipt(
+            superseded,
+            nameof(FileTransferCoordinator
+                .CommitFileTransferRouteTransitionSupersession),
+            "pause_rebind");
         var transitionState =
             FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
                 superseded.State);
@@ -20780,6 +20819,57 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
                     draining.State)
                 .CurrentOperation!.Value.PauseBindReceipt);
+    }
+
+    private static void AssertRouteTransitionAttemptReceipt(
+        FileTransferRouteTransitionDecision decision,
+        string decisionKind,
+        string expectedStage)
+    {
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            decision.SnapshotEnvelope);
+        var operation = Assert.Single(
+            envelope.Aggregate.Operations,
+            candidate => candidate is
+            {
+                Family: "route_transition",
+                StateApplied: false,
+            } && candidate.OperationKind == decisionKind);
+        var receipt = Assert.Single(operation.RouteTransition!.Receipts);
+        Assert.Equal(expectedStage, receipt.Stage);
+        Assert.Equal(receipt.CommandIdentity, operation.CommandIdentity);
+        Assert.Equal(receipt.CommandGeneration, operation.CommandGeneration);
+        Assert.Equal(receipt.CommandFingerprint, operation.CommandFingerprint);
+        Assert.Equal(receipt.ReceiptIdentity, operation.ReceiptIdentity);
+        Assert.Equal(receipt.ReceiptGeneration, operation.ReceiptGeneration);
+        Assert.Equal(receipt.ReceiptStatus, operation.ReceiptStatus);
+        Assert.Equal(receipt.ReceiptFingerprint, operation.ReceiptFingerprint);
+        Assert.Equal(receipt.ReceiptValidated, operation.ReceiptValidated);
+
+        var projected = SessionFileTransferService
+            .CreateCoordinatorSnapshotEvidenceForTesting(envelope);
+        var projectedOperation = Assert.Single(
+            projected.Aggregate.Operations,
+            candidate => candidate is
+            {
+                Family: "route_transition",
+                StateApplied: false,
+            } && candidate.OperationKind == decisionKind);
+        var projectedReceipt = Assert.Single(
+            projectedOperation.RouteTransition!.Receipts);
+        Assert.Equal(expectedStage, projectedReceipt.Stage);
+        Assert.Equal(
+            projectedReceipt.CommandIdentity,
+            projectedOperation.CommandIdentity);
+        Assert.Equal(
+            projectedReceipt.CommandFingerprint,
+            projectedOperation.CommandFingerprint);
+        Assert.Equal(
+            projectedReceipt.ReceiptIdentity,
+            projectedOperation.ReceiptIdentity);
+        Assert.Equal(
+            projectedReceipt.ReceiptFingerprint,
+            projectedOperation.ReceiptFingerprint);
     }
 
     private static (

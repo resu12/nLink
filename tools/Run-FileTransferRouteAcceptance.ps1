@@ -9990,6 +9990,12 @@ function Get-RouteAcceptanceResultFailureClass {
         $script:RouteAcceptanceExecutionMode -eq 'fake' -and
         -not $semanticAnalysisUnavailable) {
         $explicitFailureClass = Get-Phase5FailureClass -Failures $Result.failures
+        if ($explicitFailureClass -in @(
+                'live_route_proof',
+                'fallback_authority',
+                'warning_policy')) {
+            return $explicitFailureClass
+        }
         if ($explicitFailureClass -notin @(
                 'none',
                 'setup',

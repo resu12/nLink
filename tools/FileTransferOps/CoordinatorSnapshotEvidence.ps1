@@ -783,11 +783,26 @@ function ConvertTo-FileTransferCoordinatorSnapshotValidationFailures {
             Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'operation_family' -Default '(none)'
         }
         else { '(none)' }
-        $reason = $parts[0]
-        $identity = "$reason|$instanceId|$transitionId|$eventName|$effectIdentity|$operationKey"
+        $reasonParts = @([string]$parts[0] -split '\|', 2)
+        $reason = [string]$reasonParts[0]
+        $variant = if ($reasonParts.Count -eq 2 -and
+            -not [string]::IsNullOrWhiteSpace([string]$reasonParts[1])) {
+            [string]$reasonParts[1]
+        }
+        else {
+            '(none)'
+        }
+        $identity = "$reason|$variant|$instanceId|$transitionId|$eventName|$effectIdentity|$operationKey"
+        $failureText = if ($variant -cne '(none)' -and $lineIndex -ge 0) {
+            "$reason`:$lineIndex"
+        }
+        else {
+            [string]$errorText
+        }
         $failures.Add([pscustomobject][ordered]@{
-                FailureText = [string]$errorText
+                FailureText = $failureText
                 Reason = $reason
+                Variant = $variant
                 EventName = $eventName
                 LineIndex = $lineIndex
                 Writer = $writer
@@ -1031,7 +1046,123 @@ function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
             return $false
         }
     }
+    if (-not (Test-FileTransferCoordinatorSnapshotFamily1AttemptOperation `
+            -Envelope $Envelope `
+            -Operation $Operation)) {
+        return $false
+    }
     return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotFamily1AttemptOperation {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ([string]$Operation.family -cne 'route_transition' -or
+        [bool]$Operation.stateApplied -or
+        [string]$Operation.operationRole -notin @(
+            'inbound', 'outbound', 'attempt')) {
+        return $true
+    }
+    if ([string]$Operation.operationKind -cne
+            [string]$Envelope.decisionKind -or
+        [string]$Operation.routeTransition.role -cne
+            [string]$Operation.operationRole) {
+        return $false
+    }
+    if ([string]$Operation.operationRole -in @('inbound', 'outbound') -and
+        [string]$Operation.operationRole -cne
+            [string]$Envelope.direction) {
+        return $false
+    }
+
+    $expectedStage = switch ([string]$Envelope.decisionKind) {
+        'BeginFileTransferRouteTransitionPhysicalDrain' { 'pause_bind' }
+        'CommitFileTransferRouteTransitionSupersession' { 'pause_rebind' }
+        'CommitFileTransferRouteTransition' { 'drain' }
+        'ApplyFileTransferRouteTransitionRetainedFrameReceipt' {
+            'retained_frame'
+        }
+        'ApplyFileTransferRouteTransitionDispositionReceipt' {
+            'disposition'
+        }
+        default { '(none)' }
+    }
+    $receipts = @($Operation.routeTransition.receipts)
+    if ($expectedStage -ceq '(none)') {
+        return $receipts.Count -eq 0 -and
+            [string]$Operation.receiptIdentity -ceq '(none)' -and
+            [long]$Operation.receiptGeneration -eq 0 -and
+            [string]$Operation.receiptStatus -ceq '(none)' -and
+            [string]$Operation.receiptFingerprint -ceq '(none)' -and
+            -not [bool]$Operation.receiptValidated
+    }
+    if ($receipts.Count -ne 1) {
+        return $false
+    }
+
+    $receipt = $receipts[0]
+    return [string]$receipt.stage -ceq $expectedStage -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$receipt.commandIdentity) -and
+        [string]$receipt.commandIdentity -cne '(none)' -and
+        [long]$receipt.commandGeneration -eq
+            [long]$Operation.operationGeneration -and
+        [string]$receipt.commandIdentity -ceq
+            [string]$Operation.commandIdentity -and
+        [long]$receipt.commandGeneration -eq
+            [long]$Operation.commandGeneration -and
+        [string]$receipt.commandFingerprint -ceq
+            [string]$Operation.commandFingerprint -and
+        [string]$receipt.receiptIdentity -ceq
+            [string]$receipt.commandIdentity -and
+        [long]$receipt.receiptGeneration -eq
+            [long]$Operation.operationGeneration -and
+        [string]$receipt.receiptIdentity -ceq
+            [string]$Operation.receiptIdentity -and
+        [long]$receipt.receiptGeneration -eq
+            [long]$Operation.receiptGeneration -and
+        [string]$receipt.receiptStatus -ceq
+            [string]$Operation.receiptStatus -and
+        [string]$receipt.receiptFingerprint -ceq
+            [string]$Operation.receiptFingerprint -and
+        [bool]$receipt.receiptValidated -eq
+            [bool]$Operation.receiptValidated
+}
+
+function Get-FileTransferCoordinatorSnapshotFamily1AttemptReceiptStageVariant {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ([string]$Operation.family -cne 'route_transition' -or
+        [bool]$Operation.stateApplied -or
+        [string]$Operation.operationRole -notin @(
+            'inbound', 'outbound', 'attempt')) {
+        return '(none)'
+    }
+    $expectedStage = switch ([string]$Envelope.decisionKind) {
+        'BeginFileTransferRouteTransitionPhysicalDrain' { 'pause_bind' }
+        'CommitFileTransferRouteTransitionSupersession' { 'pause_rebind' }
+        'CommitFileTransferRouteTransition' { 'drain' }
+        'ApplyFileTransferRouteTransitionRetainedFrameReceipt' {
+            'retained_frame'
+        }
+        'ApplyFileTransferRouteTransitionDispositionReceipt' {
+            'disposition'
+        }
+        default { '(none)' }
+    }
+    $receipts = @($Operation.routeTransition.receipts)
+    if ($expectedStage -cne '(none)' -and
+        $receipts.Count -eq 1 -and
+        [string]$receipts[0].stage -ceq [string]$Envelope.decisionKind) {
+        return 'route_transition_attempt_receipt_stage_projected_as_decision_kind_instead_of_typed_stage'
+    }
+    return '(none)'
 }
 
 function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
@@ -2052,7 +2183,15 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog `
                             -Envelope $envelope `
                             -Operation $operation)) {
-                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        $attemptVariant =
+                            Get-FileTransferCoordinatorSnapshotFamily1AttemptReceiptStageVariant `
+                                -Envelope $envelope `
+                                -Operation $operation
+                        $reason = 'snapshot_operation_catalog_mismatch'
+                        if ($attemptVariant -cne '(none)') {
+                            $reason = "$reason|$attemptVariant"
+                        }
+                        $errors.Add("$reason`:$($record.LineIndex)")
                         break
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog `
@@ -2611,6 +2750,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
+                $isValidatedRouteTransitionAttempt =
+                    [string]$operation.family -ceq 'route_transition' -and
+                    -not [bool]$operation.stateApplied -and
+                    [string]$operation.operationRole -in @(
+                        'inbound', 'outbound', 'attempt') -and
+                    [string]$operation.operationKind -ceq
+                        [string]$boundary.decisionKind
+                if ($isValidatedRouteTransitionAttempt) {
+                    continue
+                }
                 if ([string]$operation.family -in
                     (@($script:FileTransferCoordinatorSnapshotFamily1) +
                      @($script:FileTransferCoordinatorSnapshotFamily2) +
@@ -3782,9 +3931,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             [System.Text.UTF8Encoding]::new($false).GetBytes($failureIdentity))
         $sourceBoundary = $firstFailure.Boundary
         $matchingFailureCount = @($validationFailures | Where-Object {
-                [string]$_.Reason -ceq $normalizedFailureReason
+                [string]$_.Reason -ceq $normalizedFailureReason -and
+                [string]$_.Variant -ceq [string]$firstFailure.Variant
             }).Count
-        $failureVariant = if (
+        $failureVariant = if ([string]$firstFailure.Variant -cne '(none)') {
+            [string]$firstFailure.Variant
+        }
+        elseif (
             $normalizedFailureReason -ceq 'snapshot_authority_effect_unbound' -and
             [string]$firstFailure.OperationKey -cmatch '\|\[redacted\]$') {
             'structural_operation_key_tail_redacted_by_generic_long_token_filter'
