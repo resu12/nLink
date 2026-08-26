@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -2570,12 +2571,30 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             bool includeResponderProbeHandoff = true)
     {
-        var persistent = state.PersistentState;
         var builder = ImmutableArray.CreateBuilder<CoordinatorOperationDescriptor>();
 
         AddRouteRuntimeOperationDescriptors(state, builder);
+        AddRouteTransitionOperationDescriptors(state, builder);
+        AddRuntimeUnlockRetryOperationDescriptors(state, builder);
+        AddReceiveRecoveryOperationDescriptors(state, builder);
+        AddFallbackTailYieldOperationDescriptors(state, builder);
+        AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
+        if (includeResponderProbeHandoff)
+        {
+            AddResponderProbeHandoffOperationDescriptors(state, builder);
+        }
 
-        var transitionState = persistent.FileTransferRouteTransition;
+        return builder
+            .OrderBy(GetCoordinatorOperationKey, StringComparer.Ordinal)
+            .ToImmutableArray();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AddRouteTransitionOperationDescriptors(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.CurrentOperation is { } currentTransition)
         {
             builder.Add(CreateRouteTransitionOperationDescriptor(
@@ -2614,17 +2633,16 @@ internal static partial class FileTransferCoordinator
                 bootstrapReceipt.Command,
                 bootstrapReceipt));
         }
+    }
 
-        AddRuntimeUnlockRetryOperationDescriptors(state, builder);
-        AddReceiveRecoveryOperationDescriptors(state, builder);
-
-        AddFallbackTailYieldOperationDescriptors(state, builder);
-
-        AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
-
-        var handoff = persistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
-        if (includeResponderProbeHandoff &&
-            handoff.CurrentAuthority is { } handoffAuthority)
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AddResponderProbeHandoffOperationDescriptors(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var handoff = state.PersistentState
+            .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
+        if (handoff.CurrentAuthority is { } handoffAuthority)
         {
             builder.Add(CreateResponderProbeHandoffDescriptor(
                 state,
@@ -2638,8 +2656,7 @@ internal static partial class FileTransferCoordinator
                 handoff.LastReason ??
                     "runtime_unlock_responder_peer_probe_handoff_bound"));
         }
-        if (includeResponderProbeHandoff &&
-            handoff.LastTerminalAuthority is { } terminalAuthority &&
+        if (handoff.LastTerminalAuthority is { } terminalAuthority &&
             (handoff.CurrentAuthority is null ||
              handoff.CurrentAuthority.Value.AuthorityId !=
                  terminalAuthority.AuthorityId))
@@ -2652,10 +2669,6 @@ internal static partial class FileTransferCoordinator
                 handoff.LastReason ??
                     "runtime_unlock_responder_peer_probe_handoff_invalidated"));
         }
-
-        return builder
-            .OrderBy(GetCoordinatorOperationKey, StringComparer.Ordinal)
-            .ToImmutableArray();
     }
 
     private static CoordinatorOperationDescriptor

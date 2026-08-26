@@ -4839,6 +4839,35 @@ public sealed class FileTransferCoordinatorTests
                 projectionPrefix,
                 StringComparison.Ordinal);
         }
+
+        var aggregateDeclaration = source.IndexOf(
+            "private static ImmutableArray<CoordinatorOperationDescriptor>\n" +
+            "        CreateOperationDescriptors(\n",
+            StringComparison.Ordinal);
+        Assert.True(
+            aggregateDeclaration >= 0,
+            "Missing aggregate snapshot descriptor collector.");
+        var routeCollectorDeclaration = source.IndexOf(
+            "AddRouteTransitionOperationDescriptors(\n",
+            aggregateDeclaration + 1,
+            StringComparison.Ordinal);
+        Assert.True(
+            routeCollectorDeclaration > aggregateDeclaration,
+            "Could not bound aggregate snapshot descriptor collector.");
+        var aggregatePrefix = source[
+            aggregateDeclaration..routeCollectorDeclaration];
+        Assert.DoesNotContain(
+            "state.PersistentState",
+            aggregatePrefix,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AddRouteTransitionOperationDescriptors(state, builder);",
+            aggregatePrefix,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AddResponderProbeHandoffOperationDescriptors(state, builder);",
+            aggregatePrefix,
+            StringComparison.Ordinal);
     }
 
     [Fact]
