@@ -5383,7 +5383,8 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         [object]$CoordinatorUnresolvedCount = 0,
         [string]$CoordinatorWriter = '(none)',
         [object]$CoordinatorWriterSequence = 0L,
-        [object]$CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = 1L
+        [object]$CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = 1L,
+        [object]$CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1L
     )
 
     return [pscustomobject]@{
@@ -5401,6 +5402,8 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         CoordinatorWriterSequence = $CoordinatorWriterSequence
         CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount =
             $CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount
+        CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount =
+            $CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount
         RouteMode = $RouteMode
         ClassificationSource = $ClassificationSource
         ClassificationComplete = $ClassificationComplete
@@ -6184,6 +6187,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'fallback_tail_yield')
+    $snapshotRegularV4PressureAuthoritative =
+        $snapshotEvaluatorAvailable -and
+        (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'regular_v4_frontier_repair_pressure')
     if ($coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
         $coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
         if ($null -ne $TestMetrics) {
@@ -6220,7 +6228,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ($snapshotReceiveRecoveryAuthoritative -and
          $boundaryFamilies -contains 'receive_recovery') -or
         ($snapshotFallbackTailYieldAuthoritative -and
-         $boundaryFamilies -contains 'fallback_tail_yield'))
+         $boundaryFamilies -contains 'fallback_tail_yield') -or
+        ($snapshotRegularV4PressureAuthoritative -and
+         $boundaryFamilies -contains 'regular_v4_frontier_repair_pressure'))
     if ($snapshotOwnsBoundary) {
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase ([string]$boundary.phase) `
@@ -6245,6 +6255,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
                     -InputObject $coordinatorSnapshotEvaluation `
                     -Name 'FallbackTailYieldFamilyLegacySelectionCount' `
+                    -Default 1L)) `
+            -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount `
+                ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $coordinatorSnapshotEvaluation `
+                    -Name 'RegularV4FrontierRepairPressureFamilyLegacySelectionCount' `
                     -Default 1L))
     }
     if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative') {

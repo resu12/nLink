@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
-$script:FileTransferCoordinatorSnapshotCatalogHash = '9444761dd91253649ef1ca4b562604dd8d7ae05ad41232db32d14dfc38c2247d'
+$script:FileTransferCoordinatorSnapshotCatalogHash = 'f8efc491c4524deae00d40f31cd818e4fcc36daae1e007d286997fce2c52e519'
 $script:FileTransferLegacyV0CatalogVersion = 'legacy-v0-pinned-20260825'
 $script:FileTransferLegacyV0CatalogHash = 'a2ad4a9853c5a9551c98e59c11c5d71e1a35b0b5b0ff3229da1f4d6f295083ac'
 $script:FileTransferCoordinatorEvidenceCatalogCache = $null
@@ -27,6 +27,59 @@ $script:FileTransferCoordinatorSnapshotFamily3 = @(
 )
 $script:FileTransferCoordinatorSnapshotFamily4 = @(
     'fallback_tail_yield'
+)
+$script:FileTransferCoordinatorSnapshotFamily5 = @(
+    'regular_v4_frontier_repair_pressure'
+)
+$script:FileTransferCoordinatorSnapshotFamily5DecisionKinds = @(
+    'StageRegularV4FrontierRepairPressureBinding',
+    'CommitRegularV4FrontierRepairPressureBinding',
+    'PrepareRegularV4FrontierRepairPressureSettlement',
+    'CommitRegularV4FrontierRepairPressureSettlement',
+    'PrepareRegularV4FrontierRepairPressureRecoveryHandoff',
+    'CommitRegularV4FrontierRepairPressureRecoveryHandoff'
+)
+$script:FileTransferCoordinatorSnapshotFamily5OperationRoles = @(
+    'repair_authority_current',
+    'repair_authority_terminal',
+    'pressure_binding_pending',
+    'pressure_binding_installed',
+    'pressure_binding_retained_predecessor',
+    'pressure_settlement_prepared',
+    'pressure_settlement_terminal',
+    'recovery_handoff_prepared',
+    'recovery_handoff_terminal',
+    'attempted_decision'
+)
+$script:FileTransferCoordinatorSnapshotFamily5EffectKinds = @(
+    'pressure_observed',
+    'pressure_forwarded',
+    'pressure_install_staged',
+    'pressure_install_bridge_result',
+    'repair_contract_bound',
+    'repair_contract_queued',
+    'repair_contract_reserved',
+    'repair_contract_dispatched',
+    'repair_contract_dispatch_observed',
+    'physical_send_lease_registered',
+    'physical_send_submitted',
+    'physical_send_completed',
+    'physical_send_lease_retired',
+    'pressure_settlement_prepared',
+    'pressure_settlement_bridge_applied',
+    'local_contract_settled',
+    'local_contract_reference_cleared',
+    'predecessor_superseded',
+    'successor_dispatched',
+    'route_commit_local_lifecycle_adopted',
+    'recovery_handoff_prepared',
+    'recovery_handoff_committed',
+    'projection_detached',
+    'projection_retained',
+    'projection_published',
+    'projection_cleared',
+    'projection_rejected',
+    'regular_v4_pressure_decision_adopted'
 )
 $script:FileTransferCoordinatorSnapshotFamily4DecisionKinds = @(
     'ApplyFallbackTailLocalProofReceipt',
@@ -427,6 +480,10 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
         "Family4Effects=$($script:FileTransferCoordinatorSnapshotFamily4EffectKinds -join ',')"
         "Family4DecisionKinds=$($script:FileTransferCoordinatorSnapshotFamily4DecisionKinds -join ',')"
         "Family4OperationRoles=$($script:FileTransferCoordinatorSnapshotFamily4OperationRoles -join ',')"
+        "Family5=$($script:FileTransferCoordinatorSnapshotFamily5 -join ',')"
+        "Family5Effects=$($script:FileTransferCoordinatorSnapshotFamily5EffectKinds -join ',')"
+        "Family5DecisionKinds=$($script:FileTransferCoordinatorSnapshotFamily5DecisionKinds -join ',')"
+        "Family5OperationRoles=$($script:FileTransferCoordinatorSnapshotFamily5OperationRoles -join ',')"
         "DecisionCatalog=$((@($script:FileTransferCoordinatorSnapshotDecisionCatalog.Keys | ForEach-Object { $entry = $script:FileTransferCoordinatorSnapshotDecisionCatalog[$_]; '{0}|{1}|{2}|{3}|{4}' -f $_, $entry.family, $entry.class, $entry.domain, $entry.phase })) -join ',')"
     ) -join "`n"
     $actualHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
@@ -478,6 +535,10 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
         Family4EffectKinds = $script:FileTransferCoordinatorSnapshotFamily4EffectKinds
         Family4DecisionKinds = $script:FileTransferCoordinatorSnapshotFamily4DecisionKinds
         Family4OperationRoles = $script:FileTransferCoordinatorSnapshotFamily4OperationRoles
+        Family5 = $script:FileTransferCoordinatorSnapshotFamily5
+        Family5EffectKinds = $script:FileTransferCoordinatorSnapshotFamily5EffectKinds
+        Family5DecisionKinds = $script:FileTransferCoordinatorSnapshotFamily5DecisionKinds
+        Family5OperationRoles = $script:FileTransferCoordinatorSnapshotFamily5OperationRoles
         DecisionCatalog = $script:FileTransferCoordinatorSnapshotDecisionCatalog
         LegacyV0 = [pscustomobject]@{
             Version = $script:FileTransferLegacyV0CatalogVersion
@@ -567,6 +628,11 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
     elseif ($Operation.PSObject.Properties.Name -contains 'fallbackTailYield' -and
         $null -ne $Operation.fallbackTailYield) {
         $Operation.fallbackTailYield.sourceBoundary
+    }
+    elseif ($Operation.PSObject.Properties.Name -contains
+            'regularV4FrontierRepairPressure' -and
+        $null -ne $Operation.regularV4FrontierRepairPressure) {
+        $Operation.regularV4FrontierRepairPressure.sourceBoundary
     }
     else {
         $Operation.runtimeUnlockRetry.sourceBoundary
@@ -915,6 +981,77 @@ function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ([string]$Operation.family -notin
+        $script:FileTransferCoordinatorSnapshotFamily5) {
+        return $true
+    }
+    $expectedOperationKey = @(
+        [string]$Operation.family,
+        [string]$Operation.operationRole,
+        [string]$Operation.authorityId,
+        ([long]$Operation.operationGeneration).ToString(
+            [System.Globalization.CultureInfo]::InvariantCulture),
+        [string]$Operation.operationKind) -join '|'
+    $decisionKind = [string]$Envelope.decisionKind
+    $knownAtomicDecision =
+        $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily5DecisionKinds -or
+        $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
+        $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
+        $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
+        $decisionKind -in @(
+            'StartTransfer', 'RoutePublication', 'RouteCommitPublication',
+            'Terminalized', 'LegacyFamilyCoordinatorDecision',
+            'LegacyFamilyCoordinatorActionDecision')
+    if ([string]$Operation.operationKey -cne $expectedOperationKey -or
+        -not $knownAtomicDecision -or
+        [string]$Operation.operationRole -notin
+            $script:FileTransferCoordinatorSnapshotFamily5OperationRoles -or
+        $null -eq $Operation.regularV4FrontierRepairPressure -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Operation.regularV4FrontierRepairPressure.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Operation.regularV4FrontierRepairPressure.effectiveBoundary)) {
+        return $false
+    }
+
+    foreach ($name in @(
+            'role', 'repairKind', 'repairKey', 'targetTransport',
+            'pressureReason', 'bindingState', 'settlementOutcome',
+            'settlementReason', 'successorAuthorityId',
+            'recoveryAuthorityId', 'recoveryKind')) {
+        if ($Operation.regularV4FrontierRepairPressure.PSObject.Properties.Name `
+                -notcontains $name -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$Operation.regularV4FrontierRepairPressure.$name)) {
+            return $false
+        }
+    }
+    if ($Operation.regularV4FrontierRepairPressure.PSObject.Properties.Name `
+            -notcontains 'receipts') {
+        return $false
+    }
+    foreach ($receipt in @(
+            $Operation.regularV4FrontierRepairPressure.receipts)) {
+        if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
+            [long]$receipt.commandGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.commandFingerprint) -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.receiptIdentity) -or
+            [long]$receipt.receiptGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.receiptStatus) -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.receiptFingerprint)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function ConvertFrom-FileTransferCoordinatorSnapshotPayload {
     param([Parameter(Mandatory = $true)][string]$Payload)
 
@@ -1030,6 +1167,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             RuntimeUnlockRetryFamilyLegacySelectionCount = 1
             ReceiveRecoveryFamilyLegacySelectionCount = 1
             FallbackTailYieldFamilyLegacySelectionCount = 1
+            RegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1
         }
     }
 
@@ -1284,6 +1422,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
                         break
                     }
+                    if (-not (Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog `
+                            -Envelope $envelope `
+                            -Operation $operation)) {
+                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        break
+                    }
                     if ([string]$operation.family -ceq 'route_runtime' -and
                         ($null -eq $operation.routeRuntime -or
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
@@ -1309,7 +1453,14 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
                             -Boundary $operation.fallbackTailYield.effectiveBoundary) -or
                          -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
-                            -Boundary $operation.fallbackTailYield.targetBoundary))) {
+                            -Boundary $operation.fallbackTailYield.targetBoundary)) -or
+                        [string]$operation.family -ceq
+                            'regular_v4_frontier_repair_pressure' -and
+                        ($null -eq $operation.regularV4FrontierRepairPressure -or
+                         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                            -Boundary $operation.regularV4FrontierRepairPressure.sourceBoundary) -or
+                         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                            -Boundary $operation.regularV4FrontierRepairPressure.effectiveBoundary))) {
                         $errors.Add("snapshot_operation_scope_incomplete:$($record.LineIndex)")
                         break
                     }
@@ -1361,6 +1512,23 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                     if ([string]$operation.family -ceq 'fallback_tail_yield') {
                         foreach ($receipt in @($operation.fallbackTailYield.receipts)) {
+                            if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
+                                [long]$receipt.commandGeneration -le 0 -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.commandFingerprint) -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptIdentity) -or
+                                [long]$receipt.receiptGeneration -le 0 -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptStatus) -or
+                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptFingerprint)) {
+                                $errors.Add("snapshot_operation_receipt_incomplete:$($record.LineIndex)")
+                                break
+                            }
+                        }
+                    }
+                    if ([string]$operation.family -ceq
+                        'regular_v4_frontier_repair_pressure') {
+                        foreach ($receipt in @(
+                                $operation.regularV4FrontierRepairPressure.receipts)) {
                             if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
                                 [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
                                 [long]$receipt.commandGeneration -le 0 -or
@@ -1543,6 +1711,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
             continue
         }
+        if ($effect.Family -in $script:FileTransferCoordinatorSnapshotFamily5 -and
+            $script:FileTransferCoordinatorSnapshotFamily5EffectKinds -notcontains
+                [string]$effect.EffectKind) {
+            $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
+            continue
+        }
         $matches = @(
             $boundaries | Where-Object {
                 $_.coordinatorInstanceId -ceq $effect.CoordinatorInstanceId -and
@@ -1600,6 +1774,17 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                                 [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
                                 [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
                                 [bool]$_.receiptValidated
+                            }).Count -eq 1) -or
+                         ($_.PSObject.Properties.Name -contains
+                            'regularV4FrontierRepairPressure' -and
+                          $null -ne $_.regularV4FrontierRepairPressure -and
+                          @($_.regularV4FrontierRepairPressure.receipts |
+                            Where-Object {
+                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
+                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
+                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
+                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
+                                [bool]$_.receiptValidated
                             }).Count -eq 1))
                     }).Count -eq 1
             })
@@ -1649,6 +1834,44 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $regularV4PressureRequiredEffects = [ordered]@{
+        StageRegularV4FrontierRepairPressureBinding =
+            'pressure_install_staged'
+        CommitRegularV4FrontierRepairPressureBinding =
+            'pressure_install_bridge_result'
+        PrepareRegularV4FrontierRepairPressureSettlement =
+            'pressure_settlement_prepared'
+        CommitRegularV4FrontierRepairPressureSettlement =
+            'pressure_settlement_bridge_applied'
+        PrepareRegularV4FrontierRepairPressureRecoveryHandoff =
+            'recovery_handoff_prepared'
+        CommitRegularV4FrontierRepairPressureRecoveryHandoff =
+            'recovery_handoff_committed'
+    }
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies `
+                    -contains 'regular_v4_frontier_repair_pressure' -and
+                $regularV4PressureRequiredEffects.Contains(
+                    [string]$_.decisionKind) -and
+                [string]$_.decisionStatus -in @(
+                    'Accepted', 'Idempotent', 'Committed')
+            })) {
+        $requiredEffect = [string]$regularV4PressureRequiredEffects[
+            [string]$boundary.decisionKind]
+        $matchingEffects = @($effects | Where-Object {
+                $_.CoordinatorInstanceId -ceq
+                    [string]$boundary.coordinatorInstanceId -and
+                $_.TransitionId -ceq [string]$boundary.boundaryId -and
+                $_.Family -ceq
+                    'regular_v4_frontier_repair_pressure' -and
+                $_.EffectKind -ceq $requiredEffect
+            })
+        if ($matchingEffects.Count -ne 1) {
+            $errors.Add(
+                "snapshot_regular_v4_pressure_required_effect_missing:$($boundary.boundaryId):$requiredEffect")
+        }
+    }
+
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
@@ -1656,7 +1879,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     (@($script:FileTransferCoordinatorSnapshotFamily1) +
                      @($script:FileTransferCoordinatorSnapshotFamily2) +
                      @($script:FileTransferCoordinatorSnapshotFamily3) +
-                     @($script:FileTransferCoordinatorSnapshotFamily4))) {
+                     @($script:FileTransferCoordinatorSnapshotFamily4) +
+                     @($script:FileTransferCoordinatorSnapshotFamily5))) {
                     [pscustomobject]@{
                         Boundary = $boundary
                         Operation = $operation
@@ -1784,6 +2008,138 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 $latest.Boundary.verdict = 'fail'
                 }
             }
+        }
+    }
+
+    $regularV4PressureEntries = @($operationHistory | Where-Object {
+            [string]$_.Operation.family -ceq
+                'regular_v4_frontier_repair_pressure'
+        })
+    foreach ($authorityGroup in @($regularV4PressureEntries | Group-Object {
+                "$($_.Boundary.coordinatorInstanceId)|$([string]$_.Operation.authorityId)"
+            })) {
+        $history = @($authorityGroup.Group | Sort-Object {
+                [long]$_.Boundary.decisionUtcMilliseconds
+            }, {
+                [long]$_.Boundary.afterStateGeneration
+            }, {
+                [string]$_.Boundary.boundaryId
+            })
+        if ($history.Count -eq 0) {
+            continue
+        }
+
+        $terminalSettlement = @($history | Where-Object {
+                [string]$_.Operation.operationRole -ceq
+                    'pressure_settlement_terminal' -and
+                [bool]$_.Operation.receiptValidated -and
+                [string]$_.Operation.receiptStatus -in @(
+                    'Applied', 'Idempotent')
+            } | Select-Object -Last 1) | Select-Object -First 1
+        $terminalHandoff = @($history | Where-Object {
+                [string]$_.Operation.operationRole -ceq
+                    'recovery_handoff_terminal' -and
+                [string]$_.Operation.afterState -ceq 'Committed' -and
+                [bool]$_.Operation.receiptValidated
+            } | Select-Object -Last 1) | Select-Object -First 1
+        $settlementClosed = $false
+        if ($null -ne $terminalSettlement) {
+            $settlementEffects = @($effects | Where-Object {
+                    [string]$_.CoordinatorInstanceId -ceq
+                        [string]$terminalSettlement.Boundary.coordinatorInstanceId -and
+                    [string]$_.AuthorityId -ceq
+                        [string]$terminalSettlement.Operation.authorityId -and
+                    [string]$_.ReceiptIdentity -ceq
+                        [string]$terminalSettlement.Operation.receiptIdentity -and
+                    [long]$_.ReceiptGeneration -eq
+                        [long]$terminalSettlement.Operation.receiptGeneration
+                })
+            $settlementClosed =
+                @($settlementEffects | Where-Object {
+                    [string]$_.EffectKind -ceq
+                        'pressure_settlement_bridge_applied'
+                }).Count -eq 1 -and
+                @($settlementEffects | Where-Object {
+                    [string]$_.EffectKind -ceq 'local_contract_settled'
+                }).Count -eq 1 -and
+                @($settlementEffects | Where-Object {
+                    [string]$_.EffectKind -ceq
+                        'local_contract_reference_cleared'
+                }).Count -eq 1
+        }
+
+        $pending = @($history | Where-Object {
+                [string]$_.Operation.operationRole -ceq
+                    'pressure_binding_pending' -and
+                [string]$_.Operation.afterState -ceq 'Pending'
+            } | Select-Object -Last 1) | Select-Object -First 1
+        $installed = @($history | Where-Object {
+                [string]$_.Operation.operationRole -in @(
+                    'pressure_binding_installed',
+                    'pressure_binding_retained_predecessor') -and
+                [string]$_.Operation.afterState -in @(
+                    'Installed', 'RetainedPredecessor')
+            } | Select-Object -Last 1) | Select-Object -First 1
+        $preparedHandoff = @($history | Where-Object {
+                [string]$_.Boundary.decisionKind -ceq
+                    'PrepareRegularV4FrontierRepairPressureRecoveryHandoff' -and
+                [string]$_.Boundary.decisionStatus -ceq 'Prepared'
+            } | Select-Object -Last 1) | Select-Object -First 1
+        $rejectedSettlement = @($history | Where-Object {
+                [string]$_.Boundary.decisionKind -in @(
+                    'PrepareRegularV4FrontierRepairPressureSettlement',
+                    'CommitRegularV4FrontierRepairPressureSettlement') -and
+                [string]$_.Boundary.decisionStatus -ceq 'Rejected'
+            } | Select-Object -First 1) | Select-Object -First 1
+
+        $candidate = $null
+        $class = ''
+        if ($null -ne $rejectedSettlement -and -not $settlementClosed) {
+            $candidate = $rejectedSettlement
+            $class = 'regular_v4_frontier_repair_settlement_disposition_unverifiable'
+        }
+        elseif ($null -ne $preparedHandoff -and $null -eq $terminalHandoff) {
+            $candidate = $preparedHandoff
+            $class = 'regular_v4_frontier_repair_pressure_recovery_handoff_missing'
+        }
+        elseif ($null -ne $pending -and
+            @($history | Where-Object {
+                    [string]$_.Operation.operationRole -ceq
+                        'pressure_binding_installed' -and
+                    [long]$_.Boundary.decisionUtcMilliseconds -ge
+                        [long]$pending.Boundary.decisionUtcMilliseconds
+                }).Count -eq 0) {
+            $candidate = $pending
+            $class = if ([string]$pending.Operation.predecessorAuthorityId -in
+                @('', '(none)')) {
+                'regular_v4_frontier_repair_initial_pressure_install_missing'
+            }
+            else {
+                'regular_v4_frontier_repair_successor_pressure_install_missing'
+            }
+        }
+        elseif ($null -ne $installed -and -not $settlementClosed -and
+            $null -eq $terminalHandoff) {
+            $candidate = $installed
+            $class =
+                'regular_v4_frontier_repair_pressure_authority_lifecycle_split'
+        }
+        elseif ($null -ne $terminalSettlement -and -not $settlementClosed) {
+            $candidate = $terminalSettlement
+            $class =
+                'regular_v4_frontier_repair_pressure_authority_lifecycle_split'
+        }
+
+        if ($null -ne $candidate -and
+            -not [string]::IsNullOrWhiteSpace($class)) {
+            $candidate.Boundary.taxonomyClass = $class
+            $candidate.Boundary.domain = 'route_runtime'
+            $candidate.Boundary.phase = 'fallback_frontier_repair'
+            $candidate.Boundary.rawCount = 1
+            $candidate.Boundary.distinctCount = 1
+            $candidate.Boundary.recoveredCount = 0
+            $candidate.Boundary.unresolvedCount = 1
+            $candidate.Boundary.verdict = 'fail'
         }
     }
 
@@ -2673,6 +3029,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         else {
             1
         }
+        RegularV4FrontierRepairPressureFamilyLegacySelectionCount = if (
+            @($streams.Values | ForEach-Object {
+                    $_.AuthoritativeFamilies
+                } | Sort-Object -Unique) -contains
+                'regular_v4_frontier_repair_pressure') {
+            0
+        }
+        else {
+            1
+        }
         LegacySelectionCount = if ($mode -eq 'SnapshotV1Authoritative') {
             0
         }
@@ -2791,7 +3157,8 @@ function Compare-FileTransferCoordinatorSnapshotEvaluations {
             'RouteFamilyLegacySelectionCount',
             'RuntimeUnlockRetryFamilyLegacySelectionCount',
             'ReceiveRecoveryFamilyLegacySelectionCount',
-            'FallbackTailYieldFamilyLegacySelectionCount')) {
+            'FallbackTailYieldFamilyLegacySelectionCount',
+            'RegularV4FrontierRepairPressureFamilyLegacySelectionCount')) {
         if ([string]$Full.$field -cne [string]$Compact.$field) {
             $reasons.Add("snapshot_full_compact_$($field.ToLowerInvariant())_mismatch")
         }

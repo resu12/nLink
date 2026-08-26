@@ -8029,12 +8029,7 @@ public sealed partial class SessionFileTransferService
                 decisionReason,
                 Math.Max(0, durableReceivedHighestChunkIndex - frontierChunkIndex + 1)),
             pressureReason);
-        _ = AdoptCoordinatorStateLocked(
-            context,
-            bindingDecision.State,
-            "RegularV4FrontierRepairPressureBindingStaged",
-            bindingDecision.Status.ToString(),
-            bindingDecision.Reason);
+        _ = AdoptCoordinatorStateLocked(context, bindingDecision);
         if (bindingDecision.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected ||
             bindingDecision.Binding is not { } binding)
         {
@@ -8073,12 +8068,7 @@ public sealed partial class SessionFileTransferService
                 decisionReason,
                 Math.Max(0, durableReceivedHighestChunkIndex - frontierChunkIndex + 1)),
             pressureReason);
-        _ = AdoptCoordinatorStateLocked(
-            context,
-            bindingDecision.State,
-            "RegularV4FrontierRepairPressureBindingStaged",
-            bindingDecision.Status.ToString(),
-            bindingDecision.Reason);
+        _ = AdoptCoordinatorStateLocked(context, bindingDecision);
         if (bindingDecision.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected ||
             bindingDecision.Binding is not { } binding)
         {
@@ -8880,6 +8870,16 @@ public sealed partial class SessionFileTransferService
             var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
                 state,
                 settlement);
+            if (settlement.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } preparedOutbound)
+            {
+                _ = AdoptCoordinatorStateLocked(preparedOutbound, prepared);
+            }
+            else if (settlement.Direction == FileTransferDirection.Inbound &&
+                     inboundTransfer is { } preparedInbound)
+            {
+                _ = AdoptCoordinatorStateLocked(preparedInbound, prepared);
+            }
             if (prepared.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent)
             {
                 rejectionReason = prepared.Reason;
@@ -8916,21 +8916,11 @@ public sealed partial class SessionFileTransferService
                 receipt);
             if (settlement.Direction == FileTransferDirection.Outbound && outboundTransfer is { } currentOutbound)
             {
-                _ = AdoptCoordinatorStateLocked(
-                    currentOutbound,
-                    committed.State,
-                    "RegularV4FrontierRepairPressureSettlementCommitted",
-                    committed.Status.ToString(),
-                    committed.Reason);
+                _ = AdoptCoordinatorStateLocked(currentOutbound, committed);
             }
             else if (settlement.Direction == FileTransferDirection.Inbound && inboundTransfer is { } currentInbound)
             {
-                _ = AdoptCoordinatorStateLocked(
-                    currentInbound,
-                    committed.State,
-                    "RegularV4FrontierRepairPressureSettlementCommitted",
-                    committed.Status.ToString(),
-                    committed.Reason);
+                _ = AdoptCoordinatorStateLocked(currentInbound, committed);
             }
 
             if (committed.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected)
@@ -19878,12 +19868,7 @@ public sealed partial class SessionFileTransferService
         var decision = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             receipt);
-        _ = AdoptCoordinatorStateLocked(
-            context,
-            decision.State,
-            "RegularV4FrontierRepairPressureBindingCommitted",
-            decision.Status.ToString(),
-            decision.Reason);
+        _ = AdoptCoordinatorStateLocked(context, decision);
         return CommitRegularV4FrontierRepairPressureBindingDecision(
             contract,
             decision,
@@ -19899,12 +19884,7 @@ public sealed partial class SessionFileTransferService
         var decision = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(
             CreateCoordinatorStateLocked(context),
             receipt);
-        _ = AdoptCoordinatorStateLocked(
-            context,
-            decision.State,
-            "RegularV4FrontierRepairPressureBindingCommitted",
-            decision.Status.ToString(),
-            decision.Reason);
+        _ = AdoptCoordinatorStateLocked(context, decision);
         return CommitRegularV4FrontierRepairPressureBindingDecision(
             contract,
             decision,

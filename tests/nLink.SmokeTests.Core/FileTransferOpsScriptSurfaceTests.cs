@@ -917,6 +917,81 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "Fallback-tail full/compact parity failed: $($fallbackFull | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            $pressureAuthority = 'fta2-repair_replay-pressure-snapshot'
+            $pressureOperationKey = "regular_v4_frontier_repair_pressure|pressure_binding_pending|$pressureAuthority|1|V4Repair"
+            $pressureReceipt = [ordered]@{
+                stage='attempted_decision'; commandIdentity='pressure-stage-command'
+                commandGeneration=1L; commandFingerprint='pressure-stage-command-fingerprint'
+                receiptIdentity='pressure-stage-receipt'; receiptGeneration=1L
+                receiptStatus='Accepted'; receiptReason='pressure_staged'
+                receiptFingerprint='pressure-stage-receipt-fingerprint'
+                receiptValidated=$true
+            }
+            $pressureOperation = [ordered]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='pressure_binding_pending'
+                operationKey=$pressureOperationKey; operationKind='V4Repair'
+                authorityId=$pressureAuthority; predecessorAuthorityId='(none)'
+                operationGeneration=1L; beforeState='None'; afterState='Pending'
+                commandIdentity=$pressureReceipt.commandIdentity
+                commandGeneration=1L; commandFingerprint=$pressureReceipt.commandFingerprint
+                receiptIdentity=$pressureReceipt.receiptIdentity
+                receiptGeneration=1L; receiptStatus='Accepted'
+                receiptFingerprint=$pressureReceipt.receiptFingerprint
+                receiptValidated=$true; stateApplied=$true
+                regularV4FrontierRepairPressure=[ordered]@{
+                    role='pressure_binding_pending'; sourceBoundary=$receiveScope
+                    effectiveBoundary=$receiveScope; repairKind='V4Repair'
+                    repairKey='regular-v4-pressure:snapshot'; frontierChunkIndex=12L
+                    durableReceivedHighestChunkIndex=13L; pendingRepairCount=2
+                    targetTransport='RegularNkn'; pressureReason='frontier_due'
+                    decisionGeneration=1L; pressureInstallGeneration=1L
+                    bindingState='Pending'; settlementOutcome='(none)'
+                    settlementReason='(none)'; currentAuthorityCleared=$false
+                    retainedPredecessorCleared=$false
+                    successorAuthorityId='(none)'; recoveryAuthorityId='(none)'
+                    recoveryOperationGeneration=0L; recoveryKind='(none)'
+                    receipts=@($pressureReceipt)
+                }
+            }
+            $pressureAggregate = [ordered]@{
+                beforeStateGeneration=0L; afterStateGeneration=1L
+                beforeStateFingerprint='pressure-before'; afterStateFingerprint='pressure-after'
+                beforeBoundary=$receiveScope; afterBoundary=$receiveScope
+                changedFamilies=@('regular_v4_frontier_repair_pressure')
+                operations=@($pressureOperation)
+            }
+            $pressureEnvelope = [ordered]@{
+                snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Shadow'
+                coordinatorInstanceId='coordinator-pressure'; sessionId='session-receive'
+                transferId='transfer-receive'; direction='inbound'
+                decisionUtcMilliseconds=50L; transitionId='pressure-stage'
+                decisionKind='StageRegularV4FrontierRepairPressureBinding'
+                decisionStatus='Accepted'; decisionReason='pressure_staged'
+                aggregate=$pressureAggregate
+            }
+            $pressureJson = $pressureEnvelope | ConvertTo-Json -Depth 32 -Compress
+            $pressureBytes = [Text.UTF8Encoding]::new($false).GetBytes($pressureJson)
+            $pressureHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $pressureBytes
+            $pressurePayload = [Convert]::ToBase64String($pressureBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $pressurePrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-pressure; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
+            $pressureCoverage = 'route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure'
+            $pressureStart = "event=filetransfer_coordinator_snapshot_stream_started; $pressurePrefix; initial_state_generation=0; initial_state_hash=pressure-before; emitted_family_coverage=$pressureCoverage; shadow_family_coverage=; authoritative_family_coverage=$pressureCoverage; authority_effect=none"
+            $pressureTransition = "event=filetransfer_coordinator_transition_snapshot; $pressurePrefix; transition_id=pressure-stage; before_state_generation=0; after_state_generation=1; snapshot_sha256=$pressureHash; snapshot_payload=$pressurePayload; authority_effect=none"
+            $pressureEffect = "event=filetransfer_coordinator_authority_effect; $pressurePrefix; transition_id=pressure-stage; coordinator_state_generation=1; operation_family=regular_v4_frontier_repair_pressure; operation_key=$pressureOperationKey; operation_authority_id=$pressureAuthority; operation_generation=1; effect_kind=pressure_install_staged; effect_identity=pressure-stage-effect; effect_generation=1; receipt_identity=$($pressureReceipt.receiptIdentity); receipt_generation=1; receipt_status=Accepted; receipt_fingerprint=$($pressureReceipt.receiptFingerprint); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=4; checkpoint_request_id=root-checkpoint; data_session_identity=receive-data-session; data_session_generation=5; authority_effect=applied"
+            $pressureEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $pressurePrefix; final_state_generation=1; final_state_hash=pressure-after; transition_count=1; emitted_family_coverage=$pressureCoverage; shadow_family_coverage=; authoritative_family_coverage=$pressureCoverage; authority_effect=none"
+            $pressureFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=irrelevant',$pressureStart,$pressureTransition,$pressureEffect,$pressureEnd)
+            $pressureCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($pressureStart,$pressureTransition,$pressureEffect,$pressureEnd)
+            $pressureParity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $pressureFull -Compact $pressureCompact
+            if ($pressureFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $pressureFull.FirstUnresolvedBoundary.taxonomyClass -ne 'regular_v4_frontier_repair_initial_pressure_install_missing' -or
+                $pressureFull.RegularV4FrontierRepairPressureFamilyLegacySelectionCount -ne 0 -or
+                $pressureFull.LegacySelectionCount -ne 1 -or
+                $pressureParity.Verdict -ne 'pass' -or
+                $pressureFull.BoundaryHash -ne $pressureCompact.BoundaryHash) {
+                throw "Regular-V4 pressure full/compact parity failed: $($pressureFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'
@@ -1072,6 +1147,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             Assert.Contains("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_receive_recovery_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count", text, StringComparison.Ordinal);
+            Assert.Contains("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_boundary_hash", text, StringComparison.Ordinal);
             Assert.Contains("coordinator_snapshot_catalog_hash", text, StringComparison.Ordinal);
         }
@@ -1105,11 +1181,19 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             acceptanceText,
             StringComparison.Ordinal);
         Assert.Contains(
+            "coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount",
+            acceptanceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "-Family 'fallback_tail_yield'",
             guiText,
             StringComparison.Ordinal);
         Assert.Contains(
             "CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount",
+            guiText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount",
             guiText,
             StringComparison.Ordinal);
     }
@@ -1241,7 +1325,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
             $script:family3 = $false
             $script:family4 = $false
+            $script:family5 = $false
             function Get-FileTransferCoordinatorSnapshotEvaluation {
+                if ($script:family5) {
+                    return [pscustomobject]@{
+                        Mode = 'SnapshotV1Shadow'
+                        ArtifactEvidenceVerdict = 'pass'
+                        TransitionCount = 5L
+                        RegularV4FrontierRepairPressureFamilyLegacySelectionCount = 0L
+                        FirstUnresolvedBoundary = [pscustomobject]@{
+                            boundaryId = 'pressure-boundary-5'
+                            boundaryHash = 'pressure-boundary-hash-5'
+                            families = @('regular_v4_frontier_repair_pressure')
+                            taxonomyClass = 'regular_v4_frontier_repair_pressure_authority_lifecycle_split'
+                            phase = 'route_transition'
+                            decisionReason = 'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle'
+                            variant = '(none)'
+                            rawCount = 8
+                            distinctCount = 2
+                            recoveredCount = 0
+                            unresolvedCount = 2
+                            writer = 'writer-helper'
+                            writerSequence = 40653L
+                        }
+                    }
+                }
                 if ($script:family4) {
                     return [pscustomobject]@{
                         Mode = 'SnapshotV1Shadow'
@@ -1314,7 +1422,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     'route_transition',
                     'runtime_unlock_retry_lifecycle',
                     'receive_recovery',
-                    'fallback_tail_yield')
+                    'fallback_tail_yield',
+                    'regular_v4_frontier_repair_pressure')
             }
 
             $root = Join-Path ([IO.Path]::GetTempPath()) (
@@ -1361,6 +1470,28 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     $family4.CoordinatorBoundaryId -ne 'fallback-tail-boundary-4' -or
                     $family4.CoordinatorWriterSequence -ne 14938L) {
                     throw "GUI did not preserve the Family 4 shared boundary: $($family4 | ConvertTo-Json -Compress)"
+                }
+                $script:family4 = $false
+                $script:family5 = $true
+                $family5 = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'scenario failed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($family5.ClassificationSource -ne 'coordinator_snapshot_authority_v1' -or
+                    $family5.FailureClass -ne 'regular_v4_frontier_repair_pressure_authority_lifecycle_split' -or
+                    $family5.Phase -ne 'route_transition' -or
+                    $family5.Reason -ne 'committed_route_transition_pressure_settlement_not_adopted_by_local_repair_lifecycle' -or
+                    $family5.CoordinatorBoundaryId -ne 'pressure-boundary-5' -or
+                    $family5.CoordinatorBoundaryHash -ne 'pressure-boundary-hash-5' -or
+                    $family5.CoordinatorRawCount -ne 8 -or
+                    $family5.CoordinatorDistinctCount -ne 2 -or
+                    $family5.CoordinatorRecoveredCount -ne 0 -or
+                    $family5.CoordinatorUnresolvedCount -ne 2 -or
+                    $family5.CoordinatorWriter -ne 'writer-helper' -or
+                    $family5.CoordinatorWriterSequence -ne 40653L -or
+                    $family5.CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount -ne 0L) {
+                    throw "GUI did not preserve the Family 5 shared boundary: $($family5 | ConvertTo-Json -Compress)"
                 }
             }
             finally {

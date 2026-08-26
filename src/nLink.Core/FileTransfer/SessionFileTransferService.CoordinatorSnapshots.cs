@@ -12,16 +12,16 @@ public sealed partial class SessionFileTransferService
         "snapshot-authority-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "9444761dd91253649ef1ca4b562604dd8d7ae05ad41232db32d14dfc38c2247d";
+        "f8efc491c4524deae00d40f31cd818e4fcc36daae1e007d286997fce2c52e519";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure";
 
     private const string CoordinatorSnapshotShadowFamilyCoverage =
         "";
 
     private const string CoordinatorSnapshotAuthoritativeFamilyCoverage =
-        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield";
+        "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure";
 
     private static void InitializeCoordinatorSnapshotState(
         OutboundTransferContext context)
@@ -108,28 +108,52 @@ public sealed partial class SessionFileTransferService
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
         FileTransferRouteTransitionDecision decision)
-        => AdoptCoordinatorAuthoredEnvelopeLocked(
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Outbound,
             decision.State,
             decision.SnapshotEnvelope,
-            state => context.CoordinatorPersistentState = state.PersistentState,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
             context.CoordinatorSnapshotEmitter);
+        EnqueueRegularV4PressureDecisionAuthorityEffectIfPresent(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        return state;
+    }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         InboundTransferContext context,
         FileTransferRouteTransitionDecision decision)
-        => AdoptCoordinatorAuthoredEnvelopeLocked(
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Inbound,
             decision.State,
             decision.SnapshotEnvelope,
-            state => context.CoordinatorPersistentState = state.PersistentState,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
             context.CoordinatorSnapshotEmitter);
+        EnqueueRegularV4PressureDecisionAuthorityEffectIfPresent(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        return state;
+    }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
@@ -229,6 +253,106 @@ public sealed partial class SessionFileTransferService
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
+        RegularV4FrontierRepairPressureBindingDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        EnqueueRegularV4PressureDecisionAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        InboundTransferContext context,
+        RegularV4FrontierRepairPressureBindingDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        EnqueueRegularV4PressureDecisionAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        OutboundTransferContext context,
+        RegularV4FrontierRepairPressureRecoveryHandoffDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        EnqueueRegularV4PressureDecisionAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        InboundTransferContext context,
+        RegularV4FrontierRepairPressureRecoveryHandoffDecision decision)
+    {
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            decision.State,
+            decision.SnapshotEnvelope,
+            adopted => context.CoordinatorPersistentState =
+                adopted.PersistentState,
+            context.CoordinatorSnapshotEmitter);
+        EnqueueRegularV4PressureDecisionAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
+        return state;
+    }
+
+    private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
+        OutboundTransferContext context,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
             decision)
         => AdoptCoordinatorAuthoredEnvelopeLocked(
@@ -317,6 +441,14 @@ public sealed partial class SessionFileTransferService
                 context,
                 decision.SnapshotEnvelope);
         }
+        EnqueueRegularV4PressureDecisionAuthorityEffectIfPresent(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
 
         return state;
     }
@@ -355,6 +487,14 @@ public sealed partial class SessionFileTransferService
                 context,
                 decision.SnapshotEnvelope);
         }
+        EnqueueRegularV4PressureDecisionAuthorityEffectIfPresent(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            state.PersistentState.SnapshotStateGeneration,
+            decision.SnapshotEnvelope);
 
         return state;
     }
@@ -362,16 +502,20 @@ public sealed partial class SessionFileTransferService
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         OutboundTransferContext context,
         FileTransferCoordinatorActionDecision decision)
-        => decision.SnapshotEnvelope is null
-            ? AdoptCoordinatorStateLocked(
+    {
+        if (decision.SnapshotEnvelope is null)
+        {
+            return AdoptCoordinatorStateLocked(
                 context,
                 decision.State,
                 "LegacyFamilyCoordinatorActionDecision",
                 decision.Accepted ? "Accepted" : "Rejected",
                 decision.Accepted
                     ? "legacy_family_action_accepted"
-                    : decision.RejectionReason)
-            : AdoptCoordinatorAuthoredEnvelopeLocked(
+                    : decision.RejectionReason);
+        }
+
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
@@ -380,20 +524,39 @@ public sealed partial class SessionFileTransferService
             decision.SnapshotEnvelope,
             state => context.CoordinatorPersistentState = state.PersistentState,
             context.CoordinatorSnapshotEmitter);
+        if (decision.SnapshotEnvelope.Aggregate.Operations.Any(operation =>
+                operation.Family ==
+                    "regular_v4_frontier_repair_pressure"))
+        {
+            EnqueueRegularV4PressureDecisionAuthorityEffect(
+                context.CoordinatorSnapshotEmitter,
+                context.CoordinatorInstanceId,
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                state.PersistentState.SnapshotStateGeneration,
+                decision.SnapshotEnvelope);
+        }
+        return state;
+    }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(
         InboundTransferContext context,
         FileTransferCoordinatorActionDecision decision)
-        => decision.SnapshotEnvelope is null
-            ? AdoptCoordinatorStateLocked(
+    {
+        if (decision.SnapshotEnvelope is null)
+        {
+            return AdoptCoordinatorStateLocked(
                 context,
                 decision.State,
                 "LegacyFamilyCoordinatorActionDecision",
                 decision.Accepted ? "Accepted" : "Rejected",
                 decision.Accepted
                     ? "legacy_family_action_accepted"
-                    : decision.RejectionReason)
-            : AdoptCoordinatorAuthoredEnvelopeLocked(
+                    : decision.RejectionReason);
+        }
+
+        var state = AdoptCoordinatorAuthoredEnvelopeLocked(
             context.CoordinatorInstanceId,
             context.SessionId,
             context.TransferId,
@@ -402,6 +565,21 @@ public sealed partial class SessionFileTransferService
             decision.SnapshotEnvelope,
             state => context.CoordinatorPersistentState = state.PersistentState,
             context.CoordinatorSnapshotEmitter);
+        if (decision.SnapshotEnvelope.Aggregate.Operations.Any(operation =>
+                operation.Family ==
+                    "regular_v4_frontier_repair_pressure"))
+        {
+            EnqueueRegularV4PressureDecisionAuthorityEffect(
+                context.CoordinatorSnapshotEmitter,
+                context.CoordinatorInstanceId,
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Inbound,
+                state.PersistentState.SnapshotStateGeneration,
+                decision.SnapshotEnvelope);
+        }
+        return state;
+    }
 
     private static string GetCoordinatorDecisionSnapshotStatus(
         FileTransferCoordinatorDecision decision)
@@ -422,7 +600,8 @@ public sealed partial class SessionFileTransferService
                     "route_transition" or
                     "runtime_unlock_retry_lifecycle" or
                     "receive_recovery" or
-                    "fallback_tail_yield")
+                    "fallback_tail_yield" or
+                    "regular_v4_frontier_repair_pressure")
             .Select(operation => operation.OperationKey)
             .ToArray();
         if (authoritativeOperations.Length > 0)
@@ -836,6 +1015,140 @@ public sealed partial class SessionFileTransferService
                 ("initial_activation_envelope_refresh", "initial_activation_envelope_refresh_observed"),
             _ => null,
         };
+    }
+
+    private static void EnqueueRegularV4PressureDecisionAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        if (envelope is null)
+        {
+            return;
+        }
+        if (string.Equals(
+                envelope.DecisionStatus,
+                "Rejected",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var hasTerminalSettlement = envelope.Aggregate.Operations.Any(
+            operation => operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.OperationRole == "pressure_settlement_terminal" &&
+                operation.ReceiptValidated);
+        var effectKinds = envelope.DecisionKind switch
+        {
+            nameof(FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding) =>
+                new[] { "pressure_install_staged" },
+            nameof(FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding) =>
+                new[]
+                {
+                    "pressure_install_bridge_result",
+                    "repair_contract_bound",
+                },
+            nameof(FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement) =>
+                new[] { "pressure_settlement_prepared" },
+            nameof(FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement) =>
+                new[]
+                {
+                    "pressure_settlement_bridge_applied",
+                    "local_contract_settled",
+                    "local_contract_reference_cleared",
+                },
+            nameof(FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff) =>
+                new[] { "recovery_handoff_prepared" },
+            nameof(FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff) =>
+                new[]
+                {
+                    "pressure_settlement_bridge_applied",
+                    "local_contract_settled",
+                    "local_contract_reference_cleared",
+                    "recovery_handoff_committed",
+                    "projection_detached",
+                },
+            nameof(FileTransferCoordinator.CommitFileTransferRouteTransition)
+                when hasTerminalSettlement =>
+                new[]
+                {
+                    "pressure_settlement_bridge_applied",
+                    "local_contract_settled",
+                    "local_contract_reference_cleared",
+                    "route_commit_local_lifecycle_adopted",
+                },
+            _ => new[] { "regular_v4_pressure_decision_adopted" },
+        };
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.RegularV4FrontierRepairPressure is not null)
+            .SelectMany(operation =>
+                operation.RegularV4FrontierRepairPressure!.Receipts
+                    .Where(receipt => receipt.ReceiptValidated)
+                    .Select(receipt =>
+                        (Operation: operation, Receipt: receipt)))
+            .OrderByDescending(match =>
+                match.Receipt.Stage == "attempted_decision" ? 0 : 1)
+            .ToArray();
+        if (matches.Length == 0)
+        {
+            return;
+        }
+
+        var match = matches[0];
+        foreach (var effectKind in effectKinds)
+        {
+            emitter.EnqueueAuthorityEffect(
+                coordinatorInstanceId,
+                sessionId,
+                transferId,
+                direction,
+                stateGeneration,
+                match.Operation.Family,
+                match.Operation.AuthorityId,
+                match.Operation.OperationGeneration,
+                match.Receipt.ReceiptIdentity,
+                match.Receipt.ReceiptGeneration,
+                match.Receipt.ReceiptStatus,
+                match.Receipt.ReceiptFingerprint,
+                effectKind,
+                $"{match.Operation.OperationKey}:{effectKind}",
+                Math.Max(1, match.Receipt.ReceiptGeneration));
+        }
+    }
+
+    private static void
+        EnqueueRegularV4PressureDecisionAuthorityEffectIfPresent(
+            CoordinatorSnapshotStreamEmitter emitter,
+            string coordinatorInstanceId,
+            string sessionId,
+            string transferId,
+            FileTransferDirection direction,
+            long stateGeneration,
+            FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        if (envelope?.Aggregate.Operations.Any(operation =>
+                operation.Family ==
+                    "regular_v4_frontier_repair_pressure") != true)
+        {
+            return;
+        }
+
+        EnqueueRegularV4PressureDecisionAuthorityEffect(
+            emitter,
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            stateGeneration,
+            envelope);
     }
 
     private static void EnqueueFallbackTailYieldDecisionAuthorityEffect(

@@ -1001,6 +1001,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
             -Family 'fallback_tail_yield'
+    $snapshotRegularV4PressureAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'regular_v4_frontier_repair_pressure'
+    $snapshotRegularV4PressureProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $snapshotEvaluation `
+            -Family 'regular_v4_frontier_repair_pressure' `
+            -TaxonomyClasses @(
+                'regular_v4_frontier_repair_initial_pressure_install_missing',
+                'regular_v4_frontier_repair_successor_pressure_install_missing',
+                'regular_v4_frontier_repair_settlement_disposition_unverifiable',
+                'regular_v4_frontier_repair_pressure_authority_lifecycle_split',
+                'regular_v4_frontier_repair_pressure_recovery_handoff_missing')
     $snapshotFallbackTailYieldProof =
         Get-FileTransferCoordinatorSnapshotCorrelationResult `
             -Evaluation $snapshotEvaluation `
@@ -2806,6 +2820,38 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -RetiredLeaseEvents $fileTunaV4RetiredLeaseEvents `
                     -AlreadyChronologicallyOrdered
             }
+    }
+    if ($snapshotRegularV4PressureAuthoritative) {
+        $regularV4FrontierRepairSettlementDispositionProof =
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'regular_v4_frontier_repair_pressure' `
+                -TaxonomyClasses @(
+                    'regular_v4_frontier_repair_settlement_disposition_unverifiable')
+        $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof =
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'regular_v4_frontier_repair_pressure' `
+                -TaxonomyClasses @(
+                    'regular_v4_frontier_repair_pressure_authority_lifecycle_split')
+        $regularV4FrontierRepairPressureRecoveryHandoffProof =
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'regular_v4_frontier_repair_pressure' `
+                -TaxonomyClasses @(
+                    'regular_v4_frontier_repair_pressure_recovery_handoff_missing')
+        $regularV4FrontierRepairSuccessorPressureInstallProof =
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'regular_v4_frontier_repair_pressure' `
+                -TaxonomyClasses @(
+                    'regular_v4_frontier_repair_successor_pressure_install_missing')
+        $regularV4FrontierRepairInitialPressureInstallProof =
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'regular_v4_frontier_repair_pressure' `
+                -TaxonomyClasses @(
+                    'regular_v4_frontier_repair_initial_pressure_install_missing')
     }
     if ($fileTunaV4DataPathDownstreamEvents.Count -eq 0) {
         $fileTunaV4DataPathDownstreamEvents = @(
@@ -4713,6 +4759,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count={0}" -f $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount),
         ("coordinator_snapshot_receive_recovery_family_legacy_selection_count={0}" -f $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount),
         ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount),
+        ("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count={0}" -f $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount),
         ("selected_routes={0}" -f $selectedRouteText),
         ("selected_route_sequence={0}" -f $selectedRouteText),
         ("selected_route_changes={0}" -f $selectedRouteText),
@@ -6057,6 +6104,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $snapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
         coordinator_snapshot_receive_recovery_family_legacy_selection_count = $snapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
         coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
+        coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count = $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount
         coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
         coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
         coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
@@ -9985,6 +10033,7 @@ function Invoke-FileTransferRetainedAnalysis {
             coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $fullSnapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
             coordinator_snapshot_receive_recovery_family_legacy_selection_count = $fullSnapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
             coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $fullSnapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
+            coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count = $fullSnapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount
             coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
             coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
             coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash

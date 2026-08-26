@@ -11810,7 +11810,8 @@ public sealed partial class SessionFileTransferService :
             transition.BridgeRecoveryDecision,
             transition.RecoveryLivenessLease,
             transition.BridgeRecoveryExecutionCommand,
-            committed.InitialActivationHoldDecision);
+            committed.InitialActivationHoldDecision,
+            committed.SnapshotEnvelope);
     }
 
     private static bool TryGetExactRegularV4PressureRecoveryHandoffContract(

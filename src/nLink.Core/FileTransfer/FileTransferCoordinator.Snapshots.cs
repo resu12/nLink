@@ -141,6 +141,32 @@ internal sealed record FileTransferCoordinatorFallbackTailYieldOperationSnapshot
     string InvalidationReason,
     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
 
+internal sealed record
+    FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot(
+        string Role,
+        FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+        FileTransferCoordinatorStateBoundarySnapshot EffectiveBoundary,
+        string RepairKind,
+        string RepairKey,
+        int FrontierChunkIndex,
+        int DurableReceivedHighestChunkIndex,
+        int RequestedChunkCount,
+        string TargetTransport,
+        string PressureReason,
+        int DecisionGeneration,
+        long PressureInstallGeneration,
+        string BindingState,
+        string SettlementOutcome,
+        string SettlementReason,
+        bool CurrentAuthorityCleared,
+        bool RetainedPredecessorCleared,
+        string SuccessorAuthorityId,
+        string RecoveryAuthorityId,
+        long RecoveryOperationGeneration,
+        string RecoveryKind,
+        ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+            Receipts);
+
 internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     string Family,
     string OperationRole,
@@ -167,7 +193,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     FileTransferCoordinatorReceiveRecoveryOperationSnapshot?
         ReceiveRecovery = null,
     FileTransferCoordinatorFallbackTailYieldOperationSnapshot?
-        FallbackTailYield = null);
+        FallbackTailYield = null,
+    FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot?
+        RegularV4FrontierRepairPressure = null);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -301,6 +329,232 @@ internal readonly record struct
 internal static partial class FileTransferCoordinator
 {
     private static long lastSnapshotDecisionUtcMilliseconds;
+
+    internal static RegularV4FrontierRepairPressureBindingDecision
+        FinalizeRegularV4FrontierRepairPressureSnapshot(
+            FileTransferCoordinatorState before,
+            RegularV4FrontierRepairPressureBindingDecision decision,
+            string decisionKind,
+            object? command = null)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            CreateRegularV4PressureAttemptedDecisionSnapshots(
+                before,
+                decisionKind,
+                decision.Status.ToString(),
+                decision.Reason,
+                command ??
+                    decision.SettlementCommand ??
+                    (object?)decision.InstallCommand,
+                decision.Binding?.Authority.AuthorityId));
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    internal static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        FinalizeRegularV4FrontierRepairPressureSnapshot(
+            FileTransferCoordinatorState before,
+            RegularV4FrontierRepairPressureRecoveryHandoffDecision decision,
+            string decisionKind,
+            object? command = null)
+    {
+        var coordinatorInstanceId =
+            before.PersistentState.CoordinatorInstanceId;
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            return decision;
+        }
+
+        var authorityId = decision.Transition?.PressureBinding.Authority.AuthorityId;
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            CreateRegularV4PressureAttemptedDecisionSnapshots(
+                before,
+                decisionKind,
+                decision.Status.ToString(),
+                decision.Reason,
+                command ?? (object?)decision.Transition,
+                authorityId));
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    private static ImmutableArray<
+        FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateRegularV4PressureAttemptedDecisionSnapshots(
+            FileTransferCoordinatorState state,
+            string decisionKind,
+            string decisionStatus,
+            string decisionReason,
+            object? command,
+            FileTransferAuthorityId? authorityId)
+    {
+        var attemptedRole = decisionKind switch
+        {
+            "PrepareRegularV4FrontierRepairPressureSettlement" =>
+                "pressure_settlement_prepared",
+            "PrepareRegularV4FrontierRepairPressureRecoveryHandoff" =>
+                "recovery_handoff_prepared",
+            _ => "attempted_decision",
+        };
+        var descriptors = CreateOperationDescriptors(state)
+            .Where(descriptor => string.Equals(
+                descriptor.Family,
+                "regular_v4_frontier_repair_pressure",
+                StringComparison.Ordinal));
+        if (authorityId is { IsDefault: false } exactAuthority)
+        {
+            descriptors = descriptors.Where(descriptor => string.Equals(
+                descriptor.AuthorityId,
+                exactAuthority.ToString(),
+                StringComparison.Ordinal));
+        }
+        var descriptor = descriptors
+            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
+            .FirstOrDefault();
+        var commandFingerprint = CalculateSnapshotFingerprint(command);
+        var boundary = CreateStateBoundarySnapshot(state);
+        var authority = authorityId is { IsDefault: false } exact
+            ? exact.ToString()
+            : descriptor?.AuthorityId ?? $"attempt:{commandFingerprint}";
+        var generation = Math.Max(
+            1,
+            descriptor?.OperationGeneration ??
+            state.LastRepairReplayGeneration + 1);
+        var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "attempted_decision",
+            $"{authority}:{decisionKind}",
+            generation,
+            commandFingerprint,
+            $"{authority}:{decisionKind}:decision",
+            generation,
+            decisionStatus,
+            decisionReason,
+            CalculateSnapshotFingerprint(new
+            {
+                decisionKind,
+                decisionStatus,
+                decisionReason,
+                command,
+            }),
+            true);
+        if (descriptor is not null)
+        {
+            var operation = CreateOperationTransitionSnapshot(
+                descriptor,
+                descriptor.State,
+                descriptor.State,
+                stateApplied: false);
+            return ImmutableArray.Create(operation with
+            {
+                OperationRole = attemptedRole,
+                OperationKey = CreateCoordinatorOperationKey(
+                    "regular_v4_frontier_repair_pressure",
+                    attemptedRole,
+                    authority,
+                    generation,
+                    decisionKind),
+                OperationKind = decisionKind,
+                CommandIdentity = receipt.CommandIdentity,
+                CommandGeneration = receipt.CommandGeneration,
+                CommandFingerprint = receipt.CommandFingerprint,
+                ReceiptIdentity = receipt.ReceiptIdentity,
+                ReceiptGeneration = receipt.ReceiptGeneration,
+                ReceiptStatus = receipt.ReceiptStatus,
+                ReceiptFingerprint = receipt.ReceiptFingerprint,
+                ReceiptValidated = true,
+                StateApplied = false,
+                RegularV4FrontierRepairPressure =
+                    operation.RegularV4FrontierRepairPressure is null
+                        ? null
+                        : operation.RegularV4FrontierRepairPressure with
+                        {
+                            Role = attemptedRole,
+                            Receipts = ImmutableArray.Create(receipt),
+                        },
+            });
+        }
+
+        return ImmutableArray.Create(
+            new FileTransferCoordinatorOperationTransitionSnapshot(
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: attemptedRole,
+                OperationKey: CreateCoordinatorOperationKey(
+                    "regular_v4_frontier_repair_pressure",
+                    attemptedRole,
+                    authority,
+                    generation,
+                    decisionKind),
+                OperationKind: decisionKind,
+                AuthorityId: authority,
+                PredecessorAuthorityId: "(none)",
+                OperationGeneration: generation,
+                BeforeState: "None",
+                AfterState: "None",
+                CommandIdentity: receipt.CommandIdentity,
+                CommandGeneration: receipt.CommandGeneration,
+                CommandFingerprint: receipt.CommandFingerprint,
+                ReceiptIdentity: receipt.ReceiptIdentity,
+                ReceiptGeneration: receipt.ReceiptGeneration,
+                ReceiptStatus: receipt.ReceiptStatus,
+                ReceiptFingerprint: receipt.ReceiptFingerprint,
+                ReceiptValidated: true,
+                StateApplied: false,
+                RouteRuntime: null,
+                RouteTransition: null,
+                RuntimeUnlockRetry: null,
+                ReceiveRecovery: null,
+                FallbackTailYield: null,
+                RegularV4FrontierRepairPressure: new(
+                    attemptedRole,
+                    boundary,
+                    boundary,
+                    "RegularV4FrontierRepairPressure",
+                    "(none)",
+                    0,
+                    -1,
+                    0,
+                    "Unknown",
+                    decisionReason,
+                    checked((int)generation),
+                    0,
+                    decisionStatus,
+                    "(none)",
+                    decisionReason,
+                    false,
+                    false,
+                    "(none)",
+                    "(none)",
+                    0,
+                    "(none)",
+                    ImmutableArray.Create(receipt))));
+    }
 
     internal static FileTransferFallbackTailYieldTransitionDecision
         FinalizeFallbackTailYieldSnapshot(
@@ -1958,7 +2212,8 @@ internal static partial class FileTransferCoordinator
             operation.RouteTransition,
             operation.RuntimeUnlockRetry,
             operation.ReceiveRecovery,
-            operation.FallbackTailYield);
+            operation.FallbackTailYield,
+            operation.RegularV4FrontierRepairPressure);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -2036,40 +2291,7 @@ internal static partial class FileTransferCoordinator
 
         AddFallbackTailYieldOperationDescriptors(state, builder);
 
-        var pressure = persistent.RegularV4FrontierRepairPressure.InstalledBinding ??
-                       persistent.RegularV4FrontierRepairPressure.PendingBinding ??
-                       persistent.RegularV4FrontierRepairPressure.RetainedPredecessorBinding;
-        if (pressure is { } pressureBinding)
-        {
-            builder.Add(new CoordinatorOperationDescriptor(
-                "regular_v4_frontier_repair_pressure",
-                pressureBinding.Authority.DecisionReason,
-                pressureBinding.Authority.AuthorityId.ToString(),
-                pressureBinding.PredecessorAuthorityId?.ToString() ?? "(none)",
-                pressureBinding.Authority.DecisionGeneration,
-                pressureBinding.State.ToString(),
-                pressureBinding.Authority.AuthorityId.ToString(),
-                pressureBinding.InstallGeneration,
-                CalculateSnapshotFingerprint(new
-                {
-                    pressureBinding.Authority.AuthorityId,
-                    pressureBinding.Authority.DecisionGeneration,
-                    pressureBinding.Authority.DecisionReason,
-                    pressureBinding.Authority.RepairKey,
-                    pressureBinding.InstallGeneration,
-                }),
-                pressureBinding.FinalSettlement?.AuthorityId.ToString() ?? "(none)",
-                pressureBinding.FinalSettlement?.DecisionGeneration ?? 0,
-                pressureBinding.FinalSettlement?.Outcome.ToString() ?? "(none)",
-                CalculateSnapshotFingerprint(new
-                {
-                    pressureBinding.FinalSettlement?.AuthorityId,
-                    pressureBinding.FinalSettlement?.DecisionGeneration,
-                    pressureBinding.FinalSettlement?.Outcome,
-                    pressureBinding.FinalSettlement?.DecisionReason,
-                }),
-                pressureBinding.FinalSettlement is not null));
-        }
+        AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
 
         var handoff = persistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
         if (handoff.CurrentAuthority is { } handoffAuthority)
@@ -2108,6 +2330,452 @@ internal static partial class FileTransferCoordinator
         return builder
             .OrderBy(GetCoordinatorOperationKey, StringComparer.Ordinal)
             .ToImmutableArray();
+    }
+
+    private static void
+        AddRegularV4FrontierRepairPressureOperationDescriptors(
+            FileTransferCoordinatorState state,
+            ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var pressure = state.PersistentState.RegularV4FrontierRepairPressure;
+        var pressureAuthorityIds = new[]
+        {
+            pressure.PendingBinding?.Authority.AuthorityId,
+            pressure.InstalledBinding?.Authority.AuthorityId,
+            pressure.RetainedPredecessorBinding?.Authority.AuthorityId,
+        };
+        if (state.CurrentRepairReplayDecision is { } currentRepair &&
+            pressureAuthorityIds.Any(candidate =>
+                candidate is { IsDefault: false } exact &&
+                exact == currentRepair.AuthorityId))
+        {
+            builder.Add(CreateRegularV4PressureRepairAuthorityDescriptor(
+                state,
+                currentRepair,
+                "repair_authority_current"));
+        }
+
+        AddBinding(
+            "pressure_binding_pending",
+            pressure.PendingBinding,
+            pressure.PendingInstallCommand,
+            null);
+        AddBinding(
+            "pressure_binding_installed",
+            pressure.InstalledBinding,
+            pressure.InstalledInstallCommand,
+            pressure.InstalledInstallReceipt);
+        AddBinding(
+            "pressure_binding_retained_predecessor",
+            pressure.RetainedPredecessorBinding,
+            pressure.RetainedPredecessorInstallCommand,
+            pressure.RetainedPredecessorInstallReceipt);
+
+        if (pressure.LastSettlement is { } settlement)
+        {
+            builder.Add(CreateRegularV4PressureSettlementDescriptor(
+                state,
+                "repair_authority_terminal",
+                settlement,
+                pressure.LastSettlementApplyReceipt));
+            builder.Add(CreateRegularV4PressureSettlementDescriptor(
+                state,
+                "pressure_settlement_terminal",
+                settlement,
+                pressure.LastSettlementApplyReceipt));
+        }
+        if (pressure.LastRecoveryHandoff is { } handoff)
+        {
+            builder.Add(CreateRegularV4PressureRecoveryHandoffDescriptor(
+                state,
+                "recovery_handoff_terminal",
+                handoff,
+                pressure.LastSettlementApplyReceipt,
+                "Committed"));
+        }
+
+        return;
+
+        void AddBinding(
+            string role,
+            RegularV4FrontierRepairPressureBinding? binding,
+            FileTransferRegularV4FrontierRepairPressureInstallCommand? command,
+            FileTransferRegularV4FrontierRepairPressureInstallReceipt? receipt)
+        {
+            if (binding is { } exact)
+            {
+                builder.Add(CreateRegularV4PressureBindingDescriptor(
+                    state,
+                    role,
+                    exact,
+                    command,
+                    receipt));
+            }
+        }
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRegularV4PressureRepairAuthorityDescriptor(
+            FileTransferCoordinatorState state,
+            RepairReplayDecision repair,
+            string role)
+    {
+        var boundary = CreateStateBoundarySnapshot(state);
+        var authorityId = repair.AuthorityId.ToString();
+        return new CoordinatorOperationDescriptor(
+            "regular_v4_frontier_repair_pressure",
+            repair.RepairKind.ToString(),
+            authorityId,
+            repair.PredecessorAuthorityId?.ToString() ?? "(none)",
+            repair.RepairGeneration,
+            "Authorized",
+            authorityId,
+            repair.RepairGeneration,
+            CalculateSnapshotFingerprint(repair),
+            "(none)",
+            0,
+            "(none)",
+            "(none)",
+            false,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "regular_v4_frontier_repair_pressure",
+                role,
+                authorityId,
+                repair.RepairGeneration,
+                repair.RepairKind.ToString()),
+            RegularV4FrontierRepairPressure: new(
+                role,
+                boundary,
+                boundary,
+                repair.RepairKind.ToString(),
+                "(none)",
+                0,
+                -1,
+                0,
+                repair.RoutePublicationToken?.TargetTransport.ToString() ??
+                    "Unknown",
+                repair.Reason,
+                repair.RepairGeneration,
+                0,
+                "Authorized",
+                "(none)",
+                "(none)",
+                false,
+                false,
+                "(none)",
+                "(none)",
+                0,
+                "(none)",
+                ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
+                    .Empty));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRegularV4PressureBindingDescriptor(
+            FileTransferCoordinatorState state,
+            string role,
+            RegularV4FrontierRepairPressureBinding binding,
+            FileTransferRegularV4FrontierRepairPressureInstallCommand? command,
+            FileTransferRegularV4FrontierRepairPressureInstallReceipt? receipt)
+    {
+        var authority = binding.Authority;
+        var authorityId = authority.AuthorityId.ToString();
+        var receipts = ImmutableArray.CreateBuilder<
+            FileTransferCoordinatorReceiptTransitionSnapshot>();
+        if (command is not null)
+        {
+            var exactReceipt = receipt is not null &&
+                               receipt.Authority == authority &&
+                               receipt.InstallGeneration ==
+                               binding.InstallGeneration
+                ? receipt
+                : null;
+            receipts.Add(new FileTransferCoordinatorReceiptTransitionSnapshot(
+                "pressure_install",
+                $"{authorityId}:pressure_install",
+                binding.InstallGeneration,
+                CalculateSnapshotFingerprint(command),
+                exactReceipt is null
+                    ? $"{authorityId}:pressure_install:pending"
+                    : $"{authorityId}:pressure_install",
+                exactReceipt?.InstallGeneration ?? binding.InstallGeneration,
+                exactReceipt?.Status.ToString() ?? "Pending",
+                exactReceipt?.Reason ?? "pressure_install_pending",
+                CalculateSnapshotFingerprint(exactReceipt),
+                exactReceipt?.Status is
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus
+                        .Installed or
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus
+                        .Idempotent));
+        }
+        if (binding.FinalSettlement is { } settlement)
+        {
+            receipts.Add(CreateRegularV4PressureSettlementReceiptSnapshot(
+                settlement,
+                state.PersistentState.RegularV4FrontierRepairPressure
+                    .LastSettlementApplyReceipt));
+        }
+
+        var source = CreateRegularV4PressureSourceBoundary(state, authority);
+        var effective = CreateStateBoundarySnapshot(state);
+        var selectedReceipt = receipts.LastOrDefault();
+        return new CoordinatorOperationDescriptor(
+            "regular_v4_frontier_repair_pressure",
+            authority.DecisionReason,
+            authorityId,
+            binding.PredecessorAuthorityId?.ToString() ?? "(none)",
+            authority.DecisionGeneration,
+            binding.State.ToString(),
+            command is null ? authorityId : $"{authorityId}:pressure_install",
+            command?.InstallGeneration ?? authority.DecisionGeneration,
+            CalculateSnapshotFingerprint(command ?? (object)authority),
+            selectedReceipt?.ReceiptIdentity ?? "(none)",
+            selectedReceipt?.ReceiptGeneration ?? 0,
+            selectedReceipt?.ReceiptStatus ?? "(none)",
+            selectedReceipt?.ReceiptFingerprint ?? "(none)",
+            selectedReceipt?.ReceiptValidated ?? false,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "regular_v4_frontier_repair_pressure",
+                role,
+                authorityId,
+                binding.InstallGeneration,
+                authority.DecisionReason),
+            RegularV4FrontierRepairPressure: new(
+                role,
+                source,
+                effective,
+                "RegularV4FrontierRepairPressure",
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.TargetTransport.ToString(),
+                binding.PressureReason,
+                authority.DecisionGeneration,
+                binding.InstallGeneration,
+                binding.State.ToString(),
+                binding.FinalSettlement?.Outcome.ToString() ?? "(none)",
+                binding.FinalSettlement?.DecisionReason ?? "(none)",
+                false,
+                false,
+                binding.FinalSettlement?.SuccessorAuthorityId?.ToString() ??
+                    "(none)",
+                "(none)",
+                0,
+                "(none)",
+                receipts.ToImmutable()));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRegularV4PressureSettlementDescriptor(
+            FileTransferCoordinatorState state,
+            string role,
+            FileTransferRegularV4FrontierRepairSettlement settlement,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+                receipt)
+    {
+        var authorityId = settlement.AuthorityId.ToString();
+        var receiptSnapshot =
+            CreateRegularV4PressureSettlementReceiptSnapshot(
+                settlement,
+                receipt);
+        var boundary = CreateStateBoundarySnapshot(state);
+        return new CoordinatorOperationDescriptor(
+            "regular_v4_frontier_repair_pressure",
+            "PressureSettlement",
+            authorityId,
+            "(none)",
+            settlement.DecisionGeneration,
+            receiptSnapshot.ReceiptValidated ? "Applied" : "Prepared",
+            receiptSnapshot.CommandIdentity,
+            receiptSnapshot.CommandGeneration,
+            receiptSnapshot.CommandFingerprint,
+            receiptSnapshot.ReceiptIdentity,
+            receiptSnapshot.ReceiptGeneration,
+            receiptSnapshot.ReceiptStatus,
+            receiptSnapshot.ReceiptFingerprint,
+            receiptSnapshot.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "regular_v4_frontier_repair_pressure",
+                role,
+                authorityId,
+                settlement.DecisionGeneration,
+                settlement.Outcome.ToString()),
+            RegularV4FrontierRepairPressure: new(
+                role,
+                CreateRegularV4PressureSourceBoundary(state, settlement),
+                boundary,
+                "RegularV4FrontierRepairPressure",
+                settlement.RepairKey,
+                settlement.FrontierChunkIndex,
+                settlement.DurableReceivedHighestChunkIndex,
+                settlement.RequestedChunkCount,
+                settlement.TargetTransport.ToString(),
+                settlement.DecisionReason,
+                settlement.DecisionGeneration,
+                receipt?.Command.InstallGeneration ?? 0,
+                receiptSnapshot.ReceiptValidated ? "Settled" : "Prepared",
+                settlement.Outcome.ToString(),
+                settlement.DecisionReason,
+                receipt?.CurrentAuthorityCleared ?? false,
+                receipt?.RetainedPredecessorCleared ?? false,
+                settlement.SuccessorAuthorityId?.ToString() ?? "(none)",
+                "(none)",
+                0,
+                "(none)",
+                ImmutableArray.Create(receiptSnapshot)));
+    }
+
+    private static CoordinatorOperationDescriptor
+        CreateRegularV4PressureRecoveryHandoffDescriptor(
+            FileTransferCoordinatorState state,
+            string role,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition handoff,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+                receipt,
+            string lifecycle)
+    {
+        var binding = handoff.PressureBinding;
+        var authority = binding.Authority;
+        var recovery = handoff.ReceiveRecoveryOperation;
+        var authorityId = authority.AuthorityId.ToString();
+        var receiptSnapshot =
+            CreateRegularV4PressureSettlementReceiptSnapshot(
+                handoff.Settlement,
+                receipt);
+        return new CoordinatorOperationDescriptor(
+            "regular_v4_frontier_repair_pressure",
+            "PressureRecoveryHandoff",
+            authorityId,
+            binding.PredecessorAuthorityId?.ToString() ?? "(none)",
+            recovery.OperationGeneration,
+            lifecycle,
+            $"{authorityId}:recovery_handoff",
+            recovery.OperationGeneration,
+            CalculateSnapshotFingerprint(handoff),
+            receiptSnapshot.ReceiptIdentity,
+            receiptSnapshot.ReceiptGeneration,
+            receiptSnapshot.ReceiptStatus,
+            receiptSnapshot.ReceiptFingerprint,
+            receiptSnapshot.ReceiptValidated,
+            OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey(
+                "regular_v4_frontier_repair_pressure",
+                role,
+                authorityId,
+                recovery.OperationGeneration,
+                "PressureRecoveryHandoff"),
+            RegularV4FrontierRepairPressure: new(
+                role,
+                CreateRegularV4PressureSourceBoundary(state, authority),
+                CreateStateBoundarySnapshot(state),
+                "RegularV4FrontierRepairPressure",
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.TargetTransport.ToString(),
+                binding.PressureReason,
+                authority.DecisionGeneration,
+                binding.InstallGeneration,
+                lifecycle,
+                handoff.Settlement.Outcome.ToString(),
+                handoff.Settlement.DecisionReason,
+                receipt?.CurrentAuthorityCleared ?? false,
+                receipt?.RetainedPredecessorCleared ?? false,
+                handoff.Settlement.SuccessorAuthorityId?.ToString() ??
+                    "(none)",
+                recovery.AuthorityId.ToString(),
+                recovery.OperationGeneration,
+                recovery.BridgeRecoveryDecision.RecoveryKind.ToString(),
+                ImmutableArray.Create(receiptSnapshot)));
+    }
+
+    private static FileTransferCoordinatorReceiptTransitionSnapshot
+        CreateRegularV4PressureSettlementReceiptSnapshot(
+            FileTransferRegularV4FrontierRepairSettlement settlement,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+                receipt)
+    {
+        var exactReceipt = receipt is not null &&
+                           receipt.Command.Settlement == settlement
+            ? receipt
+            : null;
+        var authorityId = settlement.AuthorityId.ToString();
+        return new FileTransferCoordinatorReceiptTransitionSnapshot(
+            "pressure_settlement",
+            $"{authorityId}:pressure_settlement",
+            settlement.DecisionGeneration,
+            CalculateSnapshotFingerprint(
+                exactReceipt?.Command ?? (object)settlement),
+            exactReceipt is null
+                ? $"{authorityId}:pressure_settlement:pending"
+                : $"{authorityId}:pressure_settlement",
+            exactReceipt?.Command.InstallGeneration ??
+                settlement.DecisionGeneration,
+            exactReceipt?.Status.ToString() ?? "Prepared",
+            exactReceipt?.Reason ?? settlement.DecisionReason,
+            CalculateSnapshotFingerprint(exactReceipt),
+            exactReceipt?.Status is
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                    .Applied or
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                    .Idempotent);
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateRegularV4PressureSourceBoundary(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairAuthority authority)
+    {
+        var current = CreateStateBoundarySnapshot(state);
+        return current with
+        {
+            Route = FileTransferRouteResolver.Resolve(
+                    authority.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                    authority.TargetTransport == FileTransferTransportKind.Tuna
+                        ? FileTransferRoute.FileTunaV4
+                        : FileTransferRoute.RegularNknV4Fast)
+                .RuntimeDescriptor.TelemetryToken,
+            ProtocolVersion = authority.ProtocolVersion,
+            LiveRouteEpoch = authority.LiveRouteEpoch,
+            RoutePublicationGeneration = authority.RoutePublicationGeneration,
+            RouteCommitGeneration = authority.RouteCommitGeneration ?? 0,
+            RuntimeGeneration = authority.RuntimeGeneration,
+            TerminalGeneration = authority.TerminalGeneration,
+            LegGeneration = checked((int)authority.LegGeneration),
+            TransportEpoch = authority.TransportEpoch,
+            BridgeRecoveryGeneration = authority.BridgeRecoveryGeneration,
+        };
+    }
+
+    private static FileTransferCoordinatorStateBoundarySnapshot
+        CreateRegularV4PressureSourceBoundary(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var current = CreateStateBoundarySnapshot(state);
+        return current with
+        {
+            Route = FileTransferRouteResolver.Resolve(
+                    settlement.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                    settlement.TargetTransport == FileTransferTransportKind.Tuna
+                        ? FileTransferRoute.FileTunaV4
+                        : FileTransferRoute.RegularNknV4Fast)
+                .RuntimeDescriptor.TelemetryToken,
+            ProtocolVersion = settlement.ProtocolVersion,
+            LiveRouteEpoch = settlement.LiveRouteEpoch,
+            RoutePublicationGeneration = settlement.RoutePublicationGeneration,
+            RouteCommitGeneration = settlement.RouteCommitGeneration ?? 0,
+            RuntimeGeneration = settlement.RuntimeGeneration,
+            TerminalGeneration = settlement.TerminalGeneration,
+            LegGeneration = checked((int)settlement.LegGeneration),
+            TransportEpoch = settlement.TransportEpoch,
+            BridgeRecoveryGeneration = settlement.BridgeRecoveryGeneration,
+        };
     }
 
     private static void AddRuntimeUnlockRetryOperationDescriptors(
@@ -4463,5 +5131,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorReceiveRecoveryOperationSnapshot?
             ReceiveRecovery = null,
         FileTransferCoordinatorFallbackTailYieldOperationSnapshot?
-            FallbackTailYield = null);
+            FallbackTailYield = null,
+        FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot?
+            RegularV4FrontierRepairPressure = null);
 }

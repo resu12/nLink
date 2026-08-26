@@ -973,6 +973,12 @@ internal readonly record struct RegularV4FrontierRepairPressureBindingDecision(
     FileTransferRegularV4FrontierRepairPressureSettlementCommand? SettlementCommand)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
+    {
+        get;
+        init;
+    }
 }
 
 internal readonly record struct RegularV4FrontierRepairPressureSubstate(
@@ -2699,6 +2705,12 @@ internal readonly record struct RegularV4FrontierRepairPressureRecoveryHandoffDe
 
     public RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision?
         InitialActivationHoldDecision
+    {
+        get;
+        init;
+    }
+
+    public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
     {
         get;
         init;
@@ -7058,7 +7070,7 @@ internal static partial class FileTransferCoordinator
                 "filetransfer_route_transition_pressure_not_installed");
         }
 
-        return PrepareRegularV4FrontierRepairPressureSettlement(
+        return PrepareRegularV4FrontierRepairPressureSettlementCore(
             state,
             CreateFileTransferRouteTransitionPressureSettlement(
                 installed.Authority));
@@ -7166,7 +7178,9 @@ internal static partial class FileTransferCoordinator
                 CreateFileTransferRouteTransitionPressureSettlement(
                     installed.Authority);
             var preparedPressure =
-                PrepareRegularV4FrontierRepairPressureSettlement(state, expectedSettlement);
+                PrepareRegularV4FrontierRepairPressureSettlementCore(
+                    state,
+                    expectedSettlement);
             if (pressureSettlementReceipt is null ||
                 preparedPressure.Status !=
                     RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
@@ -7181,7 +7195,8 @@ internal static partial class FileTransferCoordinator
                     "filetransfer_route_transition_pressure_apply_receipt_missing");
             }
 
-            var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(
+            var pressureCommit =
+                CommitRegularV4FrontierRepairPressureSettlementCore(
                 state,
                 pressureSettlementReceipt);
             if (pressureCommit.Status !=
@@ -14659,6 +14674,22 @@ internal static partial class FileTransferCoordinator
             RepairReplayDecision repairDecision,
             RegularV4FrontierRepairAuthorityRequest authorityRequest,
             string pressureReason)
+        => FinalizeRegularV4FrontierRepairPressureSnapshot(
+            state,
+            StageRegularV4FrontierRepairPressureBindingCore(
+                state,
+                repairDecision,
+                authorityRequest,
+                pressureReason),
+            nameof(StageRegularV4FrontierRepairPressureBinding),
+            new { repairDecision, authorityRequest, pressureReason });
+
+    private static RegularV4FrontierRepairPressureBindingDecision
+        StageRegularV4FrontierRepairPressureBindingCore(
+            FileTransferCoordinatorState state,
+            RepairReplayDecision repairDecision,
+            RegularV4FrontierRepairAuthorityRequest authorityRequest,
+            string pressureReason)
     {
         var normalizedReason = NormalizeReason(pressureReason);
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
@@ -14801,6 +14832,16 @@ internal static partial class FileTransferCoordinator
         CommitRegularV4FrontierRepairPressureBinding(
             FileTransferCoordinatorState state,
             FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
+        => FinalizeRegularV4FrontierRepairPressureSnapshot(
+            state,
+            CommitRegularV4FrontierRepairPressureBindingCore(state, receipt),
+            nameof(CommitRegularV4FrontierRepairPressureBinding),
+            receipt);
+
+    private static RegularV4FrontierRepairPressureBindingDecision
+        CommitRegularV4FrontierRepairPressureBindingCore(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairPressureInstallReceipt receipt)
     {
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (pressureState.InstalledBinding is { } installed &&
@@ -14912,6 +14953,18 @@ internal static partial class FileTransferCoordinator
         PrepareRegularV4FrontierRepairPressureSettlement(
             FileTransferCoordinatorState state,
             FileTransferRegularV4FrontierRepairSettlement settlement)
+        => FinalizeRegularV4FrontierRepairPressureSnapshot(
+            state,
+            PrepareRegularV4FrontierRepairPressureSettlementCore(
+                state,
+                settlement),
+            nameof(PrepareRegularV4FrontierRepairPressureSettlement),
+            settlement);
+
+    private static RegularV4FrontierRepairPressureBindingDecision
+        PrepareRegularV4FrontierRepairPressureSettlementCore(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairSettlement settlement)
     {
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (pressureState.LastSettlement == settlement)
@@ -14994,9 +15047,19 @@ internal static partial class FileTransferCoordinator
         CommitRegularV4FrontierRepairPressureSettlement(
             FileTransferCoordinatorState state,
             FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+        => FinalizeRegularV4FrontierRepairPressureSnapshot(
+            state,
+            CommitRegularV4FrontierRepairPressureSettlementCore(state, receipt),
+            nameof(CommitRegularV4FrontierRepairPressureSettlement),
+            receipt);
+
+    private static RegularV4FrontierRepairPressureBindingDecision
+        CommitRegularV4FrontierRepairPressureSettlementCore(
+            FileTransferCoordinatorState state,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
     {
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        var prepared = PrepareRegularV4FrontierRepairPressureSettlement(
+        var prepared = PrepareRegularV4FrontierRepairPressureSettlementCore(
             state,
             receipt.Command.Settlement);
         if (prepared.Status == RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent)
@@ -15117,6 +15180,18 @@ internal static partial class FileTransferCoordinator
         PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryObservation receiveRecoveryObservation)
+        => FinalizeRegularV4FrontierRepairPressureSnapshot(
+            state,
+            PrepareRegularV4FrontierRepairPressureRecoveryHandoffCore(
+                state,
+                receiveRecoveryObservation),
+            nameof(PrepareRegularV4FrontierRepairPressureRecoveryHandoff),
+            receiveRecoveryObservation);
+
+    private static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        PrepareRegularV4FrontierRepairPressureRecoveryHandoffCore(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryObservation receiveRecoveryObservation)
     {
         if (!TryCreateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
                 state,
@@ -15139,6 +15214,20 @@ internal static partial class FileTransferCoordinator
 
     internal static RegularV4FrontierRepairPressureRecoveryHandoffDecision
         CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            FileTransferCoordinatorState state,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+        => FinalizeRegularV4FrontierRepairPressureSnapshot(
+            state,
+            CommitRegularV4FrontierRepairPressureRecoveryHandoffCore(
+                state,
+                transition,
+                receipt),
+            nameof(CommitRegularV4FrontierRepairPressureRecoveryHandoff),
+            new { transition, receipt });
+
+    private static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        CommitRegularV4FrontierRepairPressureRecoveryHandoffCore(
             FileTransferCoordinatorState state,
             RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
             FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
@@ -15182,7 +15271,9 @@ internal static partial class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_recovery_handoff_apply_receipt_mismatch");
         }
 
-        var pressureCommit = CommitRegularV4FrontierRepairPressureSettlement(state, receipt);
+        var pressureCommit = CommitRegularV4FrontierRepairPressureSettlementCore(
+            state,
+            receipt);
         if (pressureCommit.Status is not RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
         {
             return RegularV4PressureRecoveryHandoffDecision(
@@ -15275,7 +15366,10 @@ internal static partial class FileTransferCoordinator
         }
 
         var settlement = CreateRegularV4FrontierRepairPressureRecoveryHandoffSettlement(binding.Authority);
-        var preparedSettlement = PrepareRegularV4FrontierRepairPressureSettlement(state, settlement);
+        var preparedSettlement =
+            PrepareRegularV4FrontierRepairPressureSettlementCore(
+                state,
+                settlement);
         if (preparedSettlement.Status != RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
             preparedSettlement.SettlementCommand is not { } settlementCommand)
         {
@@ -15403,7 +15497,8 @@ internal static partial class FileTransferCoordinator
 
         var expectedSettlement =
             CreateRegularV4FrontierRepairPressureRecoveryHandoffSettlement(binding.Authority);
-        var preparedSettlement = PrepareRegularV4FrontierRepairPressureSettlement(
+        var preparedSettlement =
+            PrepareRegularV4FrontierRepairPressureSettlementCore(
             state,
             expectedSettlement);
         if (preparedSettlement.Status !=

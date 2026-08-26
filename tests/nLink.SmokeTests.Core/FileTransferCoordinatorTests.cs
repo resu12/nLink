@@ -3344,6 +3344,148 @@ public sealed class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public void RegularV4FrontierRepairPressure_CoordinatorAuthorsTypedLifecycleSnapshots()
+    {
+        var (authorizedState, decision) = AuthorizeRegularV4FrontierRepair();
+        var state = authorizedState with
+        {
+            PersistentState = authorizedState.PersistentState with
+            {
+                CoordinatorInstanceId = "regular-v4-pressure-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
+        };
+        var staged = FileTransferCoordinator
+            .StageRegularV4FrontierRepairPressureBinding(
+                state,
+                decision,
+                RegularV4PressureAuthorityRequest(
+                    "regular-v4-pressure:snapshot"),
+                "regular_v4_receiver_frontier_repair_due");
+        var stagedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                staged.SnapshotEnvelope);
+        Assert.Equal(0, stagedEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(1, stagedEnvelope.Aggregate.AfterStateGeneration);
+        var pending = Assert.Single(
+            stagedEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "pressure_binding_pending",
+                AfterState: "Pending",
+            });
+        Assert.Equal(
+            decision.AuthorityId.ToString(),
+            pending.AuthorityId);
+        Assert.Equal(
+            "regular-v4-pressure:snapshot",
+            pending.RegularV4FrontierRepairPressure?.RepairKey);
+        Assert.Equal(
+            state.CurrentDataSessionGeneration,
+            pending.RegularV4FrontierRepairPressure?.SourceBoundary
+                .DataSessionGeneration);
+
+        var binding = Assert.IsType<
+            RegularV4FrontierRepairPressureBinding>(staged.Binding);
+        var committed = FileTransferCoordinator
+            .CommitRegularV4FrontierRepairPressureBinding(
+                staged.State,
+                new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    binding.Authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus
+                        .Installed,
+                    "installed",
+                    binding.InstallGeneration,
+                    binding.PressureReason));
+        var committedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                committed.SnapshotEnvelope);
+        Assert.Equal(1, committedEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(2, committedEnvelope.Aggregate.AfterStateGeneration);
+        var installed = Assert.Single(
+            committedEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "pressure_binding_installed",
+                AfterState: "Installed",
+            });
+        Assert.True(installed.ReceiptValidated);
+        Assert.Contains(
+            installed.RegularV4FrontierRepairPressure!.Receipts,
+            receipt => receipt.Stage == "pressure_install" &&
+                receipt.ReceiptValidated);
+
+        var settlement = RegularV4PressureSettlement(
+            binding.Authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome
+                .ProgressObserved);
+        var prepared = FileTransferCoordinator
+            .PrepareRegularV4FrontierRepairPressureSettlement(
+                committed.State,
+                settlement);
+        var preparedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                prepared.SnapshotEnvelope);
+        Assert.Equal(2, preparedEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(2, preparedEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Contains(
+            preparedEnvelope.Aggregate.Operations,
+            operation => operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.OperationRole == "pressure_settlement_prepared" &&
+                !operation.StateApplied);
+
+        var settlementCommand = Assert.IsType<
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand>(
+                prepared.SettlementCommand);
+        var settled = FileTransferCoordinator
+            .CommitRegularV4FrontierRepairPressureSettlement(
+                prepared.State,
+                new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    settlementCommand,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                        .Applied,
+                    "current_retired",
+                    CurrentAuthorityCleared: true,
+                    RetainedPredecessorCleared: false));
+        var settledEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                settled.SnapshotEnvelope);
+        Assert.Equal(2, settledEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(3, settledEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Contains(
+            settledEnvelope.Aggregate.Operations,
+            operation => operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.OperationRole == "repair_authority_terminal");
+        var terminal = Assert.Single(
+            settledEnvelope.Aggregate.Operations,
+            operation => operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.OperationRole == "pressure_settlement_terminal");
+        Assert.True(terminal.ReceiptValidated);
+        Assert.True(
+            terminal.RegularV4FrontierRepairPressure!
+                .CurrentAuthorityCleared);
+        Assert.False(
+            terminal.RegularV4FrontierRepairPressure
+                .RetainedPredecessorCleared);
+
+        Assert.Contains(
+            committedEnvelope.Aggregate.Operations,
+            operation => operation.OperationRole ==
+                "pressure_binding_installed");
+        Assert.DoesNotContain(
+            committedEnvelope.Aggregate.Operations,
+            operation => operation.OperationRole ==
+                "pressure_settlement_terminal");
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
     public void RegularV4FrontierRepairPressure_CoordinatorOwnsInstallAndExactSettlement()
     {
         var (initialState, initialDecision) = AuthorizeRegularV4FrontierRepair();
