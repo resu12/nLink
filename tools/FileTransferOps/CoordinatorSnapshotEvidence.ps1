@@ -1047,6 +1047,190 @@ function Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Left) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Right)) {
+        return $false
+    }
+    foreach ($name in @(
+            'route', 'protocolVersion', 'liveRouteEpoch',
+            'routePublicationGeneration', 'routeCommitGeneration',
+            'runtimeGeneration', 'terminalGeneration', 'legGeneration',
+            'transportEpoch', 'bridgeRecoveryGeneration',
+            'dataSessionIdentity', 'dataSessionGeneration')) {
+        $leftValue = Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Left -Name $name -Default $null
+        $rightValue = Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Right -Name $name -Default $null
+        if ([string]$leftValue -cne [string]$rightValue) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotFallbackCheckpointScopeMutation {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    $decisionKind = [string]$Envelope.decisionKind
+    if ($decisionKind -notin @(
+            'FallbackCheckpointRequested',
+            'FallbackCheckpointAccepted') -or
+        [string]$Envelope.decisionStatus -cne 'Accepted' -or
+        [string]::IsNullOrWhiteSpace([string]$Envelope.decisionReason) -or
+        $null -eq $Envelope.aggregate) {
+        return $false
+    }
+
+    $aggregate = $Envelope.aggregate
+    $beforeBoundary = $aggregate.beforeBoundary
+    $afterBoundary = $aggregate.afterBoundary
+    if ([long]$aggregate.afterStateGeneration -ne
+            [long]$aggregate.beforeStateGeneration + 1L -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$aggregate.beforeStateFingerprint) -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$aggregate.afterStateFingerprint) -or
+        [string]$aggregate.beforeStateFingerprint -ceq
+            [string]$aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint `
+            -Left $beforeBoundary -Right $afterBoundary) -or
+        [string]$beforeBoundary.route -cne 'post_tuna_fallback_v6' -or
+        [int]$beforeBoundary.protocolVersion -ne 6) {
+        return $false
+    }
+
+    $beforeCheckpointId = [string]$beforeBoundary.checkpointRequestId
+    $afterCheckpointId = [string]$afterBoundary.checkpointRequestId
+    $beforeCheckpointGeneration =
+        [long]$beforeBoundary.checkpointGeneration
+    $afterCheckpointGeneration =
+        [long]$afterBoundary.checkpointGeneration
+    if ($decisionKind -ceq 'FallbackCheckpointRequested') {
+        return $beforeCheckpointGeneration -eq 0 -and
+            $beforeCheckpointId -ceq '(none)' -and
+            $afterCheckpointGeneration -gt 0 -and
+            $afterCheckpointId -notin @('', '(none)')
+    }
+
+    return $beforeCheckpointGeneration -gt 0 -and
+        $beforeCheckpointId -notin @('', '(none)') -and
+        $afterCheckpointGeneration -eq 0 -and
+        $afterCheckpointId -ceq '(none)'
+}
+
+function Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if (-not (Test-FileTransferCoordinatorSnapshotFallbackCheckpointScopeMutation `
+            -Envelope $Envelope) -or
+        -not [bool]($Operation.stateApplied)) {
+        return $false
+    }
+
+    $family = [string]$Operation.family
+    $role = [string]$Operation.operationRole
+    $kind = [string]$Operation.operationKind
+    $beforeState = [string]$Operation.beforeState
+    $afterState = [string]$Operation.afterState
+    switch ($family) {
+        'route_transition' {
+            return [bool]($Operation.receiptValidated) -and
+                ((($role -ceq 'terminal') -and
+                  ($kind -ceq 'TunaV4ToPostTunaFallbackV6') -and
+                  ($beforeState -ceq 'Committed') -and
+                  ($afterState -ceq 'Committed')) -or
+                 (($role -ceq 'fallback_v6_bootstrap') -and
+                  ($kind -ceq 'FallbackV6ProofBootstrap') -and
+                  ($beforeState -ceq 'Delivered') -and
+                  ($afterState -ceq 'Delivered')))
+        }
+        'receive_recovery' {
+            if ($role -ceq 'initial_activation_envelope_refresh') {
+                return ($kind -ceq 'InitialActivationEnvelopeRefresh') -and
+                    ($beforeState -ceq 'Pending') -and
+                    ($afterState -ceq 'Pending') -and
+                    ([string]$Operation.receiptStatus -ceq 'Pending') -and
+                    -not [bool]($Operation.receiptValidated)
+            }
+            return [bool]($Operation.receiptValidated) -and
+                ((($role -ceq 'initial_activation_hold_terminal') -and
+                  ($kind -ceq 'InitialActivationHold') -and
+                  ($beforeState -ceq 'Released') -and
+                  ($afterState -ceq 'Released')) -or
+                 (($role -ceq 'operation_terminal') -and
+                  ($kind -ceq 'BridgeReceiveStallRecovery') -and
+                  ($beforeState -ceq 'Invalidated:None') -and
+                  ($afterState -ceq 'Invalidated:None')))
+        }
+        'fallback_tail_yield' {
+            $related = @($Envelope.aggregate.operations | Where-Object {
+                    [string]$_.family -ceq 'fallback_tail_yield' -and
+                    [string]$_.authorityId -ceq
+                        [string]$Operation.authorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$Operation.operationGeneration -and
+                    [string]$_.operationKind -ceq $kind
+                })
+            if ($kind -cne 'Quiescent' -or $related.Count -ne 2) {
+                return $false
+            }
+            $current = @($related | Where-Object {
+                    [string]$_.operationRole -ceq 'yield_current' -and
+                    [string]$_.beforeState -ceq 'LocalProofObserved' -and
+                    [string]$_.afterState -ceq 'None' -and
+                    [bool]($_.receiptValidated)
+                })
+            $terminal = @($related | Where-Object {
+                    [string]$_.operationRole -ceq 'yield_terminal' -and
+                    [string]$_.beforeState -ceq 'None' -and
+                    [string]$_.afterState -ceq 'Invalidated' -and
+                    [bool]($_.receiptValidated) -and
+                    [string]$_.fallbackTailYield.invalidationReason -ceq
+                        'fallback_checkpoint_requested'
+                })
+            return $current.Count -eq 1 -and $terminal.Count -eq 1
+        }
+        'regular_v4_frontier_repair_pressure' {
+            return [bool]($Operation.receiptValidated) -and
+                ((($role -ceq 'pressure_settlement_terminal') -and
+                  ($kind -ceq 'PressureSettlement') -and
+                  ($beforeState -ceq 'Applied') -and
+                  ($afterState -ceq 'Applied')) -or
+                 (($role -ceq 'repair_authority_terminal') -and
+                  ($kind -ceq 'PressureSettlement') -and
+                  ($beforeState -ceq 'Applied') -and
+                  ($afterState -ceq 'Applied')) -or
+                 (($role -ceq 'recovery_handoff_terminal') -and
+                  ($kind -ceq 'PressureRecoveryHandoff') -and
+                  ($beforeState -ceq 'Committed') -and
+                  ($afterState -ceq 'Committed')))
+        }
+        default { return $false }
+    }
+}
+
+function Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ([string]$Envelope.decisionKind -in @(
+            'FallbackCheckpointRequested',
+            'FallbackCheckpointAccepted')) {
+        return 'fallback_checkpoint_scope_transition_omitted_from_cross_family_catalog'
+    }
+    return '(none)'
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -1067,8 +1251,12 @@ function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
     if ([string]$Operation.operationKey -cne $expectedOperationKey) {
         return $false
     }
-    if ([string]$Envelope.decisionKind -notin
-        $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
+    $isExactFallbackCheckpointOperation =
+        Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation `
+            -Envelope $Envelope -Operation $Operation
+    if (([string]$Envelope.decisionKind -notin
+            $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -and
+         -not $isExactFallbackCheckpointOperation) -or
         [string]$Envelope.decisionStatus -notin @(
             'Accepted', 'Idempotent', 'Rejected', 'Prepared', 'Draining',
             'Committed', 'Invalidated', 'SupersessionStaged') -or
@@ -1329,7 +1517,9 @@ function Test-FileTransferCoordinatorSnapshotFamily3OperationCatalog {
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
-        $isExactPressureRecoveryHandoffCommit
+        $isExactPressureRecoveryHandoffCommit -or
+        (Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation `
+            -Envelope $Envelope -Operation $Operation)
     if ([string]$Operation.operationKey -cne $expectedOperationKey -or
         -not $knownAtomicDecision -or
         [string]$Operation.operationRole -notin
@@ -1389,6 +1579,8 @@ function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
+        (Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation `
+            -Envelope $Envelope -Operation $Operation) -or
         $decisionKind -in @(
             'StartTransfer', 'RoutePublication', 'RouteCommitPublication',
             'Terminalized', 'LegacyFamilyCoordinatorDecision',
@@ -1458,6 +1650,8 @@ function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
+        (Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation `
+            -Envelope $Envelope -Operation $Operation) -or
         $decisionKind -in @(
             'StartTransfer', 'RoutePublication', 'RouteCommitPublication',
             'Terminalized', 'LegacyFamilyCoordinatorDecision',
@@ -2540,6 +2734,11 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             Get-FileTransferCoordinatorSnapshotFamily1AttemptReceiptStageVariant `
                                 -Envelope $envelope `
                                 -Operation $operation
+                        if ($attemptVariant -ceq '(none)') {
+                            $attemptVariant =
+                                Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+                                    -Envelope $envelope
+                        }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($attemptVariant -cne '(none)') {
                             $reason = "$reason|$attemptVariant"
@@ -2550,25 +2749,53 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog `
                             -Envelope $envelope `
                             -Operation $operation)) {
-                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        $variant =
+                            Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+                                -Envelope $envelope
+                        $reason = 'snapshot_operation_catalog_mismatch'
+                        if ($variant -cne '(none)') {
+                            $reason = "$reason|$variant"
+                        }
+                        $errors.Add("$reason`:$($record.LineIndex)")
                         break
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily3OperationCatalog `
                             -Envelope $envelope `
                             -Operation $operation)) {
-                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        $variant =
+                            Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+                                -Envelope $envelope
+                        $reason = 'snapshot_operation_catalog_mismatch'
+                        if ($variant -cne '(none)') {
+                            $reason = "$reason|$variant"
+                        }
+                        $errors.Add("$reason`:$($record.LineIndex)")
                         break
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog `
                             -Envelope $envelope `
                             -Operation $operation)) {
-                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        $variant =
+                            Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+                                -Envelope $envelope
+                        $reason = 'snapshot_operation_catalog_mismatch'
+                        if ($variant -cne '(none)') {
+                            $reason = "$reason|$variant"
+                        }
+                        $errors.Add("$reason`:$($record.LineIndex)")
                         break
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog `
                             -Envelope $envelope `
                             -Operation $operation)) {
-                        $errors.Add("snapshot_operation_catalog_mismatch:$($record.LineIndex)")
+                        $variant =
+                            Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+                                -Envelope $envelope
+                        $reason = 'snapshot_operation_catalog_mismatch'
+                        if ($variant -cne '(none)') {
+                            $reason = "$reason|$variant"
+                        }
+                        $errors.Add("$reason`:$($record.LineIndex)")
                         break
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog `
@@ -3035,6 +3262,52 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($matchingEffects.Count -ne 1) {
             $errors.Add(
                 "snapshot_regular_v4_pressure_required_effect_missing:$($boundary.boundaryId):$requiredEffect")
+        }
+    }
+
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies `
+                    -contains 'regular_v4_frontier_repair_pressure' -and
+                [string]$_.decisionKind -in @(
+                    'FallbackCheckpointRequested',
+                    'FallbackCheckpointAccepted') -and
+                [string]$_.decisionStatus -ceq 'Accepted' -and
+                @($_.operations | Where-Object {
+                        [string]$_.family -ceq
+                            'regular_v4_frontier_repair_pressure'
+                    }).Count -gt 0
+            })) {
+        $adoptionOperations = @($boundary.operations | Where-Object {
+                [string]$_.family -ceq
+                    'regular_v4_frontier_repair_pressure' -and
+                [string]$_.operationRole -ceq
+                    'repair_authority_terminal' -and
+                [string]$_.operationKind -ceq 'PressureSettlement' -and
+                [bool]($_.receiptValidated)
+            })
+        $matchingEffects = @(if ($adoptionOperations.Count -eq 1) {
+            $adoption = $adoptionOperations[0]
+            $effects | Where-Object {
+                    [string]$_.CoordinatorInstanceId -ceq
+                        [string]$boundary.coordinatorInstanceId -and
+                    [string]$_.TransitionId -ceq
+                        [string]$boundary.boundaryId -and
+                    [string]$_.Family -ceq
+                        'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.OperationKey -ceq
+                        [string]$adoption.operationKey -and
+                    [string]$_.AuthorityId -ceq
+                        [string]$adoption.authorityId -and
+                    [long]$_.OperationGeneration -eq
+                        [long]$adoption.operationGeneration -and
+                    [string]$_.EffectKind -ceq
+                        'regular_v4_pressure_decision_adopted'
+                }
+        })
+        if ($adoptionOperations.Count -ne 1 -or
+            $matchingEffects.Count -ne 1) {
+            $errors.Add(
+                "snapshot_regular_v4_pressure_required_effect_missing:$($boundary.boundaryId):regular_v4_pressure_decision_adopted")
         }
     }
 

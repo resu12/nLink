@@ -1716,6 +1716,134 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "Responder full/compact authoritative parity failed: $($responderFull | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            $checkpointBefore = [ordered]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6
+                liveRouteEpoch=4L; routePublicationGeneration=4L
+                routeCommitGeneration=3L; runtimeGeneration=4L
+                terminalGeneration=0L; legGeneration=4L
+                transportEpoch=2L; bridgeRecoveryGeneration=3L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='receive-data-session'; dataSessionGeneration=5L
+            }
+            $checkpointAfter = $checkpointBefore |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $checkpointAfter.checkpointGeneration = 7L
+            $checkpointAfter.checkpointRequestId = 'fallback-checkpoint-7'
+            $checkpointReceipt = [ordered]@{
+                stage='pressure_settlement_terminal'
+                commandIdentity='fallback-checkpoint-command'
+                commandGeneration=7L
+                commandFingerprint='fallback-checkpoint-command-fingerprint'
+                receiptIdentity='fallback-checkpoint-receipt'
+                receiptGeneration=7L
+                receiptStatus='Applied'
+                receiptReason='peer_current_state_requested_checkpoint'
+                receiptFingerprint='fallback-checkpoint-receipt-fingerprint'
+                receiptValidated=$true
+            }
+            $checkpointPressurePayload = New-RepairReplayPayload `
+                'repair_authority_terminal' @($checkpointReceipt)
+            $checkpointPressurePayload.sourceBoundary = $checkpointAfter
+            $checkpointPressurePayload.effectiveBoundary = $checkpointAfter
+            $checkpointPressurePayload.bindingState = 'Settled'
+            $checkpointPressurePayload.settlementOutcome = 'ProgressObserved'
+            $checkpointPressurePayload.settlementReason =
+                'peer_current_state_requested_checkpoint'
+            $checkpointPressureOperation = [ordered]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_terminal'
+                operationKey='regular_v4_frontier_repair_pressure|repair_authority_terminal|checkpoint-pressure-authority|7|PressureSettlement'
+                operationKind='PressureSettlement'
+                authorityId='checkpoint-pressure-authority'
+                predecessorAuthorityId='(none)'
+                operationGeneration=7L
+                beforeState='Applied'; afterState='Applied'
+                commandIdentity=$checkpointReceipt.commandIdentity
+                commandGeneration=7L
+                commandFingerprint=$checkpointReceipt.commandFingerprint
+                receiptIdentity=$checkpointReceipt.receiptIdentity
+                receiptGeneration=7L
+                receiptStatus='Applied'
+                receiptFingerprint=$checkpointReceipt.receiptFingerprint
+                receiptValidated=$true; stateApplied=$true
+                regularV4FrontierRepairPressure=$checkpointPressurePayload
+            }
+            $checkpointAggregate = [ordered]@{
+                beforeStateGeneration=0L; afterStateGeneration=1L
+                beforeStateFingerprint='checkpoint-before'
+                afterStateFingerprint='checkpoint-after'
+                beforeBoundary=$checkpointBefore; afterBoundary=$checkpointAfter
+                changedFamilies=@('regular_v4_frontier_repair_pressure')
+                operations=@($checkpointPressureOperation)
+            }
+            $checkpointEnvelope = [ordered]@{
+                snapshotContractVersion=1
+                snapshotSelectionMode='SnapshotV1Shadow'
+                coordinatorInstanceId='coordinator-checkpoint'
+                sessionId='session-receive'; transferId='transfer-receive'
+                direction='inbound'; transitionId='checkpoint-requested'
+                decisionKind='FallbackCheckpointRequested'
+                decisionStatus='Accepted'
+                decisionReason='peer_current_state_requested_checkpoint'
+                decisionUtcMilliseconds=70L
+                aggregate=$checkpointAggregate
+            }
+            $checkpointJson = $checkpointEnvelope |
+                ConvertTo-Json -Depth 32 -Compress
+            $checkpointBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+                $checkpointJson)
+            $checkpointHash = Get-FileTransferCoordinatorSnapshotSha256 `
+                -Bytes $checkpointBytes
+            $checkpointPayload = [Convert]::ToBase64String($checkpointBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $checkpointCoverage = 'regular_v4_frontier_repair_pressure'
+            $checkpointPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-checkpoint; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
+            $checkpointStart = "event=filetransfer_coordinator_snapshot_stream_started; $checkpointPrefix; initial_state_generation=0; initial_state_hash=checkpoint-before; emitted_family_coverage=$checkpointCoverage; shadow_family_coverage=; authoritative_family_coverage=$checkpointCoverage; authority_effect=none"
+            $checkpointTransition = "event=filetransfer_coordinator_transition_snapshot; $checkpointPrefix; transition_id=checkpoint-requested; before_state_generation=0; after_state_generation=1; snapshot_sha256=$checkpointHash; snapshot_payload=$checkpointPayload; authority_effect=none"
+            $checkpointEffect = "event=filetransfer_coordinator_authority_effect; $checkpointPrefix; transition_id=checkpoint-requested; coordinator_state_generation=1; operation_family=regular_v4_frontier_repair_pressure; operation_key=$($checkpointPressureOperation.operationKey); operation_authority_id=$($checkpointPressureOperation.authorityId); operation_generation=7; effect_kind=regular_v4_pressure_decision_adopted; effect_identity=checkpoint-adoption-effect; effect_generation=7; receipt_identity=$($checkpointReceipt.receiptIdentity); receipt_generation=7; receipt_status=Applied; receipt_fingerprint=$($checkpointReceipt.receiptFingerprint); route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; route_publication_generation=4; route_commit_generation=3; runtime_generation=4; terminal_generation=0; leg_generation=4; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=7; checkpoint_request_id=fallback-checkpoint-7; data_session_identity=receive-data-session; data_session_generation=5; authority_effect=applied"
+            $checkpointEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $checkpointPrefix; final_state_generation=1; final_state_hash=checkpoint-after; transition_count=1; emitted_family_coverage=$checkpointCoverage; shadow_family_coverage=; authoritative_family_coverage=$checkpointCoverage; authority_effect=none"
+            $checkpointFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                'event=irrelevant', $checkpointStart, $checkpointTransition,
+                $checkpointEffect, $checkpointEnd)
+            $checkpointCompact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $checkpointStart, $checkpointTransition, $checkpointEffect,
+                $checkpointEnd)
+            $checkpointParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+                -Full $checkpointFull -Compact $checkpointCompact
+            if ($checkpointFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $checkpointFull.FirstUnresolvedBoundary -or
+                $checkpointParity.Verdict -ne 'pass' -or
+                $checkpointFull.BoundaryHash -ne $checkpointCompact.BoundaryHash) {
+                throw "Fallback checkpoint full/compact parity failed: $($checkpointFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $missingCheckpointEffect =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                    $checkpointStart, $checkpointTransition, $checkpointEnd)
+            if ($missingCheckpointEffect.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_regular_v4_pressure_required_effect_missing') {
+                throw "Missing fallback-checkpoint Family-5 adoption effect did not fail closed: $($missingCheckpointEffect | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $mutatedCheckpointEnvelope = $checkpointEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $mutatedCheckpointEnvelope.aggregate.afterBoundary.runtimeGeneration = 5L
+            $mutatedCheckpointJson = $mutatedCheckpointEnvelope |
+                ConvertTo-Json -Depth 32 -Compress
+            $mutatedCheckpointBytes =
+                [Text.UTF8Encoding]::new($false).GetBytes($mutatedCheckpointJson)
+            $mutatedCheckpointHash = Get-FileTransferCoordinatorSnapshotSha256 `
+                -Bytes $mutatedCheckpointBytes
+            $mutatedCheckpointPayload = [Convert]::ToBase64String($mutatedCheckpointBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $mutatedCheckpointTransition = "event=filetransfer_coordinator_transition_snapshot; $checkpointPrefix; transition_id=checkpoint-requested; before_state_generation=0; after_state_generation=1; snapshot_sha256=$mutatedCheckpointHash; snapshot_payload=$mutatedCheckpointPayload; authority_effect=none"
+            $mutatedCheckpoint =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                    $checkpointStart, $mutatedCheckpointTransition,
+                    $checkpointEffect, $checkpointEnd)
+            if ($mutatedCheckpoint.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_operation_catalog_mismatch' -or
+                $mutatedCheckpoint.FirstUnresolvedBoundary.variant -ne
+                    'fallback_checkpoint_scope_transition_omitted_from_cross_family_catalog') {
+                throw "Mutated fallback checkpoint did not fail with the exact catalog variant: $($mutatedCheckpoint | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'
