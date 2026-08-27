@@ -923,6 +923,56 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotEffectReceipt {
+    param(
+        [Parameter(Mandatory = $true)]$Operation,
+        [Parameter(Mandatory = $true)]$Effect
+    )
+
+    if ([bool]$Operation.receiptValidated -and
+        [string]$Operation.receiptIdentity -ceq
+            [string]$Effect.ReceiptIdentity -and
+        [long]$Operation.receiptGeneration -eq
+            [long]$Effect.ReceiptGeneration -and
+        [string]$Operation.receiptStatus -ceq
+            [string]$Effect.ReceiptStatus -and
+        [string]$Operation.receiptFingerprint -ceq
+            [string]$Effect.ReceiptFingerprint) {
+        return $true
+    }
+
+    foreach ($propertyName in @(
+            'routeTransition',
+            'runtimeUnlockRetry',
+            'receiveRecovery',
+            'fallbackTailYield',
+            'regularV4FrontierRepairPressure',
+            'responderProbeHandoff')) {
+        if ($Operation.PSObject.Properties.Name -notcontains $propertyName -or
+            $null -eq $Operation.$propertyName) {
+            continue
+        }
+        $matches = @($Operation.$propertyName.receipts | Where-Object {
+                [bool]$_.receiptValidated -and
+                [string]$_.receiptIdentity -ceq
+                    [string]$Effect.ReceiptIdentity -and
+                [long]$_.receiptGeneration -eq
+                    [long]$Effect.ReceiptGeneration -and
+                [string]$_.receiptStatus -ceq
+                    [string]$Effect.ReceiptStatus -and
+                [string]$_.receiptFingerprint -ceq
+                    [string]$Effect.ReceiptFingerprint
+            })
+        if ($matches.Count -eq 1) {
+            return $true
+        }
+        if ($matches.Count -gt 1) {
+            return $false
+        }
+    }
+    return $false
+}
+
 function Test-FileTransferCoordinatorSnapshotBoundaryComplete {
     param([Parameter(Mandatory = $true)]$Boundary)
 
@@ -965,6 +1015,36 @@ function Test-FileTransferCoordinatorSnapshotBoundaryEqual {
 
     return (ConvertTo-Json -InputObject $Left -Depth 16 -Compress) -ceq
         (ConvertTo-Json -InputObject $Right -Depth 16 -Compress)
+}
+
+function Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Left) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Right)) {
+        return $false
+    }
+    foreach ($name in @(
+            'route', 'protocolVersion', 'liveRouteEpoch',
+            'routePublicationGeneration', 'routeCommitGeneration',
+            'runtimeGeneration', 'terminalGeneration', 'legGeneration',
+            'transportEpoch', 'bridgeRecoveryGeneration',
+            'checkpointGeneration', 'checkpointRequestId',
+            'dataSessionIdentity', 'dataSessionGeneration')) {
+        $leftValue = Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Left -Name $name -Default $null
+        $rightValue = Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Right -Name $name -Default $null
+        if ([string]$leftValue -cne [string]$rightValue) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
@@ -1591,6 +1671,87 @@ function Get-FileTransferCoordinatorSnapshotFamily5RepairReplayFailure {
     $allowedOperationCount = 1 + $retired.Count + $attempts.Count
     if ($operations.Count -ne $allowedOperationCount) {
         return 'snapshot_regular_v4_repair_replay_authority_transition_invalid'
+    }
+    return ''
+}
+
+function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ([string]$Envelope.decisionKind -cne
+            'CommitRegularV4FrontierRepairPressureSettlement' -or
+        [string]$Envelope.decisionStatus -cne 'Accepted') {
+        return ''
+    }
+
+    $operations = @($Envelope.aggregate.operations | Where-Object {
+            [string]$_.family -ceq
+                'regular_v4_frontier_repair_pressure'
+        })
+    $settlements = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'pressure_settlement_terminal' -and
+            [string]$_.operationKind -ceq 'PressureSettlement' -and
+            [bool]$_.stateApplied -and
+            [bool]$_.receiptValidated -and
+            $null -ne $_.regularV4FrontierRepairPressure
+        })
+    if ($settlements.Count -ne 1) {
+        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
+    }
+
+    $settlement = $settlements[0]
+    $payload = $settlement.regularV4FrontierRepairPressure
+    $currentCleared = [bool]$payload.currentAuthorityCleared
+    $retainedCleared = [bool]$payload.retainedPredecessorCleared
+    if ($currentCleared -eq $retainedCleared) {
+        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
+    }
+
+    $currentRetirements = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_current' -and
+            (@('V4Repair', 'PeerSilenceReplay',
+                'TransportRebindSafetyReplay') -ccontains
+                    [string]$_.operationKind) -and
+            [bool]$_.stateApplied -and
+            [string]$_.beforeState -ceq 'Authorized' -and
+            [string]$_.afterState -ceq 'None'
+        })
+    if ($retainedCleared) {
+        if ($currentRetirements.Count -ne 0) {
+            return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
+        }
+        return ''
+    }
+
+    $matchingRetirements = @($currentRetirements | Where-Object {
+            [string]$_.authorityId -ceq [string]$settlement.authorityId -and
+            [long]$_.operationGeneration -eq
+                [long]$settlement.operationGeneration
+        })
+    if ($currentRetirements.Count -ne 1 -or
+        $matchingRetirements.Count -ne 1) {
+        return ('snapshot_regular_v4_repair_replay_authority_transition_missing|' +
+            'accepted_pressure_settlement_declared_current_authority_clear_without_repair_authority_retirement')
+    }
+    $retirement = $matchingRetirements[0]
+    if ($null -eq $retirement.regularV4FrontierRepairPressure -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $retirement.regularV4FrontierRepairPressure.sourceBoundary `
+            -Right $payload.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $retirement.regularV4FrontierRepairPressure.effectiveBoundary `
+            -Right $payload.effectiveBoundary)) {
+        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
+    }
+
+    $successors = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_current' -and
+            [bool]$_.stateApplied -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Authorized'
+        })
+    if ($successors.Count -ne 0) {
+        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
     }
     return ''
 }
@@ -2362,6 +2523,14 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 if (-not [string]::IsNullOrWhiteSpace($repairReplayFailure)) {
                     $errors.Add("$repairReplayFailure`:$($record.LineIndex)")
                 }
+                $pressureSettlementFailure =
+                    Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                        -Envelope $envelope
+                if (-not [string]::IsNullOrWhiteSpace(
+                        $pressureSettlementFailure)) {
+                    $errors.Add(
+                        "$pressureSettlementFailure`:$($record.LineIndex)")
+                }
                 $decisionUtcMilliseconds = 0L
                 if ($envelope.PSObject.Properties.Name -contains 'decisionUtcMilliseconds') {
                     $decisionUtcMilliseconds = [long]$envelope.decisionUtcMilliseconds
@@ -2485,6 +2654,30 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $operationIndex = @{}
+    $operationIndexSeparator = [char]31
+    foreach ($boundary in $boundaries) {
+        foreach ($operation in @($boundary.operations)) {
+            $operationIndexKey = @(
+                [string]$boundary.coordinatorInstanceId,
+                [string]$boundary.boundaryId,
+                [long]$boundary.afterStateGeneration,
+                [string]$operation.family,
+                [string]$operation.operationKey,
+                [string]$operation.authorityId,
+                [long]$operation.operationGeneration) -join
+                $operationIndexSeparator
+            if (-not $operationIndex.ContainsKey($operationIndexKey)) {
+                $operationIndex[$operationIndexKey] =
+                    [System.Collections.Generic.List[object]]::new()
+            }
+            $operationIndex[$operationIndexKey].Add([pscustomobject]@{
+                    Boundary = $boundary
+                    Operation = $operation
+                })
+        }
+    }
+
     foreach ($effect in $effects) {
         if ([string]::IsNullOrWhiteSpace($effect.Family) -or
             [string]::IsNullOrWhiteSpace($effect.TransitionId) -or
@@ -2534,87 +2727,40 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
             continue
         }
-        $matches = @(
-            $boundaries | Where-Object {
-                $_.coordinatorInstanceId -ceq $effect.CoordinatorInstanceId -and
-                $_.boundaryId -ceq $effect.TransitionId -and
-                [long]$_.afterStateGeneration -eq [long]$effect.StateGeneration -and
-                @($_.operations | Where-Object {
-                        [string]$_.family -ceq [string]$effect.Family -and
-                        [string]$_.operationKey -ceq [string]$effect.OperationKey -and
-                        [string]$_.authorityId -ceq [string]$effect.AuthorityId -and
-                        [long]$_.operationGeneration -eq [long]$effect.OperationGeneration -and
-                        (Test-FileTransferCoordinatorSnapshotEffectScope `
-                            -Operation $_ `
-                            -Effect $effect) -and
-                        (([string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                          [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                          [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                          [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                          [bool]$_.receiptValidated) -or
-                         ($_.PSObject.Properties.Name -contains
-                            'routeTransition' -and
-                          $null -ne $_.routeTransition -and
-                          @($_.routeTransition.receipts | Where-Object {
-                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                                [bool]$_.receiptValidated
-                            }).Count -eq 1) -or
-                         ($_.PSObject.Properties.Name -contains
-                            'runtimeUnlockRetry' -and
-                          $null -ne $_.runtimeUnlockRetry -and
-                         @($_.runtimeUnlockRetry.receipts | Where-Object {
-                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                                [bool]$_.receiptValidated
-                            }).Count -eq 1) -or
-                         ($_.PSObject.Properties.Name -contains
-                            'receiveRecovery' -and
-                          $null -ne $_.receiveRecovery -and
-                          @($_.receiveRecovery.receipts | Where-Object {
-                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                                [bool]$_.receiptValidated
-                            }).Count -eq 1) -or
-                         ($_.PSObject.Properties.Name -contains
-                            'fallbackTailYield' -and
-                          $null -ne $_.fallbackTailYield -and
-                          @($_.fallbackTailYield.receipts | Where-Object {
-                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                                [bool]$_.receiptValidated
-                            }).Count -eq 1) -or
-                         ($_.PSObject.Properties.Name -contains
-                            'regularV4FrontierRepairPressure' -and
-                          $null -ne $_.regularV4FrontierRepairPressure -and
-                          @($_.regularV4FrontierRepairPressure.receipts |
-                            Where-Object {
-                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                                [bool]$_.receiptValidated
-                            }).Count -eq 1) -or
-                         ($_.PSObject.Properties.Name -contains
-                            'responderProbeHandoff' -and
-                          $null -ne $_.responderProbeHandoff -and
-                          @($_.responderProbeHandoff.receipts |
-                            Where-Object {
-                                [string]$_.receiptIdentity -ceq [string]$effect.ReceiptIdentity -and
-                                [long]$_.receiptGeneration -eq [long]$effect.ReceiptGeneration -and
-                                [string]$_.receiptStatus -ceq [string]$effect.ReceiptStatus -and
-                                [string]$_.receiptFingerprint -ceq [string]$effect.ReceiptFingerprint -and
-                                [bool]$_.receiptValidated
-                            }).Count -eq 1))
-                    }).Count -eq 1
+        $operationIndexKey = @(
+            [string]$effect.CoordinatorInstanceId,
+            [string]$effect.TransitionId,
+            [long]$effect.StateGeneration,
+            [string]$effect.Family,
+            [string]$effect.OperationKey,
+            [string]$effect.AuthorityId,
+            [long]$effect.OperationGeneration) -join $operationIndexSeparator
+        $candidates = if ($operationIndex.ContainsKey($operationIndexKey)) {
+            @($operationIndex[$operationIndexKey])
+        }
+        else {
+            @()
+        }
+        $matches = @($candidates | Where-Object {
+                [string]$_.Boundary.coordinatorInstanceId -ceq
+                    [string]$effect.CoordinatorInstanceId -and
+                [string]$_.Boundary.boundaryId -ceq
+                    [string]$effect.TransitionId -and
+                [long]$_.Boundary.afterStateGeneration -eq
+                    [long]$effect.StateGeneration -and
+                [string]$_.Operation.family -ceq [string]$effect.Family -and
+                [string]$_.Operation.operationKey -ceq
+                    [string]$effect.OperationKey -and
+                [string]$_.Operation.authorityId -ceq
+                    [string]$effect.AuthorityId -and
+                [long]$_.Operation.operationGeneration -eq
+                    [long]$effect.OperationGeneration -and
+                (Test-FileTransferCoordinatorSnapshotEffectScope `
+                    -Operation $_.Operation `
+                    -Effect $effect) -and
+                (Test-FileTransferCoordinatorSnapshotEffectReceipt `
+                    -Operation $_.Operation `
+                    -Effect $effect)
             })
         if ($matches.Count -ne 1) {
             $errors.Add("snapshot_authority_effect_unbound:$($effect.LineIndex)")

@@ -1275,6 +1275,53 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "Malformed RepairReplay authorization did not fail closed: $($malformedRepair | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            $settlementPayload = New-RepairReplayPayload `
+                'pressure_settlement_terminal' @()
+            $settlementPayload.bindingState = 'Settled'
+            $settlementPayload.settlementOutcome = 'ProgressObserved'
+            $settlementPayload.currentAuthorityCleared = $true
+            $settlementOperation = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='pressure_settlement_terminal'
+                operationKind='PressureSettlement'; authorityId=$repairAuthority
+                operationGeneration=1L; stateApplied=$true
+                receiptValidated=$true
+                regularV4FrontierRepairPressure=$settlementPayload
+            }
+            $retirementPayload = New-RepairReplayPayload `
+                'repair_authority_current' @()
+            $retirementOperation = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_current'
+                operationKind='V4Repair'; authorityId=$repairAuthority
+                operationGeneration=1L; beforeState='Authorized'
+                afterState='None'; stateApplied=$true
+                regularV4FrontierRepairPressure=$retirementPayload
+            }
+            $settlementEnvelope = [pscustomobject]@{
+                decisionKind='CommitRegularV4FrontierRepairPressureSettlement'
+                decisionStatus='Accepted'
+                aggregate=[pscustomobject]@{
+                    operations=@($settlementOperation,$retirementOperation)
+                }
+            }
+            $settlementEnvelope = $settlementEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $settlementValidation =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $settlementEnvelope
+            if ($settlementValidation -ne '') {
+                throw "Exact pressure settlement authority retirement was rejected: $settlementValidation"
+            }
+            $settlementEnvelope.aggregate.operations = @($settlementOperation)
+            $missingRetirement =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $settlementEnvelope
+            if ($missingRetirement -ne
+                'snapshot_regular_v4_repair_replay_authority_transition_missing|accepted_pressure_settlement_declared_current_authority_clear_without_repair_authority_retirement') {
+                throw "Missing pressure settlement authority retirement did not fail exactly: $missingRetirement"
+            }
+
             $responderScope = [ordered]@{}
             foreach ($entry in $receiveScope.GetEnumerator()) {
                 $responderScope[$entry.Key] = $entry.Value

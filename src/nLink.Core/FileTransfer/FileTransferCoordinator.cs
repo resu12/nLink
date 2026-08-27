@@ -7220,11 +7220,7 @@ internal static partial class FileTransferCoordinator
                     pressureCommit.Reason);
             }
 
-            projectedState =
-                pressureCommit.State.CurrentRepairReplayDecision is { } currentRepair &&
-                currentRepair.AuthorityId == installed.Authority.AuthorityId
-                    ? pressureCommit.State with { CurrentRepairReplayDecision = null }
-                    : pressureCommit.State;
+            projectedState = pressureCommit.State;
         }
         else if (pressureSettlementReceipt is not null)
         {
@@ -15120,6 +15116,20 @@ internal static partial class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_current_clear_scope_mismatch");
         }
 
+        if (!settlingRetained &&
+            (state.CurrentRepairReplayDecision is not { } currentRepair ||
+             currentRepair.AuthorityId != settlement.AuthorityId ||
+             !RegularV4RepairSettlementMatchesCurrentRepair(
+                 state,
+                 currentRepair,
+                 settlement)))
+        {
+            return RegularV4PressureBindingDecision(
+                state,
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
+                "regular_v4_frontier_repair_pressure_current_repair_authority_mismatch");
+        }
+
         var nextPressureState = settlingRetained
             ? pressureState with
             {
@@ -15157,6 +15167,9 @@ internal static partial class FileTransferCoordinator
             };
         var nextState = state with
         {
+            CurrentRepairReplayDecision = settlingRetained
+                ? state.CurrentRepairReplayDecision
+                : null,
             PersistentState = state.PersistentState with
             {
                 RegularV4FrontierRepairPressure = nextPressureState,
@@ -15290,10 +15303,7 @@ internal static partial class FileTransferCoordinator
                 pressureCommit.Reason);
         }
 
-        var settledState = pressureCommit.State.CurrentRepairReplayDecision is { } currentRepair &&
-                           currentRepair.AuthorityId == transition.PressureBinding.Authority.AuthorityId
-            ? pressureCommit.State with { CurrentRepairReplayDecision = null }
-            : pressureCommit.State;
+        var settledState = pressureCommit.State;
         var operationCommit = IssueReceiveRecoveryOperation(
             settledState,
             transition.ReceiveRecoveryOperation.Observation,
@@ -22845,14 +22855,6 @@ internal static partial class FileTransferCoordinator
                     return false;
                 }
 
-                if (state.CurrentRepairReplayDecision is not { } repairDecision ||
-                    repairDecision.AuthorityId != releaseAuthorityId ||
-                    repairDecision.RepairGeneration != releaseGeneration)
-                {
-                    rejectionReason = "regular_v4_repair_settlement_stale";
-                    return false;
-                }
-
                 if (!TryValidateRuntimeUnlockRetryReleaseTuple(
                         releaseKind,
                         releaseAuthorityId,
@@ -22894,9 +22896,9 @@ internal static partial class FileTransferCoordinator
                     request.RegularV4LivenessGeneration != 0 ||
                     request.BridgeDecisionGeneration !=
                         issuedSettlement.BridgeDecisionGeneration ||
-                    !RegularV4RepairSettlementMatchesCurrentRepair(
+                    !RegularV4RepairSettlementMatchesCurrentSource(
                         state,
-                        repairDecision,
+                        request.SourcePublicationAuthority,
                         issuedSettlement) ||
                     issuedSettlement.AuthorityId != releaseAuthorityId ||
                     issuedSettlement.DecisionGeneration != releaseGeneration ||
@@ -23177,6 +23179,40 @@ internal static partial class FileTransferCoordinator
                settlement.RouteCommitGeneration == publication?.RouteCommitGeneration &&
                settlement.TargetTransport == FileTransferTransportKind.RegularNkn;
     }
+
+    private static bool RegularV4RepairSettlementMatchesCurrentSource(
+        FileTransferCoordinatorState state,
+        FileTransferRoutePublicationAuthority publication,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+        => settlement is not null &&
+           !settlement.AuthorityId.IsDefault &&
+           string.Equals(settlement.SessionId, state.SessionId, StringComparison.Ordinal) &&
+           string.Equals(settlement.TransferId, state.TransferId, StringComparison.Ordinal) &&
+           settlement.Direction == state.Direction &&
+           string.Equals(
+               settlement.RouteToken,
+               state.RouteSelection.TelemetryToken,
+               StringComparison.Ordinal) &&
+           settlement.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           settlement.LiveRouteEpoch == (state.CurrentLiveRouteEpoch?.EpochId ?? 0) &&
+           settlement.RuntimeGeneration == (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0) &&
+           settlement.TerminalGeneration == state.TerminalGeneration &&
+           settlement.LegGeneration == state.CurrentLeg?.Generation &&
+           settlement.TransportEpoch == state.CurrentLeg?.TransportEpochId &&
+           settlement.BridgeRecoveryGeneration == state.CurrentLeg?.BridgeRecoveryGeneration &&
+           string.Equals(settlement.SessionId, publication.SessionId, StringComparison.Ordinal) &&
+           string.Equals(settlement.TransferId, publication.TransferId, StringComparison.Ordinal) &&
+           settlement.Direction == publication.Direction &&
+           string.Equals(settlement.RouteToken, publication.RouteToken, StringComparison.Ordinal) &&
+           settlement.ProtocolVersion == publication.ProtocolVersion &&
+           settlement.LiveRouteEpoch == publication.LiveRouteEpoch &&
+           settlement.RuntimeGeneration == publication.RuntimeGeneration &&
+           settlement.TerminalGeneration == publication.TerminalGeneration &&
+           settlement.LegGeneration == publication.LegGeneration &&
+           settlement.RoutePublicationGeneration == publication.RoutePublicationGeneration &&
+           settlement.RouteCommitGeneration == publication.RouteCommitGeneration &&
+           settlement.TargetTransport == publication.TargetTransport &&
+           settlement.TargetTransport == FileTransferTransportKind.RegularNkn;
 
     private static bool TryValidateInheritedRuntimeUnlockRetryRelease(
         FileTransferCoordinatorState state,

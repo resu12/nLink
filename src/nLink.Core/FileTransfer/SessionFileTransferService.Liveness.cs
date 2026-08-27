@@ -1356,27 +1356,33 @@ public sealed partial class SessionFileTransferService
                     StringComparison.Ordinal))
             {
                 var previousCommand = authority.ExecutionCommand;
-                invalidationDecision =
-                    FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
-                        CreateCoordinatorStateLocked(outbound),
-                        authority,
-                        normalizedReason);
-                if (invalidationDecision.Value.Accepted)
+                var state = CreateCoordinatorStateLocked(outbound);
+                if (state.PersistentState.FileTransferReceiveRecovery
+                        .CurrentOperation is { } current &&
+                    current.Authority == authority)
                 {
-                    ApplyReceiveRecoveryStateLocked(
-                        outbound,
-                        invalidationDecision.Value,
-                        initialActivationHoldDecision:
-                            invalidationDecision.Value
-                                .InitialActivationHoldDecision);
-                    QueueBridgeRecoveryExecutionInvalidationLocked(
-                        previousCommand,
-                        outbound.CurrentBridgeRecoveryExecutionCommand,
-                        outbound.BridgeRecoveryExecutionBridge,
-                        outbound.BridgeRecoveryExecutionDispatchOrdering,
-                        normalizedReason);
-                    dispatchOrdering =
-                        outbound.BridgeRecoveryExecutionDispatchOrdering;
+                    invalidationDecision =
+                        FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
+                            state,
+                            authority,
+                            normalizedReason);
+                    if (invalidationDecision.Value.Accepted)
+                    {
+                        ApplyReceiveRecoveryStateLocked(
+                            outbound,
+                            invalidationDecision.Value,
+                            initialActivationHoldDecision:
+                                invalidationDecision.Value
+                                    .InitialActivationHoldDecision);
+                        QueueBridgeRecoveryExecutionInvalidationLocked(
+                            previousCommand,
+                            outbound.CurrentBridgeRecoveryExecutionCommand,
+                            outbound.BridgeRecoveryExecutionBridge,
+                            outbound.BridgeRecoveryExecutionDispatchOrdering,
+                            normalizedReason);
+                        dispatchOrdering =
+                            outbound.BridgeRecoveryExecutionDispatchOrdering;
+                    }
                 }
             }
             else if (request.Direction == FileTransferDirection.Inbound &&
@@ -1391,27 +1397,33 @@ public sealed partial class SessionFileTransferService
                          StringComparison.Ordinal))
             {
                 var previousCommand = authority.ExecutionCommand;
-                invalidationDecision =
-                    FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
-                        CreateCoordinatorStateLocked(inbound),
-                        authority,
-                        normalizedReason);
-                if (invalidationDecision.Value.Accepted)
+                var state = CreateCoordinatorStateLocked(inbound);
+                if (state.PersistentState.FileTransferReceiveRecovery
+                        .CurrentOperation is { } current &&
+                    current.Authority == authority)
                 {
-                    ApplyReceiveRecoveryStateLocked(
-                        inbound,
-                        invalidationDecision.Value,
-                        initialActivationHoldDecision:
-                            invalidationDecision.Value
-                                .InitialActivationHoldDecision);
-                    QueueBridgeRecoveryExecutionInvalidationLocked(
-                        previousCommand,
-                        inbound.CurrentBridgeRecoveryExecutionCommand,
-                        inbound.BridgeRecoveryExecutionBridge,
-                        inbound.BridgeRecoveryExecutionDispatchOrdering,
-                        normalizedReason);
-                    dispatchOrdering =
-                        inbound.BridgeRecoveryExecutionDispatchOrdering;
+                    invalidationDecision =
+                        FileTransferCoordinator.InvalidateReceiveRecoveryOperation(
+                            state,
+                            authority,
+                            normalizedReason);
+                    if (invalidationDecision.Value.Accepted)
+                    {
+                        ApplyReceiveRecoveryStateLocked(
+                            inbound,
+                            invalidationDecision.Value,
+                            initialActivationHoldDecision:
+                                invalidationDecision.Value
+                                    .InitialActivationHoldDecision);
+                        QueueBridgeRecoveryExecutionInvalidationLocked(
+                            previousCommand,
+                            inbound.CurrentBridgeRecoveryExecutionCommand,
+                            inbound.BridgeRecoveryExecutionBridge,
+                            inbound.BridgeRecoveryExecutionDispatchOrdering,
+                            normalizedReason);
+                        dispatchOrdering =
+                            inbound.BridgeRecoveryExecutionDispatchOrdering;
+                    }
                 }
             }
         }
