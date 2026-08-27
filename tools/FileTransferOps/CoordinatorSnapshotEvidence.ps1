@@ -1688,19 +1688,146 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             [string]$_.family -ceq
                 'regular_v4_frontier_repair_pressure'
         })
-    $settlements = @($operations | Where-Object {
+    $settlementTerminals = @($operations | Where-Object {
             [string]$_.operationRole -ceq 'pressure_settlement_terminal' -and
             [string]$_.operationKind -ceq 'PressureSettlement' -and
             [bool]$_.stateApplied -and
             [bool]$_.receiptValidated -and
             $null -ne $_.regularV4FrontierRepairPressure
         })
-    if ($settlements.Count -ne 1) {
-        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
+    $enteringSettlements = @($settlementTerminals | Where-Object {
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Applied'
+        })
+    $retiredSettlements = @($settlementTerminals | Where-Object {
+            [string]$_.beforeState -ceq 'Applied' -and
+            [string]$_.afterState -ceq 'None'
+        })
+    if ($enteringSettlements.Count -ne 1 -or
+        $retiredSettlements.Count -gt 1 -or
+        $settlementTerminals.Count -ne
+            ($enteringSettlements.Count + $retiredSettlements.Count)) {
+        return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+            'pressure_settlement_terminal_partition_invalid')
     }
 
-    $settlement = $settlements[0]
+    $settlement = $enteringSettlements[0]
     $payload = $settlement.regularV4FrontierRepairPressure
+    if ([string]$payload.role -cne 'pressure_settlement_terminal' -or
+        [string]$settlement.receiptStatus -notin @('Applied', 'Idempotent') -or
+        [string]$settlement.receiptIdentity -in @('', '(none)') -or
+        [long]$settlement.receiptGeneration -le 0 -or
+        [string]$settlement.receiptFingerprint -in @('', '(none)')) {
+        return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+            'pressure_settlement_entering_terminal_receipt_invalid')
+    }
+    $attempts = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'attempted_decision' -and
+            [string]$_.operationKind -ceq
+                'CommitRegularV4FrontierRepairPressureSettlement' -and
+            [string]$_.authorityId -ceq [string]$settlement.authorityId -and
+            [long]$_.operationGeneration -eq
+                [long]$settlement.operationGeneration -and
+            -not [bool]$_.stateApplied -and
+            [bool]$_.receiptValidated -and
+            [string]$_.receiptStatus -ceq 'Accepted' -and
+            $null -ne $_.regularV4FrontierRepairPressure -and
+            [string]$_.regularV4FrontierRepairPressure.role -ceq
+                'attempted_decision'
+        })
+    if ($attempts.Count -ne 1) {
+        return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+            'pressure_settlement_attempt_binding_invalid')
+    }
+
+    $terminalMirrors = @($operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_terminal' -and
+            [string]$_.operationKind -ceq 'PressureSettlement' -and
+            [bool]$_.stateApplied -and
+            [bool]$_.receiptValidated -and
+            $null -ne $_.regularV4FrontierRepairPressure
+        })
+    $enteringMirrors = @($terminalMirrors | Where-Object {
+            [string]$_.authorityId -ceq [string]$settlement.authorityId -and
+            [long]$_.operationGeneration -eq
+                [long]$settlement.operationGeneration -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Applied'
+        })
+    if ($enteringMirrors.Count -ne 1 -or
+        [string]$enteringMirrors[0].regularV4FrontierRepairPressure.role `
+            -cne 'repair_authority_terminal' -or
+        [string]$enteringMirrors[0].receiptIdentity -cne
+            [string]$settlement.receiptIdentity -or
+        [long]$enteringMirrors[0].receiptGeneration -ne
+            [long]$settlement.receiptGeneration -or
+        [string]$enteringMirrors[0].receiptStatus -cne
+            [string]$settlement.receiptStatus -or
+        [string]$enteringMirrors[0].receiptFingerprint -cne
+            [string]$settlement.receiptFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $enteringMirrors[0].regularV4FrontierRepairPressure.sourceBoundary `
+            -Right $payload.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $enteringMirrors[0].regularV4FrontierRepairPressure.effectiveBoundary `
+            -Right $payload.effectiveBoundary)) {
+        return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+            'pressure_settlement_entering_terminal_mirror_invalid')
+    }
+
+    if ($retiredSettlements.Count -eq 1) {
+        $retiredSettlement = $retiredSettlements[0]
+        if ([string]$retiredSettlement.authorityId -ceq
+                [string]$settlement.authorityId -or
+            [long]$retiredSettlement.operationGeneration -ge
+                [long]$settlement.operationGeneration -or
+            [string]$retiredSettlement.regularV4FrontierRepairPressure.role `
+                -cne 'pressure_settlement_terminal' -or
+            [string]$retiredSettlement.receiptIdentity -ceq
+                [string]$settlement.receiptIdentity -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retiredSettlement.regularV4FrontierRepairPressure.sourceBoundary `
+                -Right $payload.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retiredSettlement.regularV4FrontierRepairPressure.effectiveBoundary `
+                -Right $payload.effectiveBoundary)) {
+            return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+                'pressure_settlement_terminal_rollover_invalid')
+        }
+        $retiredMirrors = @($terminalMirrors | Where-Object {
+                [string]$_.authorityId -ceq
+                    [string]$retiredSettlement.authorityId -and
+                [long]$_.operationGeneration -eq
+                    [long]$retiredSettlement.operationGeneration -and
+                [string]$_.beforeState -ceq 'Applied' -and
+                [string]$_.afterState -ceq 'None'
+            })
+        if ($retiredMirrors.Count -ne 1 -or
+            [string]$retiredMirrors[0].regularV4FrontierRepairPressure.role `
+                -cne 'repair_authority_terminal' -or
+            [string]$retiredMirrors[0].receiptIdentity -cne
+                [string]$retiredSettlement.receiptIdentity -or
+            [long]$retiredMirrors[0].receiptGeneration -ne
+                [long]$retiredSettlement.receiptGeneration -or
+            [string]$retiredMirrors[0].receiptStatus -cne
+                [string]$retiredSettlement.receiptStatus -or
+            [string]$retiredMirrors[0].receiptFingerprint -cne
+                [string]$retiredSettlement.receiptFingerprint -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retiredMirrors[0].regularV4FrontierRepairPressure.sourceBoundary `
+                -Right $retiredSettlement.regularV4FrontierRepairPressure.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retiredMirrors[0].regularV4FrontierRepairPressure.effectiveBoundary `
+                -Right $retiredSettlement.regularV4FrontierRepairPressure.effectiveBoundary)) {
+            return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+                'pressure_settlement_retired_terminal_mirror_invalid')
+        }
+    }
+    if ($terminalMirrors.Count -ne (1 + $retiredSettlements.Count)) {
+        return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+            'pressure_settlement_terminal_mirror_count_invalid')
+    }
+
     $currentCleared = [bool]$payload.currentAuthorityCleared
     $retainedCleared = [bool]$payload.retainedPredecessorCleared
     if ($currentCleared -eq $retainedCleared) {
@@ -1735,12 +1862,8 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
     }
     $retirement = $matchingRetirements[0]
     if ($null -eq $retirement.regularV4FrontierRepairPressure -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
-            -Left $retirement.regularV4FrontierRepairPressure.sourceBoundary `
-            -Right $payload.sourceBoundary) -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
-            -Left $retirement.regularV4FrontierRepairPressure.effectiveBoundary `
-            -Right $payload.effectiveBoundary)) {
+        [string]$retirement.regularV4FrontierRepairPressure.role -cne
+            'repair_authority_current') {
         return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
     }
 

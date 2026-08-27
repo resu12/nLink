@@ -3530,6 +3530,89 @@ public sealed class FileTransferCoordinatorTests
             RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted,
             independentStage.Status);
 
+        var independentBinding = Assert.IsType<
+            RegularV4FrontierRepairPressureBinding>(
+                independentStage.Binding);
+        var independentCommitted = FileTransferCoordinator
+            .CommitRegularV4FrontierRepairPressureBinding(
+                independentStage.State,
+                new FileTransferRegularV4FrontierRepairPressureInstallReceipt(
+                    independentBinding.Authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus
+                        .Installed,
+                    "independent_installed",
+                    independentBinding.InstallGeneration,
+                    independentBinding.PressureReason));
+        var independentSettlement = RegularV4PressureSettlement(
+            independentBinding.Authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome
+                .SettledStalled);
+        var independentPrepared = FileTransferCoordinator
+            .PrepareRegularV4FrontierRepairPressureSettlement(
+                independentCommitted.State,
+                independentSettlement);
+        var independentSettlementCommand = Assert.IsType<
+            FileTransferRegularV4FrontierRepairPressureSettlementCommand>(
+                independentPrepared.SettlementCommand);
+        var independentSettled = FileTransferCoordinator
+            .CommitRegularV4FrontierRepairPressureSettlement(
+                independentPrepared.State,
+                new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                    independentSettlementCommand,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus
+                        .Applied,
+                    "independent_current_retired",
+                    CurrentAuthorityCleared: true,
+                    RetainedPredecessorCleared: false));
+        var rolloverEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                independentSettled.SnapshotEnvelope);
+        Assert.Equal(
+            rolloverEnvelope.Aggregate.BeforeStateGeneration + 1,
+            rolloverEnvelope.Aggregate.AfterStateGeneration);
+        var settlementTerminals = rolloverEnvelope.Aggregate.Operations
+            .Where(operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "pressure_settlement_terminal",
+                OperationKind: "PressureSettlement",
+                StateApplied: true,
+            })
+            .ToArray();
+        Assert.Equal(2, settlementTerminals.Length);
+        Assert.Contains(
+            settlementTerminals,
+            operation => operation.AuthorityId == decision.AuthorityId.ToString() &&
+                operation.BeforeState == "Applied" &&
+                operation.AfterState == "None");
+        Assert.Contains(
+            settlementTerminals,
+            operation => operation.AuthorityId ==
+                    independentDecision.AuthorityId.ToString() &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Applied");
+        var settlementTerminalMirrors = rolloverEnvelope.Aggregate.Operations
+            .Where(operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "repair_authority_terminal",
+                OperationKind: "PressureSettlement",
+                StateApplied: true,
+            })
+            .ToArray();
+        Assert.Equal(2, settlementTerminalMirrors.Length);
+        Assert.Contains(
+            settlementTerminalMirrors,
+            operation => operation.AuthorityId == decision.AuthorityId.ToString() &&
+                operation.BeforeState == "Applied" &&
+                operation.AfterState == "None");
+        Assert.Contains(
+            settlementTerminalMirrors,
+            operation => operation.AuthorityId ==
+                    independentDecision.AuthorityId.ToString() &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Applied");
+
         Assert.Contains(
             committedEnvelope.Aggregate.Operations,
             operation => operation.OperationRole ==

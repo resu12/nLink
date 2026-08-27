@@ -1284,9 +1284,27 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 family='regular_v4_frontier_repair_pressure'
                 operationRole='pressure_settlement_terminal'
                 operationKind='PressureSettlement'; authorityId=$repairAuthority
-                operationGeneration=1L; stateApplied=$true
+                operationGeneration=1L; beforeState='None'; afterState='Applied'
+                receiptIdentity='settlement-a-receipt'; receiptGeneration=1L
+                receiptStatus='Applied'; receiptFingerprint='settlement-a-fingerprint'
+                stateApplied=$true
                 receiptValidated=$true
                 regularV4FrontierRepairPressure=$settlementPayload
+            }
+            $settlementMirrorPayload = New-RepairReplayPayload `
+                'repair_authority_terminal' @()
+            $settlementMirrorPayload.bindingState = 'Settled'
+            $settlementMirrorPayload.settlementOutcome = 'ProgressObserved'
+            $settlementMirrorPayload.currentAuthorityCleared = $true
+            $settlementMirror = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_terminal'
+                operationKind='PressureSettlement'; authorityId=$repairAuthority
+                operationGeneration=1L; beforeState='None'; afterState='Applied'
+                receiptIdentity='settlement-a-receipt'; receiptGeneration=1L
+                receiptStatus='Applied'; receiptFingerprint='settlement-a-fingerprint'
+                stateApplied=$true; receiptValidated=$true
+                regularV4FrontierRepairPressure=$settlementMirrorPayload
             }
             $retirementPayload = New-RepairReplayPayload `
                 'repair_authority_current' @()
@@ -1298,11 +1316,27 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 afterState='None'; stateApplied=$true
                 regularV4FrontierRepairPressure=$retirementPayload
             }
+            $settlementAttemptPayload = New-RepairReplayPayload `
+                'attempted_decision' @()
+            $settlementAttempt = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='attempted_decision'
+                operationKind='CommitRegularV4FrontierRepairPressureSettlement'
+                authorityId=$repairAuthority; operationGeneration=1L
+                beforeState='Installed'; afterState='Installed'
+                receiptStatus='Accepted'; stateApplied=$false
+                receiptValidated=$true
+                regularV4FrontierRepairPressure=$settlementAttemptPayload
+            }
             $settlementEnvelope = [pscustomobject]@{
                 decisionKind='CommitRegularV4FrontierRepairPressureSettlement'
                 decisionStatus='Accepted'
                 aggregate=[pscustomobject]@{
-                    operations=@($settlementOperation,$retirementOperation)
+                    operations=@(
+                        $settlementOperation,
+                        $settlementMirror,
+                        $retirementOperation,
+                        $settlementAttempt)
                 }
             }
             $settlementEnvelope = $settlementEnvelope |
@@ -1313,13 +1347,133 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             if ($settlementValidation -ne '') {
                 throw "Exact pressure settlement authority retirement was rejected: $settlementValidation"
             }
-            $settlementEnvelope.aggregate.operations = @($settlementOperation)
+            $settlementEnvelope.aggregate.operations = @(
+                $settlementOperation,
+                $settlementMirror,
+                $settlementAttempt)
+            $settlementEnvelope = $settlementEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
             $missingRetirement =
                 Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
                     -Envelope $settlementEnvelope
             if ($missingRetirement -ne
                 'snapshot_regular_v4_repair_replay_authority_transition_missing|accepted_pressure_settlement_declared_current_authority_clear_without_repair_authority_retirement') {
                 throw "Missing pressure settlement authority retirement did not fail exactly: $missingRetirement"
+            }
+
+            $settlementBAuthority = 'fta2-repair_replay-authority-rollover'
+            $settlementBPayload = New-RepairReplayPayload `
+                'pressure_settlement_terminal' @()
+            $settlementBPayload.decisionGeneration = 2L
+            $settlementBPayload.bindingState = 'Settled'
+            $settlementBPayload.settlementOutcome = 'SettledStalled'
+            $settlementBPayload.currentAuthorityCleared = $true
+            $settlementB = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='pressure_settlement_terminal'
+                operationKind='PressureSettlement'; authorityId=$settlementBAuthority
+                operationGeneration=2L; beforeState='None'; afterState='Applied'
+                receiptIdentity='settlement-b-receipt'; receiptGeneration=2L
+                receiptStatus='Applied'; receiptFingerprint='settlement-b-fingerprint'
+                stateApplied=$true; receiptValidated=$true
+                regularV4FrontierRepairPressure=$settlementBPayload
+            }
+            $settlementBMirrorPayload = New-RepairReplayPayload `
+                'repair_authority_terminal' @()
+            $settlementBMirrorPayload.decisionGeneration = 2L
+            $settlementBMirrorPayload.bindingState = 'Settled'
+            $settlementBMirrorPayload.settlementOutcome = 'SettledStalled'
+            $settlementBMirrorPayload.currentAuthorityCleared = $true
+            $settlementBMirror = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_terminal'
+                operationKind='PressureSettlement'; authorityId=$settlementBAuthority
+                operationGeneration=2L; beforeState='None'; afterState='Applied'
+                receiptIdentity='settlement-b-receipt'; receiptGeneration=2L
+                receiptStatus='Applied'; receiptFingerprint='settlement-b-fingerprint'
+                stateApplied=$true; receiptValidated=$true
+                regularV4FrontierRepairPressure=$settlementBMirrorPayload
+            }
+            $settlementARetired = $settlementOperation.PSObject.Copy()
+            $settlementARetired.beforeState = 'Applied'
+            $settlementARetired.afterState = 'None'
+            $settlementAMirrorRetired = $settlementMirror.PSObject.Copy()
+            $settlementAMirrorRetired.beforeState = 'Applied'
+            $settlementAMirrorRetired.afterState = 'None'
+            $settlementBRetirementPayload = New-RepairReplayPayload `
+                'repair_authority_current' @()
+            $settlementBRetirementPayload.decisionGeneration = 2L
+            $settlementBRetirement = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_current'
+                operationKind='V4Repair'; authorityId=$settlementBAuthority
+                operationGeneration=2L; beforeState='Authorized'
+                afterState='None'; stateApplied=$true
+                regularV4FrontierRepairPressure=$settlementBRetirementPayload
+            }
+            $settlementBAttemptPayload = New-RepairReplayPayload `
+                'attempted_decision' @()
+            $settlementBAttemptPayload.decisionGeneration = 2L
+            $settlementBAttempt = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='attempted_decision'
+                operationKind='CommitRegularV4FrontierRepairPressureSettlement'
+                authorityId=$settlementBAuthority; operationGeneration=2L
+                beforeState='Installed'; afterState='Installed'
+                receiptStatus='Accepted'; stateApplied=$false
+                receiptValidated=$true
+                regularV4FrontierRepairPressure=$settlementBAttemptPayload
+            }
+            $rolloverEnvelope = [pscustomobject]@{
+                decisionKind='CommitRegularV4FrontierRepairPressureSettlement'
+                decisionStatus='Accepted'
+                aggregate=[pscustomobject]@{
+                    operations=@(
+                        $settlementARetired,
+                        $settlementB,
+                        $settlementAMirrorRetired,
+                        $settlementBMirror,
+                        $settlementBRetirement,
+                        $settlementBAttempt)
+                }
+            }
+            $rolloverEnvelope = $rolloverEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $rolloverValidation =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $rolloverEnvelope
+            if ($rolloverValidation -ne '') {
+                throw "Exact pressure settlement terminal rollover was rejected: $rolloverValidation"
+            }
+            $rolloverWithObservedRepairScope = $rolloverEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $rolloverCurrentRetirement = @(
+                $rolloverWithObservedRepairScope.aggregate.operations |
+                    Where-Object {
+                        $_.operationRole -eq 'repair_authority_current'
+                    })[0]
+            $rolloverCurrentRetirement.regularV4FrontierRepairPressure.
+                sourceBoundary.bridgeRecoveryGeneration = 1L
+            $observedRepairScopeValidation =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $rolloverWithObservedRepairScope
+            if ($observedRepairScopeValidation -ne '') {
+                throw "Settlement rollover rejected the exact current repair identity after an observation-scope advance: $observedRepairScopeValidation"
+            }
+            $rolloverEnvelope.aggregate.operations = @(
+                $settlementARetired,
+                $settlementB,
+                $settlementAMirrorRetired,
+                $settlementBRetirement,
+                $settlementBAttempt)
+            $rolloverEnvelope = $rolloverEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $missingRolloverMirror =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $rolloverEnvelope
+            if ($missingRolloverMirror -ne
+                'snapshot_regular_v4_pressure_settlement_transition_invalid|pressure_settlement_entering_terminal_mirror_invalid') {
+                throw "Missing settlement rollover mirror did not fail exactly: $missingRolloverMirror"
             }
 
             $responderScope = [ordered]@{}
