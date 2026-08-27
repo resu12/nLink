@@ -1921,7 +1921,33 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { return $null }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            $script:artifactInvalid = $false
             function Get-FileTransferCoordinatorSnapshotEvaluation {
+                if ($script:artifactInvalid) {
+                    return [pscustomobject]@{
+                        Mode = 'SnapshotV1Authoritative'
+                        ArtifactEvidenceVerdict = 'fail'
+                        TransitionCount = 4L
+                        FallbackTailYieldFamilyLegacySelectionCount = 0L
+                        RegularV4FrontierRepairPressureFamilyLegacySelectionCount = 0L
+                        ResponderProbeHandoffFamilyLegacySelectionCount = 0L
+                        FirstUnresolvedBoundary = [pscustomobject]@{
+                            boundaryId = 'invalid-pressure-boundary-8'
+                            boundaryHash = 'invalid-pressure-boundary-hash-8'
+                            families = @('regular_v4_frontier_repair_pressure')
+                            taxonomyClass = 'filetransfer_coordinator_snapshot_evidence_invalid'
+                            phase = 'evidence_finalization'
+                            decisionReason = 'snapshot_regular_v4_repair_replay_authority_transition_invalid'
+                            variant = 'specialized_family5_adoption_resurrected_settled_repair_authority'
+                            rawCount = 2
+                            distinctCount = 1
+                            recoveredCount = 0
+                            unresolvedCount = 1
+                            writer = 'writer-helper'
+                            writerSequence = 776L
+                        }
+                    }
+                }
                 return [pscustomobject]@{
                     Mode = 'SnapshotV1Shadow'
                     ArtifactEvidenceVerdict = 'pass'
@@ -1973,6 +1999,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     $actual.CoordinatorWriter -ne 'writer-helper' -or
                     $actual.CoordinatorWriterSequence -ne 9961L) {
                     throw "GUI did not preserve the shared boundary: $($actual | ConvertTo-Json -Compress)"
+                }
+
+                $script:artifactInvalid = $true
+                $invalid = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'scenario failed' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($invalid.ClassificationSource -ne 'coordinator_snapshot_evidence' -or
+                    $invalid.FailureClass -ne 'filetransfer_coordinator_snapshot_evidence_invalid' -or
+                    $invalid.Phase -ne 'evidence_finalization' -or
+                    $invalid.Reason -ne 'coordinator_snapshot_evidence_invalid' -or
+                    $invalid.FailureVariant -ne 'specialized_family5_adoption_resurrected_settled_repair_authority' -or
+                    $invalid.CoordinatorBoundaryId -ne 'invalid-pressure-boundary-8' -or
+                    $invalid.CoordinatorBoundaryHash -ne 'invalid-pressure-boundary-hash-8' -or
+                    $invalid.CoordinatorRawCount -ne 2 -or
+                    $invalid.CoordinatorDistinctCount -ne 1 -or
+                    $invalid.CoordinatorRecoveredCount -ne 0 -or
+                    $invalid.CoordinatorUnresolvedCount -ne 1 -or
+                    $invalid.CoordinatorWriter -ne 'writer-helper' -or
+                    $invalid.CoordinatorWriterSequence -ne 776L -or
+                    $invalid.CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount -ne 0L -or
+                    $invalid.CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount -ne 0L -or
+                    $invalid.CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount -ne 0L) {
+                    throw "GUI did not preserve the strict invalid boundary: $($invalid | ConvertTo-Json -Compress)"
                 }
             }
             finally {

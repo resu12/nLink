@@ -674,6 +674,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(requested);
         Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Equal(
+            binding.Authority.DecisionGeneration,
+            GetPrivateProperty<int>(context, "LastRepairReplayGeneration"));
         var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
         Assert.NotNull(recoveryRequest.BridgeRecoveryAuthority);
         var executionCommand =
@@ -856,6 +860,10 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(requested);
         Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
         Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Equal(
+            binding.Authority.DecisionGeneration,
+            GetPrivateProperty<int>(context, "LastRepairReplayGeneration"));
         var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
         Assert.NotNull(recoveryRequest.BridgeRecoveryExecutionCommand);
         Assert.NotNull(

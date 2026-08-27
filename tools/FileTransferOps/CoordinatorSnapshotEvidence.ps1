@@ -4080,6 +4080,30 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 [string]$_.Reason -ceq $normalizedFailureReason -and
                 [string]$_.Variant -ceq [string]$firstFailure.Variant
             }).Count
+        $family5RepairReplayOperations = if ($null -ne $sourceBoundary -and
+            [string]$sourceBoundary.decisionKind -ceq 'RepairReplay') {
+            @($sourceBoundary.operations | Where-Object {
+                    [string]$_.family -ceq
+                        'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq
+                        'repair_authority_current' -and
+                    [bool]$_.stateApplied
+                })
+        }
+        else {
+            @()
+        }
+        $hasUnlinkedRepairReplaySuccessor = @(
+            $family5RepairReplayOperations | Where-Object {
+                [string]$_.beforeState -ceq 'None' -and
+                [string]$_.afterState -ceq 'Authorized' -and
+                [string]$_.predecessorAuthorityId -ceq '(none)'
+            }).Count -eq 1
+        $hasRepeatedRepairReplayRetirement = @(
+            $family5RepairReplayOperations | Where-Object {
+                [string]$_.beforeState -ceq 'Authorized' -and
+                [string]$_.afterState -ceq 'None'
+            }).Count -eq 1
         $failureVariant = if ([string]$firstFailure.Variant -cne '(none)') {
             [string]$firstFailure.Variant
         }
@@ -4091,6 +4115,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         elseif ($normalizedFailureReason -ceq
             'snapshot_regular_v4_repair_replay_authority_transition_missing') {
             'accepted_v4_repair_replay_changed_state_without_atomic_successor_operation'
+        }
+        elseif ($normalizedFailureReason -ceq
+                'snapshot_regular_v4_repair_replay_authority_transition_invalid' -and
+            $hasUnlinkedRepairReplaySuccessor -and
+            $hasRepeatedRepairReplayRetirement) {
+            'specialized_family5_adoption_resurrected_settled_repair_authority'
         }
         else {
             '(none)'

@@ -6238,6 +6238,32 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Family 'responder_probe_handoff')
     if ($coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
         $coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict -ne 'pass') {
+        $invalidBoundary = $coordinatorSnapshotEvaluation.FirstUnresolvedBoundary
+        $invalidBoundaryId = '(none)'
+        $invalidBoundaryHash = '(none)'
+        $invalidBoundaryVariant = '(none)'
+        $invalidBoundaryRawCount = 0
+        $invalidBoundaryDistinctCount = 0
+        $invalidBoundaryRecoveredCount = 0
+        $invalidBoundaryUnresolvedCount = 0
+        $invalidBoundaryWriter = '(none)'
+        $invalidBoundaryWriterSequence = 0L
+        if ($null -ne $invalidBoundary) {
+            $invalidBoundaryId = [string]$invalidBoundary.boundaryId
+            $invalidBoundaryHash = [string]$invalidBoundary.boundaryHash
+            $invalidBoundaryVariant = [string](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $invalidBoundary `
+                    -Name 'variant' `
+                    -Default '(none)')
+            $invalidBoundaryRawCount = [int]$invalidBoundary.rawCount
+            $invalidBoundaryDistinctCount = [int]$invalidBoundary.distinctCount
+            $invalidBoundaryRecoveredCount = [int]$invalidBoundary.recoveredCount
+            $invalidBoundaryUnresolvedCount = [int]$invalidBoundary.unresolvedCount
+            $invalidBoundaryWriter = [string]$invalidBoundary.writer
+            $invalidBoundaryWriterSequence =
+                [long]$invalidBoundary.writerSequence
+        }
         if ($null -ne $TestMetrics) {
             $TestMetrics.evidenceLineVisitCount = [long]$evidenceLines.Count
             $TestMetrics.evidenceLookupCount = 0L
@@ -6253,7 +6279,31 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
-            -FailureClass 'filetransfer_coordinator_snapshot_evidence_invalid'
+            -FailureClass 'filetransfer_coordinator_snapshot_evidence_invalid' `
+            -FailureVariant $invalidBoundaryVariant `
+            -CoordinatorBoundaryId $invalidBoundaryId `
+            -CoordinatorBoundaryHash $invalidBoundaryHash `
+            -CoordinatorRawCount $invalidBoundaryRawCount `
+            -CoordinatorDistinctCount $invalidBoundaryDistinctCount `
+            -CoordinatorRecoveredCount $invalidBoundaryRecoveredCount `
+            -CoordinatorUnresolvedCount $invalidBoundaryUnresolvedCount `
+            -CoordinatorWriter $invalidBoundaryWriter `
+            -CoordinatorWriterSequence $invalidBoundaryWriterSequence `
+            -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount `
+                ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $coordinatorSnapshotEvaluation `
+                    -Name 'FallbackTailYieldFamilyLegacySelectionCount' `
+                    -Default 1L)) `
+            -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount `
+                ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $coordinatorSnapshotEvaluation `
+                    -Name 'RegularV4FrontierRepairPressureFamilyLegacySelectionCount' `
+                    -Default 1L)) `
+            -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount `
+                ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $coordinatorSnapshotEvaluation `
+                    -Name 'ResponderProbeHandoffFamilyLegacySelectionCount' `
+                    -Default 1L))
     }
     $boundary = $coordinatorSnapshotEvaluation.FirstUnresolvedBoundary
     $boundaryFamilies = if ($null -eq $boundary) {

@@ -313,8 +313,9 @@ public sealed partial class SessionFileTransferService
             FileTransferDirection.Outbound,
             decision.State,
             decision.SnapshotEnvelope,
-            adopted => context.CoordinatorPersistentState =
-                adopted.PersistentState,
+            adopted => AdoptRegularV4FrontierRepairPressureStateLocked(
+                context,
+                adopted),
             context.CoordinatorSnapshotEmitter);
         EnqueueRegularV4PressureDecisionAuthorityEffect(
             context.CoordinatorSnapshotEmitter,
@@ -338,8 +339,9 @@ public sealed partial class SessionFileTransferService
             FileTransferDirection.Inbound,
             decision.State,
             decision.SnapshotEnvelope,
-            adopted => context.CoordinatorPersistentState =
-                adopted.PersistentState,
+            adopted => AdoptRegularV4FrontierRepairPressureStateLocked(
+                context,
+                adopted),
             context.CoordinatorSnapshotEmitter);
         EnqueueRegularV4PressureDecisionAuthorityEffect(
             context.CoordinatorSnapshotEmitter,
@@ -363,8 +365,9 @@ public sealed partial class SessionFileTransferService
             FileTransferDirection.Outbound,
             decision.State,
             decision.SnapshotEnvelope,
-            adopted => context.CoordinatorPersistentState =
-                adopted.PersistentState,
+            adopted => AdoptRegularV4FrontierRepairPressureStateLocked(
+                context,
+                adopted),
             context.CoordinatorSnapshotEmitter);
         EnqueueRegularV4PressureDecisionAuthorityEffect(
             context.CoordinatorSnapshotEmitter,
@@ -388,8 +391,9 @@ public sealed partial class SessionFileTransferService
             FileTransferDirection.Inbound,
             decision.State,
             decision.SnapshotEnvelope,
-            adopted => context.CoordinatorPersistentState =
-                adopted.PersistentState,
+            adopted => AdoptRegularV4FrontierRepairPressureStateLocked(
+                context,
+                adopted),
             context.CoordinatorSnapshotEmitter);
         EnqueueRegularV4PressureDecisionAuthorityEffect(
             context.CoordinatorSnapshotEmitter,
@@ -400,6 +404,28 @@ public sealed partial class SessionFileTransferService
             state.PersistentState.SnapshotStateGeneration,
             decision.SnapshotEnvelope);
         return state;
+    }
+
+    private static void AdoptRegularV4FrontierRepairPressureStateLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorState state)
+    {
+        context.CoordinatorPersistentState = state.PersistentState;
+        context.CurrentRepairReplayDecision =
+            state.CurrentRepairReplayDecision;
+        context.LastRepairReplayGeneration =
+            state.LastRepairReplayGeneration;
+    }
+
+    private static void AdoptRegularV4FrontierRepairPressureStateLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorState state)
+    {
+        context.CoordinatorPersistentState = state.PersistentState;
+        context.CurrentRepairReplayDecision =
+            state.CurrentRepairReplayDecision;
+        context.LastRepairReplayGeneration =
+            state.LastRepairReplayGeneration;
     }
 
     private static FileTransferCoordinatorState AdoptCoordinatorStateLocked(

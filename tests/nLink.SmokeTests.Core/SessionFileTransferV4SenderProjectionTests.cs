@@ -58,6 +58,22 @@ public sealed partial class SessionFileTransferV4SenderTests
         var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
         Assert.Equal(initialReceipt.Authority.AuthorityId, settlement.AuthorityId);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved, settlement.Outcome);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Equal(
+            initialReceipt.Authority.DecisionGeneration,
+            GetPrivateProperty<int>(context, "LastRepairReplayGeneration"));
+
+        _ = CreateInboundState(
+            service,
+            context,
+            "frontier_stall_repair_due",
+            forceMissingRange: true);
+
+        var independentReceipt = Assert.Single(
+            transport.RegularV4PressureInstallReceipts,
+            candidate => candidate.Authority.AuthorityId !=
+                initialReceipt.Authority.AuthorityId);
+        Assert.Null(independentReceipt.Authority.PredecessorAuthorityId);
         var log = ReadOperationalLogTail(logStart);
         var installIndex = log.IndexOf(
             $"event=filetransfer_regular_v4_frontier_repair_initial_pressure_install_decided; authority_schema=2; authority_id={initialReceipt.Authority.AuthorityId}",
