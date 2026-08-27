@@ -4030,6 +4030,15 @@ public sealed class FileTransferCoordinatorTests
     public void RegularV4FrontierRepairPressure_SuccessorRetiresOnlyExactPredecessor()
     {
         var (initialState, initialDecision) = AuthorizeRegularV4FrontierRepair();
+        initialState = initialState with
+        {
+            PersistentState = initialState.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    "regular-v4-pressure-retained-predecessor-snapshot",
+                SnapshotStateGeneration = 0,
+            },
+        };
         var initialStage = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
             initialState,
             initialDecision,
@@ -4118,14 +4127,16 @@ public sealed class FileTransferCoordinatorTests
             PressureState(installedSuccessor.State).RetainedPredecessorBinding,
             PressureState(predecessorWrongScope.State).RetainedPredecessorBinding);
 
-        var predecessorRetired = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
-            installedSuccessor.State,
+        var predecessorReceipt =
             new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
                 prepared.SettlementCommand!,
                 FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
                 "predecessor_retired",
                 CurrentAuthorityCleared: false,
-                RetainedPredecessorCleared: true));
+                RetainedPredecessorCleared: true);
+        var predecessorRetired = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
+            installedSuccessor.State,
+            predecessorReceipt);
         Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, predecessorRetired.Status);
         Assert.Null(PressureState(predecessorRetired.State).RetainedPredecessorBinding);
         Assert.Equal(
@@ -4134,6 +4145,92 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             successorDecision,
             predecessorRetired.State.CurrentRepairReplayDecision);
+        var predecessorRetiredEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                predecessorRetired.SnapshotEnvelope);
+        var predecessorTerminal = Assert.Single(
+            predecessorRetiredEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "pressure_settlement_terminal",
+                BeforeState: "None",
+                AfterState: "Applied",
+            } && operation.AuthorityId ==
+                initial.Authority.AuthorityId.ToString());
+        var successorAttempt = Assert.Single(
+            predecessorRetiredEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "attempted_decision",
+                OperationKind:
+                    "CommitRegularV4FrontierRepairPressureSettlement",
+                StateApplied: false,
+            });
+        Assert.Equal(
+            successor.Authority.AuthorityId.ToString(),
+            successorAttempt.AuthorityId);
+        Assert.Equal(
+            initial.Authority.AuthorityId.ToString(),
+            successorAttempt.PredecessorAuthorityId);
+        Assert.Equal(
+            successor.InstallGeneration,
+            successorAttempt.OperationGeneration);
+        Assert.Equal(
+            predecessorTerminal.ReceiptGeneration,
+            successorAttempt.OperationGeneration);
+        Assert.Equal(
+            predecessorTerminal.ReceiptFingerprint,
+            successorAttempt.CommandFingerprint);
+        Assert.Equal(
+            predecessorTerminal.RegularV4FrontierRepairPressure!
+                .SourceBoundary,
+            successorAttempt.RegularV4FrontierRepairPressure!
+                .SourceBoundary);
+        Assert.Equal(
+            predecessorTerminal.RegularV4FrontierRepairPressure
+                .EffectiveBoundary,
+            successorAttempt.RegularV4FrontierRepairPressure
+                .EffectiveBoundary);
+        var settlementEffectBinding = Assert.IsType<
+            FileTransferCoordinatorAuthorityEffectBinding>(
+                SessionFileTransferService
+                    .CreateRegularV4PressureSettlementAuthorityEffectBindingForTesting(
+                        predecessorRetiredEnvelope));
+        Assert.Equal(
+            predecessorTerminal.OperationKey,
+            settlementEffectBinding.OperationKey);
+        Assert.Equal(
+            predecessorTerminal.AuthorityId,
+            settlementEffectBinding.AuthorityId);
+        Assert.Equal(
+            predecessorTerminal.OperationGeneration,
+            settlementEffectBinding.OperationGeneration);
+        Assert.Equal(
+            predecessorTerminal.ReceiptIdentity,
+            settlementEffectBinding.ReceiptIdentity);
+        Assert.Equal(
+            predecessorTerminal.ReceiptGeneration,
+            settlementEffectBinding.ReceiptGeneration);
+        Assert.Equal(
+            predecessorTerminal.ReceiptFingerprint,
+            settlementEffectBinding.ReceiptFingerprint);
+        Assert.NotEqual(
+            PressureState(installedSuccessor.State)
+                .RetainedPredecessorBinding!.Value.InstallGeneration,
+            settlementEffectBinding.ReceiptGeneration);
+        Assert.Null(
+            SessionFileTransferService
+                .CreateRegularV4PressureSettlementAuthorityEffectBindingForTesting(
+                    predecessorRetiredEnvelope with
+                    {
+                        Aggregate = predecessorRetiredEnvelope.Aggregate with
+                        {
+                            Operations = predecessorRetiredEnvelope.Aggregate
+                                .Operations.Add(predecessorTerminal),
+                        },
+                    }));
 
         var exactPredecessorDuplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(
             predecessorRetired.State,
@@ -4146,6 +4243,11 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent,
             exactPredecessorDuplicate.Status);
+        Assert.NotNull(
+            SessionFileTransferService
+                .CreateRegularV4PressureSettlementAuthorityEffectBindingForTesting(
+                    Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                        exactPredecessorDuplicate.SnapshotEnvelope)));
 
         var arbitraryReasonPredecessorDuplicate =
             FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(

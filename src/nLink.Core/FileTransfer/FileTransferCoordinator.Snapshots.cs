@@ -682,19 +682,87 @@ internal static partial class FileTransferCoordinator
             descriptorBuilder);
         IEnumerable<CoordinatorOperationDescriptor> descriptors =
             descriptorBuilder;
-        if (authorityId is { IsDefault: false } exactAuthority)
+        var selectedAuthorityId = authorityId;
+        var requireInstalledSuccessor = false;
+        long requiredInstallGeneration = 0;
+        string? requiredPredecessorAuthorityId = null;
+        FileTransferCoordinatorStateBoundarySnapshot?
+            requiredSourceBoundary = null;
+        FileTransferCoordinatorStateBoundarySnapshot?
+            requiredEffectiveBoundary = null;
+        var exactSuccessorLinkMatches = true;
+        if (string.Equals(
+                decisionKind,
+                nameof(CommitRegularV4FrontierRepairPressureSettlement),
+                StringComparison.Ordinal) &&
+            command is
+                FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt
+                {
+                    CurrentAuthorityCleared: false,
+                    RetainedPredecessorCleared: true,
+                } retainedPredecessorReceipt)
+        {
+            selectedAuthorityId =
+                retainedPredecessorReceipt.Command.CurrentAuthorityId;
+            requiredInstallGeneration =
+                retainedPredecessorReceipt.Command.InstallGeneration;
+            requiredPredecessorAuthorityId = retainedPredecessorReceipt
+                .Command.Settlement.AuthorityId.ToString();
+            requiredSourceBoundary = CreateRegularV4PressureSourceBoundary(
+                state,
+                retainedPredecessorReceipt.Command.Settlement);
+            requiredEffectiveBoundary = CreateStateBoundarySnapshot(state);
+            exactSuccessorLinkMatches = retainedPredecessorReceipt.Command
+                .Settlement.SuccessorAuthorityId == selectedAuthorityId;
+            requireInstalledSuccessor = true;
+        }
+
+        if (selectedAuthorityId is { IsDefault: false } exactAuthority)
         {
             descriptors = descriptors.Where(descriptor => string.Equals(
                 descriptor.AuthorityId,
                 exactAuthority.ToString(),
                 StringComparison.Ordinal));
         }
-        var descriptor = descriptors
-            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
-            .FirstOrDefault();
+        if (requireInstalledSuccessor)
+        {
+            descriptors = descriptors.Where(descriptor =>
+                string.Equals(
+                    descriptor.OperationRole,
+                    "pressure_binding_installed",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    descriptor.PredecessorAuthorityId,
+                    requiredPredecessorAuthorityId,
+                    StringComparison.Ordinal) &&
+                descriptor.OperationGeneration ==
+                    requiredInstallGeneration &&
+                descriptor.RegularV4FrontierRepairPressure is
+                    {
+                        PressureInstallGeneration: var installGeneration,
+                    } pressureSnapshot &&
+                installGeneration == requiredInstallGeneration &&
+                pressureSnapshot.SourceBoundary == requiredSourceBoundary &&
+                pressureSnapshot.EffectiveBoundary ==
+                    requiredEffectiveBoundary &&
+                exactSuccessorLinkMatches);
+        }
+
+        var matchingDescriptors = descriptors
+            .OrderBy(
+                descriptor => descriptor.OperationRole,
+                StringComparer.Ordinal)
+            .ToArray();
+        if (requireInstalledSuccessor && matchingDescriptors.Length != 1)
+        {
+            return ImmutableArray<
+                FileTransferCoordinatorOperationTransitionSnapshot>.Empty;
+        }
+
+        var descriptor = matchingDescriptors.FirstOrDefault();
         var commandFingerprint = CalculateSnapshotFingerprint(command);
         var boundary = CreateStateBoundarySnapshot(state);
-        var authority = authorityId is { IsDefault: false } exact
+        var authority = selectedAuthorityId is { IsDefault: false } exact
             ? exact.ToString()
             : descriptor?.AuthorityId ?? $"attempt:{commandFingerprint}";
         var generation = Math.Max(

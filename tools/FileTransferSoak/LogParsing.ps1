@@ -362,8 +362,15 @@ function Get-FileTransferEventField {
         return $Default
     }
 
-    if ($null -ne $Event.Fields -and $Event.Fields.ContainsKey($Name)) {
-        return [string]$Event.Fields[$Name]
+    $fieldsProperty = $Event.PSObject.Properties['Fields']
+    if ($null -eq $fieldsProperty -or $null -eq $fieldsProperty.Value) {
+        return $Default
+    }
+
+    $fields = $fieldsProperty.Value
+    if ($fields -is [System.Collections.IDictionary] -and
+        $fields.Contains($Name)) {
+        return [string]$fields[$Name]
     }
 
     return $Default

@@ -183,6 +183,12 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 $eagerSum -ne 19L -or $deferredSum -ne $eagerSum) {
                 throw "Field aggregate mismatch: eager=$eagerMax/$eagerSum deferred=$deferredMax/$deferredSum"
             }
+
+            $boundaryWithoutFields = [pscustomobject]@{ Sequence = 4L; BoundaryId = 'boundary-4' }
+            if ((Get-FileTransferEventField -Event $boundaryWithoutFields -Name 'missing' -Default 'fallback') -ne 'fallback' -or
+                (Get-FileTransferEventInt64Field -Event $boundaryWithoutFields -Name 'missing' -Default 17L) -ne 17L) {
+                throw 'Missing Fields property did not preserve the requested defaults.'
+            }
             """;
 
         var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
@@ -1347,6 +1353,109 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             if ($settlementValidation -ne '') {
                 throw "Exact pressure settlement authority retirement was rejected: $settlementValidation"
             }
+
+            $retainedAuthority = 'fta2-repair_replay-retained-a'
+            $currentAuthority = 'fta2-repair_replay-current-b'
+            $retainedSettlementPayload = New-RepairReplayPayload `
+                'pressure_settlement_terminal' @()
+            $retainedSettlementPayload.decisionGeneration = 15L
+            $retainedSettlementPayload.pressureInstallGeneration = 16L
+            $retainedSettlementPayload.bindingState = 'Settled'
+            $retainedSettlementPayload.settlementOutcome = 'Superseded'
+            $retainedSettlementPayload.currentAuthorityCleared = $false
+            $retainedSettlementPayload.retainedPredecessorCleared = $true
+            $retainedSettlementPayload.successorAuthorityId = $currentAuthority
+            $retainedSettlement = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='pressure_settlement_terminal'
+                operationKind='PressureSettlement'; authorityId=$retainedAuthority
+                predecessorAuthorityId='(none)'; operationGeneration=15L
+                beforeState='None'; afterState='Applied'
+                receiptIdentity='retained-settlement-receipt'
+                receiptGeneration=16L; receiptStatus='Applied'
+                receiptFingerprint='retained-settlement-fingerprint'
+                stateApplied=$true; receiptValidated=$true
+                regularV4FrontierRepairPressure=$retainedSettlementPayload
+            }
+            $retainedSettlementMirrorPayload = $retainedSettlementPayload |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $retainedSettlementMirrorPayload.role = 'repair_authority_terminal'
+            $retainedSettlementMirror = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='repair_authority_terminal'
+                operationKind='PressureSettlement'; authorityId=$retainedAuthority
+                predecessorAuthorityId='(none)'; operationGeneration=15L
+                beforeState='None'; afterState='Applied'
+                receiptIdentity='retained-settlement-receipt'
+                receiptGeneration=16L; receiptStatus='Applied'
+                receiptFingerprint='retained-settlement-fingerprint'
+                stateApplied=$true; receiptValidated=$true
+                regularV4FrontierRepairPressure=$retainedSettlementMirrorPayload
+            }
+            $retainedBindingPayload = New-RepairReplayPayload `
+                'pressure_binding_retained_predecessor' @()
+            $retainedBindingPayload.decisionGeneration = 15L
+            $retainedBindingPayload.pressureInstallGeneration = 15L
+            $retainedBindingPayload.bindingState = 'RetainedPredecessor'
+            $retainedBinding = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='pressure_binding_retained_predecessor'
+                operationKind='regular_v4_frontier_repair_request'
+                authorityId=$retainedAuthority
+                predecessorAuthorityId='(none)'; operationGeneration=15L
+                beforeState='RetainedPredecessor'; afterState='None'
+                stateApplied=$true; receiptValidated=$true
+                regularV4FrontierRepairPressure=$retainedBindingPayload
+            }
+            $currentAttemptPayload = New-RepairReplayPayload `
+                'attempted_decision' @()
+            $currentAttemptPayload.decisionGeneration = 16L
+            $currentAttemptPayload.pressureInstallGeneration = 16L
+            $currentAttempt = [pscustomobject]@{
+                family='regular_v4_frontier_repair_pressure'
+                operationRole='attempted_decision'
+                operationKind='CommitRegularV4FrontierRepairPressureSettlement'
+                authorityId=$currentAuthority
+                predecessorAuthorityId=$retainedAuthority
+                operationGeneration=16L; beforeState='Installed'
+                afterState='Installed'
+                commandFingerprint='retained-settlement-fingerprint'
+                commandGeneration=16L; receiptGeneration=16L
+                receiptStatus='Accepted'; stateApplied=$false
+                receiptValidated=$true
+                regularV4FrontierRepairPressure=$currentAttemptPayload
+            }
+            $retainedSettlementEnvelope = [pscustomobject]@{
+                decisionKind='CommitRegularV4FrontierRepairPressureSettlement'
+                decisionStatus='Accepted'
+                aggregate=[pscustomobject]@{
+                    operations=@(
+                        $retainedSettlement,
+                        $retainedSettlementMirror,
+                        $retainedBinding,
+                        $currentAttempt)
+                }
+            }
+            $retainedSettlementEnvelope = $retainedSettlementEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $retainedSettlementValidation =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $retainedSettlementEnvelope
+            if ($retainedSettlementValidation -ne '') {
+                throw "Exact retained-predecessor settlement was rejected: $retainedSettlementValidation"
+            }
+            $wrongRetainedAttempt = $retainedSettlementEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $wrongRetainedAttempt.aggregate.operations[3].predecessorAuthorityId =
+                'fta2-repair_replay-wrong-predecessor'
+            $wrongRetainedValidation =
+                Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
+                    -Envelope $wrongRetainedAttempt
+            if ($wrongRetainedValidation -ne
+                'snapshot_regular_v4_pressure_settlement_transition_invalid|pressure_settlement_attempt_binding_invalid') {
+                throw "Wrong retained-predecessor attempt did not fail exactly: $wrongRetainedValidation"
+            }
+
             $settlementEnvelope.aggregate.operations = @(
                 $settlementOperation,
                 $settlementMirror,

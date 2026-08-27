@@ -1721,13 +1721,16 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
         return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
             'pressure_settlement_entering_terminal_receipt_invalid')
     }
-    $attempts = @($operations | Where-Object {
+    $currentCleared = [bool]$payload.currentAuthorityCleared
+    $retainedCleared = [bool]$payload.retainedPredecessorCleared
+    if ($currentCleared -eq $retainedCleared) {
+        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
+    }
+
+    $candidateAttempts = @($operations | Where-Object {
             [string]$_.operationRole -ceq 'attempted_decision' -and
             [string]$_.operationKind -ceq
                 'CommitRegularV4FrontierRepairPressureSettlement' -and
-            [string]$_.authorityId -ceq [string]$settlement.authorityId -and
-            [long]$_.operationGeneration -eq
-                [long]$settlement.operationGeneration -and
             -not [bool]$_.stateApplied -and
             [bool]$_.receiptValidated -and
             [string]$_.receiptStatus -ceq 'Accepted' -and
@@ -1735,6 +1738,53 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             [string]$_.regularV4FrontierRepairPressure.role -ceq
                 'attempted_decision'
         })
+    if ($retainedCleared) {
+        $successorAuthorityId = [string]$payload.successorAuthorityId
+        $pressureInstallGeneration =
+            [long]$payload.pressureInstallGeneration
+        $attempts = @($candidateAttempts | Where-Object {
+                [string]$_.authorityId -ceq $successorAuthorityId -and
+                [string]$_.predecessorAuthorityId -ceq
+                    [string]$settlement.authorityId -and
+                [long]$_.operationGeneration -eq
+                    [long]$settlement.receiptGeneration -and
+                [long]$_.operationGeneration -eq
+                    $pressureInstallGeneration -and
+                [long]$_.commandGeneration -eq
+                    $pressureInstallGeneration -and
+                [long]$_.receiptGeneration -eq
+                    $pressureInstallGeneration -and
+                [long]($_.regularV4FrontierRepairPressure.
+                    decisionGeneration) -eq
+                    $pressureInstallGeneration -and
+                [long]($_.regularV4FrontierRepairPressure.
+                    pressureInstallGeneration) -eq
+                    $pressureInstallGeneration -and
+                [string]$_.commandFingerprint -ceq
+                    [string]$settlement.receiptFingerprint -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                    -Left $_.regularV4FrontierRepairPressure.sourceBoundary `
+                    -Right $payload.sourceBoundary) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                    -Left $_.regularV4FrontierRepairPressure.effectiveBoundary `
+                    -Right $payload.effectiveBoundary)
+            })
+        if ($successorAuthorityId -in @('', '(none)') -or
+            $pressureInstallGeneration -le 0 -or
+            [long]$settlement.operationGeneration -ge
+                $pressureInstallGeneration) {
+            return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+                'pressure_settlement_attempt_binding_invalid')
+        }
+    }
+    else {
+        $attempts = @($candidateAttempts | Where-Object {
+                [string]$_.authorityId -ceq
+                    [string]$settlement.authorityId -and
+                [long]$_.operationGeneration -eq
+                    [long]$settlement.operationGeneration
+            })
+    }
     if ($attempts.Count -ne 1) {
         return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
             'pressure_settlement_attempt_binding_invalid')
@@ -1828,12 +1878,6 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             'pressure_settlement_terminal_mirror_count_invalid')
     }
 
-    $currentCleared = [bool]$payload.currentAuthorityCleared
-    $retainedCleared = [bool]$payload.retainedPredecessorCleared
-    if ($currentCleared -eq $retainedCleared) {
-        return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
-    }
-
     $currentRetirements = @($operations | Where-Object {
             [string]$_.operationRole -ceq 'repair_authority_current' -and
             (@('V4Repair', 'PeerSilenceReplay',
@@ -1844,7 +1888,32 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             [string]$_.afterState -ceq 'None'
         })
     if ($retainedCleared) {
-        if ($currentRetirements.Count -ne 0) {
+        $retainedPredecessorRetirements = @($operations | Where-Object {
+                [string]$_.operationRole -ceq
+                    'pressure_binding_retained_predecessor' -and
+                [string]$_.authorityId -ceq
+                    [string]$settlement.authorityId -and
+                [long]$_.operationGeneration -eq
+                    [long]$settlement.operationGeneration -and
+                [bool]$_.stateApplied -and
+                [string]$_.beforeState -ceq 'RetainedPredecessor' -and
+                [string]$_.afterState -ceq 'None' -and
+                $null -ne $_.regularV4FrontierRepairPressure -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                    -Left $_.regularV4FrontierRepairPressure.sourceBoundary `
+                    -Right $payload.sourceBoundary) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                    -Left $_.regularV4FrontierRepairPressure.effectiveBoundary `
+                    -Right $payload.effectiveBoundary)
+            })
+        $successorMutations = @($operations | Where-Object {
+                [string]$_.authorityId -ceq
+                    [string]$payload.successorAuthorityId -and
+                [bool]$_.stateApplied
+            })
+        if ($currentRetirements.Count -ne 0 -or
+            $retainedPredecessorRetirements.Count -ne 1 -or
+            $successorMutations.Count -ne 0) {
             return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
         }
         return ''

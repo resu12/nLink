@@ -1403,6 +1403,46 @@ public sealed partial class SessionFileTransferService
             .OrderByDescending(match =>
                 match.Receipt.Stage == "attempted_decision" ? 0 : 1)
             .ToArray();
+        if (envelope.DecisionKind == nameof(
+                FileTransferCoordinator
+                    .CommitRegularV4FrontierRepairPressureSettlement))
+        {
+            var exactBinding =
+                CreateRegularV4PressureSettlementAuthorityEffectBinding(
+                    envelope,
+                    effectKinds[0]);
+            if (exactBinding is null)
+            {
+                return;
+            }
+
+            matches = matches.Where(match =>
+                    match.Operation.OperationKey ==
+                        exactBinding.OperationKey &&
+                    match.Operation.OperationKind ==
+                        exactBinding.OperationKind &&
+                    match.Operation.OperationRole ==
+                        exactBinding.OperationRole &&
+                    match.Operation.AuthorityId == exactBinding.AuthorityId &&
+                    match.Operation.OperationGeneration ==
+                        exactBinding.OperationGeneration &&
+                    match.Receipt.Stage == exactBinding.ReceiptStage &&
+                    match.Receipt.CommandIdentity ==
+                        exactBinding.CommandIdentity &&
+                    match.Receipt.CommandGeneration ==
+                        exactBinding.CommandGeneration &&
+                    match.Receipt.CommandFingerprint ==
+                        exactBinding.CommandFingerprint &&
+                    match.Receipt.ReceiptIdentity ==
+                        exactBinding.ReceiptIdentity &&
+                    match.Receipt.ReceiptGeneration ==
+                        exactBinding.ReceiptGeneration &&
+                    match.Receipt.ReceiptStatus ==
+                        exactBinding.ReceiptStatus &&
+                    match.Receipt.ReceiptFingerprint ==
+                        exactBinding.ReceiptFingerprint)
+                .ToArray();
+        }
         if (matches.Length == 0)
         {
             return;
@@ -1429,6 +1469,77 @@ public sealed partial class SessionFileTransferService
                 Math.Max(1, match.Receipt.ReceiptGeneration));
         }
     }
+
+    private static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateRegularV4PressureSettlementAuthorityEffectBinding(
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            string effectKind)
+    {
+        if (envelope.DecisionKind != nameof(
+                FileTransferCoordinator
+                    .CommitRegularV4FrontierRepairPressureSettlement) ||
+            envelope.DecisionStatus is not ("Accepted" or "Idempotent"))
+        {
+            return null;
+        }
+
+        var accepted = envelope.DecisionStatus == "Accepted";
+        var matches = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.OperationRole == (accepted
+                    ? "pressure_settlement_terminal"
+                    : "attempted_decision") &&
+                operation.OperationKind == (accepted
+                    ? "PressureSettlement"
+                    : nameof(FileTransferCoordinator
+                        .CommitRegularV4FrontierRepairPressureSettlement)) &&
+                (!accepted || operation.AfterState == "Applied") &&
+                operation.RegularV4FrontierRepairPressure is not null)
+            .SelectMany(operation =>
+                operation.RegularV4FrontierRepairPressure!.Receipts
+                    .Where(receipt =>
+                        receipt.ReceiptValidated &&
+                        receipt.Stage == (accepted
+                            ? "pressure_settlement"
+                            : "attempted_decision") &&
+                        receipt.ReceiptStatus == (accepted
+                            ? "Applied"
+                            : "Idempotent"))
+                    .Select(receipt =>
+                        (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            return null;
+        }
+
+        var match = matches[0];
+        return new FileTransferCoordinatorAuthorityEffectBinding(
+            effectKind,
+            match.Operation.Family,
+            match.Operation.OperationKey,
+            match.Operation.OperationKind,
+            match.Operation.OperationRole,
+            match.Operation.AuthorityId,
+            match.Operation.OperationGeneration,
+            match.Receipt.Stage,
+            match.Receipt.CommandIdentity,
+            match.Receipt.CommandGeneration,
+            match.Receipt.CommandFingerprint,
+            match.Receipt.ReceiptIdentity,
+            match.Receipt.ReceiptGeneration,
+            match.Receipt.ReceiptStatus,
+            match.Receipt.ReceiptFingerprint);
+    }
+
+    internal static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateRegularV4PressureSettlementAuthorityEffectBindingForTesting(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        => CreateRegularV4PressureSettlementAuthorityEffectBinding(
+            envelope,
+            "pressure_settlement_bridge_applied");
 
     private static void
         EnqueueRegularV4PressureDecisionAuthorityEffectIfPresent(

@@ -64802,6 +64802,22 @@ function Get-FileTransferRecoveryFailureClassification {
     else {
         $fileTunaV4DataPathProof.RouteTransitionProof
     }
+    $fileTransferFallbackV6ProofBootstrapProof =
+        if ($snapshotRouteTransitionAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $coordinatorSnapshotEvaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @(
+                    'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+        }
+        else {
+            [pscustomobject]@{
+                RawCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
+                DistinctCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount
+                RecoveredCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount
+                UnresolvedCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount
+            }
+        }
     $fileTransferGuiLiveFallbackFaultWindowProof =
         Get-FileTransferGuiLiveFallbackFaultWindowCorrelation `
             -Events $allEvents `
@@ -70090,15 +70106,15 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferGuiLiveReactivationActionWindowMissedVerdict =
             $fileTransferGuiLiveReactivationActionWindowProof.Verdict
         FileTransferFallbackV6ProofBootstrapMissingRawCount =
-            $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
+            $fileTransferFallbackV6ProofBootstrapProof.RawCount
         FileTransferFallbackV6ProofBootstrapMissingDistinctCount =
-            $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount
+            $fileTransferFallbackV6ProofBootstrapProof.DistinctCount
         FileTransferFallbackV6ProofBootstrapMissingRecoveredCount =
-            $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount
+            $fileTransferFallbackV6ProofBootstrapProof.RecoveredCount
         FileTransferFallbackV6ProofBootstrapMissingUnresolvedCount =
-            $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount
+            $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount
         FileTransferFallbackV6ProofBootstrapMissingVerdict = if (
-            $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) {
+            $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount -gt 0) {
             'fail'
         }
         else {
