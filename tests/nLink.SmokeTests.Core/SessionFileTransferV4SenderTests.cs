@@ -1153,6 +1153,21 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "operation_key=receive_recovery|proof_publication_terminal|",
             log,
             StringComparison.Ordinal);
+        Assert.Single(
+            log.Split(Environment.NewLine),
+            line =>
+                line.Contains(
+                    "effect_kind=proof_publication_delivered;",
+                    StringComparison.Ordinal) &&
+                line.Contains(
+                    "operation_key=receive_recovery|proof_publication_terminal|",
+                    StringComparison.Ordinal) &&
+                line.Contains(
+                    "operation_generation=2;",
+                    StringComparison.Ordinal) &&
+                line.Contains(
+                    "receipt_generation=2;",
+                    StringComparison.Ordinal));
 
         var receiveProofObservedUtcMs =
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();

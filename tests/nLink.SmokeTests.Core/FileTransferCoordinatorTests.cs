@@ -8378,6 +8378,49 @@ public sealed class FileTransferCoordinatorTests
         var recheckEnvelope = Assert.IsType<
             FileTransferCoordinatorTransitionEnvelope>(
                 recheckDelivered.SnapshotEnvelope);
+        var recheckPublicationOperations = recheckEnvelope.Aggregate.Operations
+            .Where(operation =>
+                operation is
+                {
+                    Family: "receive_recovery",
+                    OperationKind: "ProofPublication",
+                })
+            .ToArray();
+        Assert.Equal(3, recheckPublicationOperations.Length);
+        Assert.Single(
+            recheckPublicationOperations,
+            operation => operation is
+            {
+                OperationRole: "proof_publication_pending",
+                OperationGeneration: 2,
+                BeforeState: "Pending",
+                AfterState: "None",
+                StateApplied: true,
+            });
+        Assert.Single(
+            recheckPublicationOperations,
+            operation => operation is
+            {
+                OperationRole: "proof_publication_terminal",
+                OperationGeneration: 1,
+                BeforeState: "Delivered",
+                AfterState: "None",
+                ReceiptStatus: "Delivered",
+                ReceiptValidated: true,
+                StateApplied: true,
+            });
+        Assert.Single(
+            recheckPublicationOperations,
+            operation => operation is
+            {
+                OperationRole: "proof_publication_terminal",
+                OperationGeneration: 2,
+                BeforeState: "None",
+                AfterState: "Delivered",
+                ReceiptStatus: "Delivered",
+                ReceiptValidated: true,
+                StateApplied: true,
+            });
         var recheckEffectOperation = Assert.Single(
             recheckEnvelope.Aggregate.Operations,
             operation => operation.OperationKey == recheckEffect.OperationKey);

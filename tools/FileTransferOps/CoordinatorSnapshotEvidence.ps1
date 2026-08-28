@@ -1064,6 +1064,161 @@ function Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotProofPublicationTerminalTransition {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()][object[]]$PublicationOperations,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()][object[]]$DeliveryEffects,
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Delivered', 'Rejected')][string]$Outcome
+    )
+
+    $receiptValidated = $Outcome -ceq 'Delivered'
+    $terminalEntrants = @($PublicationOperations | Where-Object {
+            [string]$_.operationRole -ceq 'proof_publication_terminal' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq $Outcome -and
+            [bool]$_.stateApplied -and
+            [bool]$_.receiptValidated -eq $receiptValidated -and
+            [string]$_.receiptStatus -ceq $Outcome
+        })
+    $pendingRetirements = @($PublicationOperations | Where-Object {
+            [string]$_.operationRole -ceq 'proof_publication_pending' -and
+            [string]$_.beforeState -in @('Pending', 'Held') -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    $terminalRetirements = @($PublicationOperations | Where-Object {
+            [string]$_.operationRole -ceq 'proof_publication_terminal' -and
+            [string]$_.beforeState -in @('Delivered', 'Rejected') -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    if ($terminalEntrants.Count -ne 1 -or
+        $pendingRetirements.Count -ne 1 -or
+        $terminalRetirements.Count -gt 1 -or
+        $PublicationOperations.Count -ne
+            (2 + $terminalRetirements.Count)) {
+        return $false
+    }
+
+    $entrant = $terminalEntrants[0]
+    $pending = $pendingRetirements[0]
+    $entrantReceipts = @($entrant.receiveRecovery.receipts | Where-Object {
+            [string]$_.stage -ceq 'proof_publication_terminal' -and
+            [string]$_.commandIdentity -ceq
+                [string]$entrant.commandIdentity -and
+            [long]$_.commandGeneration -eq
+                [long]$entrant.commandGeneration -and
+            [string]$_.commandFingerprint -ceq
+                [string]$entrant.commandFingerprint -and
+            [string]$_.receiptIdentity -ceq
+                [string]$entrant.receiptIdentity -and
+            [long]$_.receiptGeneration -eq
+                [long]$entrant.receiptGeneration -and
+            [string]$_.receiptStatus -ceq
+                [string]$entrant.receiptStatus -and
+            [string]$_.receiptFingerprint -ceq
+                [string]$entrant.receiptFingerprint -and
+            [bool]$_.receiptValidated -eq
+                [bool]$entrant.receiptValidated
+        })
+    if ([string]$pending.authorityId -cne [string]$entrant.authorityId -or
+        [long]$pending.operationGeneration -ne
+            [long]$entrant.operationGeneration -or
+        [long]$entrant.commandGeneration -ne
+            [long]$entrant.operationGeneration -or
+        [long]$entrant.receiptGeneration -ne
+            [long]$entrant.operationGeneration -or
+        [long]$pending.commandGeneration -ne
+            [long]$entrant.commandGeneration -or
+        [string]$pending.commandFingerprint -cne
+            [string]$entrant.commandFingerprint -or
+        @($pending.receiveRecovery.receipts).Count -ne 0 -or
+        $entrantReceipts.Count -ne 1 -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $pending.receiveRecovery.sourceBoundary `
+            -Right $entrant.receiveRecovery.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $pending.receiveRecovery.effectiveBoundary `
+            -Right $entrant.receiveRecovery.effectiveBoundary)) {
+        return $false
+    }
+
+    if ($terminalRetirements.Count -eq 1) {
+        $retired = $terminalRetirements[0]
+        $retiredReceiptValidated =
+            [string]$retired.beforeState -ceq 'Delivered'
+        $retiredReceipts = @($retired.receiveRecovery.receipts | Where-Object {
+                [string]$_.stage -ceq 'proof_publication_terminal' -and
+                [string]$_.commandIdentity -ceq
+                    [string]$retired.commandIdentity -and
+                [long]$_.commandGeneration -eq
+                    [long]$retired.commandGeneration -and
+                [string]$_.commandFingerprint -ceq
+                    [string]$retired.commandFingerprint -and
+                [string]$_.receiptIdentity -ceq
+                    [string]$retired.receiptIdentity -and
+                [long]$_.receiptGeneration -eq
+                    [long]$retired.receiptGeneration -and
+                [string]$_.receiptStatus -ceq
+                    [string]$retired.receiptStatus -and
+                [string]$_.receiptFingerprint -ceq
+                    [string]$retired.receiptFingerprint -and
+                [bool]$_.receiptValidated -eq
+                    [bool]$retired.receiptValidated
+            })
+        if ([string]$retired.authorityId -cne
+                [string]$entrant.authorityId -or
+            [long]$retired.operationGeneration + 1L -ne
+                [long]$entrant.operationGeneration -or
+            [long]$retired.commandGeneration -ne
+                [long]$retired.operationGeneration -or
+            [long]$retired.receiptGeneration -ne
+                [long]$retired.operationGeneration -or
+            [string]$retired.receiptStatus -cne
+                [string]$retired.beforeState -or
+            [bool]$retired.receiptValidated -ne
+                $retiredReceiptValidated -or
+            $retiredReceipts.Count -ne 1 -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retired.receiveRecovery.sourceBoundary `
+                -Right $entrant.receiveRecovery.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retired.receiveRecovery.effectiveBoundary `
+                -Right $entrant.receiveRecovery.effectiveBoundary)) {
+            return $false
+        }
+    }
+
+    if ($Outcome -ceq 'Rejected') {
+        return $DeliveryEffects.Count -eq 0
+    }
+
+    $matchingDeliveryEffects = @($DeliveryEffects | Where-Object {
+            [long]$_.StateGeneration -eq
+                [long]$Boundary.afterStateGeneration -and
+            [string]$_.OperationKey -ceq [string]$entrant.operationKey -and
+            [string]$_.AuthorityId -ceq [string]$entrant.authorityId -and
+            [long]$_.OperationGeneration -eq
+                [long]$entrant.operationGeneration -and
+            [string]$_.ReceiptIdentity -ceq
+                [string]$entrant.receiptIdentity -and
+            [long]$_.ReceiptGeneration -eq
+                [long]$entrant.receiptGeneration -and
+            [string]$_.ReceiptStatus -ceq
+                [string]$entrant.receiptStatus -and
+            [string]$_.ReceiptFingerprint -ceq
+                [string]$entrant.receiptFingerprint -and
+            (Test-FileTransferCoordinatorSnapshotEffectScope `
+                -Operation $entrant -Effect $_)
+        })
+    return $DeliveryEffects.Count -eq 1 -and
+        $matchingDeliveryEffects.Count -eq 1
+}
+
 function Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint {
     param(
         [Parameter(Mandatory = $true)]$Left,
@@ -3324,49 +3479,41 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         elseif ($reason -ceq
             'filetransfer_receive_recovery_proof_state_publication_delivered') {
-            $deliveredTerminal = @($terminalOperations | Where-Object {
-                    [string]$_.beforeState -ceq 'None' -and
-                    [string]$_.afterState -ceq 'Delivered' -and
-                    [bool]$_.stateApplied -and
-                    [bool]$_.receiptValidated -and
-                    [string]$_.receiptStatus -ceq 'Delivered'
-                })
-            $retiredPending = @($pendingOperations | Where-Object {
-                    [string]$_.beforeState -in @('Pending', 'Held') -and
-                    [string]$_.afterState -ceq 'None' -and
-                    [bool]$_.stateApplied
-                })
+            $isTerminalRollover = @($terminalOperations | Where-Object {
+                    [string]$_.beforeState -in @('Delivered', 'Rejected') -and
+                    [string]$_.afterState -ceq 'None'
+                }).Count -gt 0
             $validPublicationTransition =
                 $status -ceq 'Accepted' -and
-                $deliveredTerminal.Count -eq 1 -and
-                $retiredPending.Count -eq 1 -and
-                $publicationOperations.Count -eq 2 -and
-                $deliveryEffects.Count -eq 1
+                (Test-FileTransferCoordinatorSnapshotProofPublicationTerminalTransition `
+                    -PublicationOperations $publicationOperations `
+                    -DeliveryEffects $deliveryEffects `
+                    -Boundary $boundary `
+                    -Outcome 'Delivered')
             $failureVariant =
-                'delivered_publication_transition_or_effect_invalid'
+                if ($isTerminalRollover) {
+                    'valid_terminal_proof_publication_rollover_rejected_as_extra_operation'
+                }
+                else { 'delivered_publication_transition_or_effect_invalid' }
         }
         elseif ($reason -ceq
             'filetransfer_receive_recovery_proof_state_publication_rejected') {
-            $rejectedTerminal = @($terminalOperations | Where-Object {
-                    [string]$_.beforeState -ceq 'None' -and
-                    [string]$_.afterState -ceq 'Rejected' -and
-                    [bool]$_.stateApplied -and
-                    -not [bool]$_.receiptValidated -and
-                    [string]$_.receiptStatus -ceq 'Rejected'
-                })
-            $retiredPending = @($pendingOperations | Where-Object {
-                    [string]$_.beforeState -in @('Pending', 'Held') -and
-                    [string]$_.afterState -ceq 'None' -and
-                    [bool]$_.stateApplied
-                })
+            $isTerminalRollover = @($terminalOperations | Where-Object {
+                    [string]$_.beforeState -in @('Delivered', 'Rejected') -and
+                    [string]$_.afterState -ceq 'None'
+                }).Count -gt 0
             $validPublicationTransition =
                 $status -ceq 'Accepted' -and
-                $rejectedTerminal.Count -eq 1 -and
-                $retiredPending.Count -eq 1 -and
-                $publicationOperations.Count -eq 2 -and
-                $deliveryEffects.Count -eq 0
+                (Test-FileTransferCoordinatorSnapshotProofPublicationTerminalTransition `
+                    -PublicationOperations $publicationOperations `
+                    -DeliveryEffects $deliveryEffects `
+                    -Boundary $boundary `
+                    -Outcome 'Rejected')
             $failureVariant =
-                'rejected_publication_transition_or_effect_invalid'
+                if ($isTerminalRollover) {
+                    'valid_terminal_proof_publication_rollover_rejected_as_extra_operation'
+                }
+                else { 'rejected_publication_transition_or_effect_invalid' }
         }
         elseif ($reason -in @(
                 'filetransfer_receive_recovery_proof_state_publication_receipt_duplicate',
