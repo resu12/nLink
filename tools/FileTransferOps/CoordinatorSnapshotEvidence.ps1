@@ -2502,61 +2502,271 @@ function ConvertFrom-FileTransferCoordinatorSnapshotPayload {
     }
 }
 
-function Test-FileTransferCoordinatorRouteTransitionOperationClosed {
+function Get-FileTransferCoordinatorRouteTransitionLifecycleKey {
     param(
-        [Parameter(Mandatory = $true)]$Operation,
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    $transition = $Operation.routeTransition
+    if ($null -eq $transition) {
+        return "$($Boundary.coordinatorInstanceId)|$($Operation.operationKey)"
+    }
+    $source = ConvertTo-Json -InputObject $transition.sourceBoundary `
+        -Depth 16 -Compress
+    return @(
+        [string]$Boundary.coordinatorInstanceId,
+        [string]$Boundary.writer,
+        [string]$Operation.authorityId,
+        [long]$Operation.operationGeneration,
+        [string]$transition.transitionKind,
+        [string]$transition.sourceTransport,
+        [string]$transition.proofBoundaryKind,
+        [string]$transition.proofBoundaryFingerprint,
+        [string]$transition.durableCheckpointFingerprint,
+        [string]$transition.targetRoute,
+        [int]$transition.targetProtocolVersion,
+        [string]$transition.targetTransport,
+        [string]$transition.handoffKind,
+        [string]$transition.retainedFrameFingerprint,
+        [string]$transition.retainedFrameType,
+        [string]$transition.targetBoundary.dataSessionIdentity,
+        [long]$transition.targetBoundary.dataSessionGeneration,
+        [long]$transition.targetBoundary.transportEpoch,
+        $source) -join '|'
+}
+
+function Get-FileTransferCoordinatorRouteTransitionLifecycleResult {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$History,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Effects
     )
 
-    $state = [string]$Operation.afterState
-    $receipts = @($Operation.routeTransition.receipts)
+    $ordered = @($History | Sort-Object {
+            [long]$_.Boundary.decisionUtcMilliseconds
+        }, {
+            [long]$_.Boundary.afterStateGeneration
+        }, {
+            [string]$_.Boundary.boundaryId
+        })
+    if ($ordered.Count -eq 0) {
+        return [pscustomobject]@{
+            HasCandidate = $false
+            Candidate = $null
+            RawCount = 0
+            RecoveredCount = 0
+            UnresolvedCount = 0
+            FailureClass = 'filetransfer_route_transition_incomplete'
+        }
+    }
+
+    $stateEntries = @($ordered | Where-Object {
+            [bool]$_.Operation.stateApplied -and
+            [string]$_.Operation.operationRole -in @('current', 'terminal')
+        })
+    $attemptEntries = @($ordered | Where-Object {
+            -not [bool]$_.Operation.stateApplied -and
+            [string]$_.Operation.operationRole -in @(
+                'inbound', 'outbound', 'attempt') -and
+            [string]$_.Operation.operationKind -ceq
+                [string]$_.Boundary.decisionKind
+        })
+
+    $bindingKeys = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($entry in $ordered) {
+        [void]$bindingKeys.Add(@(
+                [string]$entry.Boundary.coordinatorInstanceId,
+                [string]$entry.Boundary.boundaryId,
+                [string]$entry.Operation.operationKey) -join '|')
+    }
+    $lifecycleEffects = @($Effects | Where-Object {
+            $bindingKeys.Contains(@(
+                    [string]$_.CoordinatorInstanceId,
+                    [string]$_.TransitionId,
+                    [string]$_.OperationKey) -join '|')
+        })
+
+    $receipts = @(
+        foreach ($entry in $ordered) {
+            foreach ($receipt in @($entry.Operation.routeTransition.receipts)) {
+                $receipt
+            }
+        }
+    )
     $hasReceipt = {
-        param([string]$Stage)
-        @($receipts | Where-Object {
-                [string]$_.stage -ceq $Stage -and [bool]$_.receiptValidated
-            }).Count -eq 1
+        param([string]$Stage, [string]$Status)
+        $stageReceipts = @($receipts | Where-Object {
+                [string]$_.stage -ceq $Stage -and
+                [string]$_.receiptStatus -ceq $Status -and
+                [bool]$_.receiptValidated
+            })
+        $identities = @($stageReceipts | ForEach-Object {
+                @(
+                    [string]$_.commandIdentity,
+                    [long]$_.commandGeneration,
+                    [string]$_.commandFingerprint,
+                    [string]$_.receiptIdentity,
+                    [long]$_.receiptGeneration,
+                    [string]$_.receiptStatus,
+                    [string]$_.receiptFingerprint) -join '|'
+            } | Sort-Object -Unique)
+        return $identities.Count -eq 1
     }
     $hasEffect = {
         param([string]$Kind)
-        @($Effects | Where-Object {
-                [string]$_.OperationKey -ceq [string]$Operation.operationKey -and
+        return @($lifecycleEffects | Where-Object {
                 [string]$_.EffectKind -ceq $Kind
-            }).Count -ge 1
+            }).Count -eq 1
     }
 
-    if ($state -ceq 'Committed') {
-        if (-not (& $hasReceipt 'pause_bind') -or
-            -not (& $hasReceipt 'drain') -or
-            -not (& $hasReceipt 'commit') -or
-            -not (& $hasReceipt 'disposition') -or
-            -not (& $hasEffect 'pause_installed') -or
-            -not (& $hasEffect 'completed_drain_receipt') -or
-            -not (& $hasEffect 'route_commit_adopted') -or
-            -not (& $hasEffect 'target_runtime_leg_installed') -or
-            -not (& $hasEffect 'route_transition_disposition_applied') -or
-            -not (& $hasEffect 'transition_pause_released') -or
-            -not (& $hasEffect 'recovered_epoch_publication')) {
-            return $false
+    $atomicCommits = [System.Collections.Generic.List[object]]::new()
+    foreach ($boundaryGroup in @($stateEntries | Group-Object {
+                [string]$_.Boundary.boundaryId
+            })) {
+        $currentRetirements = @($boundaryGroup.Group | Where-Object {
+                [string]$_.Operation.operationRole -ceq 'current' -and
+                [string]$_.Operation.beforeState -ceq 'Draining' -and
+                [string]$_.Operation.afterState -ceq 'None'
+            })
+        $terminalEntrants = @($boundaryGroup.Group | Where-Object {
+                [string]$_.Operation.operationRole -ceq 'terminal' -and
+                [string]$_.Operation.beforeState -ceq 'None' -and
+                [string]$_.Operation.afterState -ceq 'Committed'
+            })
+        if ($currentRetirements.Count -eq 1 -and
+            $terminalEntrants.Count -eq 1) {
+            $atomicCommits.Add($terminalEntrants[0])
         }
-        $retainedFingerprint = [string]$Operation.routeTransition.retainedFrameFingerprint
-        $retainedFrameType = [string]$Operation.routeTransition.retainedFrameType
+    }
+    $directCommits = @($stateEntries | Where-Object {
+            [string]$_.Operation.beforeState -ceq 'Draining' -and
+            [string]$_.Operation.afterState -ceq 'Committed'
+        })
+    $commitEntries = @(@($atomicCommits) + $directCommits)
+    $successClosed =
+        $commitEntries.Count -eq 1 -and
+        (& $hasReceipt 'pause_bind' 'Installed') -and
+        (& $hasReceipt 'drain' 'Completed') -and
+        (& $hasReceipt 'commit' 'Committed') -and
+        (& $hasReceipt 'disposition' 'Applied') -and
+        (& $hasEffect 'pause_installed') -and
+        (& $hasEffect 'completed_drain_receipt') -and
+        (& $hasEffect 'route_commit_adopted') -and
+        (& $hasEffect 'target_runtime_leg_installed') -and
+        (& $hasEffect 'route_transition_disposition_applied') -and
+        (& $hasEffect 'transition_pause_released') -and
+        (& $hasEffect 'recovered_epoch_publication')
+
+    if ($successClosed) {
+        $committedOperation = $commitEntries[0].Operation
+        $retainedFingerprint =
+            [string]$committedOperation.routeTransition.retainedFrameFingerprint
+        $retainedFrameType =
+            [string]$committedOperation.routeTransition.retainedFrameType
         if ($retainedFingerprint -cne '(none)' -and
-            (-not (& $hasReceipt 'retained_frame') -or
+            (-not (& $hasReceipt 'retained_frame' 'Applied') -or
              -not (& $hasEffect 'retained_frame_applied'))) {
-            return $false
+            $successClosed = $false
         }
         if ($retainedFrameType -ceq 'filetransfer.frontier_request.v6' -and
             -not (& $hasEffect 'retained_frame_response')) {
-            return $false
+            $successClosed = $false
         }
-        return $true
     }
-    if ($state -ceq 'Invalidated') {
-        return (& $hasReceipt 'disposition') -and
-               (& $hasEffect 'route_transition_disposition_applied') -and
-               (& $hasEffect 'transition_pause_released')
+
+    $terminalizedWhileDraining =
+        @($lifecycleEffects | Where-Object {
+                [string]$_.EffectKind -ceq 'terminalized_while_draining'
+            }).Count -gt 0
+    $atomicInvalidations = [System.Collections.Generic.List[object]]::new()
+    foreach ($boundaryGroup in @($stateEntries | Group-Object {
+                [string]$_.Boundary.boundaryId
+            })) {
+        $currentRetirements = @($boundaryGroup.Group | Where-Object {
+                [string]$_.Operation.operationRole -ceq 'current' -and
+                [string]$_.Operation.beforeState -in @(
+                    'Prepared', 'Draining') -and
+                [string]$_.Operation.afterState -ceq 'None'
+            })
+        $terminalEntrants = @($boundaryGroup.Group | Where-Object {
+                [string]$_.Operation.operationRole -ceq 'terminal' -and
+                [string]$_.Operation.beforeState -ceq 'None' -and
+                [string]$_.Operation.afterState -ceq 'Invalidated'
+            })
+        if ($currentRetirements.Count -eq 1 -and
+            $terminalEntrants.Count -eq 1) {
+            $atomicInvalidations.Add($terminalEntrants[0])
+        }
     }
-    return $false
+    $cleanInvalidation =
+        $atomicInvalidations.Count -eq 1 -and
+        (& $hasReceipt 'disposition' 'Applied') -and
+        (& $hasEffect 'route_transition_disposition_applied') -and
+        (& $hasEffect 'transition_pause_released') -and
+        -not $terminalizedWhileDraining
+
+    $rejected = @($attemptEntries | Where-Object {
+            [string]$_.Boundary.decisionStatus -ceq 'Rejected' -or
+            @($_.Operation.routeTransition.receipts | Where-Object {
+                    [string]$_.receiptStatus -ceq 'Rejected' -and
+                    -not [bool]$_.receiptValidated
+                }).Count -gt 0
+        })
+    if ($rejected.Count -gt 0) {
+        $candidate = $rejected[0]
+        $candidateTime = [long]$candidate.Boundary.decisionUtcMilliseconds
+        $commitTime = if ($commitEntries.Count -eq 1) {
+            [long]$commitEntries[0].Boundary.decisionUtcMilliseconds
+        }
+        else {
+            0L
+        }
+        $recovered = $successClosed -and $commitTime -gt $candidateTime
+        return [pscustomobject]@{
+            HasCandidate = $true
+            Candidate = $candidate
+            RawCount = $rejected.Count
+            RecoveredCount = if ($recovered) { 1 } else { 0 }
+            UnresolvedCount = if ($recovered) { 0 } else { 1 }
+            FailureClass = 'filetransfer_route_transition_incomplete'
+        }
+    }
+
+    if ($successClosed -or $cleanInvalidation) {
+        return [pscustomobject]@{
+            HasCandidate = $false
+            Candidate = $null
+            RawCount = 0
+            RecoveredCount = 0
+            UnresolvedCount = 0
+            FailureClass = 'filetransfer_route_transition_incomplete'
+        }
+    }
+
+    $candidateEntries = @($stateEntries | Where-Object {
+            [string]$_.Operation.afterState -in @(
+                'Prepared', 'Draining', 'Committed', 'Invalidated')
+        })
+    $candidate = if ($candidateEntries.Count -gt 0) {
+        $candidateEntries[0]
+    }
+    else {
+        $ordered[0]
+    }
+    return [pscustomobject]@{
+        HasCandidate = $true
+        Candidate = $candidate
+        RawCount = 1
+        RecoveredCount = 0
+        UnresolvedCount = 1
+        FailureClass = if ($terminalizedWhileDraining) {
+            'filetransfer_route_transition_draining_transport_grace_terminalization'
+        }
+        else {
+            'filetransfer_route_transition_incomplete'
+        }
+    }
 }
 
 function Test-FileTransferCoordinatorFallbackV6BootstrapLineageEqual {
@@ -4067,16 +4277,6 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
-                $isValidatedRouteTransitionAttempt =
-                    [string]$operation.family -ceq 'route_transition' -and
-                    -not [bool]$operation.stateApplied -and
-                    [string]$operation.operationRole -in @(
-                        'inbound', 'outbound', 'attempt') -and
-                    [string]$operation.operationKind -ceq
-                        [string]$boundary.decisionKind
-                if ($isValidatedRouteTransitionAttempt) {
-                    continue
-                }
                 if ([string]$operation.family -in
                     (@($script:FileTransferCoordinatorSnapshotFamily1) +
                      @($script:FileTransferCoordinatorSnapshotFamily2) +
@@ -4087,7 +4287,18 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     [pscustomobject]@{
                         Boundary = $boundary
                         Operation = $operation
-                        Key = "$($boundary.coordinatorInstanceId)|$([string]$operation.operationKey)"
+                        Key = if (
+                            [string]$operation.family -ceq
+                                'route_transition' -and
+                            [string]$operation.operationRole -cne
+                                'fallback_v6_bootstrap') {
+                            Get-FileTransferCoordinatorRouteTransitionLifecycleKey `
+                                -Boundary $boundary `
+                                -Operation $operation
+                        }
+                        else {
+                            "$($boundary.coordinatorInstanceId)|$([string]$operation.operationKey)"
+                        }
                     }
                 }
             }
@@ -4109,76 +4320,61 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($family -ceq 'route_transition') {
             $isBootstrap = [string]$latest.Operation.operationRole -ceq
                 'fallback_v6_bootstrap'
-            $bootstrapLifecycle = if ($isBootstrap) {
+            if ($isBootstrap) {
+                $bootstrapLifecycle =
                 Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle `
                     -History $history
-            }
-            else {
-                $null
-            }
-            $closed = if ($isBootstrap) {
-                [bool]$bootstrapLifecycle.Closed
-            }
-            else {
-                Test-FileTransferCoordinatorRouteTransitionOperationClosed `
-                    -Operation $latest.Operation `
-                    -Effects @($effects)
-            }
-            $rejected = @($history | Where-Object {
-                    @($_.Operation.routeTransition.receipts | Where-Object {
-                            -not [bool]$_.receiptValidated -and
-                            [string]$_.receiptStatus -ceq 'Rejected'
-                        }).Count -gt 0 -or
-                    [string]$_.Boundary.decisionStatus -ceq 'Rejected'
-                })
-            if (-not $closed -or $rejected.Count -gt 0) {
-                $candidate = if ($rejected.Count -gt 0) {
-                    $rejected[0]
-                }
-                elseif ($isBootstrap) {
-                    $bootstrapLifecycle.Candidate
-                }
-                else {
-                    $ordinaryCandidates = @($history | Where-Object {
-                            [string]$_.Operation.afterState -in @(
-                                'Prepared', 'Draining', 'Committed', 'Invalidated')
-                        } | Select-Object -First 1)
-                    if ($ordinaryCandidates.Count -eq 1) {
-                        $ordinaryCandidates[0]
-                    }
-                    else {
+                if (-not [bool]$bootstrapLifecycle.Closed) {
+                    $candidate = $bootstrapLifecycle.Candidate
+                    if (-not [string]::IsNullOrWhiteSpace(
+                            [string]$bootstrapLifecycle.StructuralFailure)) {
                         $errors.Add(
-                            "snapshot_route_transition_candidate_missing:$($latest.Boundary.boundaryId)")
-                        $latest
+                            "snapshot_fallback_v6_bootstrap_$($bootstrapLifecycle.StructuralFailure):$($candidate.Boundary.boundaryId)")
+                    }
+                    if ($null -ne $candidate) {
+                        $candidate.Boundary.taxonomyClass =
+                            'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
+                        $candidate.Boundary.domain = 'route_runtime'
+                        $candidate.Boundary.phase = 'route_transition'
+                        $candidate.Boundary.rawCount = 1
+                        $candidate.Boundary.distinctCount = 1
+                        $candidate.Boundary.recoveredCount = 0
+                        $candidate.Boundary.unresolvedCount = 1
+                        $candidate.Boundary.verdict = 'fail'
                     }
                 }
-                if ($isBootstrap -and $rejected.Count -eq 0 -and
-                    -not [string]::IsNullOrWhiteSpace(
-                        [string]$bootstrapLifecycle.StructuralFailure)) {
+                continue
+            }
+
+            $lifecycle =
+                Get-FileTransferCoordinatorRouteTransitionLifecycleResult `
+                    -History $history `
+                    -Effects @($effects)
+            if ([bool]$lifecycle.HasCandidate) {
+                $candidate = $lifecycle.Candidate
+                if ($null -eq $candidate) {
                     $errors.Add(
-                        "snapshot_fallback_v6_bootstrap_$($bootstrapLifecycle.StructuralFailure):$($candidate.Boundary.boundaryId)")
+                        "snapshot_route_transition_candidate_missing:$($latest.Boundary.boundaryId)")
+                    $candidate = $latest
                 }
                 if ($null -ne $candidate) {
-                    $class = 'filetransfer_route_transition_incomplete'
-                    if ($isBootstrap) {
-                        $class = 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
-                    }
-                    elseif (@($effects | Where-Object {
-                            [string]$_.OperationKey -ceq
-                                [string]$candidate.Operation.operationKey -and
-                            [string]$_.EffectKind -ceq
-                                'terminalized_while_draining'
-                        }).Count -gt 0) {
-                        $class = 'filetransfer_route_transition_draining_transport_grace_terminalization'
-                    }
-                    $candidate.Boundary.taxonomyClass = $class
+                    $candidate.Boundary.taxonomyClass =
+                        [string]$lifecycle.FailureClass
                     $candidate.Boundary.domain = 'route_runtime'
                     $candidate.Boundary.phase = 'route_transition'
-                    $candidate.Boundary.rawCount = [Math]::Max(1, $rejected.Count)
+                    $candidate.Boundary.rawCount = [int]$lifecycle.RawCount
                     $candidate.Boundary.distinctCount = 1
-                    $candidate.Boundary.recoveredCount = if ($closed) { 1 } else { 0 }
-                    $candidate.Boundary.unresolvedCount = if ($closed) { 0 } else { 1 }
-                    $candidate.Boundary.verdict = if ($closed) { 'pass' } else { 'fail' }
+                    $candidate.Boundary.recoveredCount =
+                        [int]$lifecycle.RecoveredCount
+                    $candidate.Boundary.unresolvedCount =
+                        [int]$lifecycle.UnresolvedCount
+                    $candidate.Boundary.verdict = if (
+                        [int]$lifecycle.UnresolvedCount -eq 0) {
+                        'pass'
+                    }
+                    else {
+                        'fail'
+                    }
                 }
             }
         }

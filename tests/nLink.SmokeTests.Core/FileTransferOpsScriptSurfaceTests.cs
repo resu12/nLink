@@ -198,6 +198,187 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_CoordinatorSnapshotRouteTransitionLifecycleJoinsRoleRolloverExactly()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $source = [ordered]@{
+                route='regular_nkn_v4_fast'; protocolVersion=4
+                liveRouteEpoch=1L; routePublicationGeneration=1L
+                routeCommitGeneration=0L; runtimeGeneration=1L
+                terminalGeneration=0L; legGeneration=1L
+                transportEpoch=0L; bridgeRecoveryGeneration=0L
+                checkpointGeneration=1L; checkpointRequestId='checkpoint-1'
+                dataSessionIdentity='data-session-1'; dataSessionGeneration=1L
+            }
+            $target = [ordered]@{
+                route='file_tuna_v4'; protocolVersion=4
+                liveRouteEpoch=2L; routePublicationGeneration=2L
+                routeCommitGeneration=1L; runtimeGeneration=2L
+                terminalGeneration=0L; legGeneration=2L
+                transportEpoch=0L; bridgeRecoveryGeneration=0L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session-1'; dataSessionGeneration=1L
+            }
+            $receipts = @(
+                [pscustomobject]@{ stage='pause_bind'; commandIdentity='pause'; commandGeneration=1L; commandFingerprint='pause-command'; receiptIdentity='pause'; receiptGeneration=1L; receiptStatus='Installed'; receiptFingerprint='pause-receipt'; receiptValidated=$true },
+                [pscustomobject]@{ stage='drain'; commandIdentity='drain'; commandGeneration=1L; commandFingerprint='drain-command'; receiptIdentity='drain'; receiptGeneration=1L; receiptStatus='Completed'; receiptFingerprint='drain-receipt'; receiptValidated=$true },
+                [pscustomobject]@{ stage='commit'; commandIdentity='commit'; commandGeneration=1L; commandFingerprint='commit-command'; receiptIdentity='commit'; receiptGeneration=1L; receiptStatus='Committed'; receiptFingerprint='commit-receipt'; receiptValidated=$true },
+                [pscustomobject]@{ stage='disposition'; commandIdentity='disposition'; commandGeneration=1L; commandFingerprint='disposition-command'; receiptIdentity='disposition'; receiptGeneration=1L; receiptStatus='Applied'; receiptFingerprint='disposition-receipt'; receiptValidated=$true }
+            )
+            function New-RouteLifecycleEntry(
+                [string]$boundaryId,
+                [long]$time,
+                [string]$decisionKind,
+                [string]$decisionStatus,
+                [string]$role,
+                [string]$operationKind,
+                [string]$beforeState,
+                [string]$afterState,
+                [bool]$stateApplied,
+                [object[]]$operationReceipts,
+                [string]$authority = 'route-authority',
+                [object]$sourceBoundary = $source) {
+                $operationKey = "route_transition|$role|$authority|1|$operationKind"
+                [pscustomobject]@{
+                    Boundary = [pscustomobject]@{
+                        coordinatorInstanceId='coordinator-1'
+                        writer='writer-1'
+                        boundaryId=$boundaryId
+                        decisionUtcMilliseconds=$time
+                        afterStateGeneration=$time
+                        decisionKind=$decisionKind
+                        decisionStatus=$decisionStatus
+                    }
+                    Operation = [pscustomobject]@{
+                        family='route_transition'; operationRole=$role
+                        operationKey=$operationKey; operationKind=$operationKind
+                        authorityId=$authority; operationGeneration=1L
+                        beforeState=$beforeState; afterState=$afterState
+                        stateApplied=$stateApplied
+                        routeTransition=[pscustomobject]@{
+                            transitionKind='RegularV4ToTunaV4'
+                            sourceBoundary=$sourceBoundary; targetBoundary=$target
+                            sourceTransport='RegularNkn'
+                            proofBoundaryKind='RuntimeUnlock'
+                            proofBoundaryFingerprint='proof'
+                            durableCheckpointFingerprint='checkpoint'
+                            targetRoute='file_tuna_v4'; targetProtocolVersion=4
+                            targetTransport='Tuna'; handoffKind='NormalToTuna'
+                            retainedFrameFingerprint='(none)'
+                            retainedFrameType='(none)'
+                            receipts=$operationReceipts
+                        }
+                    }
+                }
+            }
+            function New-RouteLifecycleEffect(
+                [string]$transitionId,
+                [string]$operationKey,
+                [string]$kind) {
+                [pscustomobject]@{
+                    CoordinatorInstanceId='coordinator-1'
+                    TransitionId=$transitionId
+                    OperationKey=$operationKey
+                    EffectKind=$kind
+                }
+            }
+
+            $prepared = New-RouteLifecycleEntry 'prepared' 1 'PrepareFileTransferRouteTransition' 'Prepared' 'current' 'RegularV4ToTunaV4' 'None' 'Prepared' $true @()
+            $draining = New-RouteLifecycleEntry 'draining' 2 'BeginFileTransferRouteTransitionPhysicalDrain' 'Draining' 'current' 'RegularV4ToTunaV4' 'Prepared' 'Draining' $true @($receipts[0])
+            $commitCurrent = New-RouteLifecycleEntry 'commit' 4 'CommitFileTransferRouteTransition' 'Committed' 'current' 'RegularV4ToTunaV4' 'Draining' 'None' $true @($receipts[0])
+            $commitTerminal = New-RouteLifecycleEntry 'commit' 4 'CommitFileTransferRouteTransition' 'Committed' 'terminal' 'RegularV4ToTunaV4' 'None' 'Committed' $true $receipts
+            $commitAttempt = New-RouteLifecycleEntry 'commit' 4 'CommitFileTransferRouteTransition' 'Committed' 'outbound' 'CommitFileTransferRouteTransition' 'Current' 'Committed' $false @($receipts[1])
+            $disposition = New-RouteLifecycleEntry 'disposition' 5 'ApplyFileTransferRouteTransitionDisposition' 'Applied' 'terminal' 'RegularV4ToTunaV4' 'Committed' 'Committed' $true $receipts
+            $dispositionAttempt = New-RouteLifecycleEntry 'disposition' 5 'ApplyFileTransferRouteTransitionDisposition' 'Applied' 'outbound' 'ApplyFileTransferRouteTransitionDisposition' 'Current' 'Applied' $false @($receipts[3])
+            $retired = New-RouteLifecycleEntry 'retired' 6 'FinalizeFileTransferContext' 'Accepted' 'terminal' 'RegularV4ToTunaV4' 'Committed' 'None' $true $receipts
+            $effects = @(
+                (New-RouteLifecycleEffect 'draining' $draining.Operation.operationKey 'pause_installed'),
+                (New-RouteLifecycleEffect 'commit' $commitAttempt.Operation.operationKey 'completed_drain_receipt'),
+                (New-RouteLifecycleEffect 'commit' $commitTerminal.Operation.operationKey 'route_commit_adopted'),
+                (New-RouteLifecycleEffect 'commit' $commitTerminal.Operation.operationKey 'target_runtime_leg_installed'),
+                (New-RouteLifecycleEffect 'disposition' $dispositionAttempt.Operation.operationKey 'route_transition_disposition_applied'),
+                (New-RouteLifecycleEffect 'disposition' $dispositionAttempt.Operation.operationKey 'transition_pause_released'),
+                (New-RouteLifecycleEffect 'disposition' $dispositionAttempt.Operation.operationKey 'recovered_epoch_publication')
+            )
+            $successHistory = @(
+                $prepared, $draining, $commitCurrent, $commitTerminal,
+                $commitAttempt, $disposition, $dispositionAttempt, $retired)
+            $success = Get-FileTransferCoordinatorRouteTransitionLifecycleResult -History $successHistory -Effects $effects
+            if ($success.HasCandidate -or $success.UnresolvedCount -ne 0) {
+                throw "A role-specific current-to-terminal commit rollover remained open: $($success | ConvertTo-Json -Compress)"
+            }
+
+            $rejectedReceipt = [pscustomobject]@{
+                stage='drain'; commandIdentity='drain'; commandGeneration=1L
+                commandFingerprint='drain-command'; receiptIdentity='drain'
+                receiptGeneration=1L; receiptStatus='Rejected'
+                receiptFingerprint='drain-rejected'; receiptValidated=$false
+            }
+            $rejected = New-RouteLifecycleEntry 'rejected' 3 'CommitFileTransferRouteTransition' 'Rejected' 'outbound' 'CommitFileTransferRouteTransition' 'Current' 'Rejected' $false @($rejectedReceipt)
+            $failed = Get-FileTransferCoordinatorRouteTransitionLifecycleResult -History @($prepared,$draining,$rejected) -Effects @($effects[0])
+            if (-not $failed.HasCandidate -or $failed.RawCount -ne 1 -or
+                $failed.RecoveredCount -ne 0 -or $failed.UnresolvedCount -ne 1 -or
+                $failed.Candidate.Boundary.boundaryId -ne 'rejected') {
+                throw "An exact rejected commit was not retained as the unresolved boundary: $($failed | ConvertTo-Json -Compress)"
+            }
+            $rejectedCopy = New-RouteLifecycleEntry 'rejected-copy' 3 'CommitFileTransferRouteTransition' 'Rejected' 'outbound' 'CommitFileTransferRouteTransition' 'Current' 'Rejected' $false @($rejectedReceipt)
+            $duplicateFailure = Get-FileTransferCoordinatorRouteTransitionLifecycleResult -History @($prepared,$draining,$rejected,$rejectedCopy) -Effects @($effects[0])
+            if ($duplicateFailure.RawCount -ne 2 -or
+                $duplicateFailure.RecoveredCount -ne 0 -or
+                $duplicateFailure.UnresolvedCount -ne 1) {
+                throw "Duplicate rejected attempts did not retain raw/distinct incident semantics: $($duplicateFailure | ConvertTo-Json -Compress)"
+            }
+
+            $invalidateCurrent = New-RouteLifecycleEntry 'invalidate' 4 'InvalidateFileTransferRouteTransition' 'Invalidated' 'current' 'RegularV4ToTunaV4' 'Draining' 'None' $true @($receipts[0])
+            $invalidateTerminal = New-RouteLifecycleEntry 'invalidate' 4 'InvalidateFileTransferRouteTransition' 'Invalidated' 'terminal' 'RegularV4ToTunaV4' 'None' 'Invalidated' $true @($receipts[0],$receipts[3])
+            $invalidateAttempt = New-RouteLifecycleEntry 'invalidate' 4 'InvalidateFileTransferRouteTransition' 'Invalidated' 'outbound' 'InvalidateFileTransferRouteTransition' 'Current' 'Invalidated' $false @($receipts[3])
+            $invalidationEffects = @(
+                (New-RouteLifecycleEffect 'draining' $draining.Operation.operationKey 'pause_installed'),
+                (New-RouteLifecycleEffect 'invalidate' $invalidateAttempt.Operation.operationKey 'route_transition_disposition_applied'),
+                (New-RouteLifecycleEffect 'invalidate' $invalidateAttempt.Operation.operationKey 'transition_pause_released')
+            )
+            $invalidatedFailure = Get-FileTransferCoordinatorRouteTransitionLifecycleResult -History @($prepared,$draining,$rejected,$invalidateCurrent,$invalidateTerminal,$invalidateAttempt) -Effects $invalidationEffects
+            if ($invalidatedFailure.RecoveredCount -ne 0 -or
+                $invalidatedFailure.UnresolvedCount -ne 1 -or
+                $invalidatedFailure.Candidate.Boundary.boundaryId -ne 'rejected') {
+                throw "A later terminal invalidation incorrectly recovered an accepted-drain commit rejection: $($invalidatedFailure | ConvertTo-Json -Compress)"
+            }
+
+            $recovered = Get-FileTransferCoordinatorRouteTransitionLifecycleResult -History (@($prepared,$draining,$rejected) + $successHistory[2..7]) -Effects $effects
+            if (-not $recovered.HasCandidate -or $recovered.RawCount -ne 1 -or
+                $recovered.RecoveredCount -ne 1 -or $recovered.UnresolvedCount -ne 0 -or
+                $recovered.Candidate.Boundary.boundaryId -ne 'rejected') {
+                throw "An exact later same-authority commit did not recover the rejected attempt: $($recovered | ConvertTo-Json -Compress)"
+            }
+
+            $mutatedSource = $source | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+            $mutatedSource.checkpointRequestId = 'checkpoint-mutated'
+            $mutated = New-RouteLifecycleEntry 'mutated' 7 'CommitFileTransferRouteTransition' 'Committed' 'terminal' 'RegularV4ToTunaV4' 'None' 'Committed' $true $receipts 'route-authority' $mutatedSource
+            $originalKey = Get-FileTransferCoordinatorRouteTransitionLifecycleKey -Boundary $commitTerminal.Boundary -Operation $commitTerminal.Operation
+            $mutatedKey = Get-FileTransferCoordinatorRouteTransitionLifecycleKey -Boundary $mutated.Boundary -Operation $mutated.Operation
+            if ($originalKey -ceq $mutatedKey) {
+                throw 'A complete source-scope mutation was admitted into the same route-transition lifecycle.'
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Route-transition snapshot lifecycle regression failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public async Task FileTransferOps_CoordinatorSnapshotEvaluatorHasExactFullCompactParityAndFailsClosed()
     {
         if (!OperatingSystem.IsWindows())
