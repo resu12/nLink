@@ -1666,7 +1666,6 @@ public sealed partial class SessionFileTransferService
             .ToArray();
         var authorityRetirements = familyOperations.Where(operation =>
                 operation.OperationRole == "repair_authority_current" &&
-                operation.OperationKind == "V4Repair" &&
                 operation.BeforeState == "Authorized" &&
                 operation.AfterState == "None" &&
                 operation.StateApplied &&

@@ -4670,6 +4670,31 @@ public sealed class FileTransferCoordinatorTests
             SessionFileTransferService
                 .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
                     reorderedEnvelope));
+        var peerSilenceEnvelope = committedEnvelope with
+        {
+            Aggregate = committedEnvelope.Aggregate with
+            {
+                Operations =
+                [
+                    .. committedEnvelope.Aggregate.Operations.Select(operation =>
+                        operation.OperationRole == "repair_authority_current"
+                            ? operation with
+                            {
+                                OperationKind = "PeerSilenceReplay",
+                                OperationKey = operation.OperationKey.Replace(
+                                    "|V4Repair",
+                                    "|PeerSilenceReplay",
+                                    StringComparison.Ordinal),
+                            }
+                            : operation),
+                ],
+            },
+        };
+        Assert.Equal(
+            5,
+            SessionFileTransferService
+                .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+                    peerSilenceEnvelope).Length);
         var ambiguousEnvelope = committedEnvelope with
         {
             Aggregate = committedEnvelope.Aggregate with

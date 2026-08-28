@@ -4094,7 +4094,6 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         'regular_v4_frontier_repair_pressure' -and
                     [string]$_.operationRole -ceq
                         'repair_authority_current' -and
-                    [string]$_.operationKind -ceq 'V4Repair' -and
                     [string]$_.beforeState -ceq 'Authorized' -and
                     [string]$_.afterState -ceq 'None' -and
                     [bool]$_.stateApplied -and
