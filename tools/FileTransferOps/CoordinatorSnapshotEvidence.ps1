@@ -990,6 +990,29 @@ function Test-FileTransferCoordinatorSnapshotEffectReceipt {
     return $false
 }
 
+function Test-FileTransferCoordinatorSnapshotExactEffectBinding {
+    param(
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)]$Operation,
+        [Parameter(Mandatory = $true)]$Effect
+    )
+
+    return [string]$Effect.CoordinatorInstanceId -ceq
+            [string]$Boundary.coordinatorInstanceId -and
+        [string]$Effect.TransitionId -ceq [string]$Boundary.boundaryId -and
+        [long]$Effect.StateGeneration -eq
+            [long]$Boundary.afterStateGeneration -and
+        [string]$Effect.Family -ceq [string]$Operation.family -and
+        [string]$Effect.OperationKey -ceq [string]$Operation.operationKey -and
+        [string]$Effect.AuthorityId -ceq [string]$Operation.authorityId -and
+        [long]$Effect.OperationGeneration -eq
+            [long]$Operation.operationGeneration -and
+        (Test-FileTransferCoordinatorSnapshotEffectScope `
+            -Operation $Operation -Effect $Effect) -and
+        (Test-FileTransferCoordinatorSnapshotEffectReceipt `
+            -Operation $Operation -Effect $Effect)
+}
+
 function Test-FileTransferCoordinatorSnapshotBoundaryComplete {
     param([Parameter(Mandatory = $true)]$Boundary)
 
@@ -3973,8 +3996,6 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             'pressure_settlement_bridge_applied'
         PrepareRegularV4FrontierRepairPressureRecoveryHandoff =
             'recovery_handoff_prepared'
-        CommitRegularV4FrontierRepairPressureRecoveryHandoff =
-            'recovery_handoff_committed'
     }
     foreach ($boundary in @($boundaries | Where-Object {
                 $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies `
@@ -3997,6 +4018,219 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($matchingEffects.Count -ne 1) {
             $errors.Add(
                 "snapshot_regular_v4_pressure_required_effect_missing:$($boundary.boundaryId):$requiredEffect")
+        }
+    }
+
+    $recoveryHandoffEffectKinds = @(
+        'pressure_settlement_bridge_applied',
+        'local_contract_settled',
+        'local_contract_reference_cleared',
+        'recovery_handoff_committed',
+        'projection_detached')
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies `
+                    -contains 'regular_v4_frontier_repair_pressure' -and
+                [string]$_.decisionKind -ceq
+                    'CommitRegularV4FrontierRepairPressureRecoveryHandoff'
+            })) {
+        $boundaryEffects = @($effects | Where-Object {
+                [string]$_.CoordinatorInstanceId -ceq
+                    [string]$boundary.coordinatorInstanceId -and
+                [string]$_.TransitionId -ceq [string]$boundary.boundaryId -and
+                [string]$_.Family -ceq
+                    'regular_v4_frontier_repair_pressure' -and
+                [string]$_.EffectKind -in $recoveryHandoffEffectKinds
+            })
+        if ([string]$boundary.decisionStatus -cne 'Committed') {
+            foreach ($unexpectedEffect in $boundaryEffects) {
+                $errors.Add(
+                    "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|idempotent_or_rejected_handoff_emitted_one_shot_effect:$($unexpectedEffect.LineIndex)")
+            }
+            continue
+        }
+
+        $settlements = @($boundary.operations | Where-Object {
+                [string]$_.family -ceq
+                    'regular_v4_frontier_repair_pressure' -and
+                [string]$_.operationRole -ceq
+                    'pressure_settlement_terminal' -and
+                [string]$_.operationKind -ceq 'PressureSettlement' -and
+                [string]$_.beforeState -ceq 'None' -and
+                [string]$_.afterState -ceq 'Applied' -and
+                [bool]$_.stateApplied -and [bool]$_.receiptValidated -and
+                [string]$_.receiptStatus -ceq 'Applied'
+            })
+        $handoffs = @($boundary.operations | Where-Object {
+                [string]$_.family -ceq
+                    'regular_v4_frontier_repair_pressure' -and
+                [string]$_.operationRole -ceq
+                    'recovery_handoff_terminal' -and
+                [string]$_.operationKind -ceq 'PressureRecoveryHandoff' -and
+                [string]$_.beforeState -ceq 'None' -and
+                [string]$_.afterState -ceq 'Committed' -and
+                [bool]$_.stateApplied -and [bool]$_.receiptValidated
+            })
+        $shapeValid = $settlements.Count -eq 1 -and $handoffs.Count -eq 1
+        if ($shapeValid) {
+            $settlement = $settlements[0]
+            $handoff = $handoffs[0]
+            $settlementPayload = $settlement.regularV4FrontierRepairPressure
+            $handoffPayload = $handoff.regularV4FrontierRepairPressure
+            $bindingRetirements = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq
+                        'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq
+                        'pressure_binding_installed' -and
+                    [string]$_.beforeState -ceq 'Installed' -and
+                    [string]$_.afterState -ceq 'None' -and
+                    [bool]$_.stateApplied -and
+                    [string]$_.authorityId -ceq
+                        [string]$settlement.authorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$settlement.operationGeneration
+                })
+            $authorityRetirements = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq
+                        'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq
+                        'repair_authority_current' -and
+                    [string]$_.operationKind -ceq 'V4Repair' -and
+                    [string]$_.beforeState -ceq 'Authorized' -and
+                    [string]$_.afterState -ceq 'None' -and
+                    [bool]$_.stateApplied -and
+                    [string]$_.authorityId -ceq
+                        [string]$settlement.authorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$settlement.operationGeneration
+                })
+            $settlementMirrors = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq
+                        'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq
+                        'repair_authority_terminal' -and
+                    [string]$_.operationKind -ceq 'PressureSettlement' -and
+                    [string]$_.beforeState -ceq 'None' -and
+                    [string]$_.afterState -ceq 'Applied' -and
+                    [bool]$_.stateApplied -and [bool]$_.receiptValidated -and
+                    [string]$_.authorityId -ceq
+                        [string]$settlement.authorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$settlement.operationGeneration -and
+                    [string]$_.receiptIdentity -ceq
+                        [string]$settlement.receiptIdentity -and
+                    [long]$_.receiptGeneration -eq
+                        [long]$settlement.receiptGeneration -and
+                    [string]$_.receiptStatus -ceq
+                        [string]$settlement.receiptStatus -and
+                    [string]$_.receiptFingerprint -ceq
+                        [string]$settlement.receiptFingerprint
+                })
+            $attempts = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq
+                        'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq 'attempted_decision' -and
+                    [string]$_.operationKind -ceq
+                        'CommitRegularV4FrontierRepairPressureRecoveryHandoff' -and
+                    -not [bool]$_.stateApplied -and
+                    [bool]$_.receiptValidated -and
+                    [string]$_.receiptStatus -ceq 'Committed' -and
+                    [string]$_.authorityId -ceq
+                        [string]$settlement.authorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$settlement.operationGeneration
+                })
+            $recoveries = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq 'receive_recovery' -and
+                    [string]$_.operationRole -ceq 'operation_current' -and
+                    [string]$_.beforeState -ceq 'None' -and
+                    [string]$_.afterState -like 'Issued*' -and
+                    [bool]$_.stateApplied -and
+                    $null -ne $_.receiveRecovery -and
+                    [string]$_.authorityId -ceq
+                        [string]$handoffPayload.recoveryAuthorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$handoffPayload.recoveryOperationGeneration -and
+                    [long]$_.operationGeneration -eq
+                        [long]$handoff.operationGeneration -and
+                    [string]$_.operationKind -ceq
+                        [string]$handoffPayload.recoveryKind
+                })
+            $shapeValid =
+                [string]$handoff.authorityId -ceq
+                    [string]$settlement.authorityId -and
+                [string]$handoff.receiptIdentity -ceq
+                    [string]$settlement.receiptIdentity -and
+                [long]$handoff.receiptGeneration -eq
+                    [long]$settlement.receiptGeneration -and
+                [string]$handoff.receiptStatus -ceq
+                    [string]$settlement.receiptStatus -and
+                [string]$handoff.receiptFingerprint -ceq
+                    [string]$settlement.receiptFingerprint -and
+                [bool]$settlementPayload.currentAuthorityCleared -and
+                -not [bool]$settlementPayload.retainedPredecessorCleared -and
+                [bool]$handoffPayload.currentAuthorityCleared -and
+                -not [bool]$handoffPayload.retainedPredecessorCleared -and
+                [long]$handoffPayload.decisionGeneration -eq
+                    [long]$settlementPayload.decisionGeneration -and
+                [long]$handoffPayload.pressureInstallGeneration -eq
+                    [long]$settlementPayload.pressureInstallGeneration -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                    -Left $handoffPayload.sourceBoundary `
+                    -Right $settlementPayload.sourceBoundary) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                    -Left $handoffPayload.effectiveBoundary `
+                    -Right $settlementPayload.effectiveBoundary) -and
+                $bindingRetirements.Count -eq 1 -and
+                $authorityRetirements.Count -eq 1 -and
+                $settlementMirrors.Count -eq 1 -and
+                $attempts.Count -eq 1 -and $recoveries.Count -eq 1 -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                    -Left $recoveries[0].receiveRecovery.sourceBoundary `
+                    -Right $settlementPayload.sourceBoundary)
+        }
+        if (-not $shapeValid) {
+            $errors.Add(
+                "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|recovery_handoff_commit_operation_shape_invalid:$($boundary.evidenceLineIndex)")
+            continue
+        }
+
+        foreach ($effectKind in $recoveryHandoffEffectKinds) {
+            $subject = if ($effectKind -in @(
+                    'recovery_handoff_committed',
+                    'projection_detached')) {
+                $handoff
+            }
+            else {
+                $settlement
+            }
+            $kindEffects = @($boundaryEffects | Where-Object {
+                    [string]$_.EffectKind -ceq $effectKind
+                })
+            $exactEffects = @($kindEffects | Where-Object {
+                    Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                        -Boundary $boundary -Operation $subject -Effect $_
+                })
+            if ($kindEffects.Count -eq 1 -and $exactEffects.Count -eq 1) {
+                continue
+            }
+            if ($kindEffects.Count -eq 0) {
+                $errors.Add(
+                    "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|recovery_handoff_commit_required_effect_missing:$($boundary.evidenceLineIndex)")
+                continue
+            }
+            foreach ($invalidEffect in @($kindEffects | Where-Object {
+                        -not (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                            -Boundary $boundary -Operation $subject -Effect $_)
+                    })) {
+                $errors.Add(
+                    "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|recovery_handoff_commit_effects_bound_to_retired_pressure_install_receipt:$($invalidEffect.LineIndex)")
+            }
+            if ($exactEffects.Count -gt 1) {
+                foreach ($duplicateEffect in $exactEffects | Select-Object -Skip 1) {
+                    $errors.Add(
+                        "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|recovery_handoff_commit_effect_duplicated:$($duplicateEffect.LineIndex)")
+                }
+            }
         }
     }
 
@@ -4579,29 +4813,35 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             } | Select-Object -Last 1) | Select-Object -First 1
         $settlementClosed = $false
         if ($null -ne $terminalSettlement) {
-            $settlementEffectOperations = @(
-                $terminalSettlement.Boundary.operations | Where-Object {
-                    [string]$_.family -ceq
-                        'regular_v4_frontier_repair_pressure' -and
-                    [string]$_.operationRole -ceq
-                        'repair_authority_terminal' -and
-                    [string]$_.operationKind -ceq 'PressureSettlement' -and
-                    [string]$_.beforeState -ceq 'None' -and
-                    [string]$_.afterState -ceq 'Applied' -and
-                    [string]$_.authorityId -ceq
-                        [string]$terminalSettlement.Operation.authorityId -and
-                    [long]$_.operationGeneration -eq
-                        [long]$terminalSettlement.Operation.operationGeneration -and
-                    [string]$_.receiptIdentity -ceq
-                        [string]$terminalSettlement.Operation.receiptIdentity -and
-                    [long]$_.receiptGeneration -eq
-                        [long]$terminalSettlement.Operation.receiptGeneration -and
-                    [string]$_.receiptStatus -ceq
-                        [string]$terminalSettlement.Operation.receiptStatus -and
-                    [string]$_.receiptFingerprint -ceq
-                        [string]$terminalSettlement.Operation.receiptFingerprint -and
-                    [bool]$_.receiptValidated
-                })
+            $settlementEffectOperations = @(if (
+                [string]$terminalSettlement.Boundary.decisionKind -ceq
+                    'CommitFileTransferRouteTransition') {
+                @($terminalSettlement.Boundary.operations | Where-Object {
+                        [string]$_.family -ceq
+                            'regular_v4_frontier_repair_pressure' -and
+                        [string]$_.operationRole -ceq
+                            'repair_authority_terminal' -and
+                        [string]$_.operationKind -ceq 'PressureSettlement' -and
+                        [string]$_.beforeState -ceq 'None' -and
+                        [string]$_.afterState -ceq 'Applied' -and
+                        [string]$_.authorityId -ceq
+                            [string]$terminalSettlement.Operation.authorityId -and
+                        [long]$_.operationGeneration -eq
+                            [long]$terminalSettlement.Operation.operationGeneration -and
+                        [string]$_.receiptIdentity -ceq
+                            [string]$terminalSettlement.Operation.receiptIdentity -and
+                        [long]$_.receiptGeneration -eq
+                            [long]$terminalSettlement.Operation.receiptGeneration -and
+                        [string]$_.receiptStatus -ceq
+                            [string]$terminalSettlement.Operation.receiptStatus -and
+                        [string]$_.receiptFingerprint -ceq
+                            [string]$terminalSettlement.Operation.receiptFingerprint -and
+                        [bool]$_.receiptValidated
+                    })
+            }
+            else {
+                @($terminalSettlement.Operation)
+            })
             $settlementEffectOperation = if (
                 $settlementEffectOperations.Count -eq 1) {
                 $settlementEffectOperations[0]
@@ -4649,6 +4889,32 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     [string]$_.EffectKind -ceq
                         'local_contract_reference_cleared'
                 }).Count -eq 1
+        }
+
+        if (-not $settlementClosed -and
+            $null -ne $terminalSettlement -and
+            $null -ne $terminalHandoff -and
+            [string]$terminalHandoff.Boundary.boundaryId -ceq
+                [string]$terminalSettlement.Boundary.boundaryId -and
+            [string]$terminalHandoff.Operation.authorityId -ceq
+                [string]$terminalSettlement.Operation.authorityId -and
+            [string]$terminalHandoff.Operation.receiptIdentity -ceq
+                [string]$terminalSettlement.Operation.receiptIdentity -and
+            [long]$terminalHandoff.Operation.receiptGeneration -eq
+                [long]$terminalSettlement.Operation.receiptGeneration -and
+            [string]$terminalHandoff.Operation.receiptStatus -ceq
+                [string]$terminalSettlement.Operation.receiptStatus -and
+            [string]$terminalHandoff.Operation.receiptFingerprint -ceq
+                [string]$terminalSettlement.Operation.receiptFingerprint -and
+            (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $terminalHandoff.Operation.regularV4FrontierRepairPressure.sourceBoundary `
+                -Right $terminalSettlement.Operation.regularV4FrontierRepairPressure.sourceBoundary) -and
+            (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $terminalHandoff.Operation.regularV4FrontierRepairPressure.effectiveBoundary `
+                -Right $terminalSettlement.Operation.regularV4FrontierRepairPressure.effectiveBoundary)) {
+            # The typed Coordinator commit closes runtime authority. Malformed
+            # effect bindings remain a separate artifact-evidence failure.
+            $settlementClosed = $true
         }
 
         $pending = @($history | Where-Object {

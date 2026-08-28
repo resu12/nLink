@@ -117,6 +117,56 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public void FileTransferOps_RecoveryHandoffSnapshotEffectsUseExactSubjects()
+    {
+        var repoRoot = FindRepoRoot();
+        var serviceText = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "src",
+            "nLink.Core",
+            "FileTransfer",
+            "SessionFileTransferService.CoordinatorSnapshots.cs"));
+        var evaluatorText = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "FileTransferOps",
+            "CoordinatorSnapshotEvidence.ps1"));
+
+        const string helperName =
+            "CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindings(";
+        var helperCall = serviceText.IndexOf(
+            helperName,
+            StringComparison.Ordinal);
+        var helperStart = serviceText.IndexOf(
+            helperName,
+            helperCall + helperName.Length,
+            StringComparison.Ordinal);
+        var routeCommitStart = serviceText.IndexOf(
+            "CreateRegularV4PressureRouteCommitAuthorityEffectBindings(",
+            helperStart,
+            StringComparison.Ordinal);
+        Assert.True(helperStart >= 0 && routeCommitStart > helperStart);
+        var helper = serviceText[helperStart..routeCommitStart];
+        Assert.Contains("pressure_settlement_terminal", helper, StringComparison.Ordinal);
+        Assert.Contains("recovery_handoff_terminal", helper, StringComparison.Ordinal);
+        Assert.Contains("operation_current", helper, StringComparison.Ordinal);
+        Assert.Contains("ReceiptMatchesOperation", helper, StringComparison.Ordinal);
+        Assert.DoesNotContain("matches[0]", helper, StringComparison.Ordinal);
+        Assert.Contains(
+            "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid",
+            evaluatorText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "recovery_handoff_commit_effects_bound_to_retired_pressure_install_receipt",
+            evaluatorText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Test-FileTransferCoordinatorSnapshotExactEffectBinding",
+            evaluatorText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FileTransferOps_EfficiencySummaryUsesBoundedSemanticNameIndex()
     {
         var repoRoot = FindRepoRoot();

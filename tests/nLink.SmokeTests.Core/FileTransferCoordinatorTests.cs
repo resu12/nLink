@@ -4519,8 +4519,14 @@ public sealed class FileTransferCoordinatorTests
     [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
     public void RegularV4FrontierRepairPressure_RecoveryHandoffCommitsSettlementAndAuthorityAtomically()
     {
-        var state = StateWithInstalledRegularV4FrontierRepairPressure() with
+        var installedState = StateWithInstalledRegularV4FrontierRepairPressure();
+        var state = installedState with
         {
+            PersistentState = installedState.PersistentState with
+            {
+                CoordinatorInstanceId = "regular-v4-recovery-handoff-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
             CurrentDataSessionIdentity = "data-session-1",
             CurrentDataSessionGeneration = 1,
         };
@@ -4605,6 +4611,78 @@ public sealed class FileTransferCoordinatorTests
             transition.RecoveryLivenessLease.LeaseGeneration,
             committed.State.LastRecoveryLivenessLeaseGeneration);
 
+        var committedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                committed.SnapshotEnvelope);
+        var effectBindings = SessionFileTransferService
+            .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+                committedEnvelope);
+        Assert.Equal(5, effectBindings.Length);
+        var settlementOperation = Assert.Single(
+            committedEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "pressure_settlement_terminal",
+                OperationKind: "PressureSettlement",
+                BeforeState: "None",
+                AfterState: "Applied",
+            });
+        var handoffOperation = Assert.Single(
+            committedEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "recovery_handoff_terminal",
+                OperationKind: "PressureRecoveryHandoff",
+                BeforeState: "None",
+                AfterState: "Committed",
+            });
+        Assert.All(
+            effectBindings.Where(binding => binding.EffectKind is
+                "pressure_settlement_bridge_applied" or
+                "local_contract_settled" or
+                "local_contract_reference_cleared"),
+            binding =>
+            {
+                Assert.Equal(settlementOperation.OperationKey, binding.OperationKey);
+                Assert.Equal(settlementOperation.ReceiptIdentity, binding.ReceiptIdentity);
+                Assert.Equal("Applied", binding.ReceiptStatus);
+            });
+        Assert.All(
+            effectBindings.Where(binding => binding.EffectKind is
+                "recovery_handoff_committed" or "projection_detached"),
+            binding =>
+            {
+                Assert.Equal(handoffOperation.OperationKey, binding.OperationKey);
+                Assert.Equal(handoffOperation.ReceiptIdentity, binding.ReceiptIdentity);
+                Assert.Equal("Applied", binding.ReceiptStatus);
+            });
+        var reorderedEnvelope = committedEnvelope with
+        {
+            Aggregate = committedEnvelope.Aggregate with
+            {
+                Operations = [.. committedEnvelope.Aggregate.Operations.Reverse()],
+            },
+        };
+        Assert.Equal(
+            effectBindings,
+            SessionFileTransferService
+                .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+                    reorderedEnvelope));
+        var ambiguousEnvelope = committedEnvelope with
+        {
+            Aggregate = committedEnvelope.Aggregate with
+            {
+                Operations = committedEnvelope.Aggregate.Operations.Add(
+                    settlementOperation),
+            },
+        };
+        Assert.Empty(
+            SessionFileTransferService
+                .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+                    ambiguousEnvelope));
+
         var rejectedDuplicate =
             FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
                 committed.State,
@@ -4618,6 +4696,11 @@ public sealed class FileTransferCoordinatorTests
             RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected,
             rejectedDuplicate.Status);
         Assert.Same(committed.State, rejectedDuplicate.State);
+        Assert.Empty(
+            SessionFileTransferService
+                .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+                    Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                        rejectedDuplicate.SnapshotEnvelope)));
 
         var duplicate = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
             committed.State,
@@ -4635,6 +4718,11 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             committed.State.LastRecoveryLivenessLeaseGeneration,
             duplicate.State.LastRecoveryLivenessLeaseGeneration);
+        Assert.Empty(
+            SessionFileTransferService
+                .CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+                    Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                        duplicate.SnapshotEnvelope)));
     }
 
     [Fact]

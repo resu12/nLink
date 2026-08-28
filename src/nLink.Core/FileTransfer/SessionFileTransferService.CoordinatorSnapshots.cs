@@ -1373,6 +1373,36 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        if (envelope.DecisionKind == nameof(
+                FileTransferCoordinator
+                    .CommitRegularV4FrontierRepairPressureRecoveryHandoff))
+        {
+            foreach (var binding in
+                CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindings(
+                    envelope))
+            {
+                emitter.EnqueueAuthorityEffect(
+                    coordinatorInstanceId,
+                    sessionId,
+                    transferId,
+                    direction,
+                    stateGeneration,
+                    binding.Family,
+                    binding.AuthorityId,
+                    binding.OperationGeneration,
+                    binding.ReceiptIdentity,
+                    binding.ReceiptGeneration,
+                    binding.ReceiptStatus,
+                    binding.ReceiptFingerprint,
+                    binding.EffectKind,
+                    $"{binding.OperationKey}:{binding.EffectKind}",
+                    Math.Max(1, binding.ReceiptGeneration),
+                    binding.OperationKey);
+            }
+
+            return;
+        }
+
         var effectKinds = envelope.DecisionKind switch
         {
             nameof(FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding) =>
@@ -1394,15 +1424,6 @@ public sealed partial class SessionFileTransferService
                 },
             nameof(FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff) =>
                 new[] { "recovery_handoff_prepared" },
-            nameof(FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff) =>
-                new[]
-                {
-                    "pressure_settlement_bridge_applied",
-                    "local_contract_settled",
-                    "local_contract_reference_cleared",
-                    "recovery_handoff_committed",
-                    "projection_detached",
-                },
             _ => new[] { "regular_v4_pressure_decision_adopted" },
         };
         var matches = envelope.Aggregate.Operations
@@ -1555,6 +1576,227 @@ public sealed partial class SessionFileTransferService
         => CreateRegularV4PressureSettlementAuthorityEffectBinding(
             envelope,
             "pressure_settlement_bridge_applied");
+
+    private static ImmutableArray<
+        FileTransferCoordinatorAuthorityEffectBinding>
+        CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindings(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+    {
+        if (envelope.DecisionKind != nameof(
+                FileTransferCoordinator
+                    .CommitRegularV4FrontierRepairPressureRecoveryHandoff) ||
+            envelope.DecisionStatus != "Committed")
+        {
+            return [];
+        }
+
+        var familyOperations = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family ==
+                    "regular_v4_frontier_repair_pressure" &&
+                operation.RegularV4FrontierRepairPressure is not null)
+            .ToArray();
+        var settlementMatches = familyOperations
+            .Where(operation =>
+                operation.OperationRole == "pressure_settlement_terminal" &&
+                operation.OperationKind == "PressureSettlement" &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Applied" &&
+                operation.StateApplied &&
+                operation.ReceiptValidated &&
+                operation.ReceiptStatus == "Applied")
+            .SelectMany(operation =>
+                operation.RegularV4FrontierRepairPressure!.Receipts
+                    .Where(receipt =>
+                        receipt.ReceiptValidated &&
+                        receipt.Stage == "pressure_settlement" &&
+                        ReceiptMatchesOperation(operation, receipt))
+                    .Select(receipt =>
+                        (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (settlementMatches.Length != 1)
+        {
+            return [];
+        }
+
+        var settlementMatch = settlementMatches[0];
+        var settlement = settlementMatch.Operation;
+        var settlementPayload = settlement.RegularV4FrontierRepairPressure!;
+        var handoffMatches = familyOperations
+            .Where(operation =>
+                operation.OperationRole == "recovery_handoff_terminal" &&
+                operation.OperationKind == "PressureRecoveryHandoff" &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Committed" &&
+                operation.StateApplied &&
+                operation.ReceiptValidated &&
+                operation.AuthorityId == settlement.AuthorityId &&
+                operation.ReceiptIdentity == settlement.ReceiptIdentity &&
+                operation.ReceiptGeneration == settlement.ReceiptGeneration &&
+                operation.ReceiptStatus == settlement.ReceiptStatus &&
+                operation.ReceiptFingerprint == settlement.ReceiptFingerprint)
+            .SelectMany(operation =>
+                operation.RegularV4FrontierRepairPressure!.Receipts
+                    .Where(receipt =>
+                        receipt.ReceiptValidated &&
+                        receipt.Stage == "pressure_settlement" &&
+                        ReceiptMatchesOperation(operation, receipt))
+                    .Select(receipt =>
+                        (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (handoffMatches.Length != 1)
+        {
+            return [];
+        }
+
+        var handoffMatch = handoffMatches[0];
+        var handoff = handoffMatch.Operation;
+        var handoffPayload = handoff.RegularV4FrontierRepairPressure!;
+        var installedRetirements = familyOperations.Where(operation =>
+                operation.OperationRole == "pressure_binding_installed" &&
+                operation.BeforeState == "Installed" &&
+                operation.AfterState == "None" &&
+                operation.StateApplied &&
+                operation.AuthorityId == settlement.AuthorityId &&
+                operation.OperationGeneration ==
+                    settlement.OperationGeneration)
+            .ToArray();
+        var authorityRetirements = familyOperations.Where(operation =>
+                operation.OperationRole == "repair_authority_current" &&
+                operation.OperationKind == "V4Repair" &&
+                operation.BeforeState == "Authorized" &&
+                operation.AfterState == "None" &&
+                operation.StateApplied &&
+                operation.AuthorityId == settlement.AuthorityId &&
+                operation.OperationGeneration ==
+                    settlement.OperationGeneration)
+            .ToArray();
+        var settlementMirrors = familyOperations.Where(operation =>
+                operation.OperationRole == "repair_authority_terminal" &&
+                operation.OperationKind == "PressureSettlement" &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Applied" &&
+                operation.StateApplied &&
+                operation.ReceiptValidated &&
+                operation.AuthorityId == settlement.AuthorityId &&
+                operation.OperationGeneration ==
+                    settlement.OperationGeneration &&
+                operation.ReceiptIdentity == settlement.ReceiptIdentity &&
+                operation.ReceiptGeneration == settlement.ReceiptGeneration &&
+                operation.ReceiptStatus == settlement.ReceiptStatus &&
+                operation.ReceiptFingerprint == settlement.ReceiptFingerprint)
+            .ToArray();
+        var attempts = familyOperations.Where(operation =>
+                operation.OperationRole == "attempted_decision" &&
+                operation.OperationKind == nameof(
+                    FileTransferCoordinator
+                        .CommitRegularV4FrontierRepairPressureRecoveryHandoff) &&
+                !operation.StateApplied &&
+                operation.ReceiptValidated &&
+                operation.ReceiptStatus == "Committed" &&
+                operation.AuthorityId == settlement.AuthorityId &&
+                operation.OperationGeneration ==
+                    settlement.OperationGeneration)
+            .ToArray();
+        var recoveryOperations = envelope.Aggregate.Operations.Where(operation =>
+                operation.Family == "receive_recovery" &&
+                operation.OperationRole == "operation_current" &&
+                operation.BeforeState == "None" &&
+                operation.AfterState.StartsWith(
+                    "Issued",
+                    StringComparison.Ordinal) &&
+                operation.StateApplied &&
+                operation.ReceiveRecovery is not null &&
+                operation.AuthorityId == handoffPayload.RecoveryAuthorityId &&
+                operation.OperationGeneration ==
+                    handoffPayload.RecoveryOperationGeneration &&
+                operation.OperationGeneration == handoff.OperationGeneration &&
+                operation.OperationKind == handoffPayload.RecoveryKind)
+            .ToArray();
+
+        if (installedRetirements.Length != 1 ||
+            authorityRetirements.Length != 1 ||
+            settlementMirrors.Length != 1 ||
+            attempts.Length != 1 ||
+            recoveryOperations.Length != 1 ||
+            settlementPayload.CurrentAuthorityCleared != true ||
+            settlementPayload.RetainedPredecessorCleared ||
+            handoffPayload.CurrentAuthorityCleared != true ||
+            handoffPayload.RetainedPredecessorCleared ||
+            handoffPayload.DecisionGeneration !=
+                settlementPayload.DecisionGeneration ||
+            handoffPayload.PressureInstallGeneration !=
+                settlementPayload.PressureInstallGeneration ||
+            handoffPayload.SourceBoundary != settlementPayload.SourceBoundary ||
+            handoffPayload.EffectiveBoundary !=
+                settlementPayload.EffectiveBoundary ||
+            recoveryOperations[0].ReceiveRecovery!.SourceBoundary !=
+                settlementPayload.SourceBoundary)
+        {
+            return [];
+        }
+
+        return
+        [
+            CreateAuthorityEffectBinding(
+                "pressure_settlement_bridge_applied",
+                settlementMatch.Operation,
+                settlementMatch.Receipt),
+            CreateAuthorityEffectBinding(
+                "local_contract_settled",
+                settlementMatch.Operation,
+                settlementMatch.Receipt),
+            CreateAuthorityEffectBinding(
+                "local_contract_reference_cleared",
+                settlementMatch.Operation,
+                settlementMatch.Receipt),
+            CreateAuthorityEffectBinding(
+                "recovery_handoff_committed",
+                handoffMatch.Operation,
+                handoffMatch.Receipt),
+            CreateAuthorityEffectBinding(
+                "projection_detached",
+                handoffMatch.Operation,
+                handoffMatch.Receipt),
+        ];
+    }
+
+    internal static ImmutableArray<
+        FileTransferCoordinatorAuthorityEffectBinding>
+        CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindingsForTesting(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        => CreateRegularV4PressureRecoveryHandoffAuthorityEffectBindings(
+            envelope);
+
+    private static bool ReceiptMatchesOperation(
+        FileTransferCoordinatorOperationTransitionSnapshot operation,
+        FileTransferCoordinatorReceiptTransitionSnapshot receipt)
+        => receipt.ReceiptIdentity == operation.ReceiptIdentity &&
+           receipt.ReceiptGeneration == operation.ReceiptGeneration &&
+           receipt.ReceiptStatus == operation.ReceiptStatus &&
+           receipt.ReceiptFingerprint == operation.ReceiptFingerprint;
+
+    private static FileTransferCoordinatorAuthorityEffectBinding
+        CreateAuthorityEffectBinding(
+            string effectKind,
+            FileTransferCoordinatorOperationTransitionSnapshot operation,
+            FileTransferCoordinatorReceiptTransitionSnapshot receipt)
+        => new(
+            effectKind,
+            operation.Family,
+            operation.OperationKey,
+            operation.OperationKind,
+            operation.OperationRole,
+            operation.AuthorityId,
+            operation.OperationGeneration,
+            receipt.Stage,
+            receipt.CommandIdentity,
+            receipt.CommandGeneration,
+            receipt.CommandFingerprint,
+            receipt.ReceiptIdentity,
+            receipt.ReceiptGeneration,
+            receipt.ReceiptStatus,
+            receipt.ReceiptFingerprint);
 
     private static ImmutableArray<
         FileTransferCoordinatorAuthorityEffectBinding>
