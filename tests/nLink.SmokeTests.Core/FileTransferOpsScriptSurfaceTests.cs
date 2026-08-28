@@ -153,6 +153,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.Contains("ReceiptMatchesOperation", helper, StringComparison.Ordinal);
         Assert.DoesNotContain("matches[0]", helper, StringComparison.Ordinal);
         Assert.Contains(
+            "expectedOperationKey = exactBinding.OperationKey",
+            serviceText,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid",
             evaluatorText,
             StringComparison.Ordinal);

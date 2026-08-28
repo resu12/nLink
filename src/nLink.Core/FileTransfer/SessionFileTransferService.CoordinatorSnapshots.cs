@@ -1439,6 +1439,7 @@ public sealed partial class SessionFileTransferService
             .OrderByDescending(match =>
                 match.Receipt.Stage == "attempted_decision" ? 0 : 1)
             .ToArray();
+        string? expectedOperationKey = null;
         if (envelope.DecisionKind == nameof(
                 FileTransferCoordinator
                     .CommitRegularV4FrontierRepairPressureSettlement))
@@ -1478,6 +1479,7 @@ public sealed partial class SessionFileTransferService
                     match.Receipt.ReceiptFingerprint ==
                         exactBinding.ReceiptFingerprint)
                 .ToArray();
+            expectedOperationKey = exactBinding.OperationKey;
         }
         if (matches.Length == 0)
         {
@@ -1502,7 +1504,8 @@ public sealed partial class SessionFileTransferService
                 match.Receipt.ReceiptFingerprint,
                 effectKind,
                 $"{match.Operation.OperationKey}:{effectKind}",
-                Math.Max(1, match.Receipt.ReceiptGeneration));
+                Math.Max(1, match.Receipt.ReceiptGeneration),
+                expectedOperationKey);
         }
     }
 
