@@ -1154,9 +1154,12 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             log,
             StringComparison.Ordinal);
 
+        var receiveProofObservedUtcMs =
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         transport.RaiseReceiveRecoveryProof(
             command,
-            proofIdentity: "loopback_rechecked_v4_state_received");
+            proofIdentity: "loopback_rechecked_v4_state_received",
+            observedUtcMs: receiveProofObservedUtcMs);
         await WaitUntilAsync(
             () =>
                 GetPrivateProperty<FileTransferCoordinatorPersistentState>(
@@ -1183,6 +1186,24 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             StringComparison.Ordinal);
         Assert.Equal(
             1,
+            CountOccurrences(log, "effect_kind=receive_proof_observed;"));
+        Assert.Contains(
+            "operation_key=receive_recovery|operation_current|",
+            log,
+            StringComparison.Ordinal);
+
+        transport.RaiseReceiveRecoveryProof(
+            command,
+            proofIdentity: "loopback_rechecked_v4_state_received",
+            observedUtcMs: receiveProofObservedUtcMs);
+        await WaitUntilAsync(
+            () => CountOccurrences(
+                    ReadOperationalLogTail(logStart),
+                    "effect_kind=receive_proof_observed;") == 2,
+            timeoutMs: 10_000);
+        log = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            2,
             CountOccurrences(log, "effect_kind=receive_proof_observed;"));
         Assert.Contains(
             "operation_key=receive_recovery|operation_current|",
@@ -1297,6 +1318,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 .PendingCommand);
         Assert.Equal(heldCommand, heldReceipt.Command);
         Assert.Equal(1, heldCommand.PublicationGeneration);
+        var heldLog = ReadOperationalLogTail(logStart);
+        Assert.DoesNotContain(
+            "effect_kind=proof_publication_delivered;",
+            heldLog,
+            StringComparison.Ordinal);
 
         var availabilityMethod = typeof(SessionFileTransferService).GetMethod(
             "HandleDataSessionAvailabilityChangedAsync",
@@ -1361,6 +1387,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "publication_outcome=Delivered",
             log,
             StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "effect_kind=proof_publication_delivered;"));
     }
 
     [Fact]

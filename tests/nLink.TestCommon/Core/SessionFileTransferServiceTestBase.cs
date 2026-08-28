@@ -580,7 +580,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         internal void RaiseReceiveRecoveryProof(
             FileTransferBridgeRecoveryExecutionCommand command,
             string proofIdentity = "loopback_receive_proof",
-            string reason = "loopback_receive_proof_observed")
+            string reason = "loopback_receive_proof_observed",
+            long? observedUtcMs = null)
             => receiveRecoveryProofObserved?.Invoke(
                 this,
                 new FileTransferReceiveRecoveryProofObservedEventArgs(
@@ -588,7 +589,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                         command,
                         proofIdentity,
                         reason,
-                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())));
+                        observedUtcMs ??
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())));
 
         internal void RaiseBridgeRecoveryEvaluation(
             FileTransferBridgeRecoveryEvaluationRequest request)

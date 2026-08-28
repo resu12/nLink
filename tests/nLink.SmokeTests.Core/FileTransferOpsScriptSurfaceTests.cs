@@ -2037,6 +2037,345 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_CoordinatorSnapshotHeldProofPublicationIsStateNotDelivery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+            $scope = [ordered]@{
+                route='regular_nkn_v4_fast'; protocolVersion=4
+                liveRouteEpoch=0L; routePublicationGeneration=1L
+                routeCommitGeneration=0L; runtimeGeneration=1L
+                terminalGeneration=0L; legGeneration=1L
+                transportEpoch=0L; bridgeRecoveryGeneration=8L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session-held'; dataSessionGeneration=1L
+            }
+            $receipt = [ordered]@{
+                stage='proof_publication_pending'
+                commandIdentity='publication-command-8'
+                commandGeneration=8L
+                commandFingerprint='publication-command-fingerprint-8'
+                receiptIdentity='publication-held-receipt-8'
+                receiptGeneration=8L
+                receiptStatus='Held'
+                receiptReason='filetransfer_receive_recovery_proof_state_publication_held'
+                receiptFingerprint='publication-held-receipt-fingerprint-8'
+                receiptValidated=$true
+            }
+            $operation = [ordered]@{
+                family='receive_recovery'
+                operationRole='proof_publication_pending'
+                operationKey='receive_recovery|proof_publication_pending|recovery-authority-8|8|ProofPublication'
+                operationKind='ProofPublication'
+                authorityId='recovery-authority-8'
+                predecessorAuthorityId='recovery-authority-7'
+                operationGeneration=8L
+                beforeState='Pending'; afterState='Held'
+                commandIdentity=$receipt.commandIdentity
+                commandGeneration=$receipt.commandGeneration
+                commandFingerprint=$receipt.commandFingerprint
+                receiptIdentity=$receipt.receiptIdentity
+                receiptGeneration=$receipt.receiptGeneration
+                receiptStatus=$receipt.receiptStatus
+                receiptFingerprint=$receipt.receiptFingerprint
+                receiptValidated=$true; stateApplied=$true
+                routeRuntime=$null; routeTransition=$null
+                runtimeUnlockRetry=$null
+                receiveRecovery=[ordered]@{
+                    role='proof_publication_pending'
+                    sourceBoundary=$scope; effectiveBoundary=$scope
+                    recoveryKind='BridgeReceiveStallRecovery'
+                    bridgeDecisionGeneration=8L
+                    recoveryLivenessLeaseGeneration=8L
+                    executionState='Completed'; closureState='Retained'
+                    closureGeneration=8L; proofIdentity='(none)'
+                    proofObservedUtcMs=0L
+                    heldRetryAuthorityId='(none)'
+                    reservedRetryAuthorityId='(none)'
+                    initialActivationHoldGeneration=0L
+                    envelopeRefreshGeneration=0L
+                    checkpointBindingGeneration=0L
+                    checkpointDeliveryGeneration=0L
+                    checkpointResumeGeneration=0L
+                    checkpointFrontierHoldGeneration=0L
+                    checkpointFrontierRecheckGeneration=0L
+                    receipts=@($receipt)
+                }
+                fallbackTailYield=$null
+                regularV4FrontierRepairPressure=$null
+                responderProbeHandoff=$null
+            }
+            function New-TransitionLine(
+                [object]$operationValue,
+                [string]$status,
+                [string]$reason,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash) {
+                $envelope=[ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId='coordinator-held-publication'
+                    sessionId='session-held'; transferId='transfer-held'
+                    direction='inbound'; decisionUtcMilliseconds=10L
+                    transitionId='transition-held'
+                    decisionKind='ApplyReceiveRecoveryProofStatePublicationReceipt'
+                    decisionStatus=$status; decisionReason=$reason
+                    aggregate=[ordered]@{
+                        beforeStateGeneration=$beforeGeneration
+                        afterStateGeneration=$afterGeneration
+                        beforeStateFingerprint=$beforeHash
+                        afterStateFingerprint=$afterHash
+                        beforeBoundary=$scope; afterBoundary=$scope
+                        changedFamilies=@('receive_recovery')
+                        operations=@($operationValue)
+                    }
+                }
+                $json=$envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash=Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload=[Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $prefix; transition_id=transition-held; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none; log_writer_id=writer-helper; log_writer_sequence=8703"
+            }
+            $prefix="snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-held-publication; session_id=session-held; transfer_id=transfer-held; direction=inbound"
+            $start="event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=0; initial_state_hash=before-held; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $heldTransition=New-TransitionLine $operation 'Accepted' `
+                'filetransfer_receive_recovery_proof_state_publication_held' `
+                0 1 'before-held' 'after-held'
+            $completed="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=1; final_state_hash=after-held; transition_count=1; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+
+            $full=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                'event=irrelevant',$start,$heldTransition,$completed)
+            $compact=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$heldTransition,$completed)
+            if ($full.ArtifactEvidenceVerdict -ne 'pass' -or
+                $compact.ArtifactEvidenceVerdict -ne 'pass' -or
+                $full.BoundaryHash -ne $compact.BoundaryHash) {
+                throw "Held publication was misclassified as delivery evidence: $($full | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $spuriousEffect="event=filetransfer_coordinator_authority_effect; $prefix; transition_id=transition-held; coordinator_state_generation=1; operation_family=receive_recovery; operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=8; effect_kind=proof_publication_delivered; effect_identity=spurious-held-delivery; effect_generation=8; receipt_identity=$($receipt.receiptIdentity); receipt_generation=8; receipt_status=Held; receipt_fingerprint=$($receipt.receiptFingerprint); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=8; checkpoint_generation=0; checkpoint_request_id=(none); data_session_identity=data-session-held; data_session_generation=1; authority_effect=applied"
+            $spurious=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$heldTransition,$spuriousEffect,$completed)
+            if ($spurious.ArtifactEvidenceVerdict -ne 'fail' -or
+                $spurious.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_receive_recovery_proof_publication_transition_invalid') {
+                throw "A Held publication admitted a delivery effect: $($spurious | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $malformed=$operation | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
+            $malformed.beforeState='Pending'; $malformed.afterState='Pending'
+            $malformed.stateApplied=$false
+            $malformed.receiptStatus='Idempotent'
+            $malformed.receiveRecovery.receipts[0].stage='attempted_decision'
+            $malformed.receiveRecovery.receipts[0].receiptStatus='Idempotent'
+            $malformedTransition=New-TransitionLine $malformed 'Idempotent' `
+                'filetransfer_receive_recovery_proof_state_publication_held' `
+                0 0 'before-held' 'before-held'
+            $malformedCompleted="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=0; final_state_hash=before-held; transition_count=1; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $malformedResult=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$malformedTransition,$malformedCompleted)
+            if ($malformedResult.ArtifactEvidenceVerdict -ne 'fail' -or
+                $malformedResult.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_receive_recovery_proof_publication_transition_invalid' -or
+                $malformedResult.FirstUnresolvedBoundary.variant -ne
+                    'held_receipt_omitted_from_pending_publication_state' -or
+                $malformedResult.FirstUnresolvedBoundary.writerSequence -ne 8703L) {
+                throw "Malformed Held evidence did not fail at the exact boundary: $($malformedResult | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Held proof-publication evaluator validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public async Task FileTransferOps_CoordinatorSnapshotReceiveProofDuplicateUsesExactRecoveryOperation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+            $scope = [ordered]@{
+                route='regular_nkn_v4_fast'; protocolVersion=4
+                liveRouteEpoch=0L; routePublicationGeneration=1L
+                routeCommitGeneration=0L; runtimeGeneration=1L
+                terminalGeneration=0L; legGeneration=1L
+                transportEpoch=0L; bridgeRecoveryGeneration=1L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='proof-duplicate-data-session'
+                dataSessionGeneration=1L
+            }
+            $attempt=[ordered]@{
+                stage='attempted_decision'
+                commandIdentity='proof-duplicate-command'
+                commandGeneration=1L
+                commandFingerprint='proof-duplicate-command-fingerprint'
+                receiptIdentity='proof-duplicate-receipt'
+                receiptGeneration=1L
+                receiptStatus='Idempotent'
+                receiptReason='filetransfer_receive_recovery_proof_duplicate'
+                receiptFingerprint='proof-duplicate-receipt-fingerprint'
+                receiptValidated=$true
+            }
+            function New-ReceivePayload([string]$role) {
+                [ordered]@{
+                    role=$role; sourceBoundary=$scope; effectiveBoundary=$scope
+                    recoveryKind='BridgeReceiveStallRecovery'
+                    bridgeDecisionGeneration=1L
+                    recoveryLivenessLeaseGeneration=1L
+                    executionState='Completed'; closureState='Adopted'
+                    closureGeneration=1L
+                    proofIdentity='proof-duplicate-identity'
+                    proofObservedUtcMs=100L
+                    heldRetryAuthorityId='(none)'
+                    reservedRetryAuthorityId='(none)'
+                    initialActivationHoldGeneration=1L
+                    envelopeRefreshGeneration=1L
+                    checkpointBindingGeneration=0L
+                    checkpointDeliveryGeneration=0L
+                    checkpointResumeGeneration=0L
+                    checkpointFrontierHoldGeneration=0L
+                    checkpointFrontierRecheckGeneration=0L
+                    receipts=@($attempt)
+                }
+            }
+            function New-Operation(
+                [string]$role,
+                [string]$kind,
+                [string]$key) {
+                [ordered]@{
+                    family='receive_recovery'; operationRole=$role
+                    operationKey=$key; operationKind=$kind
+                    authorityId='proof-duplicate-authority'
+                    predecessorAuthorityId='(none)'; operationGeneration=1L
+                    beforeState='Completed:Adopted'
+                    afterState='Completed:Adopted'
+                    commandIdentity=$attempt.commandIdentity
+                    commandGeneration=$attempt.commandGeneration
+                    commandFingerprint=$attempt.commandFingerprint
+                    receiptIdentity=$attempt.receiptIdentity
+                    receiptGeneration=$attempt.receiptGeneration
+                    receiptStatus=$attempt.receiptStatus
+                    receiptFingerprint=$attempt.receiptFingerprint
+                    receiptValidated=$true; stateApplied=$false
+                    routeRuntime=$null; routeTransition=$null
+                    runtimeUnlockRetry=$null
+                    receiveRecovery=(New-ReceivePayload $role)
+                    fallbackTailYield=$null
+                    regularV4FrontierRepairPressure=$null
+                    responderProbeHandoff=$null
+                }
+            }
+            function New-Transition(
+                [object]$operation,
+                [string]$transitionId,
+                [long]$writerSequence) {
+                $envelope=[ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId='proof-duplicate-coordinator'
+                    sessionId='proof-duplicate-session'
+                    transferId='proof-duplicate-transfer'
+                    direction='outbound'; decisionUtcMilliseconds=20L
+                    transitionId=$transitionId
+                    decisionKind='ObserveReceiveRecoveryProof'
+                    decisionStatus='Idempotent'
+                    decisionReason='filetransfer_receive_recovery_proof_duplicate'
+                    aggregate=[ordered]@{
+                        beforeStateGeneration=0L; afterStateGeneration=0L
+                        beforeStateFingerprint='proof-before-hash'
+                        afterStateFingerprint='proof-before-hash'
+                        beforeBoundary=$scope; afterBoundary=$scope
+                        changedFamilies=@('receive_recovery')
+                        operations=@($operation)
+                    }
+                }
+                $json=$envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash=Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload=[Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $prefix; transition_id=$transitionId; before_state_generation=0; after_state_generation=0; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none; log_writer_id=writer-sender; log_writer_sequence=$writerSequence"
+            }
+
+            $prefix="snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=proof-duplicate-coordinator; session_id=proof-duplicate-session; transfer_id=proof-duplicate-transfer; direction=outbound"
+            $start="event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=0; initial_state_hash=proof-before-hash; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $completed="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=0; final_state_hash=proof-before-hash; transition_count=1; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+
+            $operationKey='receive_recovery|operation_current|proof-duplicate-authority|1|BridgeReceiveStallRecovery'
+            $operation=New-Operation 'operation_current' `
+                'BridgeReceiveStallRecovery' $operationKey
+            $transition=New-Transition $operation 'proof-duplicate-transition' 901
+            $effect="event=filetransfer_coordinator_authority_effect; $prefix; transition_id=proof-duplicate-transition; coordinator_state_generation=0; operation_family=receive_recovery; operation_key=$operationKey; operation_authority_id=proof-duplicate-authority; operation_generation=1; effect_kind=receive_proof_observed; effect_identity=proof-duplicate-effect; effect_generation=1; receipt_identity=$($attempt.receiptIdentity); receipt_generation=1; receipt_status=Idempotent; receipt_fingerprint=$($attempt.receiptFingerprint); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=1; checkpoint_generation=0; checkpoint_request_id=(none); data_session_identity=proof-duplicate-data-session; data_session_generation=1; authority_effect=applied"
+            $full=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                'event=irrelevant',$start,$transition,$effect,$completed)
+            $compact=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$transition,$effect,$completed)
+            if ($full.ArtifactEvidenceVerdict -ne 'pass' -or
+                $compact.ArtifactEvidenceVerdict -ne 'pass' -or
+                $full.BoundaryHash -ne $compact.BoundaryHash) {
+                throw "Exact duplicate-proof operation failed: $($full | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $childKey='receive_recovery|initial_activation_envelope_refresh|proof-duplicate-authority|1|InitialActivationEnvelopeRefresh'
+            $child=New-Operation 'initial_activation_envelope_refresh' `
+                'InitialActivationEnvelopeRefresh' $childKey
+            $malformedTransition=New-Transition $child 'proof-child-transition' 901
+            $malformed=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$malformedTransition,$completed)
+            if ($malformed.ArtifactEvidenceVerdict -ne 'fail' -or
+                $malformed.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_receive_recovery_required_effect_missing' -or
+                $malformed.FirstUnresolvedBoundary.variant -ne
+                    'initial_activation_envelope_refresh_lexically_selected_over_current_receive_recovery_operation' -or
+                $malformed.FirstUnresolvedBoundary.writerSequence -ne 901L) {
+                throw "Malformed child subject was not classified exactly: $($malformed | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $childEffect=$effect.Replace(
+                'transition_id=proof-duplicate-transition',
+                'transition_id=proof-child-transition').Replace(
+                "operation_key=$operationKey",
+                "operation_key=$childKey")
+            $forged=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$malformedTransition,$childEffect,$completed)
+            if ($forged.ArtifactEvidenceVerdict -ne 'fail' -or
+                $forged.FirstUnresolvedBoundary.variant -ne
+                    'initial_activation_envelope_refresh_lexically_selected_over_current_receive_recovery_operation') {
+                throw "Child-bound proof effect was accepted: $($forged | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Receive-proof subject evaluator validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public async Task FileTransferOps_CoordinatorSnapshotFallbackBootstrapRolloverIsExactAndTotal()
     {
         if (!OperatingSystem.IsWindows())

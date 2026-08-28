@@ -7927,7 +7927,8 @@ public sealed class FileTransferCoordinatorTests
     public void FileTransferReceiveRecoveryProofStateActivationPause_HeldPreservesExactCommandUntilTerminalReceipt()
     {
         var fixture = CreateReceiveRecoveryOperationFixture(
-            FileTransferDirection.Inbound);
+            FileTransferDirection.Inbound,
+            coordinatorInstanceId: "receive-proof-publication-held");
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);
@@ -7983,6 +7984,40 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinator
                 .GetCurrentHeldReceiveRecoveryProofStatePublicationCommand(
                     held.State));
+        Assert.Null(held.SnapshotAuthorityEffectBinding);
+        var heldEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(held.SnapshotEnvelope);
+        Assert.Equal("Accepted", heldEnvelope.DecisionStatus);
+        Assert.Equal(
+            issued.State.PersistentState.SnapshotStateGeneration + 1,
+            held.State.PersistentState.SnapshotStateGeneration);
+        var heldOperation = Assert.Single(
+            heldEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "receive_recovery",
+                OperationRole: "proof_publication_pending",
+                OperationKind: "ProofPublication",
+                BeforeState: "Pending",
+                AfterState: "Held",
+                StateApplied: true,
+                ReceiptStatus: "Held",
+                ReceiptValidated: true,
+            });
+        var projectedHeldReceipt = Assert.Single(
+            Assert.IsType<
+                    FileTransferCoordinatorReceiveRecoveryOperationSnapshot>(
+                    heldOperation.ReceiveRecovery)
+                .Receipts);
+        Assert.Equal("proof_publication_pending", projectedHeldReceipt.Stage);
+        Assert.Equal("Held", projectedHeldReceipt.ReceiptStatus);
+        Assert.True(projectedHeldReceipt.ReceiptValidated);
+        Assert.Equal(
+            heldOperation.CommandFingerprint,
+            projectedHeldReceipt.CommandFingerprint);
+        Assert.Equal(
+            heldOperation.ReceiptFingerprint,
+            projectedHeldReceipt.ReceiptFingerprint);
 
         var duplicate = FileTransferCoordinator
             .ApplyReceiveRecoveryProofStatePublicationReceipt(
@@ -7993,6 +8028,30 @@ public sealed class FileTransferCoordinatorTests
             FileTransferReceiveRecoveryTransitionStatus.Idempotent,
             duplicate.Status);
         Assert.Equal(held.State, duplicate.State);
+        Assert.Null(duplicate.SnapshotAuthorityEffectBinding);
+        var duplicateEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+            duplicate.SnapshotEnvelope);
+        Assert.Equal("Idempotent", duplicateEnvelope.DecisionStatus);
+        Assert.Equal(
+            duplicateEnvelope.Aggregate.BeforeStateGeneration,
+            duplicateEnvelope.Aggregate.AfterStateGeneration);
+        var duplicateOperation = Assert.Single(
+            duplicateEnvelope.Aggregate.Operations);
+        Assert.Equal("proof_publication_pending", duplicateOperation.OperationRole);
+        Assert.Equal("ProofPublication", duplicateOperation.OperationKind);
+        Assert.Equal("Held", duplicateOperation.BeforeState);
+        Assert.Equal("Held", duplicateOperation.AfterState);
+        Assert.False(duplicateOperation.StateApplied);
+        Assert.Equal("Idempotent", duplicateOperation.ReceiptStatus);
+        Assert.Equal(
+            "attempted_decision",
+            Assert.Single(
+                    Assert.IsType<
+                            FileTransferCoordinatorReceiveRecoveryOperationSnapshot>(
+                            duplicateOperation.ReceiveRecovery)
+                        .Receipts)
+                .Stage);
 
         var mutated = FileTransferCoordinator
             .ApplyReceiveRecoveryProofStatePublicationReceipt(
@@ -8028,6 +8087,34 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinator
                 .GetCurrentHeldReceiveRecoveryProofStatePublicationCommand(
                     delivered.State));
+        var deliveredEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+            delivered.SnapshotEnvelope);
+        Assert.Contains(
+            deliveredEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                OperationRole: "proof_publication_pending",
+                BeforeState: "Held",
+                AfterState: "None",
+                StateApplied: true,
+            });
+        Assert.Contains(
+            deliveredEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                OperationRole: "proof_publication_terminal",
+                BeforeState: "None",
+                AfterState: "Delivered",
+                StateApplied: true,
+                ReceiptStatus: "Delivered",
+                ReceiptValidated: true,
+            });
+        Assert.Equal(
+            "proof_publication_delivered",
+            Assert.IsType<FileTransferCoordinatorAuthorityEffectBinding>(
+                    delivered.SnapshotAuthorityEffectBinding)
+                .EffectKind);
 
         var rejected = FileTransferCoordinator
             .ApplyReceiveRecoveryProofStatePublicationReceipt(
@@ -8047,6 +8134,21 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(
             rejected.State.PersistentState.FileTransferReceiveRecovery
                 .ProofStatePublication?.LastHeldReceipt);
+        Assert.Null(rejected.SnapshotAuthorityEffectBinding);
+        var rejectedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+            rejected.SnapshotEnvelope);
+        Assert.Contains(
+            rejectedEnvelope.Aggregate.Operations,
+            operation => operation is
+            {
+                OperationRole: "proof_publication_terminal",
+                BeforeState: "None",
+                AfterState: "Rejected",
+                StateApplied: true,
+                ReceiptStatus: "Rejected",
+                ReceiptValidated: false,
+            });
     }
 
     [Fact]
@@ -8702,11 +8804,15 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "ReceiveRecoveryOperation")]
     public void RuntimeUnlockInitialActivationOfferEnvelopeRefresh_HeldReleaseCommitsOneExactSuccessorEnvelope()
     {
         Assert.False(typeof(FileTransferReceiveRecoverySubstate).IsValueType);
 
-        var fixture = CreateReceiveRecoveryOperationFixture();
+        var fixture = CreateReceiveRecoveryOperationFixture(
+            coordinatorInstanceId:
+                "initial-activation-envelope-refresh-proof-duplicate");
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);
@@ -8742,14 +8848,14 @@ public sealed class FileTransferCoordinatorTests
                 started.State,
                 receipt,
                 observedUtcMs: 2);
-        var proof =
-            FileTransferCoordinator.ObserveReceiveRecoveryProof(
-                completed.State,
-                new FileTransferReceiveRecoveryProof(
-                    authority,
-                    "initial-activation-envelope-refresh-proof",
-                    "receive_proof_observed",
-                    3));
+        var receiveProof = new FileTransferReceiveRecoveryProof(
+            authority,
+            "initial-activation-envelope-refresh-proof",
+            "receive_proof_observed",
+            3);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            completed.State,
+            receiveProof);
 
         var release = Assert.IsType<
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>(
@@ -8788,6 +8894,52 @@ public sealed class FileTransferCoordinatorTests
             refreshReceipt,
             committed.State.PersistentState.FileTransferReceiveRecovery
                 .LastInitialActivationEnvelopeRefreshReceipt);
+
+        var duplicateProof =
+            FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                committed.State,
+                receiveProof);
+        Assert.Equal(
+            FileTransferReceiveRecoveryTransitionStatus.Idempotent,
+            duplicateProof.Status);
+        Assert.Same(committed.State, duplicateProof.State);
+        var duplicateProofEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+            duplicateProof.SnapshotEnvelope);
+        var duplicateProofOperation = Assert.Single(
+            duplicateProofEnvelope.Aggregate.Operations);
+        Assert.Equal("operation_current", duplicateProofOperation.OperationRole);
+        Assert.Equal(
+            authority.BridgeRecoveryDecision.RecoveryKind.ToString(),
+            duplicateProofOperation.OperationKind);
+        Assert.Equal(
+            authority.AuthorityId.ToString(),
+            duplicateProofOperation.AuthorityId);
+        Assert.Equal(
+            authority.OperationGeneration,
+            duplicateProofOperation.OperationGeneration);
+        Assert.Equal(
+            receiveProof.ProofIdentity,
+            duplicateProofOperation.ReceiveRecovery?.ProofIdentity);
+        Assert.Equal(
+            receiveProof.ObservedUtcMs,
+            duplicateProofOperation.ReceiveRecovery?.ProofObservedUtcMs);
+        Assert.Equal(
+            "attempted_decision",
+            Assert.Single(
+                    duplicateProofOperation.ReceiveRecovery?.Receipts ?? [])
+                .Stage);
+        var duplicateProofEffect = Assert.IsType<
+            FileTransferCoordinatorAuthorityEffectBinding>(
+            duplicateProof.SnapshotAuthorityEffectBinding);
+        Assert.Equal("receive_proof_observed", duplicateProofEffect.EffectKind);
+        Assert.Equal("operation_current", duplicateProofEffect.OperationRole);
+        Assert.Equal(
+            duplicateProofOperation.OperationKey,
+            duplicateProofEffect.OperationKey);
+        Assert.Equal(
+            "attempted_decision",
+            duplicateProofEffect.ReceiptStage);
 
         var duplicate =
             FileTransferCoordinator

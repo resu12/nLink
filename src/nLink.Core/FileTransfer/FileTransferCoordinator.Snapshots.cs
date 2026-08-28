@@ -1170,7 +1170,10 @@ internal static partial class FileTransferCoordinator
             nameof(ApplyReceiveRecoveryProofStatePublicationReceipt)
                 when command is
                     FileTransferReceiveRecoveryProofStatePublicationReceipt
-                        publicationReceipt =>
+                        publicationReceipt &&
+                    publicationReceipt.Outcome ==
+                        FileTransferReceiveRecoveryProofStatePublicationOutcome
+                            .Delivered =>
                 GetReceiveRecoveryProofPublicationEffectMatches(
                     envelope,
                     publicationReceipt),
@@ -1394,6 +1397,80 @@ internal static partial class FileTransferCoordinator
         AddReceiveRecoveryOperationDescriptors(state, descriptorBuilder);
         IEnumerable<CoordinatorOperationDescriptor> descriptors =
             descriptorBuilder;
+        var requiresUniqueDescriptor = false;
+        if (decisionKind ==
+                nameof(ApplyReceiveRecoveryProofStatePublicationReceipt) &&
+            command is FileTransferReceiveRecoveryProofStatePublicationReceipt
+                publicationReceipt)
+        {
+            requiresUniqueDescriptor = true;
+            var publicationRole = publicationReceipt.Outcome ==
+                FileTransferReceiveRecoveryProofStatePublicationOutcome.Held
+                    ? "proof_publication_pending"
+                    : "proof_publication_terminal";
+            var authorityId =
+                publicationReceipt.Command.Authority.AuthorityId.ToString();
+            var publicationGeneration =
+                publicationReceipt.Command.PublicationGeneration;
+            var publicationCommandFingerprint = CalculateSnapshotFingerprint(
+                publicationReceipt.Command);
+            var publicationReceiptFingerprint = CalculateSnapshotFingerprint(
+                publicationReceipt);
+            descriptors = descriptors.Where(descriptor =>
+                descriptor.OperationRole == publicationRole &&
+                descriptor.OperationKind == "ProofPublication" &&
+                descriptor.AuthorityId == authorityId &&
+                descriptor.OperationGeneration == publicationGeneration &&
+                descriptor.CommandFingerprint == publicationCommandFingerprint &&
+                descriptor.ReceiptFingerprint == publicationReceiptFingerprint &&
+                descriptor.ReceiptStatus ==
+                    publicationReceipt.Outcome.ToString());
+        }
+        else if (decisionKind == nameof(ObserveReceiveRecoveryProof) &&
+                 command is FileTransferReceiveRecoveryProof proof)
+        {
+            requiresUniqueDescriptor = true;
+            var recovery =
+                state.PersistentState.FileTransferReceiveRecovery;
+            FileTransferReceiveRecoveryOperation? subject = null;
+            var subjectRole = "(none)";
+            if (recovery.LastTerminalOperation is { } terminal &&
+                terminal.Authority == proof.Authority)
+            {
+                subject = terminal;
+                subjectRole = "operation_terminal";
+            }
+            else if (recovery.CurrentOperation is { } current &&
+                     current.Authority == proof.Authority)
+            {
+                subject = current;
+                subjectRole = "operation_current";
+            }
+
+            var sourceBoundary = CreateReceiveRecoverySourceBoundary(
+                state,
+                proof.Authority.Observation);
+            descriptors = subject is null ||
+                          (decisionStatus == "Idempotent" &&
+                           subject.Value.ReceiveProof != proof)
+                ? []
+                : descriptors.Where(descriptor =>
+                    descriptor.OperationRole == subjectRole &&
+                    descriptor.OperationKind ==
+                        proof.Authority.BridgeRecoveryDecision.RecoveryKind
+                            .ToString() &&
+                    descriptor.AuthorityId ==
+                        proof.Authority.AuthorityId.ToString() &&
+                    descriptor.OperationGeneration ==
+                        proof.Authority.OperationGeneration &&
+                    descriptor.ReceiveRecovery is
+                    {
+                        SourceBoundary: var descriptorSourceBoundary,
+                        EffectiveBoundary: var descriptorEffectiveBoundary,
+                    } &&
+                    descriptorSourceBoundary == sourceBoundary &&
+                    descriptorEffectiveBoundary == sourceBoundary);
+        }
         if (authority is { IsDefault: false } exactAuthority)
         {
             descriptors = descriptors.Where(descriptor => string.Equals(
@@ -1401,9 +1478,16 @@ internal static partial class FileTransferCoordinator
                 exactAuthority.AuthorityId.ToString(),
                 StringComparison.Ordinal));
         }
-        var descriptor = descriptors
-            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
-            .FirstOrDefault();
+        var descriptorMatches = descriptors.ToArray();
+        var descriptor = requiresUniqueDescriptor
+            ? descriptorMatches.Length == 1
+                ? descriptorMatches[0]
+                : null
+            : descriptorMatches
+                .OrderBy(
+                    descriptor => descriptor.OperationRole,
+                    StringComparer.Ordinal)
+                .FirstOrDefault();
         var commandFingerprint = CalculateSnapshotFingerprint(command);
         if (descriptor is not null)
         {
@@ -4875,6 +4959,10 @@ internal static partial class FileTransferCoordinator
         var proof = recovery.ProofStatePublication;
         if (proof?.PendingCommand is { } pendingProof)
         {
+            var heldReceipt = proof.LastHeldReceipt is { } exactHeldReceipt &&
+                exactHeldReceipt.Command == pendingProof
+                    ? exactHeldReceipt
+                    : null;
             AddReceiveRecoveryChildDescriptor(
                 state,
                 builder,
@@ -4882,10 +4970,11 @@ internal static partial class FileTransferCoordinator
                 "proof_publication_pending",
                 "ProofPublication",
                 pendingProof.PublicationGeneration,
-                "Pending",
+                heldReceipt is null ? "Pending" : "Held",
                 pendingProof,
-                null,
-                "Pending");
+                heldReceipt,
+                heldReceipt?.Outcome.ToString() ?? "Pending",
+                heldReceipt is not null);
         }
         if (proof?.LastReceipt is { } proofReceipt)
         {

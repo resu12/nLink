@@ -3232,9 +3232,6 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $receiveRecoveryRequiredEffects = [ordered]@{
         ObserveReceiveRecoveryExecutionStart = 'execution_started'
         ObserveReceiveRecoveryExecutionReceipt = 'execution_receipt_observed'
-        ObserveReceiveRecoveryProof = 'receive_proof_observed'
-        ApplyReceiveRecoveryProofStatePublicationReceipt =
-            'proof_publication_delivered'
         ApplyReceiveRecoveryFallbackCheckpointDeliveryReceipt =
             'checkpoint_delivery_observed'
         ReserveReceiveRecoveryFallbackCheckpointDeliveryResume =
@@ -3247,6 +3244,262 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             'initial_activation_hold_observed'
         CommitRuntimeUnlockInitialActivationOfferEnvelopeRefresh =
             'initial_activation_envelope_refresh_observed'
+    }
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies -contains
+                    'receive_recovery' -and
+                [string]$_.decisionKind -ceq
+                    'ApplyReceiveRecoveryProofStatePublicationReceipt' -and
+                [string]$_.decisionStatus -in @('Accepted', 'Idempotent')
+            })) {
+        $publicationOperations = @($boundary.operations | Where-Object {
+                [string]$_.family -ceq 'receive_recovery' -and
+                [string]$_.operationKind -ceq 'ProofPublication'
+            })
+        $pendingOperations = @($publicationOperations | Where-Object {
+                [string]$_.operationRole -ceq 'proof_publication_pending'
+            })
+        $terminalOperations = @($publicationOperations | Where-Object {
+                [string]$_.operationRole -ceq 'proof_publication_terminal'
+            })
+        $attemptedOperations = @($publicationOperations | Where-Object {
+                @($_.receiveRecovery.receipts | Where-Object {
+                        [string]$_.stage -ceq 'attempted_decision'
+                    }).Count -eq 1
+            })
+        $deliveryEffects = @($effects | Where-Object {
+                $_.CoordinatorInstanceId -ceq
+                    [string]$boundary.coordinatorInstanceId -and
+                $_.TransitionId -ceq [string]$boundary.boundaryId -and
+                $_.Family -ceq 'receive_recovery' -and
+                $_.EffectKind -ceq 'proof_publication_delivered'
+            })
+        $reason = [string]$boundary.decisionReason
+        $status = [string]$boundary.decisionStatus
+        $validPublicationTransition = $false
+        $failureVariant =
+            'proof_publication_outcome_state_or_effect_binding_invalid'
+
+        if ($reason -ceq
+            'filetransfer_receive_recovery_proof_state_publication_held') {
+            $heldTransitions = @($pendingOperations | Where-Object {
+                    [string]$_.beforeState -ceq 'Pending' -and
+                    [string]$_.afterState -ceq 'Held' -and
+                    [bool]$_.stateApplied -and
+                    [bool]$_.receiptValidated -and
+                    [string]$_.receiptStatus -ceq 'Held' -and
+                    @($_.receiveRecovery.receipts | Where-Object {
+                            [string]$_.stage -ceq
+                                'proof_publication_pending' -and
+                            [string]$_.receiptStatus -ceq 'Held' -and
+                            [bool]$_.receiptValidated -and
+                            [long]$_.commandGeneration -eq
+                                [long]$_.receiptGeneration
+                        }).Count -eq 1
+                })
+            $validPublicationTransition =
+                $status -ceq 'Accepted' -and
+                $heldTransitions.Count -eq 1 -and
+                $publicationOperations.Count -eq 1 -and
+                $deliveryEffects.Count -eq 0
+            $failureVariant =
+                'held_receipt_omitted_from_pending_publication_state'
+        }
+        elseif ($reason -ceq
+            'filetransfer_receive_recovery_proof_state_publication_held_receipt_duplicate') {
+            $duplicateHeld = @($pendingOperations | Where-Object {
+                    [string]$_.beforeState -ceq 'Held' -and
+                    [string]$_.afterState -ceq 'Held' -and
+                    -not [bool]$_.stateApplied -and
+                    [string]$_.receiptStatus -ceq 'Idempotent'
+                })
+            $validPublicationTransition =
+                $status -ceq 'Idempotent' -and
+                $duplicateHeld.Count -eq 1 -and
+                $attemptedOperations.Count -eq 1 -and
+                $publicationOperations.Count -eq 1 -and
+                $deliveryEffects.Count -eq 0
+            $failureVariant =
+                'held_duplicate_attempt_binding_invalid'
+        }
+        elseif ($reason -ceq
+            'filetransfer_receive_recovery_proof_state_publication_delivered') {
+            $deliveredTerminal = @($terminalOperations | Where-Object {
+                    [string]$_.beforeState -ceq 'None' -and
+                    [string]$_.afterState -ceq 'Delivered' -and
+                    [bool]$_.stateApplied -and
+                    [bool]$_.receiptValidated -and
+                    [string]$_.receiptStatus -ceq 'Delivered'
+                })
+            $retiredPending = @($pendingOperations | Where-Object {
+                    [string]$_.beforeState -in @('Pending', 'Held') -and
+                    [string]$_.afterState -ceq 'None' -and
+                    [bool]$_.stateApplied
+                })
+            $validPublicationTransition =
+                $status -ceq 'Accepted' -and
+                $deliveredTerminal.Count -eq 1 -and
+                $retiredPending.Count -eq 1 -and
+                $publicationOperations.Count -eq 2 -and
+                $deliveryEffects.Count -eq 1
+            $failureVariant =
+                'delivered_publication_transition_or_effect_invalid'
+        }
+        elseif ($reason -ceq
+            'filetransfer_receive_recovery_proof_state_publication_rejected') {
+            $rejectedTerminal = @($terminalOperations | Where-Object {
+                    [string]$_.beforeState -ceq 'None' -and
+                    [string]$_.afterState -ceq 'Rejected' -and
+                    [bool]$_.stateApplied -and
+                    -not [bool]$_.receiptValidated -and
+                    [string]$_.receiptStatus -ceq 'Rejected'
+                })
+            $retiredPending = @($pendingOperations | Where-Object {
+                    [string]$_.beforeState -in @('Pending', 'Held') -and
+                    [string]$_.afterState -ceq 'None' -and
+                    [bool]$_.stateApplied
+                })
+            $validPublicationTransition =
+                $status -ceq 'Accepted' -and
+                $rejectedTerminal.Count -eq 1 -and
+                $retiredPending.Count -eq 1 -and
+                $publicationOperations.Count -eq 2 -and
+                $deliveryEffects.Count -eq 0
+            $failureVariant =
+                'rejected_publication_transition_or_effect_invalid'
+        }
+        elseif ($reason -in @(
+                'filetransfer_receive_recovery_proof_state_publication_receipt_duplicate',
+                'filetransfer_receive_recovery_proof_state_publication_predecessor_receipt_duplicate')) {
+            $validPublicationTransition =
+                $status -ceq 'Idempotent' -and
+                $attemptedOperations.Count -eq 1 -and
+                $publicationOperations.Count -eq 1 -and
+                $deliveryEffects.Count -eq 0
+            $failureVariant =
+                'publication_duplicate_attempt_binding_invalid'
+        }
+
+        if (-not $validPublicationTransition) {
+            $errors.Add(
+                "snapshot_receive_recovery_proof_publication_transition_invalid|$failureVariant`:$($boundary.evidenceLineIndex)")
+        }
+    }
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies -contains
+                    'receive_recovery' -and
+                [string]$_.decisionKind -ceq
+                    'ObserveReceiveRecoveryProof'
+            })) {
+        $proofOperations = @($boundary.operations | Where-Object {
+                [string]$_.family -ceq 'receive_recovery' -and
+                [string]$_.operationRole -in @(
+                    'operation_current',
+                    'operation_terminal') -and
+                $null -ne $_.receiveRecovery
+            })
+        $proofEffects = @($effects | Where-Object {
+                $_.CoordinatorInstanceId -ceq
+                    [string]$boundary.coordinatorInstanceId -and
+                $_.TransitionId -ceq [string]$boundary.boundaryId -and
+                $_.Family -ceq 'receive_recovery' -and
+                $_.EffectKind -ceq 'receive_proof_observed'
+            })
+        $status = [string]$boundary.decisionStatus
+        $validProofTransition = $false
+        $failureVariant =
+            'receive_proof_observation_subject_or_effect_invalid'
+
+        if ($status -in @('Accepted', 'Idempotent')) {
+            $effect = if ($proofEffects.Count -eq 1) {
+                $proofEffects[0]
+            }
+            else {
+                $null
+            }
+            $effectSubjects = @()
+            if ($null -ne $effect) {
+                $effectSubjects = @($proofOperations | Where-Object {
+                    [string]$_.operationKey -ceq
+                        [string]$effect.OperationKey -and
+                    [string]$_.authorityId -ceq
+                        [string]$effect.AuthorityId -and
+                    [long]$_.operationGeneration -eq
+                        [long]$effect.OperationGeneration
+                })
+            }
+            $subject = if ($effectSubjects.Count -eq 1) {
+                $effectSubjects[0]
+            }
+            else {
+                $null
+            }
+            $effectReceipts = @()
+            if ($null -ne $subject -and $null -ne $effect) {
+                $effectReceipts = @(
+                    $subject.receiveRecovery.receipts | Where-Object {
+                        [bool]$_.receiptValidated -and
+                        [string]$_.receiptIdentity -ceq
+                            [string]$effect.ReceiptIdentity -and
+                        [long]$_.receiptGeneration -eq
+                            [long]$effect.ReceiptGeneration -and
+                        [string]$_.receiptStatus -ceq
+                            [string]$effect.ReceiptStatus -and
+                        [string]$_.receiptFingerprint -ceq
+                            [string]$effect.ReceiptFingerprint
+                    })
+            }
+            $expectedReceiptStage = if ($status -ceq 'Accepted') {
+                'operation'
+            }
+            else {
+                'attempted_decision'
+            }
+            $validProofTransition =
+                $null -ne $subject -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$subject.receiveRecovery.proofIdentity) -and
+                [string]$subject.receiveRecovery.proofIdentity -cne '(none)' -and
+                [long]$subject.receiveRecovery.proofObservedUtcMs -gt 0 -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                    -Boundary $subject.receiveRecovery.sourceBoundary) -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                    -Boundary $subject.receiveRecovery.effectiveBoundary) -and
+                $effectReceipts.Count -eq 1 -and
+                [string]$effectReceipts[0].stage -ceq
+                    $expectedReceiptStage -and
+                (($status -ceq 'Accepted' -and
+                  [long]$boundary.afterStateGeneration -eq
+                    [long]$boundary.beforeStateGeneration + 1L -and
+                  [string]$boundary.afterStateHash -cne
+                    [string]$boundary.beforeStateHash -and
+                  [bool]$subject.stateApplied) -or
+                 ($status -ceq 'Idempotent' -and
+                  [long]$boundary.afterStateGeneration -eq
+                    [long]$boundary.beforeStateGeneration -and
+                  [string]$boundary.afterStateHash -ceq
+                    [string]$boundary.beforeStateHash -and
+                  -not [bool]$subject.stateApplied))
+            if ($status -ceq 'Idempotent' -and
+                $proofOperations.Count -eq 0 -and
+                @($boundary.operations | Where-Object {
+                        [string]$_.family -ceq 'receive_recovery' -and
+                        [string]$_.operationRole -ceq
+                            'initial_activation_envelope_refresh'
+                    }).Count -gt 0) {
+                $failureVariant =
+                    'initial_activation_envelope_refresh_lexically_selected_over_current_receive_recovery_operation'
+            }
+        }
+        elseif ($status -ceq 'Rejected') {
+            $validProofTransition = $proofEffects.Count -eq 0
+            $failureVariant = 'rejected_receive_proof_emitted_authority_effect'
+        }
+
+        if (-not $validProofTransition) {
+            $errors.Add(
+                "snapshot_receive_recovery_required_effect_missing|$failureVariant`:$($boundary.evidenceLineIndex)")
+        }
     }
     foreach ($boundary in @($boundaries | Where-Object {
                 $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies -contains
@@ -4497,7 +4750,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         $pendingProof = @($history | Where-Object {
                 [string]$_.Operation.operationRole -ceq
                     'proof_publication_pending' -and
-                [string]$_.Operation.afterState -ceq 'Pending'
+                [string]$_.Operation.afterState -in @('Pending', 'Held')
             } | Select-Object -Last 1) | Select-Object -First 1
         $terminalProof = @($history | Where-Object {
                 [string]$_.Operation.operationRole -ceq
