@@ -1844,6 +1844,186 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "Mutated fallback checkpoint did not fail with the exact catalog variant: $($mutatedCheckpoint | ConvertTo-Json -Depth 8 -Compress)"
             }
 
+            function New-RouteCommitSettlementOperation(
+                [string]$role,
+                [string]$beforeState,
+                [string]$afterState) {
+                $authority = 'fte1-111111111111111111111111'
+                $receipt = [ordered]@{
+                    stage='pressure_settlement'
+                    commandIdentity='settlement-command'
+                    commandGeneration=7L
+                    commandFingerprint='settlement-command-fingerprint'
+                    receiptIdentity='settlement-receipt'
+                    receiptGeneration=7L
+                    receiptStatus='Applied'
+                    receiptReason='regular_v4_frontier_repair_pressure_settlement_applied'
+                    receiptFingerprint='settlement-receipt-fingerprint'
+                    receiptValidated=$true
+                }
+                [ordered]@{
+                    family='regular_v4_frontier_repair_pressure'
+                    operationRole=$role
+                    operationKey="regular_v4_frontier_repair_pressure|$role|$authority|7|PressureSettlement"
+                    operationKind='PressureSettlement'
+                    authorityId=$authority
+                    predecessorAuthorityId='(none)'
+                    operationGeneration=7L
+                    beforeState=$beforeState
+                    afterState=$afterState
+                    commandIdentity=$receipt.commandIdentity
+                    commandGeneration=$receipt.commandGeneration
+                    commandFingerprint=$receipt.commandFingerprint
+                    receiptIdentity=$receipt.receiptIdentity
+                    receiptGeneration=$receipt.receiptGeneration
+                    receiptStatus=$receipt.receiptStatus
+                    receiptFingerprint=$receipt.receiptFingerprint
+                    receiptValidated=$true
+                    stateApplied=$true
+                    regularV4FrontierRepairPressure=[ordered]@{
+                        role=$role
+                        sourceBoundary=$receiveScope
+                        effectiveBoundary=$receiveScope
+                        repairKind='V4Repair'
+                        repairKey='regular-v4-pressure:route-commit'
+                        frontierChunkIndex=12L
+                        durableReceivedHighestChunkIndex=13L
+                        pendingRepairCount=0
+                        targetTransport='RegularNkn'
+                        pressureReason='route_commit'
+                        decisionGeneration=7L
+                        pressureInstallGeneration=7L
+                        bindingState='Settled'
+                        settlementOutcome='ProgressObserved'
+                        settlementReason='route_commit'
+                        currentAuthorityCleared=$true
+                        retainedPredecessorCleared=$false
+                        successorAuthorityId='(none)'
+                        recoveryAuthorityId='(none)'
+                        recoveryOperationGeneration=0L
+                        recoveryKind='(none)'
+                        receipts=@($receipt)
+                    }
+                }
+            }
+            function New-RouteCommitSettlementTransition(
+                [string]$transitionId,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [string]$beforeState,
+                [string]$afterState,
+                [long]$decisionTime) {
+                $operations = @(
+                    (New-RouteCommitSettlementOperation `
+                        'pressure_settlement_terminal' $beforeState $afterState),
+                    (New-RouteCommitSettlementOperation `
+                        'repair_authority_terminal' $beforeState $afterState))
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Shadow'
+                    coordinatorInstanceId='coordinator-route-commit-effects'
+                    sessionId='session-route-commit-effects'
+                    transferId='transfer-route-commit-effects'
+                    direction='outbound'
+                    transitionId=$transitionId
+                    decisionKind='CommitFileTransferRouteTransition'
+                    decisionStatus='Committed'
+                    decisionReason='filetransfer_route_transition_committed'
+                    decisionUtcMilliseconds=$decisionTime
+                    aggregate=[ordered]@{
+                        beforeStateGeneration=$beforeGeneration
+                        afterStateGeneration=$afterGeneration
+                        beforeStateFingerprint=$beforeHash
+                        afterStateFingerprint=$afterHash
+                        beforeBoundary=$receiveScope
+                        afterBoundary=$receiveScope
+                        changedFamilies=@('regular_v4_frontier_repair_pressure')
+                        operations=$operations
+                    }
+                }
+                $json = $envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $routeCommitEffectPrefix; transition_id=$transitionId; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+            function New-RouteCommitSettlementEffect(
+                [string]$transitionId,
+                [long]$stateGeneration,
+                [string]$kind,
+                [long]$writerSequence) {
+                $operationKey = 'regular_v4_frontier_repair_pressure|repair_authority_terminal|fte1-111111111111111111111111|7|PressureSettlement'
+                $identity = "$operationKey`:$kind"
+                "[2026-01-01 00:00:$($writerSequence.ToString('00'))Z] [INFO] [FileTransferCoordinator] event=filetransfer_coordinator_authority_effect; $routeCommitEffectPrefix; transition_id=$transitionId; coordinator_state_generation=$stateGeneration; operation_family=regular_v4_frontier_repair_pressure; operation_key=$operationKey; operation_authority_id=fte1-111111111111111111111111; operation_generation=7; effect_kind=$kind; effect_identity=$identity; effect_generation=7; receipt_identity=settlement-receipt; receipt_generation=7; receipt_status=Applied; receipt_fingerprint=settlement-receipt-fingerprint; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=4; checkpoint_request_id=root-checkpoint; data_session_identity=receive-data-session; data_session_generation=5; authority_effect=applied; log_writer_id=writer-sender; log_writer_sequence=$writerSequence"
+            }
+            $routeCommitEffectPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-route-commit-effects; session_id=session-route-commit-effects; transfer_id=transfer-route-commit-effects; direction=outbound"
+            $routeCommitCoverage = 'regular_v4_frontier_repair_pressure'
+            $routeCommitStart = "event=filetransfer_coordinator_snapshot_stream_started; $routeCommitEffectPrefix; initial_state_generation=0; initial_state_hash=route-commit-before; emitted_family_coverage=$routeCommitCoverage; shadow_family_coverage=; authoritative_family_coverage=$routeCommitCoverage; authority_effect=none"
+            $routeCommitEntering = New-RouteCommitSettlementTransition `
+                'route-commit-entering' 0 1 'route-commit-before' `
+                'route-commit-settled' 'None' 'Applied' 100
+            $routeCommitCarried = New-RouteCommitSettlementTransition `
+                'route-commit-carried' 1 2 'route-commit-settled' `
+                'route-commit-after' 'Applied' 'Applied' 200
+            $closureKinds = @(
+                'pressure_settlement_bridge_applied',
+                'local_contract_settled',
+                'local_contract_reference_cleared')
+            $enteringEffects = @()
+            $sequence = 10L
+            foreach ($kind in $closureKinds) {
+                $enteringEffects += New-RouteCommitSettlementEffect `
+                    'route-commit-entering' 1 $kind $sequence
+                $sequence++
+            }
+            $enteringEffects += New-RouteCommitSettlementEffect `
+                'route-commit-entering' 1 `
+                'route_commit_local_lifecycle_adopted' $sequence
+            $carriedAdoption = New-RouteCommitSettlementEffect `
+                'route-commit-carried' 2 `
+                'route_commit_local_lifecycle_adopted' 20
+            $routeCommitEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $routeCommitEffectPrefix; final_state_generation=2; final_state_hash=route-commit-after; transition_count=2; emitted_family_coverage=$routeCommitCoverage; shadow_family_coverage=; authoritative_family_coverage=$routeCommitCoverage; authority_effect=none"
+            $routeCommitValidLines = @($routeCommitStart,$routeCommitEntering) +
+                $enteringEffects + @($routeCommitCarried,$carriedAdoption,$routeCommitEnd)
+            $routeCommitValid = Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines $routeCommitValidLines
+            if ($routeCommitValid.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $routeCommitValid.FirstUnresolvedBoundary) {
+                throw "Transition-local route-commit effects did not pass: $($routeCommitValid | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $reusedEffects = @()
+            $sequence = 21L
+            foreach ($kind in $closureKinds) {
+                $reusedEffects += New-RouteCommitSettlementEffect `
+                    'route-commit-carried' 2 $kind $sequence
+                $sequence++
+            }
+            $routeCommitReuseFull =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines (
+                    @('event=irrelevant',$routeCommitStart,$routeCommitEntering) +
+                    $enteringEffects + @($routeCommitCarried,$carriedAdoption) +
+                    $reusedEffects + @($routeCommitEnd))
+            $routeCommitReuseCompact =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines (
+                    @($routeCommitStart,$routeCommitEntering) +
+                    $enteringEffects + @($routeCommitCarried,$carriedAdoption) +
+                    $reusedEffects + @($routeCommitEnd))
+            if ($routeCommitReuseFull.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_authority_effect_identity_reused_across_transitions' -or
+                $routeCommitReuseFull.FirstUnresolvedBoundary.variant -ne
+                    'route_commit_reemitted_already_applied_pressure_settlement_lifecycle' -or
+                $routeCommitReuseFull.FirstUnresolvedBoundary.rawCount -ne 3 -or
+                $routeCommitReuseFull.FirstUnresolvedBoundary.distinctCount -ne 1 -or
+                $routeCommitReuseFull.FirstUnresolvedBoundary.unresolvedCount -ne 1 -or
+                $routeCommitReuseFull.BoundaryHash -ne
+                    $routeCommitReuseCompact.BoundaryHash -or
+                $routeCommitReuseFull.FirstUnresolvedBoundary.boundaryHash -ne
+                    $routeCommitReuseCompact.FirstUnresolvedBoundary.boundaryHash) {
+                throw "Cross-transition settlement-effect reuse did not fail with full/compact parity: $($routeCommitReuseFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
             $legacy = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=legacy_only')
             if ($legacy.Mode -ne 'LegacyV0' -or $legacy.LegacySelectionCount -ne 1) {
                 throw 'Legacy evidence mode was not selected explicitly.'

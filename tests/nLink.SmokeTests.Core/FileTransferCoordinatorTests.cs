@@ -20582,8 +20582,17 @@ public sealed class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_InstalledPressureRequiresExactApplyReceipt()
     {
         var setup = CreateRegularV4ToTunaRouteTransitionSetup();
+        var snapshotState = setup.State with
+        {
+            PersistentState = setup.State.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    "route-commit-pressure-effects-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
+        };
         var (repairState, repairDecision) =
-            AuthorizeRegularV4FrontierRepair(setup.State);
+            AuthorizeRegularV4FrontierRepair(snapshotState);
         var stagedPressure =
             FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
                 repairState,
@@ -20698,6 +20707,72 @@ public sealed class FileTransferCoordinatorTests
             FileTransferRoute.FileTunaV4,
             committed.State.RouteSelection.Route);
         Assert.Null(PressureState(committed.State).InstalledBinding);
+        var committedEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                committed.SnapshotEnvelope);
+        var atomicRouteCommitBindings = SessionFileTransferService
+            .CreateRegularV4PressureRouteCommitAuthorityEffectBindingsForTesting(
+                committedEnvelope);
+        Assert.Equal(4, atomicRouteCommitBindings.Length);
+        Assert.Equal(
+            new[]
+            {
+                "pressure_settlement_bridge_applied",
+                "local_contract_settled",
+                "local_contract_reference_cleared",
+                "route_commit_local_lifecycle_adopted",
+            },
+            atomicRouteCommitBindings.Select(binding => binding.EffectKind));
+        Assert.All(
+            atomicRouteCommitBindings,
+            binding => Assert.Contains(
+                "|repair_authority_terminal|",
+                binding.OperationKey,
+                StringComparison.Ordinal));
+
+        var carriedEnvelope = committedEnvelope with
+        {
+            Aggregate = committedEnvelope.Aggregate with
+            {
+                Operations =
+                [
+                    .. committedEnvelope.Aggregate.Operations
+                        .Select(operation => operation.OperationRole is
+                                "pressure_settlement_terminal" or
+                                "repair_authority_terminal"
+                            ? operation with
+                            {
+                                BeforeState = "Applied",
+                                AfterState = "Applied",
+                            }
+                            : operation),
+                ],
+            },
+        };
+        var carriedRouteCommitBindings = SessionFileTransferService
+            .CreateRegularV4PressureRouteCommitAuthorityEffectBindingsForTesting(
+                carriedEnvelope);
+        var carriedBinding = Assert.Single(carriedRouteCommitBindings);
+        Assert.Equal(
+            "route_commit_local_lifecycle_adopted",
+            carriedBinding.EffectKind);
+        Assert.Contains(
+            "|repair_authority_terminal|",
+            carriedBinding.OperationKey,
+            StringComparison.Ordinal);
+        Assert.Empty(
+            SessionFileTransferService
+                .CreateRegularV4PressureRouteCommitAuthorityEffectBindingsForTesting(
+                    carriedEnvelope with
+                    {
+                        Aggregate = carriedEnvelope.Aggregate with
+                        {
+                            Operations = carriedEnvelope.Aggregate.Operations.Add(
+                                carriedEnvelope.Aggregate.Operations.Single(
+                                    operation => operation.OperationRole ==
+                                        "repair_authority_terminal")),
+                        },
+                    }));
 
         var duplicate = FileTransferCoordinator.CommitFileTransferRouteTransition(
             committed.State,
