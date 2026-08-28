@@ -1329,11 +1329,73 @@ function Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation {
         }
         'receive_recovery' {
             if ($role -ceq 'initial_activation_envelope_refresh') {
-                return ($kind -ceq 'InitialActivationEnvelopeRefresh') -and
-                    ($beforeState -ceq 'Pending') -and
-                    ($afterState -ceq 'Pending') -and
-                    ([string]$Operation.receiptStatus -ceq 'Pending') -and
-                    -not [bool]($Operation.receiptValidated)
+                if ($kind -cne 'InitialActivationEnvelopeRefresh') {
+                    return $false
+                }
+                $refreshOperations = @(
+                    $Envelope.aggregate.operations | Where-Object {
+                        [string]$_.family -ceq 'receive_recovery' -and
+                        [string]$_.operationRole -ceq
+                            'initial_activation_envelope_refresh'
+                    })
+                if ($refreshOperations.Count -ne 1) {
+                    return $false
+                }
+                if (($beforeState -ceq 'Pending') -and
+                    ($afterState -ceq 'Pending')) {
+                    return ([string]$Operation.receiptStatus -ceq 'Pending') -and
+                        -not [bool]($Operation.receiptValidated)
+                }
+                if (($beforeState -cne 'Committed') -or
+                    ($afterState -cne 'Committed') -or
+                    ([string]$Operation.receiptStatus -cne 'Accepted') -or
+                    -not [bool]($Operation.receiptValidated) -or
+                    $null -eq $Operation.receiveRecovery) {
+                    return $false
+                }
+
+                $receipts = @($Operation.receiveRecovery.receipts)
+                if ($receipts.Count -ne 1) {
+                    return $false
+                }
+                $receipt = $receipts[0]
+                $sourceBoundary = $Operation.receiveRecovery.sourceBoundary
+                $effectiveBoundary =
+                    $Operation.receiveRecovery.effectiveBoundary
+                $aggregateBoundary = $Envelope.aggregate.afterBoundary
+                return [string]$Operation.receiveRecovery.role -ceq $role -and
+                    [long]$Operation.receiveRecovery.envelopeRefreshGeneration `
+                        -eq [long]$Operation.operationGeneration -and
+                    [long]$Operation.commandGeneration -eq
+                        [long]$Operation.operationGeneration -and
+                    [long]$Operation.receiptGeneration -eq
+                        [long]$Operation.operationGeneration -and
+                    [string]$receipt.stage -ceq
+                        'initial_activation_envelope_refresh' -and
+                    [string]$receipt.commandIdentity -ceq
+                        [string]$Operation.commandIdentity -and
+                    [long]$receipt.commandGeneration -eq
+                        [long]$Operation.commandGeneration -and
+                    [string]$receipt.commandFingerprint -ceq
+                        [string]$Operation.commandFingerprint -and
+                    [string]$receipt.receiptIdentity -ceq
+                        [string]$Operation.receiptIdentity -and
+                    [long]$receipt.receiptGeneration -eq
+                        [long]$Operation.receiptGeneration -and
+                    [string]$receipt.receiptStatus -ceq 'Accepted' -and
+                    [string]$receipt.receiptStatus -ceq
+                        [string]$Operation.receiptStatus -and
+                    [string]$receipt.receiptFingerprint -ceq
+                        [string]$Operation.receiptFingerprint -and
+                    [bool]$receipt.receiptValidated -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                        -Boundary $sourceBoundary) -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                        -Left $sourceBoundary -Right $effectiveBoundary) -and
+                    [string]$sourceBoundary.dataSessionIdentity -ceq
+                        [string]$aggregateBoundary.dataSessionIdentity -and
+                    [long]$sourceBoundary.dataSessionGeneration -eq
+                        [long]$aggregateBoundary.dataSessionGeneration
             }
             return [bool]($Operation.receiptValidated) -and
                 ((($role -ceq 'initial_activation_hold_terminal') -and
@@ -1393,11 +1455,26 @@ function Test-FileTransferCoordinatorSnapshotFallbackCheckpointOperation {
 }
 
 function Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant {
-    param([Parameter(Mandatory = $true)]$Envelope)
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        $Operation = $null
+    )
 
     if ([string]$Envelope.decisionKind -in @(
             'FallbackCheckpointRequested',
             'FallbackCheckpointAccepted')) {
+        if ($null -ne $Operation -and
+            (Test-FileTransferCoordinatorSnapshotFallbackCheckpointScopeMutation `
+                -Envelope $Envelope) -and
+            [string]$Operation.family -ceq 'receive_recovery' -and
+            [string]$Operation.operationRole -ceq
+                'initial_activation_envelope_refresh' -and
+            [string]$Operation.operationKind -ceq
+                'InitialActivationEnvelopeRefresh' -and
+            ([string]$Operation.beforeState -ceq 'Committed' -or
+             [string]$Operation.afterState -ceq 'Committed')) {
+            return 'fallback_checkpoint_committed_initial_activation_envelope_refresh_carry_invalid'
+        }
         return 'fallback_checkpoint_scope_transition_omitted_from_cross_family_catalog'
     }
     return '(none)'
@@ -2910,7 +2987,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         if ($attemptVariant -ceq '(none)') {
                             $attemptVariant =
                                 Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
-                                    -Envelope $envelope
+                                    -Envelope $envelope `
+                                    -Operation $operation
                         }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($attemptVariant -cne '(none)') {
@@ -2924,7 +3002,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             -Operation $operation)) {
                         $variant =
                             Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
-                                -Envelope $envelope
+                                -Envelope $envelope `
+                                -Operation $operation
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -2937,7 +3016,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             -Operation $operation)) {
                         $variant =
                             Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
-                                -Envelope $envelope
+                                -Envelope $envelope `
+                                -Operation $operation
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -2950,7 +3030,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             -Operation $operation)) {
                         $variant =
                             Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
-                                -Envelope $envelope
+                                -Envelope $envelope `
+                                -Operation $operation
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -2963,7 +3044,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             -Operation $operation)) {
                         $variant =
                             Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
-                                -Envelope $envelope
+                                -Envelope $envelope `
+                                -Operation $operation
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -3705,6 +3787,47 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($matchingEffects.Count -ne 1) {
             $errors.Add(
                 "snapshot_regular_v4_pressure_required_effect_missing:$($boundary.boundaryId):$requiredEffect")
+        }
+    }
+
+    foreach ($boundary in @($boundaries | Where-Object {
+                $streams[[string]$_.coordinatorInstanceId].AuthoritativeFamilies `
+                    -contains 'receive_recovery' -and
+                [string]$_.decisionKind -in @(
+                    'FallbackCheckpointRequested',
+                    'FallbackCheckpointAccepted') -and
+                [string]$_.decisionStatus -ceq 'Accepted'
+            })) {
+        $committedRefreshes = @($boundary.operations | Where-Object {
+                [string]$_.family -ceq 'receive_recovery' -and
+                [string]$_.operationRole -ceq
+                    'initial_activation_envelope_refresh' -and
+                [string]$_.operationKind -ceq
+                    'InitialActivationEnvelopeRefresh' -and
+                [string]$_.beforeState -ceq 'Committed' -and
+                [string]$_.afterState -ceq 'Committed'
+            })
+        if ($committedRefreshes.Count -ne 1) {
+            continue
+        }
+        $refresh = $committedRefreshes[0]
+        foreach ($unexpectedEffect in @($effects | Where-Object {
+                    [string]$_.CoordinatorInstanceId -ceq
+                        [string]$boundary.coordinatorInstanceId -and
+                    [string]$_.TransitionId -ceq
+                        [string]$boundary.boundaryId -and
+                    [string]$_.Family -ceq 'receive_recovery' -and
+                    [string]$_.EffectKind -ceq
+                        'initial_activation_envelope_refresh_observed' -and
+                    [string]$_.OperationKey -ceq
+                        [string]$refresh.operationKey -and
+                    [string]$_.AuthorityId -ceq
+                        [string]$refresh.authorityId -and
+                    [long]$_.OperationGeneration -eq
+                        [long]$refresh.operationGeneration
+                })) {
+            $errors.Add(
+                "snapshot_receive_recovery_checkpoint_refresh_carry_effect_invalid:$($unexpectedEffect.LineIndex)")
         }
     }
 

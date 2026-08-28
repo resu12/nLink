@@ -1729,6 +1729,65 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 ConvertTo-Json -Depth 32 | ConvertFrom-Json
             $checkpointAfter.checkpointGeneration = 7L
             $checkpointAfter.checkpointRequestId = 'fallback-checkpoint-7'
+            $checkpointRefreshScope = [ordered]@{
+                route='regular_nkn_v4_fast'; protocolVersion=4
+                liveRouteEpoch=0L; routePublicationGeneration=1L
+                routeCommitGeneration=0L; runtimeGeneration=1L
+                terminalGeneration=0L; legGeneration=1L
+                transportEpoch=0L; bridgeRecoveryGeneration=0L
+                checkpointGeneration=1L; checkpointRequestId='(none)'
+                dataSessionIdentity='receive-data-session'; dataSessionGeneration=5L
+            }
+            $checkpointRefreshReceipt = [ordered]@{
+                stage='initial_activation_envelope_refresh'
+                commandIdentity='checkpoint-refresh-command'
+                commandGeneration=1L
+                commandFingerprint='checkpoint-refresh-command-fingerprint'
+                receiptIdentity='checkpoint-refresh-receipt'
+                receiptGeneration=1L
+                receiptStatus='Accepted'
+                receiptReason='Accepted'
+                receiptFingerprint='checkpoint-refresh-receipt-fingerprint'
+                receiptValidated=$true
+            }
+            $checkpointRefreshOperation = [ordered]@{
+                family='receive_recovery'
+                operationRole='initial_activation_envelope_refresh'
+                operationKey='receive_recovery|initial_activation_envelope_refresh|checkpoint-refresh-authority|1|InitialActivationEnvelopeRefresh'
+                operationKind='InitialActivationEnvelopeRefresh'
+                authorityId='checkpoint-refresh-authority'
+                predecessorAuthorityId='(none)'
+                operationGeneration=1L
+                beforeState='Committed'; afterState='Committed'
+                commandIdentity=$checkpointRefreshReceipt.commandIdentity
+                commandGeneration=1L
+                commandFingerprint=$checkpointRefreshReceipt.commandFingerprint
+                receiptIdentity=$checkpointRefreshReceipt.receiptIdentity
+                receiptGeneration=1L
+                receiptStatus='Accepted'
+                receiptFingerprint=$checkpointRefreshReceipt.receiptFingerprint
+                receiptValidated=$true; stateApplied=$true
+                receiveRecovery=[ordered]@{
+                    role='initial_activation_envelope_refresh'
+                    sourceBoundary=$checkpointRefreshScope
+                    effectiveBoundary=$checkpointRefreshScope
+                    recoveryKind='BridgeReceiveStallRecovery'
+                    bridgeDecisionGeneration=1L
+                    recoveryLivenessLeaseGeneration=1L
+                    executionState='Invalidated'; closureState='None'
+                    closureGeneration=1L; proofIdentity='checkpoint-proof'
+                    proofObservedUtcMs=1L; heldRetryAuthorityId='(none)'
+                    reservedRetryAuthorityId='(none)'
+                    initialActivationHoldGeneration=1L
+                    envelopeRefreshGeneration=1L
+                    checkpointBindingGeneration=0L
+                    checkpointDeliveryGeneration=0L
+                    checkpointResumeGeneration=0L
+                    checkpointFrontierHoldGeneration=0L
+                    checkpointFrontierRecheckGeneration=0L
+                    receipts=@($checkpointRefreshReceipt)
+                }
+            }
             $checkpointReceipt = [ordered]@{
                 stage='pressure_settlement_terminal'
                 commandIdentity='fallback-checkpoint-command'
@@ -1773,8 +1832,12 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 beforeStateFingerprint='checkpoint-before'
                 afterStateFingerprint='checkpoint-after'
                 beforeBoundary=$checkpointBefore; afterBoundary=$checkpointAfter
-                changedFamilies=@('regular_v4_frontier_repair_pressure')
-                operations=@($checkpointPressureOperation)
+                changedFamilies=@(
+                    'receive_recovery',
+                    'regular_v4_frontier_repair_pressure')
+                operations=@(
+                    $checkpointRefreshOperation,
+                    $checkpointPressureOperation)
             }
             $checkpointEnvelope = [ordered]@{
                 snapshotContractVersion=1
@@ -1795,7 +1858,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $checkpointHash = Get-FileTransferCoordinatorSnapshotSha256 `
                 -Bytes $checkpointBytes
             $checkpointPayload = [Convert]::ToBase64String($checkpointBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
-            $checkpointCoverage = 'regular_v4_frontier_repair_pressure'
+            $checkpointCoverage = 'receive_recovery,regular_v4_frontier_repair_pressure'
             $checkpointPrefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Shadow; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator-checkpoint; session_id=session-receive; transfer_id=transfer-receive; direction=inbound"
             $checkpointStart = "event=filetransfer_coordinator_snapshot_stream_started; $checkpointPrefix; initial_state_generation=0; initial_state_hash=checkpoint-before; emitted_family_coverage=$checkpointCoverage; shadow_family_coverage=; authoritative_family_coverage=$checkpointCoverage; authority_effect=none"
             $checkpointTransition = "event=filetransfer_coordinator_transition_snapshot; $checkpointPrefix; transition_id=checkpoint-requested; before_state_generation=0; after_state_generation=1; snapshot_sha256=$checkpointHash; snapshot_payload=$checkpointPayload; authority_effect=none"
@@ -1814,6 +1877,47 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 $checkpointParity.Verdict -ne 'pass' -or
                 $checkpointFull.BoundaryHash -ne $checkpointCompact.BoundaryHash) {
                 throw "Fallback checkpoint full/compact parity failed: $($checkpointFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $checkpointRefreshEffect = "event=filetransfer_coordinator_authority_effect; $checkpointPrefix; transition_id=checkpoint-requested; coordinator_state_generation=1; operation_family=receive_recovery; operation_key=$($checkpointRefreshOperation.operationKey); operation_authority_id=$($checkpointRefreshOperation.authorityId); operation_generation=1; effect_kind=initial_activation_envelope_refresh_observed; effect_identity=checkpoint-refresh-effect; effect_generation=1; receipt_identity=$($checkpointRefreshReceipt.receiptIdentity); receipt_generation=1; receipt_status=Accepted; receipt_fingerprint=$($checkpointRefreshReceipt.receiptFingerprint); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; checkpoint_generation=1; checkpoint_request_id=(none); data_session_identity=receive-data-session; data_session_generation=5; authority_effect=applied"
+            $reEmittedRefresh =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                    $checkpointStart, $checkpointTransition,
+                    $checkpointEffect, $checkpointRefreshEffect,
+                    $checkpointEnd)
+            if ($reEmittedRefresh.ArtifactEvidenceVerdict -ne 'fail' -or
+                $reEmittedRefresh.FirstUnresolvedBoundary.decisionReason -ne
+                    'snapshot_receive_recovery_checkpoint_refresh_carry_effect_invalid') {
+                throw "A committed checkpoint refresh carry re-emitted its one-shot effect: $($reEmittedRefresh | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $invalidRefreshEnvelope = $checkpointEnvelope |
+                ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $invalidRefresh = @(
+                $invalidRefreshEnvelope.aggregate.operations | Where-Object {
+                    [string]$_.operationRole -ceq
+                        'initial_activation_envelope_refresh'
+                })[0]
+            $invalidRefresh.receiptValidated = $false
+            $invalidRefresh.receiveRecovery.receipts[0].receiptValidated =
+                $false
+            $invalidRefreshJson = $invalidRefreshEnvelope |
+                ConvertTo-Json -Depth 32 -Compress
+            $invalidRefreshBytes =
+                [Text.UTF8Encoding]::new($false).GetBytes(
+                    $invalidRefreshJson)
+            $invalidRefreshHash =
+                Get-FileTransferCoordinatorSnapshotSha256 `
+                    -Bytes $invalidRefreshBytes
+            $invalidRefreshPayload = [Convert]::ToBase64String(
+                $invalidRefreshBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $invalidRefreshTransition = "event=filetransfer_coordinator_transition_snapshot; $checkpointPrefix; transition_id=checkpoint-requested; before_state_generation=0; after_state_generation=1; snapshot_sha256=$invalidRefreshHash; snapshot_payload=$invalidRefreshPayload; authority_effect=none"
+            $invalidRefreshEvaluation =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                    $checkpointStart, $invalidRefreshTransition,
+                    $checkpointEffect, $checkpointEnd)
+            if ($invalidRefreshEvaluation.ArtifactEvidenceVerdict -ne 'fail' -or
+                $invalidRefreshEvaluation.FirstUnresolvedBoundary.variant -ne
+                    'fallback_checkpoint_committed_initial_activation_envelope_refresh_carry_invalid') {
+                throw "An invalid committed checkpoint refresh carry did not fail precisely: $($invalidRefreshEvaluation | ConvertTo-Json -Depth 8 -Compress)"
             }
             $missingCheckpointEffect =
                 Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
