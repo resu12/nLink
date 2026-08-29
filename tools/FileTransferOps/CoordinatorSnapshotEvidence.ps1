@@ -1828,6 +1828,310 @@ function Test-FileTransferCoordinatorSnapshotFamily3OperationCatalog {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    foreach ($name in @(
+            'commandIdentity', 'commandGeneration', 'commandFingerprint',
+            'receiptIdentity', 'receiptGeneration', 'receiptStatus',
+            'receiptFingerprint', 'receiptValidated', 'stage')) {
+        if ([string]$Left.$name -cne [string]$Right.$name) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ($null -eq $Operation.fallbackTailYield) {
+        return $false
+    }
+    $payload = $Operation.fallbackTailYield
+    foreach ($boundary in @(
+            $payload.sourceBoundary,
+            $payload.effectiveBoundary,
+            $payload.targetBoundary)) {
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                -Boundary $boundary) -or
+            [string]$boundary.route -cne 'post_tuna_fallback_v6' -or
+            [int]$boundary.protocolVersion -ne 6 -or
+            [string]$boundary.dataSessionIdentity -cne
+                [string]$Envelope.aggregate.afterBoundary.dataSessionIdentity -or
+            [long]$boundary.dataSessionGeneration -ne
+                [long]$Envelope.aggregate.afterBoundary.dataSessionGeneration) {
+            return $false
+        }
+    }
+    return (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $payload.sourceBoundary `
+            -Right $payload.effectiveBoundary) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $payload.sourceBoundary `
+            -Right $payload.targetBoundary)
+}
+
+function Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ([string]$Envelope.decisionKind -cne 'FallbackTailQuiescent' -or
+        [string]$Envelope.decisionStatus -cne 'Accepted' -or
+        [string]::IsNullOrWhiteSpace([string]$Envelope.decisionReason) -or
+        $null -eq $Envelope.aggregate -or
+        [long]$Envelope.aggregate.afterStateGeneration -ne
+            [long]$Envelope.aggregate.beforeStateGeneration + 1L -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$Envelope.aggregate.beforeStateFingerprint) -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$Envelope.aggregate.afterStateFingerprint) -or
+        [string]$Envelope.aggregate.beforeStateFingerprint -ceq
+            [string]$Envelope.aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+            -Boundary $Envelope.aggregate.beforeBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $Envelope.aggregate.beforeBoundary `
+            -Right $Envelope.aggregate.afterBoundary) -or
+        [string]$Envelope.aggregate.afterBoundary.route -cne
+            'post_tuna_fallback_v6' -or
+        [int]$Envelope.aggregate.afterBoundary.protocolVersion -ne 6) {
+        return $false
+    }
+
+    $changedFamilies = @($Envelope.aggregate.changedFamilies)
+    $operations = @($Envelope.aggregate.operations)
+    $family4Operations = @($operations | Where-Object {
+            [string]$_.family -ceq 'fallback_tail_yield'
+        })
+    if ($changedFamilies.Count -ne 1 -or
+        [string]$changedFamilies[0] -cne 'fallback_tail_yield') {
+        return $false
+    }
+
+    $current = @($family4Operations | Where-Object {
+            [string]$_.operationRole -ceq 'yield_current' -and
+            [string]$_.operationKind -ceq 'Quiescent' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -in @('YieldIssued', 'PeerProofObserved') -and
+            [bool]$_.stateApplied
+        })
+    if ($current.Count -ne 1 -or
+        [string]$current[0].authorityId -in @('', '(none)') -or
+        [long]$current[0].operationGeneration -le 0 -or
+        [string]$current[0].predecessorAuthorityId -cne '(none)' -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
+            -Envelope $Envelope -Operation $current[0])) {
+        return $false
+    }
+
+    $yield = $current[0]
+    $yieldReceipts = @($yield.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'yield' -and
+            [string]$_.receiptStatus -ceq 'Accepted' -and
+            [bool]$_.receiptValidated
+        })
+    if ($yieldReceipts.Count -ne 1 -or
+        [string]$yield.fallbackTailYield.role -cne 'yield_current' -or
+        [string]$yield.fallbackTailYield.yieldKind -cne 'Quiescent' -or
+        [string]$yield.fallbackTailYield.ownerKey -in @('', '(none)') -or
+        [string]$yield.fallbackTailYield.pairKey -in @('', '(none)')) {
+        return $false
+    }
+
+    if ([string]$yield.afterState -ceq 'YieldIssued') {
+        return $family4Operations.Count -eq 1 -and
+            [string]$yield.fallbackTailYield.pairingState -ceq 'YieldIssued' -and
+            [string]$yield.receiptIdentity -ceq
+                [string]$yieldReceipts[0].receiptIdentity -and
+            [long]$yield.receiptGeneration -eq
+                [long]$yieldReceipts[0].receiptGeneration -and
+            [string]$yield.receiptStatus -ceq
+                [string]$yieldReceipts[0].receiptStatus -and
+            [string]$yield.receiptFingerprint -ceq
+                [string]$yieldReceipts[0].receiptFingerprint -and
+            [string]$yield.commandIdentity -ceq
+                [string]$yieldReceipts[0].commandIdentity -and
+            [long]$yield.commandGeneration -eq
+                [long]$yieldReceipts[0].commandGeneration -and
+            [string]$yield.commandFingerprint -ceq
+                [string]$yieldReceipts[0].commandFingerprint
+    }
+
+    $pending = @($family4Operations | Where-Object {
+            [string]$_.operationRole -ceq 'peer_proof_pending_initial' -and
+            [string]$_.operationKind -ceq 'PeerProof' -and
+            [string]$_.beforeState -ceq 'Pending' -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    if ($family4Operations.Count -ne 2 -or $pending.Count -ne 1 -or
+        [string]$yield.fallbackTailYield.pairingState -cne
+            'PeerProofObserved' -or
+        [string]$pending[0].authorityId -in @('', '(none)') -or
+        [string]$pending[0].authorityId -ceq [string]$yield.authorityId -or
+        [long]$pending[0].operationGeneration -le 0 -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
+            -Envelope $Envelope -Operation $pending[0])) {
+        return $false
+    }
+
+    $peerReceipts = @($pending[0].fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    $carriedPeerReceipts = @(
+        $yield.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    if ($peerReceipts.Count -ne 1 -or $carriedPeerReceipts.Count -ne 1 -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+            -Left $peerReceipts[0] -Right $carriedPeerReceipts[0])) {
+        return $false
+    }
+
+    foreach ($name in @(
+            'ownerKey', 'pairKey', 'peerProofAuthorityId',
+            'peerProofIdentity', 'peerProofFingerprint',
+            'peerProofYieldGeneration')) {
+        if ([string]$pending[0].fallbackTailYield.$name -cne
+            [string]$yield.fallbackTailYield.$name) {
+            return $false
+        }
+    }
+    return (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $pending[0].fallbackTailYield.sourceBoundary `
+            -Right $yield.fallbackTailYield.sourceBoundary) -and
+        [string]$pending[0].receiptIdentity -ceq
+            [string]$peerReceipts[0].receiptIdentity -and
+        [long]$pending[0].receiptGeneration -eq
+            [long]$peerReceipts[0].receiptGeneration -and
+        [string]$pending[0].receiptFingerprint -ceq
+            [string]$peerReceipts[0].receiptFingerprint -and
+        [string]$yield.receiptIdentity -ceq
+            [string]$carriedPeerReceipts[0].receiptIdentity -and
+        [long]$yield.receiptGeneration -eq
+            [long]$carriedPeerReceipts[0].receiptGeneration -and
+        [string]$yield.receiptFingerprint -ceq
+            [string]$carriedPeerReceipts[0].receiptFingerprint
+}
+
+function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ([string]$Envelope.decisionKind -ceq 'FallbackTailQuiescent') {
+        return 'fallback_tail_quiescent_event_omitted_from_family4_catalog'
+    }
+    return '(none)'
+}
+
+function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$OperationHistory,
+        [Parameter(Mandatory = $true)]$Effects
+    )
+
+    $operation = $Entry.Operation
+    $typed = $operation.fallbackTailYield
+    $receipt = @($typed.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [bool]$_.receiptValidated
+        })
+    if ($receipt.Count -ne 1) {
+        return $false
+    }
+
+    $matchingEffects = @($Effects | Where-Object {
+            [string]$_.CoordinatorInstanceId -ceq
+                [string]$Entry.Boundary.coordinatorInstanceId -and
+            [string]$_.Family -ceq 'fallback_tail_yield' -and
+            [string]$_.EffectKind -ceq 'peer_proof_observed' -and
+            [string]$_.ReceiptIdentity -ceq
+                [string]$receipt[0].receiptIdentity -and
+            [long]$_.ReceiptGeneration -eq
+                [long]$receipt[0].receiptGeneration -and
+            [string]$_.ReceiptStatus -ceq
+                [string]$receipt[0].receiptStatus -and
+            [string]$_.ReceiptFingerprint -ceq
+                [string]$receipt[0].receiptFingerprint
+        })
+    if ($matchingEffects.Count -ne 1) {
+        return $false
+    }
+
+    $isPeerFirstCarry =
+        [string]$Entry.Boundary.decisionKind -ceq
+            'FallbackTailQuiescent' -and
+        [string]$Entry.Boundary.decisionStatus -ceq 'Accepted' -and
+        [string]$operation.operationRole -ceq 'yield_current' -and
+        [string]$operation.operationKind -ceq 'Quiescent' -and
+        [string]$operation.beforeState -ceq 'None' -and
+        [string]$operation.afterState -ceq 'PeerProofObserved'
+    if (-not $isPeerFirstCarry) {
+        return Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+            -Boundary $Entry.Boundary `
+            -Operation $operation `
+            -Effect $matchingEffects[0]
+    }
+
+    $pending = @($Entry.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'fallback_tail_yield' -and
+            [string]$_.operationRole -ceq 'peer_proof_pending_initial' -and
+            [string]$_.operationKind -ceq 'PeerProof' -and
+            [string]$_.beforeState -ceq 'Pending' -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    if ($pending.Count -ne 1 -or
+        [string]$matchingEffects[0].OperationKey -cne
+            [string]$pending[0].operationKey -or
+        [string]$matchingEffects[0].AuthorityId -cne
+            [string]$pending[0].authorityId -or
+        [long]$matchingEffects[0].OperationGeneration -ne
+            [long]$pending[0].operationGeneration -or
+        [string]$pending[0].fallbackTailYield.ownerKey -cne
+            [string]$typed.ownerKey -or
+        [string]$pending[0].fallbackTailYield.pairKey -cne
+            [string]$typed.pairKey -or
+        [string]$pending[0].fallbackTailYield.peerProofIdentity -cne
+            [string]$typed.peerProofIdentity -or
+        [string]$pending[0].fallbackTailYield.peerProofFingerprint -cne
+            [string]$typed.peerProofFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $pending[0].fallbackTailYield.sourceBoundary `
+            -Right $typed.sourceBoundary)) {
+        return $false
+    }
+
+    $effectSubjects = @($OperationHistory | Where-Object {
+            [string]$_.Boundary.coordinatorInstanceId -ceq
+                [string]$Entry.Boundary.coordinatorInstanceId -and
+            [string]$_.Boundary.boundaryId -ceq
+                [string]$matchingEffects[0].TransitionId -and
+            [long]$_.Boundary.afterStateGeneration -eq
+                [long]$matchingEffects[0].StateGeneration -and
+            [string]$_.Operation.operationKey -ceq
+                [string]$pending[0].operationKey -and
+            [string]$_.Operation.operationRole -ceq
+                'peer_proof_pending_initial' -and
+            [string]$_.Operation.afterState -ceq 'Pending' -and
+            (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                -Boundary $_.Boundary `
+                -Operation $_.Operation `
+                -Effect $matchingEffects[0])
+        })
+    return $effectSubjects.Count -eq 1
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -1846,8 +2150,12 @@ function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
             [System.Globalization.CultureInfo]::InvariantCulture),
         [string]$Operation.operationKind) -join '|'
     $decisionKind = [string]$Envelope.decisionKind
+    $isExactFallbackTailQuiescent =
+        Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope `
+            -Envelope $Envelope
     $knownAtomicDecision =
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily4DecisionKinds -or
+        $isExactFallbackTailQuiescent -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily3DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
         $decisionKind -in $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
@@ -3194,6 +3502,17 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $errors.Add("snapshot_decision_state_transition_invalid:$($record.LineIndex)")
                     break
                 }
+                if ([string]$envelope.decisionKind -ceq
+                        'FallbackTailQuiescent' -and
+                    [string]$envelope.decisionStatus -ceq 'Accepted' -and
+                    -not (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope `
+                        -Envelope $envelope)) {
+                    $errors.Add(
+                        'snapshot_operation_catalog_mismatch|' +
+                        'fallback_tail_quiescent_event_omitted_from_family4_catalog:' +
+                        $record.LineIndex)
+                    break
+                }
                 foreach ($operation in @($envelope.aggregate.operations)) {
                     if ([string]::IsNullOrWhiteSpace([string]$operation.family) -or
                         [string]::IsNullOrWhiteSpace([string]$operation.operationRole) -or
@@ -3262,9 +3581,14 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             -Envelope $envelope `
                             -Operation $operation)) {
                         $variant =
-                            Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
-                                -Envelope $envelope `
-                                -Operation $operation
+                            Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant `
+                                -Envelope $envelope
+                        if ($variant -ceq '(none)') {
+                            $variant =
+                                Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+                                    -Envelope $envelope `
+                                    -Operation $operation
+                        }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -5022,6 +5346,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $operation = $entry.Operation
             $state = [string]$operation.afterState
             $typed = $operation.fallbackTailYield
+            $failureVariant = '(none)'
             $hasLocal = @($typed.receipts | Where-Object {
                     [string]$_.stage -ceq 'local_proof' -and
                     [bool]$_.receiptValidated
@@ -5063,13 +5388,40 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     (& $hasReceiptEffect 'local_proof' 'local_proof_applied')
             }
             if ($valid -and $hasPeer) {
-                $valid = & $hasReceiptEffect 'peer_proof' 'peer_proof_observed'
+                $valid =
+                    Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
+                        -Entry $entry `
+                        -OperationHistory @($operationHistory) `
+                        -Effects @($effects)
+                if (-not $valid -and
+                    [string]$entry.Boundary.decisionKind -ceq
+                        'FallbackTailQuiescent' -and
+                    [string]$operation.afterState -ceq
+                        'PeerProofObserved') {
+                    $failureVariant =
+                        'fallback_tail_quiescent_peer_proof_carry_invalid'
+                }
             }
             if ($valid -and $hasPair) {
                 $valid = & $hasReceiptEffect 'paired_release' 'paired_release_published'
             }
             if ($valid -and [string]$typed.yieldKind -ceq 'Quiescent') {
-                $valid = & $hasReceiptEffect 'yield' 'recovery_owner_retired_after_yield'
+                if ([string]$entry.Boundary.decisionKind -ceq
+                    'FallbackTailQuiescent') {
+                    $yieldEffects = @($effects | Where-Object {
+                            [string]$_.EffectKind -ceq
+                                'recovery_owner_retired_after_yield' -and
+                            (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                                -Boundary $entry.Boundary `
+                                -Operation $operation `
+                                -Effect $_)
+                        })
+                    $valid = $yieldEffects.Count -eq 1
+                }
+                else {
+                    $valid = & $hasReceiptEffect `
+                        'yield' 'recovery_owner_retired_after_yield'
+                }
             }
             if ($valid -and [bool]$typed.failedSupersessionCarriedPeerProof) {
                 $valid = [string]$typed.failedPredecessorAuthorityId -notin
@@ -5095,6 +5447,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             if (-not $valid) {
                 $entry.Boundary.taxonomyClass =
                     'fallback_tail_yield_authority_invalid'
+                if ($failureVariant -cne '(none)') {
+                    $entry.Boundary | Add-Member `
+                        -NotePropertyName variant `
+                        -NotePropertyValue $failureVariant `
+                        -Force
+                }
                 $entry.Boundary.domain = 'route_runtime'
                 $entry.Boundary.phase = 'fallback_tail_yield'
                 $entry.Boundary.rawCount = 1

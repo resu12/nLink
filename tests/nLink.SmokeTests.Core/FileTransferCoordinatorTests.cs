@@ -5528,20 +5528,36 @@ public sealed class FileTransferCoordinatorTests
             CurrentDataSessionIdentity = "fallback-snapshot-data-session",
             CurrentDataSessionGeneration = 7,
         };
+        source = source with
+        {
+            PersistentState = source.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    "fallback-tail-snapshot-coordinator",
+                SnapshotStateGeneration = 0,
+            },
+        };
         var yielded = MarkFallbackTailQuiescent(
             source,
             fallback,
             source.CurrentLeg!.TransportEpochId,
             committedChunk: 5,
             highestObservedChunk: 5);
-        var state = yielded.State with
-        {
-            PersistentState = yielded.State.PersistentState with
-            {
-                CoordinatorInstanceId = "fallback-tail-snapshot-coordinator",
-                SnapshotStateGeneration = 0,
-            },
-        };
+        var yieldEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                yielded.SnapshotEnvelope);
+        Assert.Equal("FallbackTailQuiescent", yieldEnvelope.DecisionKind);
+        Assert.Equal(0, yieldEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(1, yieldEnvelope.Aggregate.AfterStateGeneration);
+        var issuedOperation = Assert.Single(
+            yieldEnvelope.Aggregate.Operations,
+            operation => operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "yield_current");
+        Assert.Equal("yield_current", issuedOperation.OperationRole);
+        Assert.Equal("Quiescent", issuedOperation.OperationKind);
+        Assert.Equal("None", issuedOperation.BeforeState);
+        Assert.Equal("YieldIssued", issuedOperation.AfterState);
+        var state = yielded.State;
         var decision = Assert.IsType<FallbackTailYieldDecision>(
             yielded.FallbackTailYieldDecision);
         var localReceipt =
@@ -5564,8 +5580,8 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(local.Accepted, local.Reason);
         var localEnvelope = Assert.IsType<
             FileTransferCoordinatorTransitionEnvelope>(local.SnapshotEnvelope);
-        Assert.Equal(0, localEnvelope.Aggregate.BeforeStateGeneration);
-        Assert.Equal(1, localEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal(1, localEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(2, localEnvelope.Aggregate.AfterStateGeneration);
         var localOperation = Assert.Single(
             localEnvelope.Aggregate.Operations,
             operation => operation.Family == "fallback_tail_yield" &&
@@ -5582,8 +5598,8 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(paired.Accepted, paired.Reason);
         var pairedEnvelope = Assert.IsType<
             FileTransferCoordinatorTransitionEnvelope>(paired.SnapshotEnvelope);
-        Assert.Equal(1, pairedEnvelope.Aggregate.BeforeStateGeneration);
-        Assert.Equal(2, pairedEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal(2, pairedEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(3, pairedEnvelope.Aggregate.AfterStateGeneration);
         var pairedOperation = Assert.Single(
             pairedEnvelope.Aggregate.Operations,
             operation => operation.Family == "fallback_tail_yield" &&
@@ -5612,8 +5628,8 @@ public sealed class FileTransferCoordinatorTests
         var duplicateEnvelope = Assert.IsType<
             FileTransferCoordinatorTransitionEnvelope>(
                 duplicate.SnapshotEnvelope);
-        Assert.Equal(2, duplicateEnvelope.Aggregate.BeforeStateGeneration);
-        Assert.Equal(2, duplicateEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal(3, duplicateEnvelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(3, duplicateEnvelope.Aggregate.AfterStateGeneration);
         Assert.Equal("Idempotent", duplicateEnvelope.DecisionStatus);
         Assert.Contains(
             duplicateEnvelope.Aggregate.Operations,

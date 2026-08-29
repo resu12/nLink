@@ -171,6 +171,197 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_FallbackTailQuiescentCatalogAcceptsLocalAndPeerFirstShapes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $scope = [pscustomobject]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6
+                liveRouteEpoch=2L; routePublicationGeneration=3L
+                routeCommitGeneration=0L; runtimeGeneration=3L
+                terminalGeneration=0L; legGeneration=3L
+                transportEpoch=1L; bridgeRecoveryGeneration=1L
+                checkpointGeneration=1L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session'; dataSessionGeneration=1L
+            }
+            function New-Receipt([string]$stage,[string]$status,[string]$id) {
+                [pscustomobject]@{
+                    stage=$stage; commandIdentity="$id-command"
+                    commandGeneration=1L; commandFingerprint="$id-command-fingerprint"
+                    receiptIdentity="$id-receipt"; receiptGeneration=1L
+                    receiptStatus=$status; receiptReason='accepted'
+                    receiptFingerprint="$id-receipt-fingerprint"
+                    receiptValidated=$true
+                }
+            }
+            function New-Payload(
+                [string]$role,[string]$kind,[string]$state,
+                [object[]]$receipts) {
+                [pscustomobject]@{
+                    role=$role; yieldKind=$kind; pairingState=$state
+                    ownerKey='owner'; pairKey='pair'
+                    localProofIdentity='(none)'; localProofFingerprint='(none)'
+                    peerProofAuthorityId='peer-authority'
+                    peerProofIdentity='peer-receipt'
+                    peerProofFingerprint='peer-frame'
+                    peerProofYieldGeneration=1L
+                    pairedReleaseAuthorityId='(none)'; pairedReleaseGeneration=0L
+                    pairedReleaseOutcome='(none)'; pairingGeneration=0L
+                    failedPredecessorAuthorityId='(none)'
+                    failedSupersessionCarriedPeerProof=$false
+                    reauthorizationGeneration=0L
+                    reauthorizationSourceTransportEpoch=1L
+                    reauthorizationTargetTransportEpoch=1L
+                    reservationGeneration=0L; reservedRetryAuthorityId='(none)'
+                    consumingInstallGeneration=0L; retryHoldGeneration=0L
+                    retryRecheckGeneration=0L; invalidationReason='(none)'
+                    sourceBoundary=$scope; effectiveBoundary=$scope
+                    targetBoundary=$scope; receipts=$receipts
+                }
+            }
+            function New-Operation(
+                [string]$role,[string]$kind,[string]$authority,
+                [string]$before,[string]$after,[object]$payload,
+                [object]$primaryReceipt) {
+                [pscustomobject]@{
+                    family='fallback_tail_yield'; operationRole=$role
+                    operationKey="fallback_tail_yield|$role|$authority|1|$kind"
+                    operationKind=$kind; authorityId=$authority
+                    predecessorAuthorityId='(none)'; operationGeneration=1L
+                    beforeState=$before; afterState=$after
+                    commandIdentity=$primaryReceipt.commandIdentity
+                    commandGeneration=$primaryReceipt.commandGeneration
+                    commandFingerprint=$primaryReceipt.commandFingerprint
+                    receiptIdentity=$primaryReceipt.receiptIdentity
+                    receiptGeneration=$primaryReceipt.receiptGeneration
+                    receiptStatus=$primaryReceipt.receiptStatus
+                    receiptFingerprint=$primaryReceipt.receiptFingerprint
+                    receiptValidated=$true; stateApplied=$true
+                    fallbackTailYield=$payload
+                }
+            }
+            function New-Envelope([object[]]$operations,[long]$before,[long]$after) {
+                [pscustomobject]@{
+                    decisionKind='FallbackTailQuiescent'; decisionStatus='Accepted'
+                    decisionReason='chunk_batch_committed'
+                    coordinatorInstanceId='coordinator'; transitionId='current'
+                    aggregate=[pscustomobject]@{
+                        beforeStateGeneration=$before; afterStateGeneration=$after
+                        beforeStateFingerprint='before'; afterStateFingerprint='after'
+                        beforeBoundary=$scope; afterBoundary=$scope
+                        changedFamilies=@('fallback_tail_yield')
+                        operations=$operations
+                    }
+                }
+            }
+
+            $yieldReceipt=New-Receipt 'yield' 'Accepted' 'yield'
+            $localOperation=New-Operation 'yield_current' 'Quiescent' `
+                'local-authority' 'None' 'YieldIssued' `
+                (New-Payload 'yield_current' 'Quiescent' 'YieldIssued' @($yieldReceipt)) `
+                $yieldReceipt
+            $localEnvelope=New-Envelope @($localOperation) 4L 5L
+            if (-not (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope $localEnvelope) -or
+                -not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog $localEnvelope $localOperation)) {
+                throw 'Exact local FallbackTailQuiescent issuance was rejected.'
+            }
+
+            $peerReceipt=New-Receipt 'peer_proof' 'Observed' 'peer'
+            $pending=New-Operation 'peer_proof_pending_initial' 'PeerProof' `
+                'pending-authority' 'Pending' 'None' `
+                (New-Payload 'peer_proof_pending_initial' 'PeerProof' 'Pending' @($peerReceipt)) `
+                $peerReceipt
+            $currentPayload=New-Payload 'yield_current' 'Quiescent' `
+                'PeerProofObserved' @($yieldReceipt,$peerReceipt)
+            $current=New-Operation 'yield_current' 'Quiescent' `
+                'current-authority' 'None' 'PeerProofObserved' `
+                $currentPayload $peerReceipt
+            $peerEnvelope=New-Envelope @($pending,$current) 8L 9L
+            if (-not (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope $peerEnvelope) -or
+                -not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog $peerEnvelope $pending) -or
+                -not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog $peerEnvelope $current)) {
+                throw 'Exact peer-first FallbackTailQuiescent issuance was rejected.'
+            }
+
+            $priorPending=New-Operation 'peer_proof_pending_initial' 'PeerProof' `
+                'pending-authority' 'None' 'Pending' `
+                (New-Payload 'peer_proof_pending_initial' 'PeerProof' 'Pending' @($peerReceipt)) `
+                $peerReceipt
+            $priorBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='prior'
+                afterStateGeneration=8L; decisionUtcMilliseconds=1L
+                operations=@($priorPending)
+            }
+            $currentBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='current'
+                afterStateGeneration=9L; decisionUtcMilliseconds=2L
+                decisionKind='FallbackTailQuiescent'; decisionStatus='Accepted'
+                operations=@($pending,$current)
+            }
+            $effect=[pscustomobject]@{
+                CoordinatorInstanceId='coordinator'; TransitionId='prior'
+                StateGeneration=8L; Family='fallback_tail_yield'
+                OperationKey=$priorPending.operationKey
+                AuthorityId=$priorPending.authorityId; OperationGeneration=1L
+                EffectKind='peer_proof_observed'
+                ReceiptIdentity=$peerReceipt.receiptIdentity
+                ReceiptGeneration=1L; ReceiptStatus='Observed'
+                ReceiptFingerprint=$peerReceipt.receiptFingerprint
+                Route=$scope.route; ProtocolVersion=$scope.protocolVersion
+                LiveRouteEpoch=$scope.liveRouteEpoch
+                RoutePublicationGeneration=$scope.routePublicationGeneration
+                RouteCommitGeneration=$scope.routeCommitGeneration
+                RuntimeGeneration=$scope.runtimeGeneration
+                TerminalGeneration=$scope.terminalGeneration
+                LegGeneration=$scope.legGeneration
+                TransportEpoch=$scope.transportEpoch
+                BridgeRecoveryGeneration=$scope.bridgeRecoveryGeneration
+                CheckpointGeneration=$scope.checkpointGeneration
+                CheckpointRequestId=$scope.checkpointRequestId
+                DataSessionIdentity=$scope.dataSessionIdentity
+                DataSessionGeneration=$scope.dataSessionGeneration
+            }
+            $entry=[pscustomobject]@{Boundary=$currentBoundary;Operation=$current}
+            $history=@(
+                [pscustomobject]@{Boundary=$priorBoundary;Operation=$priorPending},
+                $entry)
+            if (-not (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
+                    $entry $history @($effect))) {
+                throw 'The exact pending-operation peer proof was not carried.'
+            }
+            $forged=$effect.PSObject.Copy()
+            $forged.OperationKey=$current.operationKey
+            $forged.AuthorityId=$current.authorityId
+            $forged.TransitionId='current'; $forged.StateGeneration=9L
+            if (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
+                    $entry $history @($forged)) {
+                throw 'A copied peer-proof effect on the new yield was accepted.'
+            }
+            $mutated=$peerEnvelope.PSObject.Copy()
+            $mutated.aggregate=$peerEnvelope.aggregate.PSObject.Copy()
+            $mutated.aggregate.operations=@($pending,$current,$localOperation)
+            if (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope $mutated) {
+                throw 'An extra Family-4 operation did not fail closed.'
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"FallbackTailQuiescent snapshot validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public void FileTransferOps_EfficiencySummaryUsesBoundedSemanticNameIndex()
     {
         var repoRoot = FindRepoRoot();
