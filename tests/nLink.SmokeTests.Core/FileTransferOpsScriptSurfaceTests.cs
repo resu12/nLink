@@ -171,6 +171,208 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_FallbackTailPendingCommandsDoNotRequireCompletedReceipts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+            $scope = [pscustomobject]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6
+                liveRouteEpoch=2L; routePublicationGeneration=3L
+                routeCommitGeneration=0L; runtimeGeneration=3L
+                terminalGeneration=0L; legGeneration=3L
+                transportEpoch=1L; bridgeRecoveryGeneration=1L
+                checkpointGeneration=1L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session'; dataSessionGeneration=1L
+            }
+            function New-Pending([string]$role, [string]$before, [string]$after) {
+                $kind = if ($role -eq 'retry_request_pending') { 'RetryRequest' } else { 'RetryDispatchRecheck' }
+                $receipt = [pscustomobject]@{
+                    stage=$kind; commandIdentity="$kind-command"; commandGeneration=1L
+                    commandFingerprint="$kind-fingerprint"; receiptIdentity='(none)'
+                    receiptGeneration=0L; receiptFingerprint='(none)'
+                    receiptStatus='Pending'; receiptReason='Pending'; receiptValidated=$false
+                }
+                [pscustomobject]@{
+                    family='fallback_tail_yield'; operationRole=$role; operationKind=$kind
+                    operationKey="fallback_tail_yield|$role|yield-1|1|$kind"
+                    authorityId='yield-1'; predecessorAuthorityId='(none)'; operationGeneration=1L
+                    beforeState=$before; afterState=$after; stateApplied=$true
+                    commandIdentity=$receipt.commandIdentity; commandGeneration=1L
+                    commandFingerprint=$receipt.commandFingerprint; receiptIdentity='(none)'
+                    receiptGeneration=0L; receiptFingerprint='(none)'
+                    receiptStatus='Pending'; receiptValidated=$false
+                    fallbackTailYield=[pscustomobject]@{
+                        role=$role; yieldKind='Quiescent'; pairingState='Paired'
+                        ownerKey='owner'; pairKey='pair'; localProofIdentity='local-proof'
+                        localProofFingerprint='local-fingerprint'; peerProofAuthorityId='peer'
+                        peerProofIdentity='peer-proof'; peerProofFingerprint='peer-fingerprint'
+                        pairedReleaseAuthorityId='yield-1'; failedPredecessorAuthorityId='(none)'
+                        invalidationReason='(none)'; sourceBoundary=$scope
+                        effectiveBoundary=$scope; targetBoundary=$scope; receipts=@($receipt)
+                    }
+                }
+            }
+            function New-Envelope([object[]]$operations, [long]$generation, [string]$kind='ApplyFallbackTailLocalProofReceipt', [string]$status='Accepted') {
+                [pscustomobject]@{
+                    snapshotContractVersion=1; snapshotSelectionMode='SnapshotV1Authoritative'
+                    coordinatorInstanceId='pending-coordinator'; sessionId='session'; transferId='transfer'
+                    direction='outbound'; decisionUtcMilliseconds=$generation
+                    transitionId="pending-$generation"; decisionKind=$kind; decisionStatus=$status
+                    decisionReason='pending-command-test'
+                    aggregate=[pscustomobject]@{
+                        beforeStateGeneration=($generation-1); afterStateGeneration=$generation
+                        beforeStateFingerprint="state-$($generation-1)"; afterStateFingerprint="state-$generation"
+                        beforeBoundary=$scope; afterBoundary=$scope
+                        changedFamilies=@('fallback_tail_yield'); operations=$operations
+                    }
+                }
+            }
+            function Assert-Catalog([object]$operation, [bool]$expected) {
+                $envelope = New-Envelope @($operation) 1
+                $actual = Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog $envelope $operation
+                if ($actual -ne $expected) { throw "Unexpected command validation: $($operation | ConvertTo-Json -Depth 16 -Compress)" }
+            }
+            foreach ($role in @('retry_request_pending','retry_recheck_pending')) {
+                foreach ($states in @(@('None','Pending'),@('Pending','Pending'),@('Pending','None'))) {
+                    Assert-Catalog (New-Pending $role $states[0] $states[1]) $true
+                }
+                $mutations = @(
+                    { param($o) $o.operationKind='Foreign' },
+                    { param($o) $o.operationRole=$o.operationRole.ToUpperInvariant(); $o.fallbackTailYield.role=$o.operationRole; $o.operationKey="fallback_tail_yield|$($o.operationRole)|yield-1|1|$($o.operationKind)" },
+                    { param($o) $o.operationKey='wrong-key' },
+                    { param($o) $o.authorityId='other-authority' },
+                    { param($o) $o.operationGeneration=2L },
+                    { param($o) $o.commandGeneration=0L },
+                    { param($o) $o.commandIdentity='(none)' },
+                    { param($o) $o.commandFingerprint='wrong-fingerprint' },
+                    { param($o) $o.receiptIdentity='forged' },
+                    { param($o) $o.receiptGeneration=1L },
+                    { param($o) $o.receiptFingerprint='forged' },
+                    { param($o) $o.receiptStatus='Delivered' },
+                    { param($o) $o.receiptValidated=$true },
+                    { param($o) $o.beforeState='Applied' },
+                    { param($o) $o.fallbackTailYield.role='yield_current' },
+                    { param($o) $o.fallbackTailYield.receipts=@() },
+                    { param($o) $o.fallbackTailYield.receipts=@($o.fallbackTailYield.receipts[0],$o.fallbackTailYield.receipts[0]) },
+                    { param($o) $o.fallbackTailYield.receipts[0].stage='Foreign' },
+                    { param($o) $o.fallbackTailYield.receipts[0].commandGeneration=2L },
+                    { param($o) $o.fallbackTailYield.receipts[0].receiptReason='Delivered' },
+                    { param($o) $o.fallbackTailYield.receipts[0].receiptIdentity='forged' },
+                    { param($o) $o.fallbackTailYield.receipts[0].receiptGeneration=1L },
+                    { param($o) $o.fallbackTailYield.receipts[0].receiptValidated=$true },
+                    { param($o) $o.fallbackTailYield.sourceBoundary.dataSessionIdentity='' }
+                )
+                foreach ($mutation in $mutations) {
+                    $invalid = New-Pending $role 'None' 'Pending' | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+                    & $mutation $invalid
+                    Assert-Catalog $invalid $false
+                }
+            }
+            $carry = New-Pending 'retry_request_pending' 'Pending' 'Pending' | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+            $carry.fallbackTailYield.effectiveBoundary.transportEpoch=2L
+            $carry.fallbackTailYield.targetBoundary.transportEpoch=2L
+            Assert-Catalog $carry $true
+            $terminal = New-Pending 'retry_recheck_pending' 'Pending' 'None'
+            $terminal.operationRole='retry_recheck_terminal'
+            $terminal.fallbackTailYield.role='retry_recheck_terminal'
+            $terminal.operationKey='fallback_tail_yield|retry_recheck_terminal|yield-1|1|RetryDispatchRecheck'
+            Assert-Catalog $terminal $false
+
+            $coverage = $catalog.RequiredFamilies -join ','
+            $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=pending-coordinator; session_id=session; transfer_id=transfer; direction=outbound; log_writer_id=pending-writer"
+            function Convert-Envelope([object]$envelope) {
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($envelope | ConvertTo-Json -Depth 24 -Compress))
+                $hash=Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload=[Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $prefix; log_writer_sequence=$($envelope.aggregate.afterStateGeneration); transition_id=$($envelope.transitionId); before_state_generation=$($envelope.aggregate.beforeStateGeneration); after_state_generation=$($envelope.aggregate.afterStateGeneration); snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+            $start="event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=0; initial_state_hash=state-0; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none"
+            $end="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=state-3; transition_count=3; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none"
+            $issued=Convert-Envelope (New-Envelope @((New-Pending 'retry_request_pending' 'None' 'Pending')) 1)
+            $held=Convert-Envelope (New-Envelope @($carry,(New-Pending 'retry_recheck_pending' 'None' 'Pending')) 2 'IssueFallbackTailYieldRetryDispatchRecheck')
+            $retired=Convert-Envelope (New-Envelope @((New-Pending 'retry_request_pending' 'Pending' 'None'),(New-Pending 'retry_recheck_pending' 'Pending' 'None')) 3 'AuthorizeRuntimeUnlockRetryDispatch' 'Granted')
+            $fullLines=@($start,'event=unrelated',$issued,$issued,$held,$retired,$end)
+            $compactLines=@($fullLines | Where-Object { $_ -notlike 'event=unrelated*' })
+            $full=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $fullLines
+            $compact=Get-FileTransferCoordinatorSnapshotEvaluation -Lines $compactLines
+            $parity=Compare-FileTransferCoordinatorSnapshotEvaluations -Full $full -Compact $compact
+            if ($full.ArtifactEvidenceVerdict -ne 'pass' -or $compact.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $full.FirstUnresolvedBoundary -or $full.EffectCount -ne 0 -or
+                $parity.Verdict -ne 'pass' -or $full.BoundaryHash -cne $compact.BoundaryHash) {
+                throw "Pending command full/compact parity failed: $($full | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            foreach ($status in @('Idempotent','Rejected')) {
+                $operation=New-Pending 'retry_request_pending' 'Pending' 'Pending'
+                $operation.stateApplied=$false
+                $neutral=New-Envelope @($operation) 1 'ApplyFallbackTailLocalProofReceipt' $status
+                $neutral.transitionId="neutral-$status"
+                $neutral.aggregate.beforeStateGeneration=1L
+                $neutral.aggregate.beforeStateFingerprint='state-1'
+                $neutral.aggregate.changedFamilies=@()
+                $neutralEvaluation=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                    $start,$issued,(Convert-Envelope $neutral),$held,$retired,$end.Replace('transition_count=3','transition_count=4'))
+                if ($neutralEvaluation.ArtifactEvidenceVerdict -ne 'pass' -or $neutralEvaluation.EffectCount -ne 0) {
+                    throw "Unchanged $status pending command was rejected."
+                }
+            }
+            $invalid=New-Pending 'retry_request_pending' 'None' 'Pending'
+            $invalid.receiptValidated=$true
+            $invalidLine=Convert-Envelope (New-Envelope @($invalid) 1)
+            $invalidEvaluation=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($start,$invalidLine,$held,$retired,$end)
+            if ($invalidEvaluation.ArtifactEvidenceVerdict -ne 'fail' -or
+                $invalidEvaluation.FirstUnresolvedBoundary.variant -cne 'family4_pending_retry_command_validated_as_completed_receipt') {
+                throw 'Malformed command did not retain the precise fail-closed variant.'
+            }
+            $conflict=New-Pending 'retry_request_pending' 'None' 'Pending'
+            $conflict.commandFingerprint='different'
+            $conflictLine=Convert-Envelope (New-Envelope @($conflict) 1)
+            $conflicting=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($start,$issued,$conflictLine,$held,$retired,$end)
+            if ($conflicting.ArtifactEvidenceVerdict -ne 'fail') { throw 'Conflicting duplicate passed.' }
+            $guiAst=[Management.Automation.Language.Parser]::ParseFile(
+                (Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),[ref]$null,[ref]$null)
+            foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult',
+                    'Get-TunaGuiExplicitFailureClassification','Get-TunaGuiFileTransferSetupFailureClassification')) {
+                $definitions=@($guiAst.FindAll({ param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+                },$true))
+                if ($definitions.Count -ne 1) { throw "GUI function not unique: $name" }
+                . ([scriptblock]::Create($definitions[0].Extent.Text))
+            }
+            $guiInput=Join-Path ([IO.Path]::GetTempPath()) ("pending-command-$([guid]::NewGuid().ToString('N')).log")
+            try {
+                [IO.File]::WriteAllLines($guiInput,[string[]]@($start,$invalidLine,$held,$retired,$end))
+                $gui=Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'test evidence' `
+                    -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($guiInput)
+                $boundary=$invalidEvaluation.FirstUnresolvedBoundary
+                if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
+                    $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
+                    $gui.CoordinatorWriter -cne $boundary.writer -or
+                    $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
+                    $gui.FailureVariant -cne $boundary.variant -or
+                    $gui.CoordinatorRawCount -ne $boundary.rawCount -or
+                    $gui.CoordinatorUnresolvedCount -ne $boundary.unresolvedCount) {
+                    throw 'GUI did not preserve the shared pending-command boundary.'
+                }
+            }
+            finally { if (Test-Path -LiteralPath $guiInput) { Remove-Item -LiteralPath $guiInput -Force } }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(result.ExitCode == 0,
+            $"Pending Family-4 command regression failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public async Task FileTransferOps_FallbackTailQuiescentCatalogAcceptsLocalAndPeerFirstShapes()
     {
         if (!OperatingSystem.IsWindows())

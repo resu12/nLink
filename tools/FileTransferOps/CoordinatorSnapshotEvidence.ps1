@@ -2025,8 +2025,16 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope {
 }
 
 function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
-    param([Parameter(Mandatory = $true)]$Envelope)
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        $Operation = $null
+    )
 
+    if ($null -ne $Operation -and
+        [string]$Operation.operationRole -in @(
+            'retry_request_pending', 'retry_recheck_pending')) {
+        return 'family4_pending_retry_command_validated_as_completed_receipt'
+    }
     if ([string]$Envelope.decisionKind -ceq 'FallbackTailQuiescent') {
         return 'fallback_tail_quiescent_event_omitted_from_family4_catalog'
     }
@@ -2132,6 +2140,92 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
     return $effectSubjects.Count -eq 1
 }
 
+function Test-FileTransferCoordinatorSnapshotFamily4StageEvidence {
+    param([Parameter(Mandatory = $true)]$Operation)
+
+    $typed = $Operation.fallbackTailYield
+    $receipts = @($typed.receipts)
+    $role = [string]$Operation.operationRole
+    if ($role -in @('retry_request_pending', 'retry_recheck_pending')) {
+        $kind = if ($role -ceq 'retry_request_pending') {
+            'RetryRequest'
+        }
+        else {
+            'RetryDispatchRecheck'
+        }
+        $expectedKey = @(
+            'fallback_tail_yield', $role, [string]$Operation.authorityId,
+            ([long]$Operation.operationGeneration).ToString(
+                [System.Globalization.CultureInfo]::InvariantCulture), $kind) -join '|'
+        if ($receipts.Count -ne 1 -or
+            $role -cnotin @('retry_request_pending', 'retry_recheck_pending') -or
+            [string]$Operation.family -cne 'fallback_tail_yield' -or
+            [string]$typed.role -cne $role -or
+            [string]$Operation.operationKind -cne $kind -or
+            [string]$Operation.operationKey -cne $expectedKey -or
+            [string]::IsNullOrWhiteSpace([string]$Operation.authorityId) -or
+            [string]$Operation.authorityId -ceq '(none)' -or
+            [long]$Operation.operationGeneration -le 0 -or
+            [long]$Operation.commandGeneration -ne
+                [long]$Operation.operationGeneration -or
+            "$($Operation.beforeState)->$($Operation.afterState)" -cnotin @(
+                'None->Pending', 'Pending->Pending', 'Pending->None')) {
+            return $false
+        }
+        $receipt = $receipts[0]
+        foreach ($name in @(
+                'stage', 'commandIdentity', 'commandGeneration',
+                'commandFingerprint', 'receiptIdentity', 'receiptGeneration',
+                'receiptStatus', 'receiptReason', 'receiptFingerprint',
+                'receiptValidated')) {
+            if ($null -eq $receipt -or
+                $receipt.PSObject.Properties.Name -notcontains $name) {
+                return $false
+            }
+        }
+        if ([string]$receipt.stage -cne $kind -or
+            [string]$receipt.receiptReason -cne 'Pending') {
+            return $false
+        }
+        foreach ($name in @('commandIdentity', 'commandFingerprint')) {
+            if ([string]::IsNullOrWhiteSpace([string]$Operation.$name) -or
+                [string]$Operation.$name -ceq '(none)' -or
+                [string]$Operation.$name -cne [string]$receipt.$name) {
+                return $false
+            }
+        }
+        if ([long]$receipt.commandGeneration -ne
+            [long]$Operation.commandGeneration) {
+            return $false
+        }
+        foreach ($subject in @($Operation, $receipt)) {
+            if ([string]$subject.receiptIdentity -cne '(none)' -or
+                [long]$subject.receiptGeneration -ne 0 -or
+                [string]$subject.receiptFingerprint -cne '(none)' -or
+                [string]$subject.receiptStatus -cne 'Pending' -or
+                $subject.receiptValidated -isnot [bool] -or
+                [bool]$subject.receiptValidated) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    foreach ($receipt in $receipts) {
+        if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
+            [long]$receipt.commandGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.commandFingerprint) -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.receiptIdentity) -or
+            [long]$receipt.receiptGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.receiptStatus) -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.receiptFingerprint)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -2191,19 +2285,8 @@ function Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog {
             return $false
         }
     }
-    foreach ($receipt in @($Operation.fallbackTailYield.receipts)) {
-        if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
-            [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
-            [long]$receipt.commandGeneration -le 0 -or
-            [string]::IsNullOrWhiteSpace([string]$receipt.commandFingerprint) -or
-            [string]::IsNullOrWhiteSpace([string]$receipt.receiptIdentity) -or
-            [long]$receipt.receiptGeneration -le 0 -or
-            [string]::IsNullOrWhiteSpace([string]$receipt.receiptStatus) -or
-            [string]::IsNullOrWhiteSpace([string]$receipt.receiptFingerprint)) {
-            return $false
-        }
-    }
-    return $true
+    return Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+        -Operation $Operation
 }
 
 function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
@@ -3869,7 +3952,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             -Operation $operation)) {
                         $variant =
                             Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant `
-                                -Envelope $envelope
+                                -Envelope $envelope -Operation $operation
                         if ($variant -ceq '(none)') {
                             $variant =
                                 Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
@@ -3995,18 +4078,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         }
                     }
                     if ([string]$operation.family -ceq 'fallback_tail_yield') {
-                        foreach ($receipt in @($operation.fallbackTailYield.receipts)) {
-                            if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
-                                [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
-                                [long]$receipt.commandGeneration -le 0 -or
-                                [string]::IsNullOrWhiteSpace([string]$receipt.commandFingerprint) -or
-                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptIdentity) -or
-                                [long]$receipt.receiptGeneration -le 0 -or
-                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptStatus) -or
-                                [string]::IsNullOrWhiteSpace([string]$receipt.receiptFingerprint)) {
-                                $errors.Add("snapshot_operation_receipt_incomplete:$($record.LineIndex)")
-                                break
-                            }
+                        if (-not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+                                -Operation $operation)) {
+                            $errors.Add("snapshot_operation_receipt_incomplete:$($record.LineIndex)")
                         }
                     }
                     if ([string]$operation.family -ceq
