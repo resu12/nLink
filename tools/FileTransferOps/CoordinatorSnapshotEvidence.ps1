@@ -5838,23 +5838,192 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
 
         $pendingProof = @($history | Where-Object {
                 [string]$_.Operation.operationRole -ceq
-                    'proof_publication_pending' -and
-                [string]$_.Operation.afterState -in @('Pending', 'Held')
+                    'proof_publication_pending'
+            } | Group-Object {
+                [string]$_.Operation.operationKey
+            } | ForEach-Object {
+                $publicationHistory = @($_.Group | Sort-Object {
+                        [long]$_.Boundary.afterStateGeneration
+                    }, {
+                        [long]$_.Boundary.decisionUtcMilliseconds
+                    }, {
+                        [string]$_.Boundary.boundaryId
+                    })
+                $latestPublication = $publicationHistory | Select-Object -Last 1
+                if ($null -eq $latestPublication -or
+                    [string]$latestPublication.Operation.afterState -notin
+                        @('Pending', 'Held')) {
+                    return
+                }
+
+                $terminalProof = @($history | Where-Object {
+                        [string]$_.Operation.operationRole -ceq
+                            'proof_publication_terminal' -and
+                        [string]$_.Operation.authorityId -ceq
+                            [string]$latestPublication.Operation.authorityId -and
+                        [long]$_.Operation.operationGeneration -eq
+                            [long]$latestPublication.Operation.operationGeneration -and
+                        [long]$_.Boundary.afterStateGeneration -ge
+                            [long]$latestPublication.Boundary.afterStateGeneration -and
+                        ((([string]$_.Operation.afterState -ceq 'Delivered') -and
+                          [bool]$_.Operation.receiptValidated) -or
+                         (([string]$_.Operation.afterState -ceq 'Rejected') -and
+                          [string]$_.Operation.receiptStatus -ceq 'Rejected' -and
+                          [string]$_.Operation.receiptIdentity -notin
+                              @('', '(none)') -and
+                          [string]$_.Operation.receiptFingerprint -notin
+                              @('', '(none)'))) -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                            -Left $_.Operation.receiveRecovery.sourceBoundary `
+                            -Right $latestPublication.Operation.receiveRecovery.sourceBoundary) -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                            -Left $_.Operation.receiveRecovery.effectiveBoundary `
+                            -Right $latestPublication.Operation.receiveRecovery.effectiveBoundary)
+                    })
+                if ($terminalProof.Count -eq 0) {
+                    $latestPublication
+                }
+            } | Sort-Object {
+                [long]$_.Boundary.afterStateGeneration
+            }, {
+                [long]$_.Boundary.decisionUtcMilliseconds
+            }, {
+                [string]$_.Boundary.boundaryId
             } | Select-Object -Last 1) | Select-Object -First 1
-        $terminalProof = @($history | Where-Object {
-                [string]$_.Operation.operationRole -ceq
-                    'proof_publication_terminal' -and
-                [bool]$_.Operation.receiptValidated
-            })
-        if ($null -ne $pendingProof -and $terminalProof.Count -eq 0) {
+        if ($null -ne $pendingProof) {
             $candidate = $pendingProof
             $class = 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing'
         }
+
         $pendingProofRecheck = @($history | Where-Object {
                 [string]$_.Operation.operationRole -ceq
-                    'proof_publication_recheck' -and
-                [string]$_.Operation.afterState -ceq 'Armed' -and
-                -not [bool]$_.Operation.receiptValidated
+                    'proof_publication_recheck'
+            } | Group-Object {
+                [string]$_.Operation.operationKey
+            } | ForEach-Object {
+                $recheckHistory = @($_.Group | Sort-Object {
+                        [long]$_.Boundary.afterStateGeneration
+                    }, {
+                        [long]$_.Boundary.decisionUtcMilliseconds
+                    }, {
+                        [string]$_.Boundary.boundaryId
+                })
+                $latestRecheck = $recheckHistory | Select-Object -Last 1
+                if ($null -eq $latestRecheck -or
+                    [bool]$latestRecheck.Operation.receiptValidated) {
+                    return
+                }
+
+                $arms = @($recheckHistory | Where-Object {
+                        [string]$_.Operation.beforeState -ceq 'None' -and
+                        [string]$_.Operation.afterState -ceq 'Armed'
+                    })
+                if ($arms.Count -eq 0) {
+                    $latestRecheck
+                    return
+                }
+                if ($arms.Count -gt 1) {
+                    $arms | Select-Object -Last 1
+                    return
+                }
+
+                if ([string]$latestRecheck.Operation.afterState -ceq 'Armed') {
+                    $latestRecheck
+                    return
+                }
+                if ([string]$latestRecheck.Operation.afterState -cne 'None') {
+                    return
+                }
+
+                $arm = $arms[0]
+                if ($null -eq $arm) {
+                    $latestRecheck
+                    return
+                }
+
+                $closures = @($recheckHistory | Where-Object {
+                        [long]$_.Boundary.afterStateGeneration -gt
+                            [long]$arm.Boundary.afterStateGeneration -and
+                        [string]$_.Operation.beforeState -ceq 'Armed' -and
+                        [string]$_.Operation.afterState -ceq 'None' -and
+                        [string]$_.Operation.commandIdentity -ceq
+                            [string]$arm.Operation.commandIdentity -and
+                        [long]$_.Operation.commandGeneration -eq
+                            [long]$arm.Operation.commandGeneration -and
+                        [string]$_.Operation.commandFingerprint -ceq
+                            [string]$arm.Operation.commandFingerprint -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                            -Left $_.Operation.receiveRecovery.sourceBoundary `
+                            -Right $arm.Operation.receiveRecovery.sourceBoundary) -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                            -Left $_.Operation.receiveRecovery.effectiveBoundary `
+                            -Right $arm.Operation.receiveRecovery.effectiveBoundary)
+                    })
+                $closed = $false
+                if ($closures.Count -eq 1) {
+                    $closure = $closures[0]
+                    if ([string]$closure.Boundary.decisionStatus -ceq 'Accepted' -and
+                        [string]$closure.Boundary.decisionKind -ceq
+                            'ObserveReceiveRecoveryProofStatePublicationRecheckEvidence') {
+                        $successors = @($history | Where-Object {
+                                [string]$_.Boundary.boundaryId -ceq
+                                    [string]$closure.Boundary.boundaryId -and
+                                [string]$_.Operation.operationRole -ceq
+                                    'proof_publication_pending' -and
+                                [string]$_.Operation.operationKind -ceq
+                                    'ProofPublication' -and
+                                [string]$_.Operation.beforeState -ceq 'None' -and
+                                [string]$_.Operation.afterState -ceq 'Pending' -and
+                                [string]$_.Operation.authorityId -ceq
+                                    [string]$arm.Operation.authorityId -and
+                                [long]$_.Operation.operationGeneration -eq
+                                    ([long]$arm.Operation.operationGeneration + 1) -and
+                                [long]$_.Operation.commandGeneration -eq
+                                    ([long]$arm.Operation.commandGeneration + 1) -and
+                                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                                    -Left $_.Operation.receiveRecovery.sourceBoundary `
+                                    -Right $arm.Operation.receiveRecovery.sourceBoundary) -and
+                                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                                    -Left $_.Operation.receiveRecovery.effectiveBoundary `
+                                    -Right $arm.Operation.receiveRecovery.effectiveBoundary)
+                            })
+                        $closed = $successors.Count -eq 1
+                    }
+                    elseif ([string]$closure.Boundary.decisionStatus -ceq
+                            'Accepted') {
+                        $typedCancellation = @($history | Where-Object {
+                                [string]$_.Boundary.boundaryId -ceq
+                                    [string]$closure.Boundary.boundaryId -and
+                                [string]$_.Operation.operationRole -in @(
+                                    'operation_current', 'operation_terminal') -and
+                                [string]$_.Operation.authorityId -ceq
+                                    [string]$arm.Operation.authorityId -and
+                                [long]$_.Operation.operationGeneration -eq
+                                    [long]$arm.Operation.operationGeneration -and
+                                (([string]$_.Operation.receiveRecovery.proofIdentity -notin
+                                      @('', '(none)')) -or
+                                 ([string]$_.Operation.afterState -like
+                                      'Invalidated*')) -and
+                                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                                    -Left $_.Operation.receiveRecovery.sourceBoundary `
+                                    -Right $arm.Operation.receiveRecovery.sourceBoundary) -and
+                                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                                    -Left $_.Operation.receiveRecovery.effectiveBoundary `
+                                    -Right $arm.Operation.receiveRecovery.effectiveBoundary)
+                            })
+                        $closed = $typedCancellation.Count -eq 1
+                    }
+                }
+
+                if (-not $closed) {
+                    $arm
+                }
+            } | Sort-Object {
+                [long]$_.Boundary.afterStateGeneration
+            }, {
+                [long]$_.Boundary.decisionUtcMilliseconds
+            }, {
+                [string]$_.Boundary.boundaryId
             } | Select-Object -Last 1) | Select-Object -First 1
         if ($null -ne $pendingProofRecheck) {
             $candidate = $pendingProofRecheck

@@ -2830,6 +2830,51 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     responderProbeHandoff=$null
                 }
             }
+            function New-RecheckOperation(
+                [string]$before,
+                [string]$after) {
+                [ordered]@{
+                    family='receive_recovery'
+                    operationRole='proof_publication_recheck'
+                    operationKey='receive_recovery|proof_publication_recheck|publication-authority|1|ProofPublicationRecheck'
+                    operationKind='ProofPublicationRecheck'
+                    authorityId='publication-authority'
+                    predecessorAuthorityId='(none)'
+                    operationGeneration=1L
+                    beforeState=$before; afterState=$after
+                    commandIdentity='publication-recheck-command'
+                    commandGeneration=1L
+                    commandFingerprint='publication-recheck-command-fingerprint'
+                    receiptIdentity='(none)'; receiptGeneration=0L
+                    receiptStatus='Pending'; receiptFingerprint='(none)'
+                    receiptValidated=$false; stateApplied=$true
+                    routeRuntime=$null; routeTransition=$null
+                    runtimeUnlockRetry=$null
+                    receiveRecovery=[ordered]@{
+                        role='proof_publication_recheck'
+                        sourceBoundary=$scope; effectiveBoundary=$scope
+                        recoveryKind='BridgeReceiveStallRecovery'
+                        bridgeDecisionGeneration=1L
+                        recoveryLivenessLeaseGeneration=1L
+                        executionState='Completed'; closureState='Retained'
+                        closureGeneration=1L; proofIdentity='(none)'
+                        proofObservedUtcMs=0L
+                        heldRetryAuthorityId='(none)'
+                        reservedRetryAuthorityId='(none)'
+                        initialActivationHoldGeneration=0L
+                        envelopeRefreshGeneration=0L
+                        checkpointBindingGeneration=0L
+                        checkpointDeliveryGeneration=0L
+                        checkpointResumeGeneration=0L
+                        checkpointFrontierHoldGeneration=0L
+                        checkpointFrontierRecheckGeneration=0L
+                        receipts=@()
+                    }
+                    fallbackTailYield=$null
+                    regularV4FrontierRepairPressure=$null
+                    responderProbeHandoff=$null
+                }
+            }
             function New-TransitionLine(
                 [string]$id,
                 [long]$beforeGeneration,
@@ -2838,7 +2883,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 [string]$afterHash,
                 [string]$reason,
                 [object[]]$operations,
-                [long]$sequence) {
+                [long]$sequence,
+                [string]$decisionKind='ApplyReceiveRecoveryProofStatePublicationReceipt') {
                 $envelope=[ordered]@{
                     snapshotContractVersion=1
                     snapshotSelectionMode='SnapshotV1Shadow'
@@ -2848,7 +2894,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     direction='inbound'
                     decisionUtcMilliseconds=$sequence
                     transitionId=$id
-                    decisionKind='ApplyReceiveRecoveryProofStatePublicationReceipt'
+                    decisionKind=$decisionKind
                     decisionStatus='Accepted'; decisionReason=$reason
                     aggregate=[ordered]@{
                         beforeStateGeneration=$beforeGeneration
@@ -2957,6 +3003,91 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 $malformed.FirstUnresolvedBoundary.variant -ne
                     'valid_terminal_proof_publication_rollover_rejected_as_extra_operation'){
                 throw "Malformed rollover did not fail closed: $($malformed | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $receipt1=New-PublicationReceipt 1 'Delivered' $true
+            $pending1=New-PublicationOperation `
+                'proof_publication_pending' 'Pending' 'None' 1 $null
+            $terminal1=New-PublicationOperation `
+                'proof_publication_terminal' 'None' 'Delivered' 1 $receipt1
+            $arm=New-RecheckOperation 'None' 'Armed'
+            $armLine=New-TransitionLine 'publication-arm' 0 1 `
+                'hash-0' 'hash-1' `
+                'filetransfer_receive_recovery_proof_state_publication_delivered' `
+                @($pending1,$arm,$terminal1) 10
+            $delivery1=New-DeliveryEffect 'publication-arm' $terminal1 1 11
+
+            $closure=New-RecheckOperation 'Armed' 'None'
+            $pending2=New-PublicationOperation `
+                'proof_publication_pending' 'None' 'Pending' 2 $null
+            $closureLine=New-TransitionLine 'publication-recheck' 1 2 `
+                'hash-1' 'hash-2' `
+                'filetransfer_receive_recovery_proof_state_republication_issued' `
+                @($closure,$pending2) 20 `
+                'ObserveReceiveRecoveryProofStatePublicationRecheckEvidence'
+
+            $receipt2=New-PublicationReceipt 2 'Delivered' $true
+            $pending2Retired=New-PublicationOperation `
+                'proof_publication_pending' 'Pending' 'None' 2 $null
+            $terminal1Retired=New-PublicationOperation `
+                'proof_publication_terminal' 'Delivered' 'None' 1 $receipt1
+            $terminal2=New-PublicationOperation `
+                'proof_publication_terminal' 'None' 'Delivered' 2 $receipt2
+            $deliveryLine=New-TransitionLine 'publication-recheck-delivered' 2 3 `
+                'hash-2' 'hash-3' `
+                'filetransfer_receive_recovery_proof_state_publication_delivered' `
+                @($pending2Retired,$terminal1Retired,$terminal2) 30
+            $delivery2=New-DeliveryEffect `
+                'publication-recheck-delivered' $terminal2 3 31
+            $completed3="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=hash-3; transition_count=3; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $recheckedLines=@(
+                $start,$armLine,$delivery1,$closureLine,$deliveryLine,
+                $delivery2,$completed3)
+            $recheckedFull=Get-FileTransferCoordinatorSnapshotEvaluation -Lines `
+                (@('event=unrelated') + $recheckedLines)
+            $recheckedCompact=Get-FileTransferCoordinatorSnapshotEvaluation -Lines `
+                $recheckedLines
+            if($recheckedFull.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $recheckedFull.FirstUnresolvedBoundary -or
+                $recheckedFull.BoundaryHash -ne $recheckedCompact.BoundaryHash){
+                throw "A consumed proof-publication recheck remained armed: $($recheckedFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $rejectedReceipt2=New-PublicationReceipt 2 'Rejected' $false
+            $rejectedTerminal2=New-PublicationOperation `
+                'proof_publication_terminal' 'None' 'Rejected' 2 `
+                $rejectedReceipt2
+            $rejectedLine=New-TransitionLine 'publication-recheck-rejected' 2 3 `
+                'hash-2' 'hash-3' `
+                'filetransfer_receive_recovery_proof_state_publication_rejected' `
+                @($pending2Retired,$terminal1Retired,$rejectedTerminal2) 30
+            $rejected=Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                $start,$armLine,$delivery1,$closureLine,$rejectedLine,$completed3)
+            if($rejected.ArtifactEvidenceVerdict -ne 'pass' -or
+                $null -ne $rejected.FirstUnresolvedBoundary){
+                throw "A consumed recheck with an exact Rejected publication stayed open: $($rejected | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $completed1="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=1; final_state_hash=hash-1; transition_count=1; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $open=Get-FileTransferCoordinatorSnapshotEvaluation -Lines `
+                @($start,$armLine,$delivery1,$completed1)
+            if($open.ArtifactEvidenceVerdict -ne 'pass' -or
+                $open.FirstUnresolvedBoundary.taxonomyClass -ne
+                    'filetransfer_receive_recovery_completed_retained_proof_state_recheck_heartbeat_suppressed' -or
+                $open.FirstUnresolvedBoundary.rawCount -ne 1 -or
+                $open.FirstUnresolvedBoundary.distinctCount -ne 1 -or
+                $open.FirstUnresolvedBoundary.recoveredCount -ne 0 -or
+                $open.FirstUnresolvedBoundary.unresolvedCount -ne 1){
+                throw "A singleton recheck arm did not remain unresolved: $($open | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $completed2="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=2; final_state_hash=hash-2; transition_count=2; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
+            $missingDelivery=Get-FileTransferCoordinatorSnapshotEvaluation -Lines `
+                @($start,$armLine,$delivery1,$closureLine,$completed2)
+            if($missingDelivery.ArtifactEvidenceVerdict -ne 'pass' -or
+                $missingDelivery.FirstUnresolvedBoundary.taxonomyClass -ne
+                    'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing'){
+                throw "A consumed recheck without successor delivery was not classified as publication missing: $($missingDelivery | ConvertTo-Json -Depth 8 -Compress)"
             }
             """;
 
