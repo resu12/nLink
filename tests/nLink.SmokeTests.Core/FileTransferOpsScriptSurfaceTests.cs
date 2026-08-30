@@ -624,6 +624,202 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_CoordinatorSnapshotResponderHandoffReducerConsumesOnlyExactPostCommitDuplicates()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $source = [pscustomobject]@{
+                route='regular_nkn_v4_fast'; protocolVersion=4
+                liveRouteEpoch=0L; routePublicationGeneration=1L
+                routeCommitGeneration=0L; runtimeGeneration=1L
+                terminalGeneration=0L; legGeneration=1L
+                transportEpoch=0L; bridgeRecoveryGeneration=0L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session-1'; dataSessionGeneration=1L
+            }
+            $target = [pscustomobject]@{
+                route='file_tuna_v4'; protocolVersion=4
+                liveRouteEpoch=1L; routePublicationGeneration=2L
+                routeCommitGeneration=1L; runtimeGeneration=2L
+                terminalGeneration=0L; legGeneration=2L
+                transportEpoch=0L; bridgeRecoveryGeneration=0L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session-1'; dataSessionGeneration=1L
+            }
+            function New-ResponderPayload(
+                [string]$role,
+                [object]$effective,
+                [string]$linkedAuthority='(none)',
+                [long]$linkedGeneration=0L) {
+                [pscustomobject]@{
+                    role=$role; transitionMode='initial_regular_v4'
+                    sourceBoundary=$source; effectiveBoundary=$effective
+                    targetBoundary=$target; transactionGeneration=1L
+                    offerGeneration=6L; pendingAnswerAckGeneration=6L
+                    payerDecisionId='4'; launchGeneration=1L
+                    tunaPathLeaseGeneration=1L; tunaPathLeaseListenerRunId='listener-1'
+                    ackMessageId='ack-1'; ackSourceFingerprint='ack-fingerprint-1'
+                    peerProbeFrameFingerprint='probe-fingerprint-1'; probeId='probe-1'
+                    ownerKey='(none)'; pairKey='(none)'; localProofIdentity='(none)'
+                    localProofFingerprint='(none)'; peerProofIdentity='(none)'
+                    peerProofFingerprint='(none)'; pairedReleaseAuthorityId='(none)'
+                    pairedReleaseGeneration=0L; pairingGeneration=0L
+                    admissionGeneration=1L; pendingPreCommitGeneration=1L
+                    linkedTransitionAuthorityId=$linkedAuthority
+                    linkedTransitionGeneration=$linkedGeneration
+                }
+            }
+            function New-ResponderOperation(
+                [string]$role,
+                [string]$kind,
+                [string]$afterState,
+                [string]$receiptStatus,
+                [object]$payload,
+                [string]$receiptFingerprint,
+                [bool]$validated=$true) {
+                [pscustomobject]@{
+                    family='responder_probe_handoff'; operationRole=$role
+                    operationKey="responder_probe_handoff|$role|handoff-1|1|$kind"
+                    operationKind=$kind; authorityId='handoff-1'
+                    operationGeneration=1L; beforeState='None'; afterState=$afterState
+                    commandIdentity='observation-1'; commandGeneration=1L
+                    commandFingerprint='observation-fingerprint-1'
+                    receiptIdentity='observation-receipt-1'; receiptGeneration=1L
+                    receiptStatus=$receiptStatus; receiptFingerprint=$receiptFingerprint
+                    receiptValidated=$validated; stateApplied=$false
+                    responderProbeHandoff=$payload
+                }
+            }
+            function New-RouteOperation(
+                [string]$role,
+                [string]$beforeState,
+                [string]$afterState,
+                [string]$receiptStatus,
+                [bool]$validated) {
+                [pscustomobject]@{
+                    family='route_transition'; operationRole=$role
+                    operationKey="route_transition|$role|route-transition-1|1|RegularV4ToTunaV4"
+                    operationKind='RegularV4ToTunaV4'; authorityId='route-transition-1'
+                    operationGeneration=1L; beforeState=$beforeState; afterState=$afterState
+                    receiptStatus=$receiptStatus; receiptValidated=$validated
+                }
+            }
+            function New-PublicationOperation {
+                [pscustomobject]@{
+                    family='route_runtime'; operationRole='route_publication'
+                    operationKind='RouteCommitPublication'; beforeState='None'
+                    afterState='Published'; receiptValidated=$true
+                    routeRuntime=[pscustomobject]@{ boundary=$target }
+                }
+            }
+            function New-Entry(
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$decisionKind,
+                [string]$decisionStatus,
+                [object]$operation,
+                [object[]]$otherOperations=@(),
+                [string]$decisionReason='accepted') {
+                $operations = @($operation) + @($otherOperations)
+                [pscustomobject]@{
+                    Boundary=[pscustomobject]@{
+                        coordinatorInstanceId='coordinator-1'; writer='writer-helper'
+                        sessionId='session-1'; transferId='transfer-1'; direction='inbound'
+                        decisionKind=$decisionKind; decisionStatus=$decisionStatus
+                        decisionReason=$decisionReason
+                        beforeStateGeneration=$beforeGeneration
+                        afterStateGeneration=$afterGeneration
+                        beforeStateHash="hash-$beforeGeneration"
+                        afterStateHash="hash-$afterGeneration"
+                        operations=$operations
+                    }
+                    Operation=$operation
+                }
+            }
+
+            $accepted = New-Entry 0 0 `
+                'ObserveRuntimeUnlockResponderPeerProbeHandoff' 'Idempotent' `
+                (New-ResponderOperation 'peer_acceptance_attempt' `
+                    'ObserveRuntimeUnlockResponderPeerProbeHandoff' 'Accepted' `
+                    'Accepted' (New-ResponderPayload 'peer_acceptance_attempt' $source) `
+                    'accepted-receipt-fingerprint')
+            $prepared = New-Entry 0 1 'PrepareFileTransferRouteTransition' 'Prepared' `
+                (New-ResponderOperation 'route_transition_handoff_pending' `
+                    'PrepareFileTransferRouteTransition' 'Prepared' 'Prepared' `
+                    (New-ResponderPayload 'route_transition_handoff_pending' $source `
+                        'route-transition-1' 1L) 'prepared-receipt-fingerprint') `
+                @((New-RouteOperation 'current' 'None' 'Prepared' '(none)' $false))
+            $draining = New-Entry 1 2 `
+                'BeginFileTransferRouteTransitionPhysicalDrain' 'Draining' `
+                (New-ResponderOperation 'route_transition_handoff_pending' `
+                    'BeginFileTransferRouteTransitionPhysicalDrain' 'Draining' `
+                    'Draining' (New-ResponderPayload 'route_transition_handoff_pending' `
+                        $source 'route-transition-1' 1L) 'draining-receipt-fingerprint') `
+                @((New-RouteOperation 'current' 'Prepared' 'Draining' 'Installed' $true))
+            $committed = New-Entry 2 3 'CommitFileTransferRouteTransition' 'Committed' `
+                (New-ResponderOperation 'route_transition_handoff_pending' `
+                    'CommitFileTransferRouteTransition' 'Committed' 'Committed' `
+                    (New-ResponderPayload 'route_transition_handoff_pending' $target) `
+                    'committed-receipt-fingerprint') `
+                @(
+                    (New-RouteOperation 'terminal' 'None' 'Committed' 'Committed' $true),
+                    (New-PublicationOperation))
+            $disposition = New-Entry 3 4 `
+                'ApplyFileTransferRouteTransitionDispositionReceipt' 'Committed' `
+                (New-ResponderOperation 'route_transition_handoff_pending' `
+                    'ApplyFileTransferRouteTransitionDispositionReceipt' 'Committed' `
+                    'Committed' (New-ResponderPayload 'route_transition_handoff_pending' `
+                        $target) 'disposition-receipt-fingerprint') `
+                @((New-RouteOperation 'terminal' 'Committed' 'Committed' 'Applied' $true))
+            $candidate = New-Entry 4 4 `
+                'ObserveRuntimeUnlockResponderPeerProbeHandoff' 'Rejected' `
+                (New-ResponderOperation 'attempted_decision' `
+                    'ObserveRuntimeUnlockResponderPeerProbeHandoff' 'Rejected' `
+                    'Rejected' (New-ResponderPayload 'attempted_decision' $target) `
+                    'rejected-receipt-fingerprint')
+
+            $history = @($accepted,$prepared,$draining,$committed,$disposition)
+            $duplicates = @(1..55 | ForEach-Object { $candidate })
+            foreach ($duplicate in $duplicates) {
+                if (-not (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                        -History ($history + $duplicates) -Candidate $duplicate)) {
+                    throw 'An exact post-disposition duplicate was not consumed.'
+                }
+            }
+            if (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History @($accepted,$prepared,$draining,$candidate) `
+                    -Candidate $candidate) {
+                throw 'A partial Prepared/Draining lineage consumed a rejection.'
+            }
+
+            $mutatedCandidate = $candidate | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $mutatedCandidate.Operation.responderProbeHandoff.probeId = 'probe-2'
+            $originalKey = Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
+                -Boundary $candidate.Boundary -Operation $candidate.Operation
+            $mutatedKey = Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
+                -Boundary $mutatedCandidate.Boundary -Operation $mutatedCandidate.Operation
+            if ($originalKey -ceq $mutatedKey) {
+                throw 'A probe mutation reused the completed responder lineage key.'
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Responder-handoff lifecycle reducer regression failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public async Task FileTransferOps_CoordinatorSnapshotEvaluatorHasExactFullCompactParityAndFailsClosed()
     {
         if (!OperatingSystem.IsWindows())

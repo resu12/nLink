@@ -2867,6 +2867,293 @@ function Get-FileTransferCoordinatorRouteTransitionLifecycleKey {
         $source) -join '|'
 }
 
+function Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey {
+    param(
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    $payload = $Operation.responderProbeHandoff
+    if ($null -eq $payload) {
+        return "$($Boundary.coordinatorInstanceId)|$($Operation.operationKey)"
+    }
+    $source = ConvertTo-Json -InputObject $payload.sourceBoundary `
+        -Depth 16 -Compress
+    return @(
+        [string]$Boundary.coordinatorInstanceId,
+        [string]$Boundary.writer,
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Boundary -Name 'sessionId' -Default ''),
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Boundary -Name 'transferId' -Default ''),
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $Boundary -Name 'direction' -Default ''),
+        [string]$Operation.authorityId,
+        [long]$Operation.operationGeneration,
+        [string]$payload.transitionMode,
+        [long]$payload.admissionGeneration,
+        [long]$payload.transactionGeneration,
+        [long]$payload.offerGeneration,
+        [long]$payload.pendingAnswerAckGeneration,
+        [string]$payload.payerDecisionId,
+        [long]$payload.launchGeneration,
+        [long]$payload.tunaPathLeaseGeneration,
+        [string]$payload.tunaPathLeaseListenerRunId,
+        [string]$payload.ackMessageId,
+        [string]$payload.ackSourceFingerprint,
+        [string]$payload.peerProbeFrameFingerprint,
+        [string]$payload.probeId,
+        [string]$payload.ownerKey,
+        [string]$payload.pairKey,
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $payload -Name 'localProofIdentity' -Default ''),
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $payload -Name 'localProofFingerprint' -Default ''),
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $payload -Name 'peerProofIdentity' -Default ''),
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $payload -Name 'peerProofFingerprint' -Default ''),
+        [string]$payload.pairedReleaseAuthorityId,
+        [long]$payload.pairedReleaseGeneration,
+        [long]$payload.pairingGeneration,
+        $source) -join '|'
+}
+
+function Get-FileTransferCoordinatorResponderProbeHandoffObservationKey {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    $boundary = $Entry.Boundary
+    $operation = $Entry.Operation
+    $payload = $operation.responderProbeHandoff
+    return @(
+        [string]$boundary.decisionKind,
+        [string]$boundary.decisionStatus,
+        [string]$boundary.decisionReason,
+        [long]$boundary.beforeStateGeneration,
+        [long]$boundary.afterStateGeneration,
+        [string]$boundary.beforeStateHash,
+        [string]$boundary.afterStateHash,
+        [string]$operation.operationRole,
+        [string]$operation.beforeState,
+        [string]$operation.afterState,
+        [string]$operation.commandIdentity,
+        [long]$operation.commandGeneration,
+        [string]$operation.commandFingerprint,
+        [string]$operation.receiptIdentity,
+        [long]$operation.receiptGeneration,
+        [string]$operation.receiptStatus,
+        [string]$operation.receiptFingerprint,
+        [bool]$operation.receiptValidated,
+        [bool]$operation.stateApplied,
+        (ConvertTo-Json -InputObject $payload.effectiveBoundary -Depth 16 -Compress),
+        (ConvertTo-Json -InputObject $payload.targetBoundary -Depth 16 -Compress)) -join '|'
+}
+
+function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$History,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    $candidateBoundary = $Candidate.Boundary
+    $candidateOperation = $Candidate.Operation
+    $candidatePayload = $candidateOperation.responderProbeHandoff
+    if ($null -eq $candidatePayload -or
+        [string]$candidateBoundary.decisionKind -cne
+            'ObserveRuntimeUnlockResponderPeerProbeHandoff' -or
+        [string]$candidateBoundary.decisionStatus -cne 'Rejected' -or
+        [string]$candidateBoundary.decisionReason -cne 'accepted' -or
+        [string]$candidateOperation.operationRole -cne 'attempted_decision' -or
+        [string]$candidateOperation.beforeState -cne 'None' -or
+        [string]$candidateOperation.afterState -cne 'Rejected' -or
+        [string]$candidateOperation.receiptStatus -cne 'Rejected' -or
+        -not [bool]$candidateOperation.receiptValidated -or
+        [bool]$candidateOperation.stateApplied -or
+        [long]$candidateBoundary.beforeStateGeneration -ne
+            [long]$candidateBoundary.afterStateGeneration -or
+        [string]$candidateBoundary.beforeStateHash -cne
+            [string]$candidateBoundary.afterStateHash) {
+        return $false
+    }
+
+    $candidateGeneration = [long]$candidateBoundary.afterStateGeneration
+    $accepted = @($History | Where-Object {
+            [string]$_.Boundary.decisionKind -ceq
+                'ObserveRuntimeUnlockResponderPeerProbeHandoff' -and
+            [string]$_.Operation.operationRole -ceq
+                'peer_acceptance_attempt' -and
+            [string]$_.Operation.receiptStatus -ceq 'Accepted' -and
+            [bool]$_.Operation.receiptValidated -and
+            -not [bool]$_.Operation.stateApplied -and
+            [long]$_.Boundary.afterStateGeneration -lt $candidateGeneration -and
+            [string]$_.Operation.commandIdentity -ceq
+                [string]$candidateOperation.commandIdentity -and
+            [long]$_.Operation.commandGeneration -eq
+                [long]$candidateOperation.commandGeneration -and
+            [string]$_.Operation.commandFingerprint -ceq
+                [string]$candidateOperation.commandFingerprint -and
+            [string]$_.Operation.receiptIdentity -ceq
+                [string]$candidateOperation.receiptIdentity -and
+            [long]$_.Operation.receiptGeneration -eq
+                [long]$candidateOperation.receiptGeneration -and
+            (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $_.Operation.responderProbeHandoff.sourceBoundary `
+                -Right $candidatePayload.sourceBoundary)
+        })
+    if ($accepted.Count -ne 1) {
+        return $false
+    }
+
+    $acceptedGeneration = [long]$accepted[0].Boundary.afterStateGeneration
+    $prepared = @($History | Where-Object {
+            [string]$_.Boundary.decisionKind -ceq
+                'PrepareFileTransferRouteTransition' -and
+            [string]$_.Operation.operationRole -ceq
+                'route_transition_handoff_pending' -and
+            [string]$_.Operation.receiptStatus -ceq 'Prepared' -and
+            [bool]$_.Operation.receiptValidated -and
+            [long]$_.Boundary.afterStateGeneration -gt $acceptedGeneration -and
+            [long]$_.Boundary.afterStateGeneration -lt $candidateGeneration
+        })
+    if ($prepared.Count -ne 1) {
+        return $false
+    }
+    $preparedEntry = $prepared[0]
+    $preparedPayload = $preparedEntry.Operation.responderProbeHandoff
+    $linkedAuthority = [string]$preparedPayload.linkedTransitionAuthorityId
+    $linkedGeneration = [long]$preparedPayload.linkedTransitionGeneration
+    if ($linkedAuthority -in @('', '(none)') -or $linkedGeneration -le 0 -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $preparedPayload.sourceBoundary `
+            -Right $candidatePayload.sourceBoundary)) {
+        return $false
+    }
+
+    $preparedGeneration = [long]$preparedEntry.Boundary.afterStateGeneration
+    $draining = @($History | Where-Object {
+            [string]$_.Boundary.decisionKind -ceq
+                'BeginFileTransferRouteTransitionPhysicalDrain' -and
+            [string]$_.Operation.operationRole -ceq
+                'route_transition_handoff_pending' -and
+            [string]$_.Operation.receiptStatus -ceq 'Draining' -and
+            [bool]$_.Operation.receiptValidated -and
+            [long]$_.Boundary.afterStateGeneration -gt $preparedGeneration -and
+            [long]$_.Boundary.afterStateGeneration -lt $candidateGeneration
+        })
+    if ($draining.Count -ne 1) {
+        return $false
+    }
+    $drainingEntry = $draining[0]
+    $drainingGeneration = [long]$drainingEntry.Boundary.afterStateGeneration
+    $committed = @($History | Where-Object {
+            [string]$_.Boundary.decisionKind -ceq
+                'CommitFileTransferRouteTransition' -and
+            [string]$_.Operation.operationRole -ceq
+                'route_transition_handoff_pending' -and
+            [string]$_.Operation.receiptStatus -ceq 'Committed' -and
+            [bool]$_.Operation.receiptValidated -and
+            [long]$_.Boundary.afterStateGeneration -gt $drainingGeneration -and
+            [long]$_.Boundary.afterStateGeneration -lt $candidateGeneration
+        })
+    if ($committed.Count -ne 1) {
+        return $false
+    }
+    $committedEntry = $committed[0]
+    $committedGeneration = [long]$committedEntry.Boundary.afterStateGeneration
+    $dispositions = @($History | Where-Object {
+            [string]$_.Boundary.decisionKind -ceq
+                'ApplyFileTransferRouteTransitionDispositionReceipt' -and
+            [string]$_.Operation.operationRole -ceq
+                'route_transition_handoff_pending' -and
+            [string]$_.Operation.receiptStatus -ceq 'Committed' -and
+            [bool]$_.Operation.receiptValidated -and
+            [long]$_.Boundary.afterStateGeneration -gt $committedGeneration -and
+            [long]$_.Boundary.afterStateGeneration -eq $candidateGeneration
+        })
+    if ($dispositions.Count -ne 1) {
+        return $false
+    }
+    $dispositionEntry = $dispositions[0]
+    $dispositionPayload = $dispositionEntry.Operation.responderProbeHandoff
+
+    foreach ($entry in @($drainingEntry, $committedEntry, $dispositionEntry)) {
+        $payload = $entry.Operation.responderProbeHandoff
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $payload.sourceBoundary `
+                -Right $candidatePayload.sourceBoundary)) {
+            return $false
+        }
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $dispositionPayload.effectiveBoundary `
+            -Right $candidatePayload.effectiveBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $dispositionPayload.targetBoundary `
+            -Right $candidatePayload.targetBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $candidatePayload.effectiveBoundary `
+            -Right $candidatePayload.targetBoundary)) {
+        return $false
+    }
+
+    $preparedRoute = @($preparedEntry.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'route_transition' -and
+            [string]$_.operationRole -ceq 'current' -and
+            [string]$_.authorityId -ceq $linkedAuthority -and
+            [long]$_.operationGeneration -eq $linkedGeneration -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Prepared'
+        })
+    $drainingRoute = @($drainingEntry.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'route_transition' -and
+            [string]$_.operationRole -ceq 'current' -and
+            [string]$_.authorityId -ceq $linkedAuthority -and
+            [long]$_.operationGeneration -eq $linkedGeneration -and
+            [string]$_.beforeState -ceq 'Prepared' -and
+            [string]$_.afterState -ceq 'Draining' -and
+            [bool]$_.receiptValidated
+        })
+    $committedRoute = @($committedEntry.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'route_transition' -and
+            [string]$_.operationRole -ceq 'terminal' -and
+            [string]$_.authorityId -ceq $linkedAuthority -and
+            [long]$_.operationGeneration -eq $linkedGeneration -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Committed' -and
+            [string]$_.receiptStatus -ceq 'Committed' -and
+            [bool]$_.receiptValidated
+        })
+    $dispositionRoute = @($dispositionEntry.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'route_transition' -and
+            [string]$_.operationRole -ceq 'terminal' -and
+            [string]$_.authorityId -ceq $linkedAuthority -and
+            [long]$_.operationGeneration -eq $linkedGeneration -and
+            [string]$_.beforeState -ceq 'Committed' -and
+            [string]$_.afterState -ceq 'Committed' -and
+            [string]$_.receiptStatus -ceq 'Applied' -and
+            [bool]$_.receiptValidated
+        })
+    $publication = @($committedEntry.Boundary.operations | Where-Object {
+            [string]$_.family -ceq 'route_runtime' -and
+            [string]$_.operationRole -ceq 'route_publication' -and
+            [string]$_.operationKind -ceq 'RouteCommitPublication' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Published' -and
+            [bool]$_.receiptValidated
+        })
+    if ($preparedRoute.Count -ne 1 -or $drainingRoute.Count -ne 1 -or
+        $committedRoute.Count -ne 1 -or $dispositionRoute.Count -ne 1 -or
+        $publication.Count -ne 1) {
+        return $false
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $publication[0].routeRuntime.boundary `
+            -Right $candidatePayload.targetBoundary)) {
+        return $false
+    }
+    return $true
+}
+
 function Get-FileTransferCoordinatorRouteTransitionLifecycleResult {
     param(
         [Parameter(Mandatory = $true)][object[]]$History,
@@ -4991,26 +5278,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             [string]$_.Operation.family -ceq 'responder_probe_handoff'
         })
     foreach ($lineageGroup in @($responderEntries | Group-Object {
-                $payload = $_.Operation.responderProbeHandoff
-                $source = ConvertTo-Json -InputObject $payload.sourceBoundary `
-                    -Depth 16 -Compress
-                @(
-                    [string]$_.Boundary.coordinatorInstanceId,
-                    [string]$payload.transitionMode,
-                    [long]$payload.transactionGeneration,
-                    [long]$payload.offerGeneration,
-                    [long]$payload.pendingAnswerAckGeneration,
-                    [string]$payload.payerDecisionId,
-                    [long]$payload.launchGeneration,
-                    [long]$payload.tunaPathLeaseGeneration,
-                    [string]$payload.tunaPathLeaseListenerRunId,
-                    [string]$payload.ackMessageId,
-                    [string]$payload.ackSourceFingerprint,
-                    [string]$payload.peerProbeFrameFingerprint,
-                    [string]$payload.probeId,
-                    [string]$payload.pairKey,
-                    [string]$payload.pairedReleaseAuthorityId,
-                    $source) -join '|'
+                Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
+                    -Boundary $_.Boundary `
+                    -Operation $_.Operation
             })) {
         $history = @($lineageGroup.Group | Sort-Object {
                 [long]$_.Boundary.decisionUtcMilliseconds
@@ -5038,6 +5308,24 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 [string]$_.Operation.receiptStatus -in @(
                     'Rejected', 'Held')
             })
+        if ($incidentEntries.Count -gt 0) {
+            $openIncidentEntries = New-Object System.Collections.Generic.List[object]
+            foreach ($observationGroup in @($incidentEntries | Group-Object {
+                        Get-FileTransferCoordinatorResponderProbeHandoffObservationKey `
+                            -Entry $_
+                    })) {
+                $observations = @($observationGroup.Group)
+                if (-not (
+                        Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                            -History $history `
+                            -Candidate $observations[0])) {
+                    foreach ($observation in $observations) {
+                        $openIncidentEntries.Add($observation) | Out-Null
+                    }
+                }
+            }
+            $incidentEntries = @($openIncidentEntries.ToArray())
+        }
         if ($incidentEntries.Count -eq 0 -and $prepared.Count -eq 0) {
             $incidentEntries = @($history | Where-Object {
                     [string]$_.Boundary.decisionKind -ceq
