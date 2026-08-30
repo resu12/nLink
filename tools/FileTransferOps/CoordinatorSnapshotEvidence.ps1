@@ -3032,10 +3032,127 @@ function Get-FileTransferCoordinatorResponderProbeHandoffObservationKey {
         (ConvertTo-Json -InputObject $payload.targetBoundary -Depth 16 -Compress)) -join '|'
 }
 
+function New-FileTransferCoordinatorSnapshotAggregateIntervalIndex {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Entries)
+
+    $index = @{}
+    foreach ($entry in $Entries) {
+        $boundary = $entry.Boundary
+        $key = "$($boundary.coordinatorInstanceId)|$($boundary.writer)"
+        if (-not $index.ContainsKey($key)) {
+            $index[$key] = @{ Boundaries = @{}; Mutations = @{} }
+        }
+        $stream = $index[$key]
+        $stream.Boundaries[[string]$boundary.boundaryId] = $entry
+        if ([long]$boundary.beforeStateGeneration -eq
+            [long]$boundary.afterStateGeneration) {
+            continue
+        }
+        $generation = [long]$boundary.beforeStateGeneration
+        if (-not $stream.Mutations.ContainsKey($generation)) {
+            $stream.Mutations[$generation] =
+                [System.Collections.Generic.List[object]]::new()
+        }
+        $stream.Mutations[$generation].Add($entry)
+    }
+    return $index
+}
+
+function Test-FileTransferCoordinatorResponderHandoffConsumedInterval {
+    param(
+        [Parameter(Mandatory = $true)]$Disposition,
+        [Parameter(Mandatory = $true)]$Candidate,
+        [Parameter(Mandatory = $true)][string]$LinkedAuthority,
+        [Parameter(Mandatory = $true)][long]$LinkedGeneration,
+        $AggregateIndex = $null
+    )
+
+    $start = $Disposition.Boundary
+    $end = $Candidate.Boundary
+    $generation = [long]$start.afterStateGeneration
+    $hash = [string]$start.afterStateHash
+    if ($generation -eq [long]$end.beforeStateGeneration) {
+        return $hash -ceq [string]$end.beforeStateHash
+    }
+    $key = "$($end.coordinatorInstanceId)|$($end.writer)"
+    if ($generation -gt [long]$end.beforeStateGeneration -or
+        $null -eq $AggregateIndex -or -not $AggregateIndex.ContainsKey($key) -or
+        [string]$start.coordinatorInstanceId -cne [string]$end.coordinatorInstanceId -or
+        [string]$start.writer -cne [string]$end.writer) {
+        return $false
+    }
+    $stream = $AggregateIndex[$key]
+    if (-not $stream.Boundaries.ContainsKey([string]$start.boundaryId) -or
+        -not $stream.Boundaries.ContainsKey([string]$end.boundaryId)) {
+        return $false
+    }
+    $startEntry = $stream.Boundaries[[string]$start.boundaryId]
+    $endEntry = $stream.Boundaries[[string]$end.boundaryId]
+    $target = $Candidate.Operation.responderProbeHandoff.targetBoundary
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $target) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $startEntry.AfterBoundary -Right $target) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $endEntry.BeforeBoundary -Right $target) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $endEntry.AfterBoundary -Right $target)) {
+        return $false
+    }
+
+    $retainedOperations = @{}
+    foreach ($operation in @($start.operations)) {
+        if ([string]$operation.family -ceq 'responder_probe_handoff' -or
+            ([string]$operation.family -ceq 'route_transition' -and
+             [string]$operation.authorityId -ceq $LinkedAuthority -and
+             [long]$operation.operationGeneration -eq $LinkedGeneration)) {
+            $retainedOperations[[string]$operation.operationKey] = ConvertTo-Json `
+                -InputObject ($operation | Select-Object * -ExcludeProperty beforeState, stateApplied) `
+                -Depth 64 -Compress
+        }
+    }
+    while ($generation -lt [long]$end.beforeStateGeneration) {
+        if (-not $stream.Mutations.ContainsKey($generation) -or
+            $stream.Mutations[$generation].Count -ne 1) {
+            return $false
+        }
+        $entry = $stream.Mutations[$generation][0]
+        $boundary = $entry.Boundary
+        if ([long]$boundary.afterStateGeneration -ne ($generation + 1L) -or
+            [string]$boundary.beforeStateHash -cne $hash -or
+            [string]$boundary.beforeStateHash -ceq [string]$boundary.afterStateHash -or
+            [string]$entry.SessionId -cne [string]$startEntry.SessionId -or
+            [string]$entry.TransferId -cne [string]$startEntry.TransferId -or
+            [string]$entry.Direction -cne [string]$startEntry.Direction -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $entry.BeforeBoundary -Right $target) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $entry.AfterBoundary -Right $target)) {
+            return $false
+        }
+        foreach ($operation in @($boundary.operations)) {
+            if ([string]$operation.family -cne 'responder_probe_handoff' -and
+                -not ([string]$operation.family -ceq 'route_transition' -and
+                      [string]$operation.authorityId -ceq $LinkedAuthority)) {
+                continue
+            }
+            $operationKey = [string]$operation.operationKey
+            if ([string]$operation.beforeState -cne [string]$operation.afterState -or
+                -not $retainedOperations.ContainsKey($operationKey) -or
+                $retainedOperations[$operationKey] -cne (ConvertTo-Json `
+                    -InputObject ($operation | Select-Object * -ExcludeProperty beforeState, stateApplied) `
+                    -Depth 64 -Compress)) {
+                return $false
+            }
+        }
+        $generation = [long]$boundary.afterStateGeneration
+        $hash = [string]$boundary.afterStateHash
+    }
+    return $hash -ceq [string]$end.beforeStateHash -and
+        [string]$endEntry.SessionId -ceq [string]$startEntry.SessionId -and
+        [string]$endEntry.TransferId -ceq [string]$startEntry.TransferId -and
+        [string]$endEntry.Direction -ceq [string]$startEntry.Direction
+}
+
 function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
     param(
         [Parameter(Mandatory = $true)][object[]]$History,
-        [Parameter(Mandatory = $true)]$Candidate
+        [Parameter(Mandatory = $true)]$Candidate,
+        $AggregateIndex = $null
     )
 
     $candidateBoundary = $Candidate.Boundary
@@ -3151,7 +3268,7 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
             [string]$_.Operation.receiptStatus -ceq 'Committed' -and
             [bool]$_.Operation.receiptValidated -and
             [long]$_.Boundary.afterStateGeneration -gt $committedGeneration -and
-            [long]$_.Boundary.afterStateGeneration -eq $candidateGeneration
+            [long]$_.Boundary.afterStateGeneration -le $candidateGeneration
         })
     if ($dispositions.Count -ne 1) {
         return $false
@@ -3234,7 +3351,10 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
             -Right $candidatePayload.targetBoundary)) {
         return $false
     }
-    return $true
+    return Test-FileTransferCoordinatorResponderHandoffConsumedInterval `
+        -Disposition $dispositionEntry -Candidate $Candidate `
+        -LinkedAuthority $linkedAuthority -LinkedGeneration $linkedGeneration `
+        -AggregateIndex $AggregateIndex
 }
 
 function Get-FileTransferCoordinatorRouteTransitionLifecycleResult {
@@ -3662,6 +3782,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
 
     $errors = [System.Collections.Generic.List[string]]::new()
     $boundaries = [System.Collections.Generic.List[object]]::new()
+    $aggregateEntries = [System.Collections.Generic.List[object]]::new()
     $effects = [System.Collections.Generic.List[object]]::new()
     $seenTransitions = @{}
     $seenEffects = @{}
@@ -3670,6 +3791,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $selectionModes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 
     foreach ($record in @($records)) {
+        $transitionErrorCount = $errors.Count
         $line = $record.Line
         $instanceId = $record.CoordinatorInstanceId
         if ([string]::IsNullOrWhiteSpace($instanceId)) {
@@ -4154,6 +4276,18 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     unresolvedCount = 0
                 }
                 $boundaries.Add([pscustomobject]$boundary)
+                if ($errors.Count -eq $transitionErrorCount -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $envelope.aggregate.beforeBoundary) -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $envelope.aggregate.afterBoundary)) {
+                    $aggregateEntries.Add([pscustomobject]@{
+                        Boundary = [pscustomobject]$boundary
+                        BeforeBoundary = $envelope.aggregate.beforeBoundary
+                        AfterBoundary = $envelope.aggregate.afterBoundary
+                        SessionId = [string]$envelope.sessionId
+                        TransferId = [string]$envelope.transferId
+                        Direction = [string]$envelope.direction
+                    })
+                }
                 $stream.CurrentGeneration = $afterGeneration
                 $stream.CurrentHash = $afterHash
                 $stream.TransitionCount++
@@ -5348,6 +5482,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $aggregateBoundaryIndex = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex `
+        -Entries @($aggregateEntries)
     $responderEntries = @($operationHistory | Where-Object {
             [string]$_.Operation.family -ceq 'responder_probe_handoff'
         })
@@ -5392,7 +5528,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 if (-not (
                         Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
                             -History $history `
-                            -Candidate $observations[0])) {
+                            -Candidate $observations[0] `
+                            -AggregateIndex $aggregateBoundaryIndex)) {
                     foreach ($observation in $observations) {
                         $openIncidentEntries.Add($observation) | Out-Null
                     }

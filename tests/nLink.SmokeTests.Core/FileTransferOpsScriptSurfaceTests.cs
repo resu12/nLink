@@ -935,6 +935,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 $operations = @($operation) + @($otherOperations)
                 [pscustomobject]@{
                     Boundary=[pscustomobject]@{
+                        boundaryId="$decisionKind-$beforeGeneration-$afterGeneration"
                         coordinatorInstanceId='coordinator-1'; writer='writer-helper'
                         sessionId='session-1'; transferId='transfer-1'; direction='inbound'
                         decisionKind=$decisionKind; decisionStatus=$decisionStatus
@@ -1013,6 +1014,110 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             if ($originalKey -ceq $mutatedKey) {
                 throw 'A probe mutation reused the completed responder lineage key.'
             }
+
+            function New-AggregateEntry([object]$entry) {
+                [pscustomobject]@{
+                    Boundary=$entry.Boundary; BeforeBoundary=$target; AfterBoundary=$target
+                    SessionId='session-1'; TransferId='transfer-1'; Direction='inbound'
+                }
+            }
+            $closedHistory=$history | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            foreach ($entry in $closedHistory) {
+                $entry.Boundary.beforeStateGeneration+=8L
+                $entry.Boundary.afterStateGeneration+=8L
+                $entry.Boundary.beforeStateHash="hash-$($entry.Boundary.beforeStateGeneration)"
+                $entry.Boundary.afterStateHash="hash-$($entry.Boundary.afterStateGeneration)"
+            }
+            $late=$candidate | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $late.Boundary.boundaryId='late-3108'
+            $late.Boundary.beforeStateGeneration=15L
+            $late.Boundary.afterStateGeneration=15L
+            $late.Boundary.beforeStateHash='hash-15'
+            $late.Boundary.afterStateHash='hash-15'
+            $lateCopy=$late | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $lateCopy.Boundary.boundaryId='late-3141'
+            $unrelated=@(12L..14L | ForEach-Object {
+                New-AggregateEntry (New-Entry $_ ($_+1L) 'PressureMutation' 'Accepted' ([pscustomobject]@{
+                    family='regular_v4_frontier_repair_pressure'; operationRole='pressure_binding_installed'
+                    operationKey="pressure-$_"; authorityId="pressure-$_"; operationGeneration=$_
+                    beforeState='Pending'; afterState='Installed'; stateApplied=$true
+                }))
+            })
+            $entries=@((New-AggregateEntry $closedHistory[-1]))+$unrelated+@(
+                (New-AggregateEntry $late),(New-AggregateEntry $lateCopy))
+            function Assert-LateConsumed([object[]]$interval, [bool]$expected) {
+                $index=New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries $interval
+                $actual=Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History (@($closedHistory)+@($late,$lateCopy)) -Candidate $late -AggregateIndex $index
+                if ($actual -ne $expected) { throw "Unexpected aggregate-interval consumption: expected=$expected" }
+            }
+            Assert-LateConsumed $entries $true
+            $index=New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries $entries
+            if (-not (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History (@($closedHistory)+@($late,$lateCopy)) -Candidate $lateCopy -AggregateIndex $index)) {
+                throw 'Second exact late duplicate was not consumed.'
+            }
+            if (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History (@($closedHistory)+@($late)) -Candidate $late) {
+                throw 'A later generation was consumed without aggregate interval proof.'
+            }
+            Assert-LateConsumed @($entries[0],$entries[1],$entries[3],$entries[4],$entries[5]) $false
+            Assert-LateConsumed ($entries+@($entries[2])) $false
+            foreach ($field in @('route','protocolVersion','liveRouteEpoch','routePublicationGeneration',
+                    'routeCommitGeneration','runtimeGeneration','terminalGeneration','legGeneration',
+                    'transportEpoch','bridgeRecoveryGeneration','checkpointGeneration','checkpointRequestId',
+                    'dataSessionIdentity','dataSessionGeneration')) {
+                $mutated=$entries | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                if ($mutated[1].AfterBoundary.$field -is [string]) { $mutated[1].AfterBoundary.$field='changed' }
+                else { $mutated[1].AfterBoundary.$field++ }
+                # Restore A after B: the candidate still has the original target scope.
+                $mutated[2].BeforeBoundary=$mutated[1].AfterBoundary
+                Assert-LateConsumed $mutated $false
+            }
+            foreach ($mutation in @(
+                    { param($e) $e[2].Boundary.beforeStateHash='wrong-hash' },
+                    { param($e) $e[2].Boundary.afterStateGeneration=12L },
+                    { param($e) $e[2].Boundary.writer='other-writer' },
+                    { param($e) $e[2].Boundary.coordinatorInstanceId='other-coordinator' },
+                    { param($e) $e[2].SessionId='other-session' },
+                    { param($e) $e[2].TransferId='other-transfer' },
+                    { param($e) $e[2].Direction='outbound' },
+                    { param($e) $e[4].BeforeBoundary.dataSessionGeneration=2L },
+                    { param($e) $e[4].SessionId='other-session' })) {
+                $mutated=$entries | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                & $mutation $mutated
+                Assert-LateConsumed $mutated $false
+            }
+            $carry=$closedHistory[-1].Operation | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $carry.beforeState=$carry.afterState
+            $carry.stateApplied=$true
+            $carried=$entries | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $carried[2].Boundary.operations+=@($carry)
+            Assert-LateConsumed $carried $true
+            foreach ($mutation in @(
+                    { param($o) $o.afterState='Invalidated' },
+                    { param($o) $o.authorityId='successor-authority' },
+                    { param($o) $o.commandFingerprint='conflict' },
+                    { param($o) $o.responderProbeHandoff.probeId='replacement-probe' })) {
+                $mutated=$carried | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                & $mutation $mutated[2].Boundary.operations[-1]
+                Assert-LateConsumed $mutated $false
+            }
+            $retired=$entries | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $retired[2].Boundary.operations+=@((New-RouteOperation 'terminal' 'Committed' 'None' 'Invalidated' $true))
+            Assert-LateConsumed $retired $false
+            foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity','receiptGeneration')) {
+                $wrong=$late | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                if ($wrong.Operation.$field -is [string]) { $wrong.Operation.$field='wrong' }
+                else { $wrong.Operation.$field++ }
+                if (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                        -History (@($closedHistory)+@($wrong)) -Candidate $wrong -AggregateIndex $index) {
+                    throw "Wrong observation $field was consumed."
+                }
+            }
+            $other=$entries | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            foreach ($entry in $other) { $entry.Boundary.coordinatorInstanceId='other-cycle'; $entry.Boundary.writer='other-writer' }
+            Assert-LateConsumed ($entries+$other) $true
             """;
 
         var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
