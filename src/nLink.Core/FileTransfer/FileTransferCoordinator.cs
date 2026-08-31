@@ -23134,7 +23134,9 @@ internal static partial class FileTransferCoordinator
     private static bool IsEligibleRuntimeUnlockRetryRepairSettlementRelease(
         FileTransferCoordinatorState state,
         FileTransferRegularV4FrontierRepairSettlement settlement)
-        => settlement.Outcome is (
+        => state.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
+           settlement.TargetTransport == FileTransferTransportKind.RegularNkn &&
+           settlement.Outcome is (
                FileTransferRegularV4FrontierRepairSettlementOutcome
                    .ProgressObserved or
                FileTransferRegularV4FrontierRepairSettlementOutcome
@@ -23156,7 +23158,19 @@ internal static partial class FileTransferCoordinator
         FileTransferRegularV4FrontierRepairSettlement settlement)
     {
         var publication = repairDecision.RoutePublicationToken;
+        var expectedTransport = repairDecision.CurrentRoute switch
+        {
+            FileTransferRoute.RegularNknV4Fast => FileTransferTransportKind.RegularNkn,
+            FileTransferRoute.FileTunaV4 when publication?.RouteCommitGeneration > 0
+                => FileTransferTransportKind.Tuna,
+            _ => FileTransferTransportKind.Unknown,
+        };
         return settlement is not null &&
+               expectedTransport != FileTransferTransportKind.Unknown &&
+               state.RouteSelection.Route == repairDecision.CurrentRoute &&
+               state.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+               repairDecision.CurrentProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+               publication?.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
                !settlement.AuthorityId.IsDefault &&
                settlement.AuthorityId == repairDecision.AuthorityId &&
                settlement.DecisionGeneration == repairDecision.RepairGeneration &&
@@ -23177,7 +23191,8 @@ internal static partial class FileTransferCoordinator
                settlement.BridgeDecisionGeneration == repairDecision.BridgeDecisionGeneration &&
                settlement.RoutePublicationGeneration == publication?.PublicationGeneration &&
                settlement.RouteCommitGeneration == publication?.RouteCommitGeneration &&
-               settlement.TargetTransport == FileTransferTransportKind.RegularNkn;
+               publication?.TargetTransport == expectedTransport &&
+               settlement.TargetTransport == expectedTransport;
     }
 
     private static bool RegularV4RepairSettlementMatchesCurrentSource(

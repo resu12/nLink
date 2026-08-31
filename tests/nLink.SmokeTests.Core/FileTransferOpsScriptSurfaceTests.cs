@@ -4446,6 +4446,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    public async Task FileTransferOps_FileTunaPressureSettlementUsesSharedSnapshotEvaluation(
+        NLink.Core.FileTransfer.FileTransferDirection direction)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-tuna-settlement", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateFileTunaPressureSettlementSnapshotFixture(direction)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "FileTunaPressureSettlementSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(7)]
