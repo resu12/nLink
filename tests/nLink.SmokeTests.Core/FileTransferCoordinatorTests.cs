@@ -5793,6 +5793,106 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(committedInvalidationOperation.ReceiptValidated);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferRuntimeSuite", "RuntimeUnlockRetryLifecycle")]
+    public void RuntimeUnlockRetryLifecycle_IssuedReceiptRemainsStagedUntilExactInstall(bool fallback)
+    {
+        var envelopes = CreateStagedRetryInstallSnapshotFixture(fallback);
+        var issuance = envelopes[2];
+        var pending = Assert.Single(issuance.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_pending");
+        Assert.Equal("Staged", pending.BeforeState);
+        Assert.Equal("Staged", pending.AfterState);
+        Assert.True(pending.StateApplied);
+        Assert.Equal(issuance.Aggregate.BeforeStateGeneration + 1, issuance.Aggregate.AfterStateGeneration);
+        Assert.NotEqual(issuance.Aggregate.BeforeStateFingerprint, issuance.Aggregate.AfterStateFingerprint);
+        var receipt = Assert.Single(pending.RuntimeUnlockRetry!.Receipts, item => item.Stage == "install");
+        Assert.True(receipt.ReceiptValidated);
+        Assert.Equal("Staged", receipt.ReceiptStatus);
+        Assert.Equal(receipt.ReceiptFingerprint, pending.ReceiptFingerprint);
+
+        foreach (var duplicate in new[] { envelopes[3], envelopes[5] })
+        {
+            Assert.Equal("Idempotent", duplicate.DecisionStatus);
+            Assert.Equal(duplicate.Aggregate.BeforeStateGeneration, duplicate.Aggregate.AfterStateGeneration);
+            Assert.Equal(duplicate.Aggregate.BeforeStateFingerprint, duplicate.Aggregate.AfterStateFingerprint);
+            Assert.All(duplicate.Aggregate.Operations, operation => Assert.False(operation.StateApplied));
+        }
+        var duplicatePending = Assert.Single(envelopes[3].Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_pending");
+        Assert.Equal("Idempotent", duplicatePending.ReceiptStatus);
+        Assert.Equal(receipt, Assert.Single(duplicatePending.RuntimeUnlockRetry!.Receipts,
+            item => item.Stage == "install"));
+        Assert.NotEqual(receipt.ReceiptFingerprint, duplicatePending.ReceiptFingerprint);
+
+        var commit = envelopes[4];
+        Assert.Equal(commit.Aggregate.BeforeStateGeneration + 1, commit.Aggregate.AfterStateGeneration);
+        var retired = Assert.Single(commit.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_pending");
+        var installed = Assert.Single(commit.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_installed");
+        Assert.Equal("Staged", retired.BeforeState);
+        Assert.Equal("None", retired.AfterState);
+        Assert.Equal("None", installed.BeforeState);
+        Assert.Equal("Installed", installed.AfterState);
+        Assert.Equal(retired.AuthorityId, installed.AuthorityId);
+        Assert.Equal(retired.OperationGeneration, installed.OperationGeneration);
+        Assert.Equal(retired.ReceiptGeneration, installed.ReceiptGeneration);
+        Assert.Equal(retired.ReceiptFingerprint, installed.ReceiptFingerprint);
+        Assert.Equal(retired.RuntimeUnlockRetry!.SourceBoundary, installed.RuntimeUnlockRetry!.SourceBoundary);
+        Assert.Equal("Staged", pending.AfterState); // Earlier immutable envelope remains pending.
+    }
+
+    internal static FileTransferCoordinatorTransitionEnvelope[] CreateStagedRetryInstallSnapshotFixture(bool fallback)
+    {
+        RuntimeUnlockRetryDispatchDecision granted;
+        RuntimeUnlockRetryDispatchAuthorityRequest request;
+        if (fallback)
+        {
+            var source = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+            request = source.Request;
+            var state = source.State with
+            {
+                PersistentState = source.State.PersistentState with
+                {
+                    CoordinatorInstanceId = "staged-install-fallback",
+                    SnapshotStateGeneration = 0,
+                },
+            };
+            granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(state, request,
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, source.TailYield.AuthorityId,
+                source.TailYield.YieldGeneration, source.TailYield.YieldKind.ToString());
+        }
+        else
+        {
+            var source = AuthorizeRegularRuntimeUnlockRetryDispatchSource(
+                coordinatorInstanceId: "staged-install-regular");
+            request = source.Request;
+            granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(source.State, request,
+                RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement, source.Release.AuthorityId,
+                source.Release.RepairGeneration, "ProgressObserved");
+        }
+        Assert.True(granted.Granted, granted.Reason);
+        var staged = StagePersistentRetryLifecycle(granted.State, granted, 30_000);
+        var issued = FileTransferCoordinator.IssueRuntimeUnlockRetryDispatchInstallReceipt(
+            staged.State, granted, request, 30_001);
+        var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(issued.Receipt);
+        var duplicate = FileTransferCoordinator.IssueRuntimeUnlockRetryDispatchInstallReceipt(
+            issued.State, granted, request, 30_002);
+        var installed = FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall(issued.State,
+            new RuntimeUnlockRetryDispatchInstallResult(RuntimeUnlockRetryDispatchInstallStatus.Installed,
+                "installed", receipt), 30_003);
+        var duplicateInstall = FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall(installed.State,
+            new RuntimeUnlockRetryDispatchInstallResult(RuntimeUnlockRetryDispatchInstallStatus.Idempotent,
+                "idempotent", receipt), 30_004);
+        return new[] { granted.SnapshotEnvelope, staged.SnapshotEnvelope, issued.SnapshotEnvelope,
+                duplicate.SnapshotEnvelope, installed.SnapshotEnvelope, duplicateInstall.SnapshotEnvelope }
+            .Select(envelope => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(envelope)).ToArray();
+    }
+
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockRetryLifecycle")]
     public void RuntimeUnlockRetryLifecycle_InitialRequestOrdinalsAreCoordinatorPrepared()

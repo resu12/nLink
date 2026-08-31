@@ -1705,6 +1705,128 @@ function Get-FileTransferCoordinatorSnapshotFamily1AttemptReceiptStageVariant {
     return '(none)'
 }
 
+function Test-FileTransferCoordinatorSnapshotStagedRetryInstallReceipt {
+    param([Parameter(Mandatory = $true)]$Operation)
+
+    if ([string]$Operation.family -cne 'runtime_unlock_retry_lifecycle' -or
+        [string]$Operation.operationRole -cne 'attempt_pending' -or
+        [string]$Operation.operationKind -cne 'RetryAttempt' -or
+        [string]$Operation.beforeState -cne 'Staged' -or
+        [string]$Operation.afterState -notin @('Staged', 'None') -or
+        $null -eq $Operation.runtimeUnlockRetry) { return $false }
+    $retry = $Operation.runtimeUnlockRetry
+    if ([string]$retry.role -cne 'attempt_pending' -or
+        [long]$Operation.operationGeneration -le 0 -or
+        [long]$Operation.operationGeneration -ne [long]$retry.authorityGeneration -or
+        [string]::IsNullOrWhiteSpace([string]$Operation.authorityId) -or
+        [string]$Operation.authorityId -ceq '(none)' -or
+        [string]$Operation.operationKey -cne
+            "runtime_unlock_retry_lifecycle|attempt_pending|$($Operation.authorityId)|$($Operation.operationGeneration)|RetryAttempt" -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $retry.sourceBoundary)) {
+        return $false
+    }
+    $receipts = @($retry.receipts)
+    $staging = @($receipts | Where-Object { [string]$_.stage -ceq 'stage' })
+    $install = @($receipts | Where-Object { [string]$_.stage -ceq 'install' })
+    if ($receipts.Count -ne 2 -or $staging.Count -ne 1 -or $install.Count -ne 1) {
+        return $false
+    }
+    foreach ($receipt in $receipts) {
+        foreach ($field in @('commandIdentity', 'commandFingerprint', 'receiptIdentity', 'receiptFingerprint')) {
+            if ([string]::IsNullOrWhiteSpace([string]$receipt.$field) -or
+                [string]$receipt.$field -ceq '(none)') { return $false }
+        }
+        if (-not [bool]$receipt.receiptValidated -or
+            [long]$receipt.commandGeneration -le 0 -or
+            [long]$receipt.commandGeneration -ne [long]$receipt.receiptGeneration -or
+            [string]$receipt.commandIdentity -cne [string]$receipt.receiptIdentity) {
+            return $false
+        }
+    }
+    if ([string]$staging[0].receiptStatus -notin @('Staged', 'Idempotent') -or
+        [long]$staging[0].commandGeneration -ne [long]$retry.dispatchAttemptGeneration -or
+        [string]$install[0].receiptStatus -cne 'Staged' -or
+        [string]$staging[0].commandFingerprint -cne [string]$install[0].commandFingerprint) {
+        return $false
+    }
+    if ([bool]$Operation.stateApplied) {
+        foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint',
+                'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$Operation.$field -cne [string]$install[0].$field) { return $false }
+        }
+    }
+    else {
+        # Unchanged attempts carry a decision receipt above the retained install receipt.
+        if ([string]$Operation.afterState -cne 'Staged' -or
+            [string]$Operation.receiptStatus -notin @('Idempotent', 'Rejected') -or
+            -not [bool]$Operation.receiptValidated -or
+            [long]$Operation.commandGeneration -le 0 -or
+            [long]$Operation.receiptGeneration -le 0) { return $false }
+        foreach ($field in @('commandIdentity', 'commandFingerprint', 'receiptIdentity', 'receiptFingerprint')) {
+            if ([string]::IsNullOrWhiteSpace([string]$Operation.$field) -or
+                [string]$Operation.$field -ceq '(none)') { return $false }
+        }
+    }
+    return $true
+}
+
+function Test-FileTransferCoordinatorSnapshotStagedRetryInstallBoundary {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+    if (-not (Test-FileTransferCoordinatorSnapshotStagedRetryInstallReceipt -Operation $Operation)) {
+        return $false
+    }
+    $aggregate = $Envelope.aggregate
+    if (@($aggregate.operations | Where-Object {
+            [string]$_.operationKey -ceq [string]$Operation.operationKey
+        }).Count -ne 1) { return $false }
+    if (-not [bool]$Operation.stateApplied) {
+        return [string]$Envelope.decisionStatus -ceq [string]$Operation.receiptStatus -and
+            [long]$aggregate.beforeStateGeneration -eq [long]$aggregate.afterStateGeneration -and
+            [string]$aggregate.beforeStateFingerprint -ceq [string]$aggregate.afterStateFingerprint
+    }
+    if ([string]$Envelope.decisionStatus -cne 'Accepted' -or
+        [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1) -or
+        [string]$aggregate.beforeStateFingerprint -ceq [string]$aggregate.afterStateFingerprint) {
+        return $false
+    }
+    if ([string]$Operation.afterState -ceq 'Staged') {
+        return [string]$Envelope.decisionKind -ceq 'IssueRuntimeUnlockRetryDispatchInstallReceipt'
+    }
+    if ([string]$Envelope.decisionKind -cne 'CommitRuntimeUnlockRetryDispatchInstall') { return $false }
+    $entrants = @($aggregate.operations | Where-Object {
+            [string]$_.family -ceq 'runtime_unlock_retry_lifecycle' -and
+            [string]$_.operationRole -ceq 'attempt_installed' -and
+            [string]$_.authorityId -ceq [string]$Operation.authorityId
+        })
+    if ($entrants.Count -ne 1) { return $false }
+    $entrant = $entrants[0]
+    if ([string]$entrant.operationKind -cne 'RetryAttempt' -or
+        [string]$entrant.beforeState -cne 'None' -or [string]$entrant.afterState -cne 'Installed' -or
+        -not [bool]$entrant.stateApplied -or
+        [long]$entrant.operationGeneration -ne [long]$Operation.operationGeneration -or
+        $null -eq $entrant.runtimeUnlockRetry -or
+        [string]$entrant.runtimeUnlockRetry.role -cne 'attempt_installed' -or
+        [long]$entrant.runtimeUnlockRetry.authorityGeneration -ne [long]$Operation.operationGeneration -or
+        [long]$entrant.runtimeUnlockRetry.dispatchAttemptGeneration -ne [long]$Operation.runtimeUnlockRetry.dispatchAttemptGeneration -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $Operation.runtimeUnlockRetry.sourceBoundary -Right $entrant.runtimeUnlockRetry.sourceBoundary)) {
+        return $false
+    }
+    $pendingInstall = @($Operation.runtimeUnlockRetry.receipts | Where-Object { [string]$_.stage -ceq 'install' })[0]
+    $installedReceipts = @($entrant.runtimeUnlockRetry.receipts | Where-Object { [string]$_.stage -ceq 'install' })
+    if ($installedReceipts.Count -ne 1 -or
+        [string]$installedReceipts[0].receiptStatus -cne 'Installed') { return $false }
+    foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint',
+            'receiptIdentity', 'receiptGeneration', 'receiptFingerprint', 'receiptValidated')) {
+        if ([string]$pendingInstall.$field -cne [string]$installedReceipts[0].$field -or
+            [string]$entrant.$field -cne [string]$installedReceipts[0].$field) { return $false }
+    }
+    return [string]$entrant.receiptStatus -ceq 'Installed'
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -1755,6 +1877,11 @@ function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
     }
     foreach ($receipt in @($Operation.runtimeUnlockRetry.receipts)) {
         $stage = [string]$receipt.stage
+        if ($stage -ceq 'install' -and [string]$receipt.receiptStatus -ceq 'Staged') {
+            if (-not (Test-FileTransferCoordinatorSnapshotStagedRetryInstallBoundary `
+                    -Envelope $Envelope -Operation $Operation)) { return $false }
+            continue
+        }
         if (-not $script:FileTransferCoordinatorSnapshotFamily2ReceiptStages.Contains($stage) -or
             [string]$receipt.receiptStatus -notin
                 @($script:FileTransferCoordinatorSnapshotFamily2ReceiptStages[$stage])) {
@@ -4048,6 +4175,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
                                 -Envelope $envelope `
                                 -Operation $operation
+                        if ($null -ne $operation.runtimeUnlockRetry -and
+                            @($operation.runtimeUnlockRetry.receipts | Where-Object {
+                                [string]$_.stage -ceq 'install' -and
+                                [string]$_.receiptStatus -ceq 'Staged'
+                            }).Count -gt 0) {
+                            $variant = 'family2_staged_install_receipt_omitted_from_catalog'
+                        }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -4515,6 +4649,11 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             })
         if ($matches.Count -ne 1) {
             $errors.Add("snapshot_authority_effect_unbound:$($effect.LineIndex)")
+        }
+        elseif ($effect.Family -ceq 'runtime_unlock_retry_lifecycle' -and
+            $effect.EffectKind -ceq 'install_committed' -and
+            [string]$matches[0].Operation.operationRole -ceq 'attempt_pending') {
+            $errors.Add("snapshot_authority_effect_install_before_commit:$($effect.LineIndex)")
         }
     }
 
@@ -6031,7 +6170,11 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 }
                 $requiredEffectKind = switch -Exact ([string]$receipt.stage) {
                     'stage' { 'dispatch_stage_observed'; break }
-                    'install' { 'install_committed'; break }
+                    'install' {
+                        if (-not (Test-FileTransferCoordinatorSnapshotStagedRetryInstallReceipt `
+                                -Operation $entry.Operation)) { 'install_committed' }
+                        break
+                    }
                     'execution' {
                         if ([bool]$entry.Operation.runtimeUnlockRetry.dispatchObserved) {
                             'execution_observed'
@@ -6046,6 +6189,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 }
                 $matchingEffects = @($exactEffects | Where-Object {
                         [string]$_.EffectKind -ceq $requiredEffectKind -and
+                        ($requiredEffectKind -cne 'install_committed' -or
+                         [string]$entry.Operation.beforeState -cne 'None' -or
+                         [string]$entry.Operation.afterState -cne 'Installed' -or
+                         ([string]$_.TransitionId -ceq [string]$entry.Boundary.boundaryId -and
+                          [string]$_.OperationKey -ceq [string]$entry.Operation.operationKey -and
+                          [long]$_.StateGeneration -eq [long]$entry.Boundary.afterStateGeneration)) -and
                         [string]$_.ReceiptIdentity -ceq
                             [string]$receipt.receiptIdentity -and
                         [long]$_.ReceiptGeneration -eq
