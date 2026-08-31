@@ -5855,6 +5855,24 @@ public sealed class FileTransferCoordinatorTests
             invalidationCommand.CommandId.ToString(),
             invalidationOperation.OperationKey,
             StringComparison.Ordinal);
+        Assert.Equal("None", invalidationOperation.BeforeState);
+        Assert.Equal("Pending", invalidationOperation.AfterState);
+        Assert.True(invalidationOperation.StateApplied);
+        Assert.Equal(invalidationEnvelope.Aggregate.BeforeStateGeneration + 1,
+            invalidationEnvelope.Aggregate.AfterStateGeneration);
+        Assert.NotEqual(invalidationEnvelope.Aggregate.BeforeStateFingerprint,
+            invalidationEnvelope.Aggregate.AfterStateFingerprint);
+        var pendingReceipt = Assert.Single(invalidationOperation.RuntimeUnlockRetry!.Receipts);
+        Assert.Equal("scope_invalidation", pendingReceipt.Stage);
+        Assert.Equal(invalidationCommand.CommandId.ToString(), pendingReceipt.CommandIdentity);
+        Assert.Equal(invalidationCommand.InvalidationGeneration, pendingReceipt.CommandGeneration);
+        Assert.Equal(invalidationOperation.OperationGeneration, pendingReceipt.CommandGeneration);
+        Assert.Equal("(none)", pendingReceipt.ReceiptIdentity);
+        Assert.Equal(0, pendingReceipt.ReceiptGeneration);
+        Assert.Equal("(none)", pendingReceipt.ReceiptFingerprint);
+        Assert.Equal("Pending", pendingReceipt.ReceiptStatus);
+        Assert.Equal(invalidationCommand.Reason, pendingReceipt.ReceiptReason);
+        Assert.False(pendingReceipt.ReceiptValidated);
 
         var duplicateInvalidation = FileTransferCoordinator
             .PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
@@ -5942,6 +5960,49 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(retired.ReceiptFingerprint, installed.ReceiptFingerprint);
         Assert.Equal(retired.RuntimeUnlockRetry!.SourceBoundary, installed.RuntimeUnlockRetry!.SourceBoundary);
         Assert.Equal("Staged", pending.AfterState); // Earlier immutable envelope remains pending.
+    }
+
+    internal static FileTransferCoordinatorTransitionEnvelope[] CreatePendingScopeInvalidationSnapshotFixture(bool fallback)
+    {
+        // Use the same production authorization/staging helpers as the runtime contract tests.
+        RuntimeUnlockRetryDispatchDecision granted;
+        if (fallback)
+        {
+            var fixture = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+            granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(fixture.State, fixture.Request,
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, fixture.TailYield.AuthorityId,
+                fixture.TailYield.YieldGeneration, fixture.TailYield.YieldKind.ToString());
+        }
+        else
+        {
+            var fixture = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+            granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(fixture.State, fixture.Request,
+                RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement, fixture.Release.AuthorityId,
+                fixture.Release.RepairGeneration, "ProgressObserved");
+        }
+        Assert.True(granted.Granted, granted.Reason);
+        var staged = StagePersistentRetryLifecycle(granted.State, granted, 40_000);
+        var state = staged.State with
+        {
+            PersistentState = staged.State.PersistentState with
+            {
+                CoordinatorInstanceId = fallback ? "pending-invalidation-fallback" : "pending-invalidation-regular",
+                SnapshotStateGeneration = 0,
+            },
+        };
+        var prepared = FileTransferCoordinator.PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
+            state, "retry_dispatch_runtime_scope_replaced");
+        var command = Assert.IsType<RuntimeUnlockRetryDispatchScopeInvalidationCommand>(prepared.Command);
+        var duplicate = FileTransferCoordinator.PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
+            prepared.State, command.Reason);
+        var committed = FileTransferCoordinator.CommitRuntimeUnlockRetryLifecycleScopeInvalidation(
+            prepared.State, new RuntimeUnlockRetryDispatchScopeInvalidationReceipt(command,
+                RuntimeUnlockRetryDispatchScopeInvalidationStatus.Applied, command.Reason));
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, prepared.Status);
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent, duplicate.Status);
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, committed.Status);
+        return new[] { prepared.SnapshotEnvelope, duplicate.SnapshotEnvelope, committed.SnapshotEnvelope }
+            .Select(envelope => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(envelope)).ToArray();
     }
 
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateStagedRetryInstallSnapshotFixture(bool fallback)

@@ -1827,6 +1827,97 @@ function Test-FileTransferCoordinatorSnapshotStagedRetryInstallBoundary {
     return [string]$entrant.receiptStatus -ceq 'Installed'
 }
 
+function Test-FileTransferCoordinatorSnapshotPendingScopeInvalidationStage {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        [Parameter(Mandatory = $true)]$Operation
+    )
+
+    if ([string]$Operation.family -cne 'runtime_unlock_retry_lifecycle' -or
+        [string]$Operation.operationRole -cne 'scope_invalidation' -or
+        [string]$Operation.operationKind -cne 'ScopeInvalidation' -or
+        $Operation.stateApplied -isnot [bool] -or $Operation.receiptValidated -isnot [bool] -or
+        [string]$Operation.beforeState -notin @('None', 'Pending') -or
+        [string]$Operation.afterState -notin @('Pending', 'None') -or
+        ([string]$Operation.beforeState -ceq 'None' -and [string]$Operation.afterState -ceq 'None') -or
+        $null -eq $Operation.runtimeUnlockRetry) { return $false }
+    $retry = $Operation.runtimeUnlockRetry
+    $receipts = @($retry.receipts)
+    if ([string]$retry.role -cne 'scope_invalidation' -or
+        $receipts.Count -ne 1 -or [string]$receipts[0].stage -cne 'scope_invalidation' -or
+        [long]$Operation.operationGeneration -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$Operation.authorityId) -or
+        [string]$Operation.authorityId -ceq '(none)' -or
+        [string]$Operation.operationKey -cne
+            "runtime_unlock_retry_lifecycle|scope_invalidation|$($Operation.authorityId)|$($Operation.operationGeneration)|ScopeInvalidation" -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $retry.sourceBoundary)) {
+        return $false
+    }
+    $receipt = $receipts[0]
+    foreach ($field in @('commandIdentity', 'commandFingerprint', 'receiptReason')) {
+        if ([string]::IsNullOrWhiteSpace([string]$receipt.$field) -or
+            [string]$receipt.$field -ceq '(none)') { return $false }
+    }
+    # Invalidation generation is independent of retry-authority/dispatch/install generations.
+    if ([long]$receipt.commandGeneration -ne [long]$Operation.operationGeneration -or
+        [string]$receipt.receiptIdentity -cne '(none)' -or
+        [long]$receipt.receiptGeneration -ne 0 -or
+        [string]$receipt.receiptFingerprint -cne '(none)' -or
+        [string]$receipt.receiptStatus -cne 'Pending' -or
+        $receipt.receiptValidated -isnot [bool] -or $receipt.receiptValidated) { return $false }
+    $aggregate = $Envelope.aggregate
+    if (@($aggregate.operations | Where-Object {
+            [string]$_.operationKey -ceq [string]$Operation.operationKey
+        }).Count -ne 1) { return $false }
+    if ([bool]$Operation.stateApplied) {
+        if ([string]$Envelope.decisionKind -ceq 'CommitRuntimeUnlockRetryLifecycleScopeInvalidation') { return $false }
+        foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint',
+                'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$Operation.$field -cne [string]$receipt.$field) { return $false }
+        }
+        if ([string]$Operation.beforeState -ceq 'None') {
+            if ([string]$Envelope.decisionKind -notin @('PrepareRuntimeUnlockRetryLifecycleScopeInvalidation',
+                    'PrepareRuntimeUnlockRetryDispatchStageExpiry')) { return $false }
+            $attempts = @($aggregate.operations | Where-Object {
+                [string]$_.family -ceq 'runtime_unlock_retry_lifecycle' -and
+                [string]$_.operationRole -ceq 'attempted_decision'
+            })
+            if ($attempts.Count -ne 1) { return $false }
+            $attempt = $attempts[0]
+            if ([string]$attempt.authorityId -cne [string]$receipt.commandIdentity -or
+                [long]$attempt.operationGeneration -ne [long]$receipt.commandGeneration -or
+                [string]$attempt.commandFingerprint -cne [string]$receipt.commandFingerprint -or
+                [string]$attempt.operationKind -cne [string]$Envelope.decisionKind -or
+                [bool]$attempt.stateApplied -or -not [bool]$attempt.receiptValidated -or
+                [string]$attempt.receiptStatus -cne 'Accepted' -or [long]$attempt.receiptGeneration -le 0 -or
+                $null -eq $attempt.runtimeUnlockRetry) { return $false }
+            $decisions = @($attempt.runtimeUnlockRetry.receipts)
+            if ($decisions.Count -ne 1 -or [string]$decisions[0].stage -cne 'decision') { return $false }
+            foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint',
+                    'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+                if ([string]$attempt.$field -cne [string]$decisions[0].$field) { return $false }
+            }
+        }
+        return [string]$Envelope.decisionStatus -ceq 'Accepted' -and
+            [long]$aggregate.afterStateGeneration -eq ([long]$aggregate.beforeStateGeneration + 1) -and
+            [string]$aggregate.beforeStateFingerprint -cne [string]$aggregate.afterStateFingerprint
+    }
+    # Unchanged attempts have their own decision receipt, not a fabricated command receipt.
+    if ([string]$Operation.beforeState -cne 'Pending' -or [string]$Operation.afterState -cne 'Pending' -or
+        [string]$Operation.receiptStatus -notin @('Idempotent', 'Rejected') -or
+        [string]$Operation.receiptStatus -cne [string]$Envelope.decisionStatus -or
+        -not [bool]$Operation.receiptValidated -or [long]$Operation.receiptGeneration -le 0 -or
+        [long]$Operation.commandGeneration -ne [long]$receipt.commandGeneration -or
+        [string]$Operation.commandFingerprint -cne [string]$receipt.commandFingerprint -or
+        [long]$aggregate.beforeStateGeneration -ne [long]$aggregate.afterStateGeneration -or
+        [string]$aggregate.beforeStateFingerprint -cne [string]$aggregate.afterStateFingerprint) { return $false }
+    foreach ($field in @('commandIdentity', 'receiptIdentity', 'receiptFingerprint')) {
+        if ([string]::IsNullOrWhiteSpace([string]$Operation.$field) -or
+            [string]$Operation.$field -ceq '(none)') { return $false }
+    }
+    return $true
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -1874,6 +1965,14 @@ function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
     if ([string]$Operation.beforeState -notin $states -or
         [string]$Operation.afterState -notin $states) {
         return $false
+    }
+    if (($kind -ceq 'ScopeInvalidation' -and
+            ([string]$Operation.afterState -ceq 'Pending' -or
+             ([string]$Operation.beforeState -ceq 'Pending' -and [string]$Operation.afterState -ceq 'None'))) -or
+        @($Operation.runtimeUnlockRetry.receipts | Where-Object {
+            [string]$_.stage -ceq 'scope_invalidation' -and [string]$_.receiptStatus -ceq 'Pending'
+        }).Count -gt 0) {
+        return Test-FileTransferCoordinatorSnapshotPendingScopeInvalidationStage -Envelope $Envelope -Operation $Operation
     }
     foreach ($receipt in @($Operation.runtimeUnlockRetry.receipts)) {
         $stage = [string]$receipt.stage
@@ -4689,6 +4788,14 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             }).Count -gt 0) {
                             $variant = 'family2_staged_install_receipt_omitted_from_catalog'
                         }
+                        if ($null -ne $operation.runtimeUnlockRetry -and
+                            (([string]$operation.operationKind -ceq 'ScopeInvalidation' -and
+                              [string]$operation.afterState -ceq 'Pending') -or
+                             @($operation.runtimeUnlockRetry.receipts | Where-Object {
+                                 [string]$_.stage -ceq 'scope_invalidation' -and [string]$_.receiptStatus -ceq 'Pending'
+                             }).Count -gt 0)) {
+                            $variant = 'family2_pending_scope_invalidation_command_validated_as_completed_receipt'
+                        }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -4812,6 +4919,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     if ([string]$operation.family -ceq
                         'runtime_unlock_retry_lifecycle') {
                         foreach ($receipt in @($operation.runtimeUnlockRetry.receipts)) {
+                            if ([string]$receipt.stage -ceq 'scope_invalidation' -and
+                                [string]$receipt.receiptStatus -ceq 'Pending' -and
+                                (Test-FileTransferCoordinatorSnapshotPendingScopeInvalidationStage `
+                                    -Envelope $envelope -Operation $operation)) { continue }
                             if ([string]::IsNullOrWhiteSpace([string]$receipt.stage) -or
                                 [string]::IsNullOrWhiteSpace([string]$receipt.commandIdentity) -or
                                 [long]$receipt.commandGeneration -le 0 -or
@@ -6021,6 +6132,31 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         $latest = $history[-1]
         $family = [string]$latest.Operation.family
+        if ($family -ceq 'runtime_unlock_retry_lifecycle' -and
+            [string]$latest.Operation.operationRole -ceq 'scope_invalidation') {
+            $pendingSignature = $null
+            $retired = $false
+            foreach ($entry in @($history | Sort-Object {
+                        [long]$_.Boundary.afterStateGeneration
+                    }, { [long]$_.Boundary.beforeStateGeneration }, {
+                        [string]$_.Boundary.boundaryId
+                    })) {
+                $operation = $entry.Operation
+                $pendingStages = @($operation.runtimeUnlockRetry.receipts | Where-Object {
+                    [string]$_.stage -ceq 'scope_invalidation' -and [string]$_.receiptStatus -ceq 'Pending'
+                })
+                if ($pendingStages.Count -ne 1) { $retired = $true; continue }
+                # The pending command captures this immutable attempt and historical source.
+                $signature = $operation.runtimeUnlockRetry | ConvertTo-Json -Depth 64 -Compress
+                if ($retired -or ($null -ne $pendingSignature -and $signature -cne $pendingSignature)) {
+                    $errors.Add(
+                        "snapshot_operation_receipt_incomplete|family2_pending_scope_invalidation_command_mutated_or_reused:$($entry.Boundary.evidenceLineIndex)")
+                    continue
+                }
+                $pendingSignature = $signature
+                $retired = [string]$operation.afterState -ceq 'None'
+            }
+        }
         if ($family -ceq 'regular_v4_frontier_repair_pressure' -and
             [string]$latest.Operation.operationRole -ceq 'recovery_handoff_terminal') {
             $receiptSignature = $null
