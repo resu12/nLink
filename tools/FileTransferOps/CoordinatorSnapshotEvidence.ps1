@@ -1577,6 +1577,191 @@ function Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant {
     return '(none)'
 }
 
+function Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptBridgeRecovery {
+    param($Left, $Right)
+
+    if ($null -eq $Left -or $null -eq $Right -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Left) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Right)) { return $false }
+    $comparison = $Right | Select-Object *
+    $comparison.bridgeRecoveryGeneration = $Left.bridgeRecoveryGeneration
+    return Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Left $comparison
+}
+
+function Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry {
+    param($Envelope, $Operation)
+
+    $decision = [string]$Envelope.decisionKind
+    $aggregate = $Envelope.aggregate
+    $before = $aggregate.beforeBoundary; $after = $aggregate.afterBoundary
+    if ($decision -notin @('IssueReceiveRecoveryOperation', 'ObserveReceiveRecoveryProof') -or
+        [string]$Envelope.decisionStatus -cne 'Accepted' -or
+        [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1L) -or
+        [string]$aggregate.beforeStateFingerprint -ceq [string]$aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptBridgeRecovery $before $after) -or
+        [string]$after.route -cne 'post_tuna_fallback_v6' -or [long]$after.protocolVersion -ne 6 -or
+        [long]$after.terminalGeneration -ne 0 -or
+        [string]$Operation.family -cne 'route_transition') { return $false }
+
+    $routes = @($aggregate.operations | Where-Object {
+        $_.family -in @('route_runtime', 'route_transition')
+    })
+    if ($routes.Count -ne 2 -or
+        @($routes | Where-Object operationRole -CEQ 'terminal').Count -ne 1 -or
+        @($routes | Where-Object operationRole -CEQ 'fallback_v6_bootstrap').Count -ne 1) { return $false }
+    foreach ($route in $routes) {
+        $typed = $route.routeTransition
+        $bootstrap = [string]$route.operationRole -ceq 'fallback_v6_bootstrap'
+        $kind = if ($bootstrap) { 'FallbackV6ProofBootstrap' } else { 'TunaV4ToPostTunaFallbackV6' }
+        $state = if ($bootstrap) { 'Delivered' } else { 'Committed' }
+        $stage = if ($bootstrap) { 'fallback_v6_bootstrap' } else { 'disposition' }
+        if ($route.family -cne 'route_transition' -or $null -eq $typed -or
+            $typed.role -cne $route.operationRole -or $route.operationKind -cne $kind -or
+            $route.beforeState -cne $state -or $route.afterState -cne $state -or
+            $route.stateApplied -isnot [bool] -or -not $route.stateApplied -or
+            $route.receiptValidated -isnot [bool] -or -not $route.receiptValidated -or
+            $route.authorityId -in @('', '(none)') -or [long]$route.operationGeneration -le 0 -or
+            $route.operationKey -cne "route_transition|$($route.operationRole)|$($route.authorityId)|$($route.operationGeneration)|$kind" -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $typed.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $typed.targetBoundary) -or
+            $typed.transitionKind -cne 'TunaV4ToPostTunaFallbackV6' -or
+            $typed.targetRoute -cne 'post_tuna_fallback_v6' -or [long]$typed.targetProtocolVersion -ne 6 -or
+            $typed.targetTransport -cne 'RegularNkn' -or $typed.sourceTransport -cne 'Tuna' -or
+            $typed.targetBoundary.route -cne 'post_tuna_fallback_v6' -or [long]$typed.targetBoundary.protocolVersion -ne 6 -or
+            [long]$typed.targetBoundary.bridgeRecoveryGeneration -ne [long]$after.bridgeRecoveryGeneration) { return $false }
+        if ($bootstrap) {
+            if (@($typed.receipts).Count -ne 1 -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $typed.sourceBoundary $after)) { return $false }
+        }
+        # The retained target has its own exact identity representation. Its
+        # complete tuple is checked against indexed target history below; never
+        # alias that identity to the aggregate's evidence projection.
+        if (@($typed.receipts).Count -eq 0 -or
+            @($typed.receipts | ForEach-Object { $_.stage } | Sort-Object -Unique).Count -ne @($typed.receipts).Count) { return $false }
+        foreach ($receipt in @($typed.receipts)) {
+            if ($receipt.receiptValidated -isnot [bool] -or -not $receipt.receiptValidated -or
+                [long]$receipt.commandGeneration -ne [long]$route.operationGeneration -or
+                [long]$receipt.receiptGeneration -ne [long]$route.operationGeneration) { return $false }
+            foreach ($field in @('commandIdentity','commandFingerprint','receiptIdentity','receiptFingerprint')) {
+                if ([string]$receipt.$field -in @('', '(none)')) { return $false }
+            }
+        }
+        $receipts = @($typed.receipts | Where-Object stage -CEQ $stage)
+        if ($receipts.Count -ne 1 -or -not $receipts[0].receiptValidated -or
+            $receipts[0].receiptStatus -notin $(if ($bootstrap) { @('Delivered') } else { @('Applied', 'Idempotent') })) { return $false }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity',
+                'receiptGeneration','receiptStatus','receiptFingerprint')) {
+            if ([string]$route.$field -cne [string]$receipts[0].$field -or
+                [string]$route.$field -in @('', '(none)')) { return $false }
+        }
+        if ([long]$route.commandGeneration -le 0 -or [long]$route.receiptGeneration -le 0) { return $false }
+    }
+    if (@($routes | Where-Object operationKey -CEQ $Operation.operationKey).Count -ne 1) { return $false }
+
+    $recovery = @($aggregate.operations | Where-Object {
+        $_.family -ceq 'receive_recovery' -and $_.operationRole -in @('operation_current', 'operation_terminal')
+    })
+    $current = @($recovery | Where-Object operationRole -CEQ 'operation_current')
+    if ($current.Count -ne 1 -or $null -eq $current[0].receiveRecovery) { return $false }
+    $subject = $current[0]; $typed = $subject.receiveRecovery
+    if ($subject.operationKind -cne 'BridgeReceiveStallRecovery' -or
+        $typed.recoveryKind -cne 'BridgeReceiveStallRecovery' -or $typed.role -cne 'operation_current' -or
+        $subject.stateApplied -isnot [bool] -or -not $subject.stateApplied -or $subject.authorityId -in @('', '(none)') -or
+        [long]$subject.operationGeneration -le 0 -or [long]$typed.bridgeDecisionGeneration -le 0 -or
+        $subject.commandIdentity -cne $subject.authorityId -or
+        [long]$subject.commandGeneration -ne [long]$subject.operationGeneration -or
+        $subject.commandFingerprint -in @('', '(none)') -or
+        $subject.operationKey -cne "receive_recovery|operation_current|$($subject.authorityId)|$($subject.operationGeneration)|BridgeReceiveStallRecovery" -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $typed.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $typed.effectiveBoundary)) { return $false }
+    # Recovery authority retains its own transport/checkpoint scope, not the
+    # aggregate's currently installed transport or cleared checkpoint lease.
+    foreach ($scope in @($typed.sourceBoundary, $typed.effectiveBoundary)) {
+        foreach ($field in @('route','protocolVersion','liveRouteEpoch','routePublicationGeneration',
+                'routeCommitGeneration','runtimeGeneration','terminalGeneration','legGeneration',
+                'dataSessionIdentity','dataSessionGeneration')) {
+            if ([string]$scope.$field -cne [string]$after.$field) { return $false }
+        }
+    }
+    if ($decision -ceq 'IssueReceiveRecoveryOperation') {
+        $attempts = @($aggregate.operations | Where-Object {
+            $_.family -ceq 'receive_recovery' -and $_.operationRole -ceq 'attempted_decision'
+        })
+        if ($Envelope.decisionReason -cne 'filetransfer_receive_recovery_operation_issued' -or
+            $recovery.Count -ne 1 -or $attempts.Count -ne 1 -or
+            [long]$before.bridgeRecoveryGeneration -ne 0 -or
+            [long]$after.bridgeRecoveryGeneration -ne [long]$typed.bridgeDecisionGeneration -or
+            $subject.beforeState -cne 'None' -or $subject.afterState -cne 'Issued:None' -or
+            $typed.executionState -cne 'Issued' -or $typed.closureState -cne 'None' -or
+            $subject.receiptStatus -cne 'Pending' -or $subject.receiptIdentity -cne '(none)' -or
+            [long]$subject.receiptGeneration -ne 0 -or $subject.receiptFingerprint -cne '(none)' -or
+            $subject.receiptValidated -isnot [bool] -or $subject.receiptValidated -or @($typed.receipts).Count -ne 0) { return $false }
+        $attempt = $attempts[0]; $attemptTyped = $attempt.receiveRecovery
+        if ($null -eq $attemptTyped -or $attempt.operationKind -cne $decision -or
+            $attempt.authorityId -cne $subject.authorityId -or
+            [long]$attempt.operationGeneration -ne [long]$subject.operationGeneration -or
+            $attempt.stateApplied -isnot [bool] -or $attempt.stateApplied -or $attempt.beforeState -cne 'None' -or $attempt.afterState -cne 'None' -or
+            $attemptTyped.role -cne 'attempted_decision' -or $attemptTyped.recoveryKind -cne $typed.recoveryKind -or
+            [long]$attemptTyped.bridgeDecisionGeneration -ne [long]$typed.bridgeDecisionGeneration -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $attemptTyped.sourceBoundary $typed.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $attemptTyped.effectiveBoundary $typed.effectiveBoundary)) { return $false }
+        $receipts = @($attemptTyped.receipts)
+        if ($receipts.Count -ne 1 -or $receipts[0].stage -cne 'attempted_decision' -or
+            $receipts[0].receiptReason -cne $Envelope.decisionReason -or
+            $receipts[0].receiptStatus -cne 'Accepted' -or $receipts[0].receiptValidated -isnot [bool] -or -not $receipts[0].receiptValidated -or
+            $attempt.receiptValidated -isnot [bool] -or -not $attempt.receiptValidated) { return $false }
+        if ([long]$attempt.commandGeneration -ne [long]$subject.operationGeneration -or
+            [long]$attempt.receiptGeneration -ne [long]$subject.operationGeneration) { return $false }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity',
+                'receiptGeneration','receiptStatus','receiptFingerprint')) {
+            if ([string]$attempt.$field -cne [string]$receipts[0].$field -or
+                [string]$attempt.$field -in @('', '(none)')) { return $false }
+        }
+        return [long]$attempt.commandGeneration -gt 0 -and [long]$attempt.receiptGeneration -gt 0
+    }
+
+    $terminals = @($recovery | Where-Object operationRole -CEQ 'operation_terminal')
+    if ($Envelope.decisionReason -cne 'filetransfer_receive_recovery_proof_observed' -or
+        $recovery.Count -ne 2 -or $terminals.Count -ne 1 -or
+        [long]$before.bridgeRecoveryGeneration -ne [long]$typed.bridgeDecisionGeneration -or
+        [long]$after.bridgeRecoveryGeneration -ne 0 -or
+        $subject.beforeState -cne 'Completed:None' -or $subject.afterState -cne 'None' -or
+        $typed.executionState -cne 'Completed' -or $typed.closureState -cne 'None' -or
+        $typed.proofIdentity -cne '(none)' -or [long]$typed.proofObservedUtcMs -ne 0 -or
+        [long]$typed.closureGeneration -ne 0 -or [long]$typed.recoveryLivenessLeaseGeneration -ne 0) { return $false }
+    $terminal = $terminals[0]; $terminalTyped = $terminal.receiveRecovery
+    if ($null -eq $terminalTyped -or $terminal.beforeState -cne 'None' -or
+        $terminal.afterState -cne 'Completed:None' -or $terminal.stateApplied -isnot [bool] -or -not $terminal.stateApplied -or
+        $terminalTyped.role -cne 'operation_terminal' -or $terminalTyped.recoveryKind -cne $typed.recoveryKind -or
+        $terminalTyped.executionState -cne 'Completed' -or
+        $terminalTyped.closureState -cne 'None' -or [long]$terminalTyped.closureGeneration -ne 0 -or
+        $terminalTyped.proofIdentity -in @('', '(none)') -or
+        [long]$terminalTyped.proofObservedUtcMs -le 0 -or
+        [long]$terminalTyped.bridgeDecisionGeneration -ne [long]$typed.bridgeDecisionGeneration -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $terminalTyped.sourceBoundary $typed.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $terminalTyped.effectiveBoundary $typed.effectiveBoundary)) { return $false }
+    foreach ($field in @('authorityId','predecessorAuthorityId','operationKind','operationGeneration',
+            'commandIdentity','commandGeneration','commandFingerprint','receiptIdentity','receiptGeneration')) {
+        if ([string]$terminal.$field -cne [string]$subject.$field) { return $false }
+    }
+    $currentPayload = $typed | Select-Object * -ExcludeProperty role,proofIdentity,proofObservedUtcMs,receipts | ConvertTo-Json -Depth 64 -Compress
+    $terminalPayload = $terminalTyped | Select-Object * -ExcludeProperty role,proofIdentity,proofObservedUtcMs,receipts | ConvertTo-Json -Depth 64 -Compress
+    if ($currentPayload -cne $terminalPayload) { return $false }
+    foreach ($pair in @(@{ Operation=$subject; Status='Completed' }, @{ Operation=$terminal; Status='Adopted' })) {
+        $parent = $pair.Operation; $receipts = @($parent.receiveRecovery.receipts)
+        if ($receipts.Count -ne 1 -or $receipts[0].stage -cne 'operation' -or
+            [long]$parent.receiptGeneration -ne [long]$parent.operationGeneration -or
+            $parent.receiptStatus -cne $pair.Status -or $parent.receiptValidated -isnot [bool] -or -not $parent.receiptValidated -or
+            $receipts[0].receiptValidated -isnot [bool] -or -not $receipts[0].receiptValidated) { return $false }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity',
+                'receiptGeneration','receiptStatus','receiptFingerprint')) {
+            if ([string]$parent.$field -cne [string]$receipts[0].$field -or
+                [string]$parent.$field -in @('', '(none)')) { return $false }
+        }
+    }
+    return $true
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -1602,7 +1787,8 @@ function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
             -Envelope $Envelope -Operation $Operation
     if (([string]$Envelope.decisionKind -notin
             $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -and
-         -not $isExactFallbackCheckpointOperation) -or
+         -not $isExactFallbackCheckpointOperation -and
+         -not (Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry $Envelope $Operation)) -or
         [string]$Envelope.decisionStatus -notin @(
             'Accepted', 'Idempotent', 'Rejected', 'Prepared', 'Draining',
             'Committed', 'Invalidated', 'SupersessionStaged') -or
@@ -3746,6 +3932,216 @@ function New-FileTransferCoordinatorSnapshotAggregateIntervalIndex {
     return $index
 }
 
+function Get-FileTransferCoordinatorReceiveRecoveryRouteCarryIdentity {
+    param($Operation)
+
+    [ordered]@{
+        Operation = $Operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied,routeTransition
+        Route = $Operation.routeTransition | Select-Object * -ExcludeProperty sourceBoundary,targetBoundary
+    } | ConvertTo-Json -Depth 64 -Compress
+}
+
+function Test-FileTransferCoordinatorReceiveRecoveryRouteTargetCarry {
+    param($PreviousTarget, $Target, $BeforeBoundary, $AfterBoundary, [string]$Role, [string]$DecisionKind)
+
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $PreviousTarget) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Target)) { return $false }
+    foreach ($field in $PreviousTarget.PSObject.Properties.Name) {
+        if ([string]$PreviousTarget.$field -ceq [string]$Target.$field) { continue }
+        if ($Role -ceq 'terminal' -and $field -ceq 'checkpointRequestId' -and
+            [long]$PreviousTarget.checkpointGeneration -eq [long]$BeforeBoundary.checkpointGeneration -and
+            [long]$Target.checkpointGeneration -eq [long]$AfterBoundary.checkpointGeneration) {
+            # Request identities, like data-session identities, have separate
+            # target and aggregate projections. Preserve the target's own exact
+            # request until its validated checkpoint acceptance clears it.
+            if (($DecisionKind -ceq 'FallbackCheckpointRequested' -and
+                    [long]$PreviousTarget.checkpointGeneration -eq 0 -and $PreviousTarget.checkpointRequestId -ceq '(none)' -and
+                    [long]$Target.checkpointGeneration -gt 0 -and $Target.checkpointRequestId -notin @('', '(none)')) -or
+                ($DecisionKind -ceq 'FallbackCheckpointAccepted' -and
+                    [long]$PreviousTarget.checkpointGeneration -gt 0 -and $PreviousTarget.checkpointRequestId -notin @('', '(none)') -and
+                    [long]$Target.checkpointGeneration -eq 0 -and $Target.checkpointRequestId -ceq '(none)')) { continue }
+        }
+        # A retained target identity never changes representation. Other scope
+        # changes must be the exact aggregate-authored delta, not a new target.
+        if (($Role -ceq 'fallback_v6_bootstrap' -and $field -notin @('transportEpoch', 'bridgeRecoveryGeneration')) -or
+            $field -in @('dataSessionIdentity', 'dataSessionGeneration') -or
+            [string]$PreviousTarget.$field -cne [string]$BeforeBoundary.$field -or
+            [string]$Target.$field -cne [string]$AfterBoundary.$field) { return $false }
+    }
+    return $true
+}
+
+function Resolve-FileTransferCoordinatorReceiveRecoveryRouteCarries {
+    param($AggregateIndex, $Candidates, $InvalidBoundaries, [object[]]$Effects)
+
+    $routeEffects = @{}
+    foreach ($effect in $Effects) {
+        if ($effect.Family -ceq 'route_transition') {
+            $routeEffects["$($effect.CoordinatorInstanceId)|$($effect.TransitionId)"] = $true
+        }
+    }
+    $resolved = @{}
+    foreach ($stream in $AggregateIndex.Values) {
+        $slots = @{}; $seen = @{}; $previous = $null; $currentRecovery = $null; $seenRecovery = @{}
+        foreach ($generation in @($stream.Mutations.Keys | Sort-Object)) {
+            $entries = $stream.Mutations[$generation]
+            if ($entries.Count -ne 1) { $slots.Clear(); $previous = $null; $currentRecovery = $null; continue }
+            $entry = $entries[0]; $boundary = $entry.Boundary; $id = [string]$boundary.boundaryId
+            $valid = -not $InvalidBoundaries.ContainsKey($id) -and
+                [long]$boundary.afterStateGeneration -eq ([long]$generation + 1L) -and
+                [string]$boundary.beforeStateHash -cne [string]$boundary.afterStateHash -and
+                [long]$entry.AfterBoundary.terminalGeneration -eq 0 -and
+                [string]$entry.BeforeBoundary.dataSessionIdentity -ceq [string]$entry.AfterBoundary.dataSessionIdentity -and
+                [long]$entry.BeforeBoundary.dataSessionGeneration -eq [long]$entry.AfterBoundary.dataSessionGeneration
+            if ($null -ne $previous) {
+                $valid = $valid -and [long]$previous.Boundary.afterStateGeneration -eq [long]$generation -and
+                    [string]$previous.Boundary.afterStateHash -ceq [string]$boundary.beforeStateHash -and
+                    [string]$previous.SessionId -ceq [string]$entry.SessionId -and
+                    [string]$previous.TransferId -ceq [string]$entry.TransferId -and
+                    [string]$previous.Direction -ceq [string]$entry.Direction -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $previous.AfterBoundary $entry.BeforeBoundary)
+            }
+            if (-not $valid) { $slots.Clear(); $currentRecovery = $null }
+            $operations = @($boundary.operations | Where-Object {
+                $_.family -ceq 'route_transition' -and $_.stateApplied -and
+                $_.operationRole -in @('terminal', 'fallback_v6_bootstrap')
+            })
+            if ($Candidates.ContainsKey($id)) {
+                $resolved[$id] = $true
+                if ($boundary.decisionKind -ceq 'ObserveReceiveRecoveryProof') {
+                    $retirements = @($boundary.operations | Where-Object {
+                        $_.family -ceq 'receive_recovery' -and $_.operationRole -ceq 'operation_current' -and $_.stateApplied
+                    })
+                    $valid = $valid -and $null -ne $currentRecovery -and $retirements.Count -eq 1
+                    if ($null -ne $currentRecovery -and $retirements.Count -eq 1) {
+                        $retiredIdentity = $retirements[0] | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
+                        $currentIdentity = $currentRecovery | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
+                        $valid = $valid -and $retirements[0].beforeState -ceq $currentRecovery.afterState -and
+                            $retiredIdentity -ceq $currentIdentity
+                    }
+                }
+                foreach ($operation in $operations) {
+                    $role = [string]$operation.operationRole
+                    if (-not $slots.ContainsKey($role)) { $valid = $false; continue }
+                    $prior = $slots[$role]
+                    $valid = $valid -and $operation.operationKey -ceq $prior.operationKey -and
+                        $operation.beforeState -ceq $prior.afterState -and
+                        (Get-FileTransferCoordinatorReceiveRecoveryRouteCarryIdentity $operation) -ceq
+                            (Get-FileTransferCoordinatorReceiveRecoveryRouteCarryIdentity $prior) -and
+                        [long]$prior.routeTransition.targetBoundary.bridgeRecoveryGeneration -eq
+                            [long]$entry.BeforeBoundary.bridgeRecoveryGeneration -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptBridgeRecovery `
+                            $prior.routeTransition.targetBoundary $operation.routeTransition.targetBoundary)
+                    if ($role -ceq 'terminal') {
+                        $valid = $valid -and
+                            (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                                $prior.routeTransition.sourceBoundary $operation.routeTransition.sourceBoundary)
+                    }
+                    else {
+                        $valid = $valid -and
+                            (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $prior.routeTransition.sourceBoundary $entry.BeforeBoundary) -and
+                            (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptBridgeRecovery `
+                                $prior.routeTransition.sourceBoundary $operation.routeTransition.sourceBoundary)
+                    }
+                }
+                $valid = $valid -and $operations.Count -eq 2
+                $variant = 'receive_recovery_route_terminal_carry_history_invalid'
+                if ($routeEffects.ContainsKey("$($boundary.coordinatorInstanceId)|$id")) {
+                    $valid = $false
+                    $variant = 'receive_recovery_route_terminal_carry_effect_invalid'
+                }
+                if (-not $valid) {
+                    $InvalidBoundaries[$id] = $true
+                    [void]$stream.Boundaries.Remove($id); [void]$stream.Mutations.Remove($generation)
+                    "snapshot_operation_catalog_mismatch|$variant`:$($boundary.evidenceLineIndex)"
+                    $slots.Clear(); $currentRecovery = $null
+                }
+            }
+            if ($valid) {
+                $recoveries = @($boundary.operations | Where-Object {
+                    $_.family -ceq 'receive_recovery' -and $_.operationRole -ceq 'operation_current' -and $_.stateApplied
+                })
+                $retiringRecovery = @($recoveries | Where-Object afterState -CEQ 'None')
+                $remainingRecovery = @($recoveries | Where-Object afterState -CNE 'None')
+                if ($recoveries.Count -gt 0) {
+                    $recoveryValid = $retiringRecovery.Count -le 1 -and $remainingRecovery.Count -le 1
+                    foreach ($recovery in $recoveries) {
+                        if ($recovery.beforeState -ceq 'None') {
+                            $recoveryValid = $recoveryValid -and -not $seenRecovery.ContainsKey([string]$recovery.operationKey) -and
+                                ($null -eq $currentRecovery -or $retiringRecovery.Count -eq 1)
+                            $seenRecovery[[string]$recovery.operationKey] = $true
+                            continue
+                        }
+                        $recoveryValid = $recoveryValid -and $null -ne $currentRecovery
+                        if ($null -ne $currentRecovery) {
+                            foreach ($field in @('operationKey','commandIdentity','commandGeneration','commandFingerprint')) {
+                                $recoveryValid = $recoveryValid -and [string]$recovery.$field -ceq [string]$currentRecovery.$field
+                            }
+                            $recoveryValid = $recoveryValid -and $recovery.beforeState -ceq $currentRecovery.afterState -and
+                                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $recovery.receiveRecovery.sourceBoundary $currentRecovery.receiveRecovery.sourceBoundary)
+                        }
+                    }
+                    if ($recoveryValid -and $remainingRecovery.Count -eq 1) { $currentRecovery = $remainingRecovery[0] }
+                    else { $currentRecovery = $null }
+                }
+                foreach ($role in @('terminal', 'fallback_v6_bootstrap')) {
+                    $changes = @($operations | Where-Object operationRole -CEQ $role)
+                    if ($changes.Count -eq 0) {
+                        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $entry.BeforeBoundary $entry.AfterBoundary)) {
+                            [void]$slots.Remove($role)
+                        }
+                        continue
+                    }
+                    $retired = @($changes | Where-Object afterState -CEQ 'None')
+                    $remaining = @($changes | Where-Object afterState -CNE 'None')
+                    if ($retired.Count -gt 1 -or $remaining.Count -gt 1) { [void]$slots.Remove($role); continue }
+                    if ($retired.Count -eq 1) {
+                        if (-not $slots.ContainsKey($role) -or $slots[$role].operationKey -cne $retired[0].operationKey) {
+                            [void]$slots.Remove($role); continue
+                        }
+                        [void]$slots.Remove($role)
+                    }
+                    if ($remaining.Count -eq 0) { continue }
+                    $operation = $remaining[0]; $key = [string]$operation.operationKey
+                    if ($operation.beforeState -ceq 'None') {
+                        if ($slots.ContainsKey($role) -or $seen.ContainsKey($key)) { [void]$slots.Remove($role); continue }
+                        $seen[$key] = $true
+                    }
+                    elseif (-not $slots.ContainsKey($role) -or $slots[$role].operationKey -cne $key -or
+                        $slots[$role].afterState -cne $operation.beforeState) {
+                        [void]$slots.Remove($role); continue
+                    }
+                    elseif ($role -ceq 'terminal' -and
+                        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                            $slots[$role].routeTransition.sourceBoundary $operation.routeTransition.sourceBoundary)) {
+                        [void]$slots.Remove($role); continue
+                    }
+                    elseif (-not (Test-FileTransferCoordinatorReceiveRecoveryRouteTargetCarry `
+                            $slots[$role].routeTransition.targetBoundary $operation.routeTransition.targetBoundary `
+                            $entry.BeforeBoundary $entry.AfterBoundary $role $boundary.decisionKind)) {
+                        [void]$slots.Remove($role); continue
+                    }
+                    elseif ((($role -ceq 'fallback_v6_bootstrap' -and $slots[$role].afterState -ceq 'Delivered') -or
+                            ($role -ceq 'terminal' -and @($slots[$role].routeTransition.receipts | Where-Object {
+                                $_.stage -ceq 'disposition' -and $_.receiptValidated -and $_.receiptStatus -in @('Applied', 'Idempotent')
+                            }).Count -eq 1)) -and
+                        (Get-FileTransferCoordinatorReceiveRecoveryRouteCarryIdentity $slots[$role]) -cne
+                            (Get-FileTransferCoordinatorReceiveRecoveryRouteCarryIdentity $operation)) {
+                        [void]$slots.Remove($role); continue
+                    }
+                    $slots[$role] = $operation
+                }
+            }
+            $previous = $entry
+        }
+    }
+    foreach ($id in $Candidates.Keys) {
+        if (-not $resolved.ContainsKey($id)) {
+            "snapshot_operation_catalog_mismatch|receive_recovery_route_terminal_carry_history_invalid:$($Candidates[$id].Line)"
+        }
+    }
+}
+
 function Resolve-FileTransferCoordinatorCheckpointStalePeerProofRetirements {
     param($AggregateIndex, $Candidates, $InvalidBoundaries, [object[]]$Effects)
 
@@ -5117,6 +5513,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $aggregateEntries = [System.Collections.Generic.List[object]]::new()
     $pressureTerminalRolloverCandidates = @{}
     $checkpointStalePeerProofCandidates = @{}
+    $receiveRecoveryRouteCarryCandidates = @{}
     $effects = [System.Collections.Generic.List[object]]::new()
     $seenTransitions = @{}
     $seenEffects = @{}
@@ -5390,12 +5787,20 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                                     -Envelope $envelope `
                                     -Operation $operation
                         }
+                        if ([string]$envelope.decisionKind -in @('IssueReceiveRecoveryOperation', 'ObserveReceiveRecoveryProof') -and
+                            [string]$operation.family -ceq 'route_transition') {
+                            $attemptVariant = 'receive_recovery_bridge_scope_carry_omitted_from_family1_catalog'
+                        }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($attemptVariant -cne '(none)') {
                             $reason = "$reason|$attemptVariant"
                         }
                         $errors.Add("$reason`:$($record.LineIndex)")
                         break
+                    }
+                    if ([string]$envelope.decisionKind -in @('IssueReceiveRecoveryOperation', 'ObserveReceiveRecoveryProof') -and
+                        [string]$operation.family -ceq 'route_transition') {
+                        $receiveRecoveryRouteCarryCandidates[$transitionId] = @{ Line = $record.LineIndex }
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog `
                             -Envelope $envelope `
@@ -6966,6 +7371,18 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         foreach ($failure in @(Resolve-FileTransferCoordinatorCheckpointStalePeerProofRetirements `
                 -AggregateIndex $aggregateBoundaryIndex -Candidates $checkpointStalePeerProofCandidates `
+                -InvalidBoundaries $invalidAggregateBoundaries -Effects @($effects))) {
+            $errors.Add([string]$failure)
+        }
+    }
+    if ($receiveRecoveryRouteCarryCandidates.Count -gt 0) {
+        $invalidAggregateBoundaries = @{}
+        foreach ($failure in @(ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
+                -Errors @($errors) -Records @($records) -Boundaries @($boundaries))) {
+            $invalidAggregateBoundaries[[string]$failure.TransitionId] = $true
+        }
+        foreach ($failure in @(Resolve-FileTransferCoordinatorReceiveRecoveryRouteCarries `
+                -AggregateIndex $aggregateBoundaryIndex -Candidates $receiveRecoveryRouteCarryCandidates `
                 -InvalidBoundaries $invalidAggregateBoundaries -Effects @($effects))) {
             $errors.Add([string]$failure)
         }
