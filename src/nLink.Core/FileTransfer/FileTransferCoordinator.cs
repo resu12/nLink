@@ -1001,7 +1001,8 @@ internal readonly record struct RegularV4FrontierRepairPressureSubstate(
     FileTransferRegularV4FrontierRepairSettlement? LastSettlement = null,
     long LastInstallGeneration = 0,
     FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastSettlementApplyReceipt = null,
-    RegularV4FrontierRepairPressureRecoveryHandoffTransition? LastRecoveryHandoff = null)
+    RegularV4FrontierRepairPressureRecoveryHandoffTransition? LastRecoveryHandoff = null,
+    FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt? LastRecoveryHandoffApplyReceipt = null)
 {
     internal static RegularV4FrontierRepairPressureSubstate Empty => default;
 
@@ -15328,6 +15329,7 @@ internal static partial class FileTransferCoordinator
             committedState.PersistentState.RegularV4FrontierRepairPressure with
             {
                 LastRecoveryHandoff = transition,
+                LastRecoveryHandoffApplyReceipt = receipt,
             };
         committedState = committedState with
         {

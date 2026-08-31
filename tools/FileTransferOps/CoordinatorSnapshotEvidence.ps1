@@ -2490,6 +2490,102 @@ function Test-FileTransferCoordinatorSnapshotFamily5OperationCatalog {
     return $true
 }
 
+function Test-FileTransferCoordinatorSnapshotRecoveryHandoffTerminalReceipt {
+    param([Parameter(Mandatory = $true)]$Operation)
+
+    foreach ($name in @('family', 'operationRole', 'operationKind', 'operationKey', 'authorityId',
+            'operationGeneration', 'commandIdentity', 'commandGeneration', 'commandFingerprint',
+            'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+        if ($Operation.PSObject.Properties.Name -notcontains $name) { return $false }
+    }
+    $payload = Get-FileTransferCoordinatorSnapshotObjectProperty -InputObject $Operation `
+        -Name 'regularV4FrontierRepairPressure' -Default $null
+    if ($null -eq $payload) { return $false }
+    foreach ($name in @('role', 'bindingState', 'receipts', 'decisionGeneration', 'pressureInstallGeneration',
+            'recoveryOperationGeneration', 'recoveryKind', 'recoveryAuthorityId', 'currentAuthorityCleared',
+            'retainedPredecessorCleared', 'sourceBoundary', 'effectiveBoundary')) {
+        if ($payload.PSObject.Properties.Name -notcontains $name) { return $false }
+    }
+    if ([string]$Operation.family -cne 'regular_v4_frontier_repair_pressure' -or
+        [string]$Operation.operationRole -cne 'recovery_handoff_terminal' -or
+        [string]$Operation.operationKind -cne 'PressureRecoveryHandoff' -or
+        $null -eq $payload -or
+        [string]$payload.role -cne 'recovery_handoff_terminal' -or
+        [string]$payload.bindingState -cne 'Committed' -or
+        @($payload.receipts).Count -ne 1 -or
+        [long]$payload.decisionGeneration -le 0 -or
+        [long]$payload.pressureInstallGeneration -le 0 -or
+        [long]$Operation.operationGeneration -le 0 -or
+        [long]$Operation.commandGeneration -ne [long]$Operation.operationGeneration -or
+        [long]$payload.recoveryOperationGeneration -ne [long]$Operation.operationGeneration -or
+        [string]$payload.recoveryKind -cne 'BridgeReceiveStallRecovery' -or
+        -not [bool]$payload.currentAuthorityCleared -or
+        [bool]$payload.retainedPredecessorCleared -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $payload.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $payload.effectiveBoundary) -or
+        [string]$payload.sourceBoundary.dataSessionIdentity -cne [string]$payload.effectiveBoundary.dataSessionIdentity -or
+        [long]$payload.sourceBoundary.dataSessionGeneration -ne [long]$payload.effectiveBoundary.dataSessionGeneration) {
+        return $false
+    }
+    $key = @('regular_v4_frontier_repair_pressure', 'recovery_handoff_terminal',
+        [string]$Operation.authorityId, [string]$Operation.operationGeneration,
+        'PressureRecoveryHandoff') -join '|'
+    $receipt = $payload.receipts[0]
+    if ($null -eq $receipt) { return $false }
+    foreach ($name in @('stage', 'commandIdentity', 'commandGeneration', 'commandFingerprint',
+            'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptReason',
+            'receiptFingerprint', 'receiptValidated')) {
+        if ($receipt.PSObject.Properties.Name -notcontains $name) { return $false }
+    }
+    if ([string]$Operation.operationKey -cne $key -or
+        [string]$receipt.stage -cne 'pressure_settlement' -or
+        [long]$receipt.commandGeneration -ne [long]$payload.decisionGeneration -or
+        [long]$receipt.receiptGeneration -ne [long]$payload.pressureInstallGeneration -or
+        [string]$receipt.receiptStatus -notin @('Applied', 'Idempotent') -or
+        -not [bool]$receipt.receiptValidated -or -not [bool]$Operation.receiptValidated) {
+        return $false
+    }
+    foreach ($value in @($Operation.authorityId, $Operation.commandIdentity,
+            $Operation.commandFingerprint, $payload.recoveryAuthorityId,
+            $receipt.commandIdentity, $receipt.commandFingerprint,
+            $receipt.receiptIdentity, $receipt.receiptFingerprint, $receipt.receiptReason)) {
+        if ([string]::IsNullOrWhiteSpace([string]$value) -or [string]$value -ceq '(none)') {
+            return $false
+        }
+    }
+    foreach ($name in @('receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint')) {
+        if ([string]$Operation.$name -cne [string]$receipt.$name) { return $false }
+    }
+    return $true
+}
+
+function Get-FileTransferCoordinatorSnapshotRecoveryHandoffReceiptSignature {
+    param([Parameter(Mandatory = $true)]$Operation)
+
+    $payload = $Operation.regularV4FrontierRepairPressure
+    [ordered]@{
+        authority = $Operation.authorityId
+        predecessor = $Operation.predecessorAuthorityId
+        generation = $Operation.operationGeneration
+        commandIdentity = $Operation.commandIdentity
+        commandGeneration = $Operation.commandGeneration
+        commandFingerprint = $Operation.commandFingerprint
+        decisionGeneration = $payload.decisionGeneration
+        installGeneration = $payload.pressureInstallGeneration
+        settlementOutcome = $payload.settlementOutcome
+        settlementReason = $payload.settlementReason
+        currentCleared = $payload.currentAuthorityCleared
+        predecessorCleared = $payload.retainedPredecessorCleared
+        successor = $payload.successorAuthorityId
+        recoveryAuthority = $payload.recoveryAuthorityId
+        recoveryGeneration = $payload.recoveryOperationGeneration
+        recoveryKind = $payload.recoveryKind
+        dataSessionIdentity = $payload.sourceBoundary.dataSessionIdentity
+        dataSessionGeneration = $payload.sourceBoundary.dataSessionGeneration
+        receipt = $payload.receipts[0]
+    } | ConvertTo-Json -Depth 8 -Compress
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily5RepairReplayScope {
     param([Parameter(Mandatory = $true)]$Operation)
 
@@ -4534,6 +4630,16 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     break
                 }
                 foreach ($operation in @($envelope.aggregate.operations)) {
+                    if ([string]$operation.family -ceq 'regular_v4_frontier_repair_pressure' -and
+                        [string]$operation.operationRole -ceq 'recovery_handoff_terminal' -and
+                        ([string]$operation.beforeState -ceq 'Committed' -or
+                         [string]$operation.afterState -ceq 'Committed') -and
+                        -not (Test-FileTransferCoordinatorSnapshotRecoveryHandoffTerminalReceipt -Operation $operation)) {
+                        $errors.Add(
+                            "snapshot_regular_v4_pressure_recovery_handoff_terminal_receipt_invalid|retained_recovery_handoff_receipt_replaced_by_unrelated_last_settlement:$($record.LineIndex)")
+                    }
+                }
+                foreach ($operation in @($envelope.aggregate.operations)) {
                     if ([string]::IsNullOrWhiteSpace([string]$operation.family) -or
                         [string]::IsNullOrWhiteSpace([string]$operation.operationRole) -or
                         [string]::IsNullOrWhiteSpace([string]$operation.operationKey) -or
@@ -5915,6 +6021,29 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         $latest = $history[-1]
         $family = [string]$latest.Operation.family
+        if ($family -ceq 'regular_v4_frontier_repair_pressure' -and
+            [string]$latest.Operation.operationRole -ceq 'recovery_handoff_terminal') {
+            $receiptSignature = $null
+            $retired = $false
+            foreach ($entry in @($history | Sort-Object {
+                        [long]$_.Boundary.afterStateGeneration
+                    }, { [long]$_.Boundary.beforeStateGeneration }, {
+                        [string]$_.Boundary.boundaryId
+                    })) {
+                $operation = $entry.Operation
+                if (-not (Test-FileTransferCoordinatorSnapshotRecoveryHandoffTerminalReceipt -Operation $operation)) {
+                    continue # The per-operation validator already reports this exact location.
+                }
+                $signature = Get-FileTransferCoordinatorSnapshotRecoveryHandoffReceiptSignature -Operation $operation
+                if ($retired -or ($null -ne $receiptSignature -and $signature -cne $receiptSignature)) {
+                    $errors.Add(
+                        "snapshot_regular_v4_pressure_recovery_handoff_terminal_receipt_invalid|retained_recovery_handoff_receipt_mutated_or_reused:$($entry.Boundary.evidenceLineIndex)")
+                    continue
+                }
+                $receiptSignature = $signature
+                $retired = [string]$operation.afterState -ceq 'None'
+            }
+        }
         if ($family -ceq 'route_transition') {
             $isBootstrap = [string]$latest.Operation.operationRole -ceq
                 'fallback_v6_bootstrap'

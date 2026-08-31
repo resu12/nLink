@@ -3352,7 +3352,7 @@ internal static partial class FileTransferCoordinator
                 state,
                 "recovery_handoff_terminal",
                 handoff,
-                pressure.LastSettlementApplyReceipt,
+                pressure.LastRecoveryHandoffApplyReceipt,
                 "Committed"));
         }
 
@@ -3700,10 +3700,14 @@ internal static partial class FileTransferCoordinator
         var authority = binding.Authority;
         var recovery = handoff.ReceiveRecoveryOperation;
         var authorityId = authority.AuthorityId.ToString();
+        var exactReceipt = receipt?.Command == handoff.SettlementCommand &&
+                           receipt.Command.Settlement == handoff.Settlement
+            ? receipt
+            : null;
         var receiptSnapshot =
             CreateRegularV4PressureSettlementReceiptSnapshot(
                 handoff.Settlement,
-                receipt);
+                exactReceipt);
         return new CoordinatorOperationDescriptor(
             "regular_v4_frontier_repair_pressure",
             "PressureRecoveryHandoff",
@@ -3742,8 +3746,8 @@ internal static partial class FileTransferCoordinator
                 lifecycle,
                 handoff.Settlement.Outcome.ToString(),
                 handoff.Settlement.DecisionReason,
-                receipt?.CurrentAuthorityCleared ?? false,
-                receipt?.RetainedPredecessorCleared ?? false,
+                exactReceipt?.CurrentAuthorityCleared ?? false,
+                exactReceipt?.RetainedPredecessorCleared ?? false,
                 handoff.Settlement.SuccessorAuthorityId?.ToString() ??
                     "(none)",
                 recovery.AuthorityId.ToString(),

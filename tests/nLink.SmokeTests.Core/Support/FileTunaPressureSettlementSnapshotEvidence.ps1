@@ -15,6 +15,7 @@ function New-Effect($envelope, $operation, [string]$kind, [long]$sequence) {
         'responder_probe_handoff' { $operation.responderProbeHandoff.sourceBoundary }
         'route_transition' { $operation.routeTransition.sourceBoundary }
         'route_runtime' { $operation.routeRuntime.boundary }
+        'receive_recovery' { $operation.receiveRecovery.sourceBoundary }
     }
     "event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$($envelope.transitionId); coordinator_state_generation=$($envelope.aggregate.afterStateGeneration); operation_family=$($operation.family); operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=$kind; effect_identity=$($operation.operationKey):$kind; effect_generation=$($operation.receiptGeneration); receipt_identity=$($operation.receiptIdentity); receipt_generation=$($operation.receiptGeneration); receipt_status=$($operation.receiptStatus); receipt_fingerprint=$($operation.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=fixture-writer; log_writer_sequence=$sequence"
 }
@@ -35,6 +36,10 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
         'CommitRegularV4FrontierRepairPressureBinding' { $role='pressure_binding_installed'; $kinds=@('pressure_install_bridge_result','repair_contract_bound') }
         'PrepareRegularV4FrontierRepairPressureSettlement' { $role='pressure_settlement_prepared'; $kinds=@('pressure_settlement_prepared') }
         'CommitRegularV4FrontierRepairPressureSettlement' { $role='pressure_settlement_terminal'; $kinds=@('pressure_settlement_bridge_applied','local_contract_settled','local_contract_reference_cleared') }
+        'PrepareRegularV4FrontierRepairPressureRecoveryHandoff' { $role='recovery_handoff_prepared'; $kinds=@('recovery_handoff_prepared') }
+        'ObserveReceiveRecoveryExecutionStart' { $role='operation_current'; $kinds=@('execution_started') }
+        'FallbackCheckpointRequested' { $role='repair_authority_terminal'; $kinds=@('regular_v4_pressure_decision_adopted') }
+        'FallbackCheckpointAccepted' { $role='repair_authority_terminal'; $kinds=@('regular_v4_pressure_decision_adopted') }
     }
     if ($null -ne $role) {
         $matches = @($envelope.aggregate.operations | Where-Object { $_.operationRole -ceq $role -and $_.afterState -cne 'None' })
@@ -43,7 +48,12 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
     }
     foreach ($operation in $envelope.aggregate.operations) {
         $kinds = @()
-        if ($operation.family -ceq 'regular_v4_frontier_repair_pressure' -and
+        if ($envelope.decisionKind -ceq 'CommitRegularV4FrontierRepairPressureRecoveryHandoff' -and
+            $operation.family -ceq 'regular_v4_frontier_repair_pressure' -and $operation.beforeState -ceq 'None') {
+            if ($operation.operationRole -ceq 'pressure_settlement_terminal') { $kinds=@('pressure_settlement_bridge_applied','local_contract_settled','local_contract_reference_cleared') }
+            elseif ($operation.operationRole -ceq 'recovery_handoff_terminal') { $kinds=@('recovery_handoff_committed','projection_detached') }
+        }
+        elseif ($operation.family -ceq 'regular_v4_frontier_repair_pressure' -and
             $envelope.decisionKind -ceq 'CommitFileTransferRouteTransition' -and
             $operation.operationRole -ceq 'repair_authority_terminal' -and $operation.afterState -ceq 'Applied') {
             $kinds = @('route_commit_local_lifecycle_adopted')
@@ -60,11 +70,14 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
         elseif ($operation.family -ceq 'route_transition') {
             if ($envelope.decisionKind -ceq 'BeginFileTransferRouteTransitionPhysicalDrain' -and $operation.operationRole -ceq 'current') { $kinds=@('pause_installed') }
             elseif ($envelope.decisionKind -ceq 'CommitFileTransferRouteTransition') {
-                if ($operation.operationRole -ceq 'terminal') { $kinds=@('route_commit_adopted','target_runtime_leg_installed') }
+                if ($operation.operationRole -ceq 'terminal' -and $operation.beforeState -ceq 'None' -and $operation.afterState -ceq 'Committed') { $kinds=@('route_commit_adopted','target_runtime_leg_installed') }
                 elseif ($operation.operationRole -ceq $envelope.direction) { $kinds=@('completed_drain_receipt') }
             }
             elseif ($envelope.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and $operation.operationRole -ceq $envelope.direction) {
                 $kinds=@('route_transition_disposition_applied','transition_pause_released','recovered_epoch_publication')
+            }
+            elseif ($envelope.decisionKind -ceq 'ApplyFileTransferRouteTransitionRetainedFrameReceipt' -and $operation.operationRole -ceq $envelope.direction) {
+                $kinds=@('retained_frame_response','retained_frame_applied')
             }
         }
         foreach ($kind in $kinds) { $sequence++; $lines.Add((New-Effect $envelope $operation $kind $sequence)) }
@@ -81,7 +94,7 @@ foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult','Get-Tu
     if ($definitions.Count -ne 1) { throw "GUI function not unique: $name" }
     . ([scriptblock]::Create($definitions[0].Extent.Text))
 }
-function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
+function Assert-Parity([string[]]$inputLines, [bool]$missingClosure, [bool]$retainedRouteControl = $false) {
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated_diagnostic')+$inputLines)
     $compactLines = @($inputLines | Where-Object {
         $name = Get-FileTransferCoordinatorSnapshotEventName -Line $_
@@ -90,14 +103,34 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
     $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $compactLines
     if ((Compare-FileTransferCoordinatorSnapshotEvaluations -Full $full -Compact $compact).Verdict -cne 'pass') { throw 'Full/compact parity failed.' }
     if ($full.LegacySelectionCount -ne 0 -or
-        ($null -ne $full.FirstUnresolvedBoundary) -ne $missingClosure -or
+        ($null -ne $full.FirstUnresolvedBoundary) -ne ($missingClosure -or $retainedRouteControl) -or
         (-not $missingClosure -and $full.ArtifactEvidenceVerdict -cne 'pass')) {
-        throw "Tuna settlement contract failed: $($full | ConvertTo-Json -Depth 10 -Compress)"
+        $catalogFailures = @($full.ArtifactEvidenceFailureReason -split ';' | Where-Object { $_ -match 'snapshot_operation_catalog_mismatch:(\d+)$' } | ForEach-Object {
+            $index = [int]($_ -replace '^.*:', '')
+            $badLine = (@('event=unrelated_diagnostic') + $inputLines)[$index]
+            $e = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField -Line $badLine -Name snapshot_payload)).Value
+            foreach ($op in $e.aggregate.operations) {
+                foreach ($family in 1..6) {
+                    if (-not (& "Test-FileTransferCoordinatorSnapshotFamily${family}OperationCatalog" -Envelope $e -Operation $op)) {
+                        "$($e.decisionKind):$($op.operationRole):$($op.beforeState)->$($op.afterState)"
+                    }
+                }
+            }
+        })
+        throw "Tuna settlement contract failed: $($full.ArtifactEvidenceFailureReason); catalog=$($catalogFailures -join ','); first=$($full.FirstUnresolvedBoundary | Select-Object * -ExcludeProperty operations | ConvertTo-Json -Depth 4 -Compress)"
+    }
+    if ($retainedRouteControl -and -not $missingClosure) {
+        foreach ($failure in @($full.Boundaries | Where-Object unresolvedCount -gt 0)) {
+            if ($failure.taxonomyClass -cne 'filetransfer_route_transition_incomplete' -or
+                @($failure.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationKind -ceq 'TunaV4ToPostTunaFallbackV6' }).Count -eq 0) {
+                throw 'Unexpected failure beside the independent retained-frame route control.'
+            }
+        }
     }
     $path = Join-Path $OutputRoot 'gui-input.log'
     [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($missingClosure) {
+    if ($missingClosure -or $retainedRouteControl) {
         $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
             $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
@@ -105,10 +138,16 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
     }
     elseif ($null -ne $gui) { throw 'GUI rejected the exact settlement.' }
 }
-Assert-Parity $lines $false
-Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $false
+$retainedHandoffFixture = @($envelopes | Where-Object decisionKind -ceq 'CommitRegularV4FrontierRepairPressureRecoveryHandoff').Count -gt 0
+# The existing route reducer splits the retained-frame lifecycle when its frame first
+# appears at commit. Preserve that independent finding; all receipt evidence must pass.
+Assert-Parity $lines $false $retainedHandoffFixture
+Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $false $retainedHandoffFixture
 Assert-Parity @($lines | Where-Object { $_ -notmatch 'effect_kind=local_contract_reference_cleared;' }) $true
 if (@($envelopes | Where-Object decisionKind -ceq 'CommitRegularV4FrontierRepairPressureSettlement').Count -eq 2) {
     . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/CrossRoutePressureTerminalRolloverControls.ps1')
+}
+if ($retainedHandoffFixture) {
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/RetainedHandoffReceiptControls.ps1')
 }
 'File-Tuna Coordinator/projector/full/compact/GUI settlement contract passed.'

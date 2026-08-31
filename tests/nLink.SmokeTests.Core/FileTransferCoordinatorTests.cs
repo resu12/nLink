@@ -4716,6 +4716,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(transition.Settlement, PressureState(committed.State).LastSettlement);
         Assert.Equal(receipt, PressureState(committed.State).LastSettlementApplyReceipt);
         Assert.Equal(transition, PressureState(committed.State).LastRecoveryHandoff);
+        Assert.Same(receipt, PressureState(committed.State).LastRecoveryHandoffApplyReceipt);
         Assert.Equal(transition.BridgeRecoveryDecision, committed.State.CurrentBridgeRecoveryDecision);
         Assert.Equal(transition.RecoveryLivenessLease, committed.State.CurrentRecoveryLivenessLease);
         Assert.Equal(
@@ -22208,7 +22209,8 @@ public sealed class FileTransferCoordinatorTests
         FileTransferCoordinatorState state,
         FileTransferRouteSelection fallback,
         int committedChunk,
-        long transportEpoch)
+        long transportEpoch,
+        Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         if (state.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast)
         {
@@ -22285,7 +22287,8 @@ public sealed class FileTransferCoordinatorTests
         var committed = CommitEmptyFileTransferRouteTransitionForTest(
             state,
             request,
-            finalProof: null);
+            finalProof: null,
+            capture: capture);
         return committed with
         {
             State = committed.State with
@@ -22382,14 +22385,15 @@ public sealed class FileTransferCoordinatorTests
         var committedState = committed.State;
         if (committed.RetainedFrameApplyCommand is { } frameCommand)
         {
-            committedState = FileTransferCoordinator
+            var retainedFrame = FileTransferCoordinator
                 .ApplyFileTransferRouteTransitionRetainedFrameReceipt(
                     committedState,
                     new FileTransferRouteTransitionRetainedFrameApplyReceipt(
                         frameCommand,
                         FileTransferRouteTransitionRetainedFrameApplyStatus.Applied,
-                        "filetransfer_route_transition_retained_frame_applied"))
-                .State;
+                        "filetransfer_route_transition_retained_frame_applied"));
+            capture?.Invoke(retainedFrame.SnapshotEnvelope!);
+            committedState = retainedFrame.State;
         }
 
         var disposition = committed.DispositionCommand!.Value;
@@ -23398,6 +23402,198 @@ public sealed class FileTransferCoordinatorTests
             entering.RegularV4FrontierRepairPressure.EffectiveBoundary);
         Assert.Equal("(none)", entering.PredecessorAuthorityId);
         Assert.Equal(2, rollover.Aggregate.Operations.Count(operation => operation.OperationRole == "repair_authority_terminal"));
+        return envelopes;
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_RetainedHandoffReceiptSurvivesIndependentSettlement(
+        FileTransferDirection direction) => CreateRetainedHandoffReceiptSnapshotFixture(direction);
+
+    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CreateRetainedHandoffReceiptSnapshotFixture(FileTransferDirection direction)
+    {
+        var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
+        {
+            Assert.NotNull(envelope);
+            if (envelopes.Count > 0)
+            {
+                Assert.Equal(envelopes[^1].Aggregate.AfterStateGeneration, envelope.Aggregate.BeforeStateGeneration);
+                Assert.Equal(envelopes[^1].Aggregate.AfterStateFingerprint, envelope.Aggregate.BeforeStateFingerprint);
+            }
+            envelopes.Add(envelope);
+        }
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular, direction).State with
+        {
+            CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var publication = FileTransferCoordinator.AuthorizeAction(state,
+            RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
+                state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
+                targetRoute: regular.Route, targetProtocolVersion: 4,
+                targetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+        state = publication.State with
+        {
+            LastRepairReplayGeneration = 2,
+            PersistentState = publication.State.PersistentState with
+            {
+                CoordinatorInstanceId = $"retained-handoff-receipt-{direction}",
+                RegularV4FrontierRepairPressure = PressureState(publication.State) with { LastInstallGeneration = 2 },
+            },
+        };
+
+        void Install(string key)
+        {
+            var authorized = FileTransferCoordinator.AuthorizeAction(state,
+                RecoveryActionRequest(FileTransferCoordinatorActionKind.RepairReplay,
+                    state.CurrentRuntimeOwner!.Value, state.CurrentLeg!, repairReplayKind: RepairReplayKind.V4Repair));
+            Assert.True(authorized.Accepted, authorized.RejectionReason);
+            Capture(authorized.SnapshotEnvelope!);
+            var staged = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+                authorized.State, authorized.RepairReplayDecision!.Value,
+                RegularV4PressureAuthorityRequest(key), "regular_v4_receiver_frontier_repair_due");
+            Capture(staged.SnapshotEnvelope!);
+            var binding = staged.Binding!.Value;
+            var installed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(staged.State,
+                new FileTransferRegularV4FrontierRepairPressureInstallReceipt(binding.Authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                    "installed", binding.InstallGeneration, binding.PressureReason));
+            Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, installed.Status);
+            Capture(installed.SnapshotEnvelope!);
+            state = installed.State;
+        }
+
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt Handoff()
+        {
+            var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
+                state, CreateReceiveRecoveryObservationForTest(state, "session_liveness_timeout_pending",
+                    state.LastBridgeRecoveryDecisionGeneration + 1));
+            Assert.True(prepared.Status == RegularV4FrontierRepairPressureRecoveryHandoffStatus.Prepared, prepared.Reason);
+            Capture(prepared.SnapshotEnvelope!);
+            var transition = prepared.Transition!.Value;
+            var receipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
+                transition.SettlementCommand, FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                "regular_v4_frontier_repair_pressure_settlement_applied", true, false);
+            var committed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(state, transition, receipt);
+            Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed, committed.Status);
+            Capture(committed.SnapshotEnvelope!);
+            Assert.Equal(committed.SnapshotEnvelope!.Aggregate.BeforeStateGeneration + 1,
+                committed.SnapshotEnvelope.Aggregate.AfterStateGeneration);
+            state = committed.State;
+            Assert.Same(receipt, PressureState(state).LastRecoveryHandoffApplyReceipt);
+            var execution = transition.ReceiveRecoveryOperation.ExecutionCommand;
+            var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(state,
+                new FileTransferBridgeRecoveryExecutionStartResult(execution,
+                    FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                    "bridge_recovery_execution_started",
+                    Task.FromResult(new FileTransferBridgeRecoveryExecutionReceipt(execution,
+                        FileTransferBridgeRecoveryExecutionOutcome.Completed, "hard", "bridge_recovery_completed"))),
+                observedUtcMs: 100);
+            Assert.True(started.Accepted, started.Reason);
+            Capture(started.SnapshotEnvelope!);
+            state = started.State;
+            var invalidated = FileTransferCoordinator.InvalidateReceiveRecoveryOperation(state,
+                transition.ReceiveRecoveryOperation, "snapshot_handoff_recovery_complete");
+            Assert.True(invalidated.Accepted, invalidated.Reason);
+            Capture(invalidated.SnapshotEnvelope!);
+            state = invalidated.State;
+            return receipt;
+        }
+
+        Install("retained-handoff-A");
+        var receiptA = Handoff();
+        var stateA = state;
+        var handoffA = PressureState(state).LastRecoveryHandoff;
+        Install("independent-settlement-B");
+        var bindingB = PressureState(state).InstalledBinding!.Value;
+        var preparedB = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(state,
+            RegularV4PressureSettlement(bindingB.Authority, FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled));
+        Capture(preparedB.SnapshotEnvelope!);
+        var receiptB = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(preparedB.SettlementCommand!,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+            "regular_v4_frontier_repair_pressure_settlement_applied", true, false);
+        var settledB = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(preparedB.State, receiptB);
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, settledB.Status);
+        Capture(settledB.SnapshotEnvelope!);
+        state = settledB.State;
+        Assert.Same(receiptB, PressureState(state).LastSettlementApplyReceipt);
+        Assert.Same(receiptA, PressureState(state).LastRecoveryHandoffApplyReceipt);
+        Assert.Equal(handoffA, PressureState(state).LastRecoveryHandoff);
+        Assert.Same(receiptA, PressureState(stateA).LastSettlementApplyReceipt);
+        Assert.DoesNotContain(settledB.SnapshotEnvelope!.Aggregate.Operations,
+            operation => operation.OperationRole == "recovery_handoff_terminal");
+        var duplicateB = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(state, receiptB);
+        Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Idempotent, duplicateB.Status);
+        Assert.Same(receiptA, PressureState(duplicateB.State).LastRecoveryHandoffApplyReceipt);
+        Assert.Equal(duplicateB.SnapshotEnvelope!.Aggregate.BeforeStateGeneration,
+            duplicateB.SnapshotEnvelope.Aggregate.AfterStateGeneration);
+        Assert.Equal(duplicateB.SnapshotEnvelope.Aggregate.BeforeStateFingerprint,
+            duplicateB.SnapshotEnvelope.Aggregate.AfterStateFingerprint);
+        foreach (var invalidReceipt in new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?[] { null, receiptB })
+        {
+            var malformed = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    RegularV4FrontierRepairPressure = PressureState(state) with
+                    {
+                        LastRecoveryHandoffApplyReceipt = invalidReceipt,
+                    },
+                },
+            };
+            var projection = FileTransferCoordinator.CreateTransitionSnapshot(state, malformed,
+                state.PersistentState.CoordinatorInstanceId!, state.PersistentState.SnapshotStateGeneration,
+                "LegacyFamilyCoordinatorDecision", "Accepted", "missing_retained_receipt_control");
+            var terminal = Assert.Single(projection.Envelope.Aggregate.Operations,
+                operation => operation.OperationRole == "recovery_handoff_terminal");
+            Assert.Equal("Committed", terminal.AfterState);
+            Assert.Equal("Prepared", terminal.ReceiptStatus);
+            Assert.False(terminal.ReceiptValidated);
+            Assert.Equal("(none)", terminal.ReceiptFingerprint);
+        }
+
+        Install("replacement-handoff-C");
+        var receiptC = Handoff();
+        Assert.NotEqual(receiptA, receiptC);
+        Assert.Same(receiptA, PressureState(stateA).LastRecoveryHandoffApplyReceipt);
+        if (direction == FileTransferDirection.Inbound)
+            state = ActivateInitialResponderTunaForFallbackFixture(state, Capture).State;
+        else
+        {
+            var setup = CreateRegularV4ToTunaRouteTransitionSetup(state, Capture);
+            state = CommitEmptyFileTransferRouteTransitionForTest(setup.State, setup.Request, setup.FinalProof, capture: Capture).State;
+        }
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        state = FallBack(state, fallback, 5, 17, Capture).State;
+        if (state.CurrentFallbackCheckpointLease is { } bootstrapCheckpoint)
+        {
+            var bootstrapAccepted = AcceptFallbackCheckpoint(state, fallback,
+                bootstrapCheckpoint.CheckpointRequestId, state.CurrentLeg!.TransportEpochId, 5, 5);
+            Assert.False(bootstrapAccepted.TerminalMutationRejected);
+            Capture(bootstrapAccepted.SnapshotEnvelope!);
+            state = bootstrapAccepted.State;
+        }
+        var requested = RequestFallbackCheckpoint(state, fallback, "retained-handoff-checkpoint", state.CurrentLeg!.TransportEpochId);
+        Capture(requested.SnapshotEnvelope!);
+        var accepted = AcceptFallbackCheckpoint(requested.State, fallback, "retained-handoff-checkpoint", requested.State.CurrentLeg!.TransportEpochId, 5, 5);
+        Capture(accepted.SnapshotEnvelope!);
+        Assert.Same(receiptC, PressureState(accepted.State).LastRecoveryHandoffApplyReceipt);
+        foreach (var operation in envelopes.SelectMany(envelope => envelope.Aggregate.Operations)
+                     .Where(operation => operation.OperationRole == "recovery_handoff_terminal"))
+        {
+            Assert.True(operation.ReceiptValidated);
+            Assert.Equal("Applied", operation.ReceiptStatus);
+            Assert.NotEqual("(none)", operation.ReceiptFingerprint);
+            Assert.Equal(operation.ReceiptFingerprint,
+                Assert.Single(operation.RegularV4FrontierRepairPressure!.Receipts).ReceiptFingerprint);
+        }
         return envelopes;
     }
 
