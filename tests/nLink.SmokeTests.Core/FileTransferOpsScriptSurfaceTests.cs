@@ -4474,6 +4474,26 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         finally { TryDeleteDirectory(tempRoot); }
     }
 
+    [Fact]
+    public async Task FileTransferOps_FailedYieldUsesExactConsumedReservationOwnership()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-consumed-owner", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateFailedYieldAfterConsumedReservationSnapshotFixture()
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath, "[" + string.Join(",", envelopes.Select(e => e.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core", "Support", "ConsumedReleaseOwnerSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
@@ -4566,6 +4586,53 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "PendingScopeInvalidationSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Fact]
+    public async Task FileTransferOps_CheckpointResponderCarryUsesExactSharedHistory()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-checkpoint-responder", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateCheckpointResponderCarrySnapshotFixture()
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "CheckpointResponderCarrySnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
+    public async Task FileTransferOps_CheckpointStalePeerProofUsesExactSharedHistory(
+        NLink.Core.FileTransfer.FileTransferDirection direction)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-checkpoint-discard", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateCheckpointStalePeerProofSnapshotFixture(direction)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "CheckpointStalePeerProofSnapshotEvidence.ps1"));
             var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }

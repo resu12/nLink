@@ -1924,6 +1924,89 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "FallbackTailYield")]
+    public void FallbackTailYield_FreshFailedYieldDoesNotInheritConsumedReservation()
+        => CreateFailedYieldAfterConsumedReservationSnapshotFixture();
+
+    internal static FileTransferCoordinatorTransitionEnvelope[] CreateFailedYieldAfterConsumedReservationSnapshotFixture()
+    {
+        var snapshots = new List<FileTransferCoordinatorTransitionEnvelope>();
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope) => snapshots.Add(envelope);
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource(snapshotCapture: snapshots);
+        var grant = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(state, request,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, tailYield.AuthorityId,
+            tailYield.YieldGeneration, tailYield.YieldKind.ToString());
+        Assert.True(grant.Granted, grant.Reason);
+        Capture(grant.SnapshotEnvelope!);
+        var staged = StagePersistentRetryLifecycle(grant.State, grant, 25_000);
+        Capture(staged.SnapshotEnvelope!);
+        var issued = FileTransferCoordinator.IssueRuntimeUnlockRetryDispatchInstallReceipt(staged.State, grant, request, 25_001);
+        Capture(issued.SnapshotEnvelope!);
+        var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(issued.Receipt);
+        var installed = FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall(issued.State,
+            new(RuntimeUnlockRetryDispatchInstallStatus.Installed, "installed", receipt), 25_002);
+        Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, installed.Status);
+        Capture(installed.SnapshotEnvelope!);
+        var reservation = installed.State.PersistentState.FallbackTailYield.LastConsumedReservation;
+        var consumed = Assert.Single(installed.SnapshotEnvelope!.Aggregate.Operations,
+            operation => operation.OperationRole == "release_reservation_consumed");
+        Assert.Equal("Consumed", consumed.AfterState);
+        Assert.True(consumed.ReceiptValidated);
+        Assert.Equal(receipt.InstallGeneration, consumed.FallbackTailYield!.ConsumingInstallGeneration);
+        var immutable = installed.SnapshotEnvelope.ToCanonicalJson();
+        var owner = installed.State.PersistentState.FallbackTailYield.CurrentOperation!.Value;
+        var ownedReservation = reservation!.Value;
+        var ownership = typeof(FileTransferCoordinator).GetMethod("FallbackTailReservationSnapshotBelongsToOperation",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        bool Belongs(FileTransferFallbackTailYieldOperation operation, FileTransferFallbackTailPairedReleaseReservation value)
+            => (bool)ownership.Invoke(null, [operation, value])!;
+        Assert.True(Belongs(owner, ownedReservation));
+        foreach (var mutation in new[]
+        {
+            owner with { Decision = owner.Decision with { YieldGeneration = owner.Decision.YieldGeneration + 1 } },
+            owner with { Scope = owner.Scope with { DataSessionIdentity = "replacement" } },
+            owner with { Scope = owner.Scope with { DataSessionGeneration = owner.Scope.DataSessionGeneration + 1 } },
+            owner with { Scope = owner.Scope with { PairKey = "wrong-pair" } },
+            owner with { Scope = owner.Scope with { CheckpointGeneration = owner.Scope.CheckpointGeneration + 1 } },
+            owner with { LocalProof = null },
+            owner with { PeerProof = null },
+            owner with { PairedRelease = null },
+        }) { Assert.False(Belongs(mutation, ownedReservation)); }
+        Assert.False(Belongs(owner, ownedReservation with { RetryAuthority = receipt.Authority with { TransportEpoch = receipt.Authority.TransportEpoch + 1 } }));
+        Assert.False(Belongs(owner, ownedReservation with { Release = ownedReservation.Release with { PairingGeneration = ownedReservation.Release.PairingGeneration + 1 } }));
+        var carryTarget = owner.Scope with { TransportEpoch = owner.Scope.TransportEpoch + 1 };
+        Assert.True(Belongs(owner with { PairedReleaseCarryForward = new(owner.Decision, ownedReservation.Release, owner.Scope, carryTarget, "transport_reauthorized") }, ownedReservation));
+        Assert.False(Belongs(owner with { PairedReleaseCarryForward = new(owner.Decision, ownedReservation.Release,
+            owner.Scope with { TransportEpoch = owner.Scope.TransportEpoch + 2 }, carryTarget with { TransportEpoch = owner.Scope.TransportEpoch + 3 }, "wrong_source") }, ownedReservation));
+
+        var setup = CreateFallbackV6ToTunaRouteTransitionSetup(installed.State);
+        state = CommitEmptyFileTransferRouteTransitionForTest(setup.State, setup.Request, setup.FinalProof, capture: Capture).State;
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        state = FallBack(state, fallback, 4, 4, Capture).State;
+        Assert.Equal(reservation, state.PersistentState.FallbackTailYield.LastConsumedReservation);
+        Assert.Null(state.PersistentState.FallbackTailYield.CurrentOperation);
+        var failed = MarkFallbackTailFailed(state, fallback, 4);
+        Assert.Null(failed.MutationRejectedReason);
+        Capture(failed.SnapshotEnvelope!);
+        var fresh = Assert.Single(failed.SnapshotEnvelope!.Aggregate.Operations,
+            operation => operation.OperationRole == "yield_current");
+        Assert.Equal("Failed", fresh.OperationKind);
+        Assert.Equal("None", fresh.BeforeState);
+        Assert.Equal("YieldIssued", fresh.AfterState);
+        Assert.NotEqual(consumed.AuthorityId, fresh.AuthorityId);
+        Assert.Equal(0, fresh.FallbackTailYield!.ReservationGeneration);
+        Assert.Equal("(none)", fresh.FallbackTailYield.ReservedRetryAuthorityId);
+        Assert.Equal(0, fresh.FallbackTailYield.ConsumingInstallGeneration);
+        Assert.DoesNotContain(failed.SnapshotEnvelope.Aggregate.Operations,
+            operation => operation.OperationRole.StartsWith("release_reservation_", StringComparison.Ordinal));
+        Assert.Equal(reservation, failed.State.PersistentState.FallbackTailYield.LastConsumedReservation);
+        Assert.Equal(receipt, failed.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
+        Assert.Equal(immutable, installed.SnapshotEnvelope.ToCanonicalJson());
+        return snapshots.ToArray();
+    }
+
+    [Fact]
     public void FallbackTailYield_StageRejectionExpiryAndStaleReceiptReleaseOnlyExactReservation()
     {
         var (state, request, tailYield) =
@@ -5966,12 +6049,14 @@ public sealed class FileTransferCoordinatorTests
     {
         // Use the same production authorization/staging helpers as the runtime contract tests.
         RuntimeUnlockRetryDispatchDecision granted;
+        var prefix = new List<FileTransferCoordinatorTransitionEnvelope>();
         if (fallback)
         {
-            var fixture = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+            var fixture = AuthorizeFallbackRuntimeUnlockRetryDispatchSource(snapshotCapture: prefix);
             granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(fixture.State, fixture.Request,
                 RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, fixture.TailYield.AuthorityId,
                 fixture.TailYield.YieldGeneration, fixture.TailYield.YieldKind.ToString());
+            prefix.Add(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(granted.SnapshotEnvelope));
         }
         else
         {
@@ -5981,28 +6066,73 @@ public sealed class FileTransferCoordinatorTests
                 fixture.Release.RepairGeneration, "ProgressObserved");
         }
         Assert.True(granted.Granted, granted.Reason);
-        var staged = StagePersistentRetryLifecycle(granted.State, granted, 40_000);
-        var state = staged.State with
+        var source = fallback ? granted.State : granted.State with
         {
-            PersistentState = staged.State.PersistentState with
+            PersistentState = granted.State.PersistentState with
             {
                 CoordinatorInstanceId = fallback ? "pending-invalidation-fallback" : "pending-invalidation-regular",
                 SnapshotStateGeneration = 0,
             },
         };
+        var staged = StagePersistentRetryLifecycle(source, granted, 40_000);
+        var state = staged.State;
         var prepared = FileTransferCoordinator.PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
             state, "retry_dispatch_runtime_scope_replaced");
         var command = Assert.IsType<RuntimeUnlockRetryDispatchScopeInvalidationCommand>(prepared.Command);
         var duplicate = FileTransferCoordinator.PrepareRuntimeUnlockRetryLifecycleScopeInvalidation(
             prepared.State, command.Reason);
-        var committed = FileTransferCoordinator.CommitRuntimeUnlockRetryLifecycleScopeInvalidation(
-            prepared.State, new RuntimeUnlockRetryDispatchScopeInvalidationReceipt(command,
-                RuntimeUnlockRetryDispatchScopeInvalidationStatus.Applied, command.Reason));
+        var receipt = new RuntimeUnlockRetryDispatchScopeInvalidationReceipt(command,
+            RuntimeUnlockRetryDispatchScopeInvalidationStatus.Applied, command.Reason);
+        var committed = FileTransferCoordinator.CommitRuntimeUnlockRetryLifecycleScopeInvalidation(prepared.State, receipt);
+        var committedDuplicate = FileTransferCoordinator.CommitRuntimeUnlockRetryLifecycleScopeInvalidation(committed.State, receipt);
+        var rejected = FileTransferCoordinator.CommitRuntimeUnlockRetryLifecycleScopeInvalidation(committed.State,
+            receipt with { Status = RuntimeUnlockRetryDispatchScopeInvalidationStatus.Rejected });
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, prepared.Status);
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent, duplicate.Status);
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, committed.Status);
-        return new[] { prepared.SnapshotEnvelope, duplicate.SnapshotEnvelope, committed.SnapshotEnvelope }
-            .Select(envelope => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(envelope)).ToArray();
+        return new[] { prepared.SnapshotEnvelope, duplicate.SnapshotEnvelope, committed.SnapshotEnvelope,
+                staged.SnapshotEnvelope, committedDuplicate.SnapshotEnvelope, rejected.SnapshotEnvelope }
+            .Select(envelope => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(envelope)).Concat(prefix).ToArray();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "RuntimeUnlockRetryLifecycle")]
+    public void RuntimeUnlockRetryLifecycle_AppliedScopeInvalidationRetainsExactReceipt(bool fallback)
+    {
+        var values = CreatePendingScopeInvalidationSnapshotFixture(fallback);
+        var pending = Assert.Single(values[0].Aggregate.Operations, o => o.OperationRole == "scope_invalidation");
+        var committed = values[2];
+        var applied = Assert.Single(committed.Aggregate.Operations, o => o.OperationRole == "scope_invalidation");
+        Assert.Equal("Pending", applied.BeforeState);
+        Assert.Equal("Applied", applied.AfterState);
+        Assert.True(applied.StateApplied);
+        Assert.True(applied.ReceiptValidated);
+        Assert.Equal(pending.OperationKey, applied.OperationKey);
+        Assert.Equal(pending.CommandIdentity, applied.CommandIdentity);
+        Assert.Equal(pending.CommandFingerprint, applied.CommandFingerprint);
+        Assert.Equal(pending.OperationGeneration, applied.ReceiptGeneration);
+        Assert.Equal(pending.RuntimeUnlockRetry!.SourceBoundary, applied.RuntimeUnlockRetry!.SourceBoundary);
+        Assert.Equal(committed.Aggregate.BeforeStateGeneration + 1, committed.Aggregate.AfterStateGeneration);
+        Assert.NotEqual(committed.Aggregate.BeforeStateFingerprint, committed.Aggregate.AfterStateFingerprint);
+        var receipt = Assert.Single(applied.RuntimeUnlockRetry.Receipts);
+        Assert.Equal("scope_invalidation", receipt.Stage);
+        Assert.Equal("Applied", receipt.ReceiptStatus);
+        foreach (var duplicate in values[4..6])
+        {
+            Assert.Contains(duplicate.DecisionStatus, new[] { "Idempotent", "Rejected" });
+            Assert.Equal(duplicate.Aggregate.BeforeStateGeneration, duplicate.Aggregate.AfterStateGeneration);
+            Assert.Equal(duplicate.Aggregate.BeforeStateFingerprint, duplicate.Aggregate.AfterStateFingerprint);
+            var attempt = Assert.Single(duplicate.Aggregate.Operations, o => o.OperationRole == "scope_invalidation");
+            Assert.Equal("Applied", attempt.BeforeState);
+            Assert.Equal("Applied", attempt.AfterState);
+            Assert.False(attempt.StateApplied);
+            Assert.Equal(receipt, Assert.Single(attempt.RuntimeUnlockRetry!.Receipts));
+        }
+        Assert.Equal("Pending", pending.AfterState);
+        Assert.False(pending.ReceiptValidated);
     }
 
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateStagedRetryInstallSnapshotFixture(bool fallback)
@@ -18793,6 +18923,80 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(failed.State.CurrentLeg.CanSendData);
     }
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound)]
+    [InlineData(FileTransferDirection.Outbound)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "FallbackTailYield")]
+    public void FallbackTailYield_CheckpointStalePeerProofIsRetiredWithoutAdoption(FileTransferDirection direction)
+        => CreateCheckpointStalePeerProofSnapshotFixture(direction);
+
+    internal static FileTransferCoordinatorTransitionEnvelope[] CreateCheckpointStalePeerProofSnapshotFixture(
+        FileTransferDirection direction)
+    {
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var source = ActiveFallbackStateWithoutCheckpoint(direction) with
+        {
+            CurrentDataSessionIdentity = "checkpoint-discard-session",
+            CurrentDataSessionGeneration = 1,
+        };
+        var epoch = source.CurrentLeg!.TransportEpochId;
+        var initialRequest = RequestFallbackCheckpoint(source, fallback, "checkpoint:initial", epoch);
+        Assert.Null(initialRequest.MutationRejectedReason);
+        var initialAcceptance = AcceptFallbackCheckpoint(initialRequest.State, fallback, "checkpoint:initial", epoch, 5, 5);
+        Assert.Null(initialAcceptance.MutationRejectedReason);
+        source = initialAcceptance.State;
+        source = source with
+        {
+            PersistentState = source.PersistentState with
+            {
+                CoordinatorInstanceId = $"checkpoint-discard-{direction}",
+                SnapshotStateGeneration = 0,
+                // This contract fixture begins on the established fallback route;
+                // it does not include the earlier route-transition effect stream.
+                FileTransferRouteTransition = default,
+            },
+        };
+        // The preview creates the remote proof only; it is never adopted locally.
+        var preview = MarkFallbackTailQuiescent(source, fallback, epoch, 5, 5);
+        var proof = CreateCoordinatorFallbackTailPeerProof(preview.State,
+            Assert.IsType<FallbackTailYieldDecision>(preview.FallbackTailYieldDecision));
+        var receipt = FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(source, proof,
+            "checkpoint-discard-peer-proof", 3_000);
+        var pending = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(source, receipt);
+        Assert.True(pending.Status == FileTransferFallbackTailYieldTransitionStatus.Accepted, pending.Reason);
+        Assert.Null(FileTransferCoordinator.GetFallbackTailYieldSubstate(pending.State).CurrentOperation);
+        var pendingEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(pending.SnapshotEnvelope);
+        var immutablePending = pendingEnvelope.ToCanonicalJson();
+        var requested = RequestFallbackCheckpoint(pending.State, fallback, "checkpoint:successor", epoch);
+        Assert.Null(requested.MutationRejectedReason);
+        var accepted = AcceptFallbackCheckpoint(requested.State, fallback, "checkpoint:successor", epoch, 5, 5);
+        Assert.Null(accepted.MutationRejectedReason);
+        var yielded = MarkFallbackTailQuiescent(accepted.State, fallback, epoch, 5, 5);
+        Assert.Null(yielded.MutationRejectedReason);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(yielded.SnapshotEnvelope);
+        var operations = envelope.Aggregate.Operations.Where(o => o.Family == "fallback_tail_yield").ToArray();
+        Assert.Equal(2, operations.Length);
+        var retired = Assert.Single(operations, o => o.OperationRole == "peer_proof_pending_initial");
+        var current = Assert.Single(operations, o => o.OperationRole == "yield_current");
+        Assert.Equal("Pending", retired.BeforeState); Assert.Equal("None", retired.AfterState);
+        Assert.Equal("None", current.BeforeState); Assert.Equal("YieldIssued", current.AfterState);
+        Assert.True(retired.FallbackTailYield!.SourceBoundary.CheckpointGeneration > 0);
+        Assert.Equal(retired.FallbackTailYield.SourceBoundary.CheckpointGeneration + 1,
+            current.FallbackTailYield!.SourceBoundary.CheckpointGeneration);
+        Assert.Equal("(none)", current.FallbackTailYield.PeerProofIdentity);
+        Assert.Equal("(none)", current.FallbackTailYield.PairedReleaseAuthorityId);
+        Assert.Equal("yield", Assert.Single(current.FallbackTailYield.Receipts).Stage);
+        Assert.Equal(envelope.Aggregate.BeforeStateGeneration + 1, envelope.Aggregate.AfterStateGeneration);
+        Assert.NotEqual(envelope.Aggregate.BeforeStateFingerprint, envelope.Aggregate.AfterStateFingerprint);
+        Assert.Equal(immutablePending, pendingEnvelope.ToCanonicalJson());
+        Assert.Equal(receipt, FileTransferCoordinator.GetFallbackTailYieldSubstate(pending.State).PendingPeerProofBeforeLocalYield);
+        Assert.Null(FileTransferCoordinator.GetFallbackTailYieldSubstate(yielded.State).PendingPeerProofBeforeLocalYield);
+        return [pendingEnvelope,
+            Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(requested.SnapshotEnvelope),
+            Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(accepted.SnapshotEnvelope), envelope];
+    }
+
     [Fact]
     public void FallbackTailYield_InitialPeerProofBeforeLocalYieldIsRetainedAndPairsExactlyOnce()
     {
@@ -18803,6 +19007,11 @@ public sealed class FileTransferCoordinatorTests
             CurrentDataSessionIdentity = "peer-first-data-session",
             CurrentDataSessionGeneration = 31,
         };
+        var requested = RequestFallbackCheckpoint(source, fallback, "peer-first-checkpoint", source.CurrentLeg!.TransportEpochId);
+        Assert.Null(requested.MutationRejectedReason);
+        var checkpointAccepted = AcceptFallbackCheckpoint(requested.State, fallback, "peer-first-checkpoint", source.CurrentLeg.TransportEpochId, 5, 5);
+        Assert.Null(checkpointAccepted.MutationRejectedReason);
+        source = checkpointAccepted.State;
         var preview = MarkFallbackTailQuiescent(
             source,
             fallback,
@@ -18906,6 +19115,15 @@ public sealed class FileTransferCoordinatorTests
             CurrentDataSessionIdentity = "asymmetric-peer-first-data-session",
             CurrentDataSessionGeneration = 32,
         };
+        var checkpointRequested = RequestFallbackCheckpoint(
+            source, fallback, "asymmetric-peer-first-checkpoint", source.CurrentLeg!.TransportEpochId);
+        Assert.Null(checkpointRequested.MutationRejectedReason);
+        var checkpointAccepted = AcceptFallbackCheckpoint(
+            checkpointRequested.State, fallback, "asymmetric-peer-first-checkpoint",
+            source.CurrentLeg.TransportEpochId, 5, 5);
+        Assert.Null(checkpointAccepted.MutationRejectedReason);
+        source = checkpointAccepted.State;
+        Assert.Null(source.CurrentFallbackCheckpointLease);
         var sourceLeg = Assert.IsType<FileTransferLeg>(source.CurrentLeg);
         var localLeg = new FileTransferLeg
         {
@@ -18966,6 +19184,8 @@ public sealed class FileTransferCoordinatorTests
             peerProof,
             "asymmetric-peer-proof-before-local-yield",
             3_000);
+        Assert.Equal("(none)", receipt.ObservationScope.CheckpointRequestIdSnapshot);
+        Assert.Equal(localLeg.CheckpointGeneration, receipt.ObservationScope.CheckpointGeneration);
 
         var retained = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
             source,
@@ -18989,6 +19209,11 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinator.GetFallbackTailYieldSubstate(yielded.State)
                 .CurrentOperation);
         Assert.Equal(receipt, operation.PeerProof);
+        Assert.Equal(receipt.ObservationScope, operation.Scope);
+        Assert.Equal(4, operation.Scope.LegGeneration);
+        Assert.Equal(2, operation.Scope.BridgeRecoveryGeneration);
+        Assert.Equal(3, receipt.Proof.LegGeneration);
+        Assert.Equal(1, receipt.Proof.BridgeRecoveryGeneration);
         Assert.Equal(
             FileTransferFallbackTailYieldPairingState.PeerProofObserved,
             operation.PairingState);
@@ -19016,6 +19241,11 @@ public sealed class FileTransferCoordinatorTests
             CurrentDataSessionIdentity = "peer-first-original-data-session",
             CurrentDataSessionGeneration = 33,
         };
+        var requested = RequestFallbackCheckpoint(source, fallback, "peer-replacement-checkpoint", source.CurrentLeg!.TransportEpochId);
+        Assert.Null(requested.MutationRejectedReason);
+        var checkpointAccepted = AcceptFallbackCheckpoint(requested.State, fallback, "peer-replacement-checkpoint", source.CurrentLeg.TransportEpochId, 5, 5);
+        Assert.Null(checkpointAccepted.MutationRejectedReason);
+        source = checkpointAccepted.State;
         var preview = MarkFallbackTailQuiescent(
             source,
             fallback,
@@ -19069,6 +19299,15 @@ public sealed class FileTransferCoordinatorTests
             CurrentDataSessionIdentity = "fallback-data-session",
             CurrentDataSessionGeneration = 17,
         };
+        var checkpointRequested = RequestFallbackCheckpoint(
+            source, fallback, "failed-to-quiescent-checkpoint", source.CurrentLeg!.TransportEpochId);
+        Assert.Null(checkpointRequested.MutationRejectedReason);
+        var checkpointAccepted = AcceptFallbackCheckpoint(
+            checkpointRequested.State, fallback, "failed-to-quiescent-checkpoint",
+            source.CurrentLeg.TransportEpochId, 5, 5);
+        Assert.Null(checkpointAccepted.MutationRejectedReason);
+        source = checkpointAccepted.State;
+        Assert.Null(source.CurrentFallbackCheckpointLease);
         var failed = MarkFallbackTailFailed(
             source,
             fallback,
@@ -19089,6 +19328,9 @@ public sealed class FileTransferCoordinatorTests
                     failedDecision),
                 "peer-proof-before-quiescence",
                 3_000);
+        Assert.Equal("(none)", peerReceipt.ObservationScope.CheckpointRequestIdSnapshot);
+        Assert.Equal(source.CurrentLeg.CheckpointGeneration, peerReceipt.ObservationScope.CheckpointGeneration);
+        Assert.Equal(failedOperation.Scope, peerReceipt.ObservationScope);
         var peerFirst =
             FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
                 failed.State,
@@ -19118,6 +19360,7 @@ public sealed class FileTransferCoordinatorTests
             aggregate.CurrentOperation);
         Assert.Equal(successor, successorOperation.Decision);
         Assert.Equal(peerReceipt, successorOperation.PeerProof);
+        Assert.Equal(peerReceipt.ObservationScope, successorOperation.Scope);
         Assert.Equal(
             FileTransferFallbackTailYieldPairingState.PeerProofObserved,
             successorOperation.PairingState);
@@ -19165,6 +19408,15 @@ public sealed class FileTransferCoordinatorTests
             CurrentDataSessionIdentity = "peer-first-failed-data-session",
             CurrentDataSessionGeneration = 19,
         };
+        var checkpointRequested = RequestFallbackCheckpoint(
+            source, fallback, "peer-first-failed-checkpoint", source.CurrentLeg!.TransportEpochId);
+        Assert.Null(checkpointRequested.MutationRejectedReason);
+        var checkpointAccepted = AcceptFallbackCheckpoint(
+            checkpointRequested.State, fallback, "peer-first-failed-checkpoint",
+            source.CurrentLeg.TransportEpochId, 5, 5);
+        Assert.Null(checkpointAccepted.MutationRejectedReason);
+        source = checkpointAccepted.State;
+        Assert.Null(source.CurrentFallbackCheckpointLease);
         var preview = MarkFallbackTailFailed(
             source,
             fallback,
@@ -19178,6 +19430,8 @@ public sealed class FileTransferCoordinatorTests
                 previewDecision),
             "peer-proof-before-failed-yield",
             4_000);
+        Assert.Equal("(none)", receipt.ObservationScope.CheckpointRequestIdSnapshot);
+        Assert.Equal(source.CurrentLeg.CheckpointGeneration, receipt.ObservationScope.CheckpointGeneration);
         var retained = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
             source,
             receipt);
@@ -19194,6 +19448,7 @@ public sealed class FileTransferCoordinatorTests
             FallbackTailYieldKind.Failed,
             failedOperation.Decision.YieldKind);
         Assert.Equal(receipt, failedOperation.PeerProof);
+        Assert.Equal(receipt.ObservationScope, failedOperation.Scope);
         Assert.NotEqual(
             FileTransferFallbackTailYieldPairingState.Paired,
             failedOperation.PairingState);
@@ -19213,6 +19468,7 @@ public sealed class FileTransferCoordinatorTests
             FallbackTailYieldKind.Quiescent,
             successorOperation.Decision.YieldKind);
         Assert.Equal(receipt, successorOperation.PeerProof);
+        Assert.Equal(receipt.ObservationScope, successorOperation.Scope);
         Assert.True(successorOperation.FailedYieldSupersession!.Value.CarriedPeerProof);
         Assert.Equal(
             FileTransferFallbackTailYieldPairingState.PeerProofObserved,
@@ -20818,6 +21074,9 @@ public sealed class FileTransferCoordinatorTests
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
     public void FileTransferRouteTransition_InboundResponderAckedProbeUsesPairedReceiptWithoutPhase2Release()
+        => CreatePairedResponderHandoffForCheckpoint();
+
+    private static FileTransferCoordinatorState CreatePairedResponderHandoffForCheckpoint()
     {
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
@@ -21330,6 +21589,66 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
             staleAvailableAfterCommit.Status);
         Assert.Null(staleAvailableAfterCommit.Authority);
+        return committed.State;
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
+    public void ResponderHandoff_InvalidatedTerminalSurvivesFallbackCheckpointCarry()
+        => CreateCheckpointResponderCarrySnapshotFixture();
+
+    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateCheckpointResponderCarrySnapshotFixture()
+    {
+        var setup = CreatePairedResponderHandoffForCheckpoint();
+        // Begin this contract stream on the already established Tuna route. The
+        // paired authority itself retains its exact historical PostFallback scope.
+        var state = setup with { PersistentState = setup.PersistentState with
+        {
+            CoordinatorInstanceId = "checkpoint-responder-carry",
+            SnapshotStateGeneration = 0,
+            SnapshotStateFingerprint = string.Empty,
+            FileTransferRouteTransition = default,
+            FallbackTailYield = default,
+        } };
+        var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope) => envelopes.Add(envelope);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        state = FallBack(state, fallback, 5, 17, Capture).State;
+        var original = Assert.Single(envelopes[0].Aggregate.Operations, operation => operation.OperationRole == "handoff_terminal" &&
+            operation.OperationKind == "ResponderPeerProbeRouteTransitionHandoff");
+        Assert.Equal("None", original.BeforeState);
+        Assert.Equal("Invalidated", original.AfterState);
+        var originalJson = envelopes[0].ToCanonicalJson();
+        if (state.CurrentFallbackCheckpointLease is { } bootstrap)
+        {
+            var bootstrapAccepted = AcceptFallbackCheckpoint(state, fallback, bootstrap.CheckpointRequestId,
+                state.CurrentLeg!.TransportEpochId, 5, 5);
+            Assert.Null(bootstrapAccepted.MutationRejectedReason);
+            Capture(bootstrapAccepted.SnapshotEnvelope!);
+            state = bootstrapAccepted.State;
+        }
+        var requested = RequestFallbackCheckpoint(state, fallback, "responder-carry-checkpoint", state.CurrentLeg!.TransportEpochId);
+        Assert.Null(requested.MutationRejectedReason);
+        Capture(requested.SnapshotEnvelope!);
+        var accepted = AcceptFallbackCheckpoint(requested.State, fallback, "responder-carry-checkpoint",
+            requested.State.CurrentLeg!.TransportEpochId, 5, 5);
+        Assert.Null(accepted.MutationRejectedReason);
+        Capture(accepted.SnapshotEnvelope!);
+        foreach (var envelope in envelopes.Where(e => e.DecisionKind is "FallbackCheckpointRequested" or "FallbackCheckpointAccepted"))
+        {
+            var carry = Assert.Single(envelope.Aggregate.Operations, o => o.OperationRole == "handoff_terminal");
+            Assert.Equal("Invalidated", carry.BeforeState);
+            Assert.Equal("Invalidated", carry.AfterState);
+            Assert.Equal(original.OperationKey, carry.OperationKey);
+            Assert.Equal(original.ReceiptFingerprint, carry.ReceiptFingerprint);
+            Assert.Equal(original.ResponderProbeHandoff!.SourceBoundary, carry.ResponderProbeHandoff!.SourceBoundary);
+            Assert.Equal(envelope.Aggregate.AfterBoundary, carry.ResponderProbeHandoff.EffectiveBoundary);
+            Assert.Equal(envelope.Aggregate.BeforeStateGeneration + 1, envelope.Aggregate.AfterStateGeneration);
+            Assert.NotEqual(envelope.Aggregate.BeforeStateFingerprint, envelope.Aggregate.AfterStateFingerprint);
+        }
+        Assert.Equal(originalJson, envelopes[0].ToCanonicalJson());
+        return envelopes;
     }
 
     [Fact]
@@ -24703,7 +25022,8 @@ public sealed class FileTransferCoordinatorTests
         FileTransferCoordinatorState State,
         RuntimeUnlockRetryDispatchAuthorityRequest Request,
         FallbackTailYieldDecision TailYield) AuthorizeFallbackRuntimeUnlockRetryDispatchSource(
-            FileTransferCoordinatorState? sourceState = null)
+            FileTransferCoordinatorState? sourceState = null,
+            List<FileTransferCoordinatorTransitionEnvelope>? snapshotCapture = null)
     {
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var state = sourceState ?? ActiveFallbackStateWithoutCheckpoint();
@@ -24734,6 +25054,21 @@ public sealed class FileTransferCoordinatorTests
                 1,
                 publication.State.CurrentDataSessionGeneration + 1),
         };
+        if (snapshotCapture is not null)
+        {
+            var checkpoint = RequestFallbackCheckpoint(state, fallback, "applied-invalidation-checkpoint", leg.TransportEpochId);
+            Assert.Null(checkpoint.MutationRejectedReason);
+            var accepted = AcceptFallbackCheckpoint(checkpoint.State, fallback, "applied-invalidation-checkpoint",
+                leg.TransportEpochId, Math.Max(0, leg.ProvenCommittedChunkIndex), leg.ProvenHighestObservedChunkIndex);
+            Assert.Null(accepted.MutationRejectedReason);
+            state = accepted.State;
+            state = state with { PersistentState = state.PersistentState with
+            {
+                CoordinatorInstanceId = "applied-invalidation-fallback",
+                SnapshotStateGeneration = 0,
+                FileTransferRouteTransition = default,
+            } };
+        }
         var yielded = FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.FallbackTailQuiescent,
@@ -24773,6 +25108,12 @@ public sealed class FileTransferCoordinatorTests
                 localApplied.State,
                 peerReceipt);
         Assert.True(paired.Accepted, paired.Reason);
+        if (snapshotCapture is not null)
+        {
+            snapshotCapture.Add(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(yielded.SnapshotEnvelope));
+            snapshotCapture.Add(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(localApplied.SnapshotEnvelope));
+            snapshotCapture.Add(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(paired.SnapshotEnvelope));
+        }
         var pairedRelease =
             Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
                 paired.PairedRelease);

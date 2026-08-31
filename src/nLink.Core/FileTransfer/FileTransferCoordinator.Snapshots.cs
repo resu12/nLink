@@ -4002,7 +4002,8 @@ internal static partial class FileTransferCoordinator
                     recheckReceipt.Status !=
                         FileTransferFallbackTailYieldRetryDispatchRecheckReceiptStatus.Rejected));
             }
-            if (fallback.CurrentReservation is { } reservation)
+            if (fallback.CurrentReservation is { } reservation &&
+                FallbackTailReservationSnapshotBelongsToOperation(retryOperation, reservation))
             {
                 builder.Add(CreateFallbackTailYieldReservationDescriptor(
                     state,
@@ -4011,7 +4012,8 @@ internal static partial class FileTransferCoordinator
                     "release_reservation_current",
                     fallback.LastConsumingInstallReceipt));
             }
-            if (fallback.LastConsumedReservation is { } consumed)
+            if (fallback.LastConsumedReservation is { } consumed &&
+                FallbackTailReservationSnapshotBelongsToOperation(retryOperation, consumed))
             {
                 builder.Add(CreateFallbackTailYieldReservationDescriptor(
                     state,
@@ -4273,8 +4275,8 @@ internal static partial class FileTransferCoordinator
                 ? "fallback_tail_paired_release_consumed"
                 : "fallback_tail_paired_release_reserved",
             CalculateSnapshotFingerprint(consumed ? installReceipt : reservation),
-            !reservation.IsDefault && (!consumed ||
-                installReceipt is { IsDefault: false }));
+            FallbackTailReservationSnapshotBelongsToOperation(operation, reservation) &&
+                (!consumed || FallbackTailConsumptionSnapshotMatchesReservation(reservation, installReceipt)));
         return CreateFallbackTailYieldChildDescriptor(
             state,
             operation,
@@ -4391,8 +4393,18 @@ internal static partial class FileTransferCoordinator
         var effectiveScope = GetEffectiveFallbackTailYieldScope(operation);
         var effective = CreateFallbackTailYieldScopeBoundary(effectiveScope);
         var reauthorization = operation.SourceReauthorization?.Reauthorization;
-        var reservation = fallback.CurrentReservation ??
-                          fallback.LastConsumedReservation;
+        var reservation = fallback.CurrentReservation is { } current &&
+                FallbackTailReservationSnapshotBelongsToOperation(operation, current)
+            ? current
+            : fallback.LastConsumedReservation is { } consumed &&
+                FallbackTailReservationSnapshotBelongsToOperation(operation, consumed)
+                ? consumed
+                : (FileTransferFallbackTailPairedReleaseReservation?)null;
+        var consumingInstall = reservation is { } owned &&
+            fallback.LastConsumedReservation == owned &&
+            FallbackTailConsumptionSnapshotMatchesReservation(owned, fallback.LastConsumingInstallReceipt)
+                ? fallback.LastConsumingInstallReceipt
+                : null;
         return new(
             role,
             source,
@@ -4420,7 +4432,7 @@ internal static partial class FileTransferCoordinator
             reauthorization?.TargetTransportEpoch ?? effective.TransportEpoch,
             reservation?.ReservationGeneration ?? 0,
             reservation?.RetryAuthority.AuthorityId.ToString() ?? "(none)",
-            fallback.LastConsumingInstallReceipt?.InstallGeneration ?? 0,
+            consumingInstall?.InstallGeneration ?? 0,
             fallback.CurrentRetryDispatchHold?.HoldGeneration ?? 0,
             fallback.PendingRetryDispatchRecheckCommand?.RecheckGeneration ??
                 fallback.LastRetryDispatchRecheckReceipt?.Command
@@ -4428,6 +4440,37 @@ internal static partial class FileTransferCoordinator
             operation.InvalidationReason ?? "(none)",
             receipts);
     }
+
+    private static bool FallbackTailReservationSnapshotBelongsToOperation(
+        FileTransferFallbackTailYieldOperation operation,
+        FileTransferFallbackTailPairedReleaseReservation reservation)
+    {
+        if (reservation.IsDefault || operation.PairedRelease != reservation.Release ||
+            reservation.Release.LocalProof.Decision != operation.Decision ||
+            reservation.Release.LocalProof.Scope != operation.Scope ||
+            operation.LocalProof != reservation.Release.LocalProof ||
+            operation.PeerProof != reservation.Release.PeerProof)
+        {
+            return false;
+        }
+
+        if (IsFallbackTailRetryAuthorityExactForRelease(operation, reservation.Release, reservation.RetryAuthority))
+        {
+            return true;
+        }
+
+        // A consumed reservation retains its original retry authority during exact transport carry-forward.
+        return operation.PairedReleaseCarryForward is { IsDefault: false } carry &&
+            carry.Decision == operation.Decision && carry.PairedRelease == reservation.Release &&
+            IsFallbackTailRetryAuthorityExactForRelease(
+                operation with { Scope = carry.SourceScope, PairedReleaseCarryForward = null },
+                reservation.Release, reservation.RetryAuthority);
+    }
+
+    private static bool FallbackTailConsumptionSnapshotMatchesReservation(
+        FileTransferFallbackTailPairedReleaseReservation reservation,
+        RuntimeUnlockRetryDispatchInstallReceipt? receipt)
+        => receipt is { IsDefault: false } exact && exact.Authority == reservation.RetryAuthority;
 
     private static ImmutableArray<
         FileTransferCoordinatorReceiptTransitionSnapshot>

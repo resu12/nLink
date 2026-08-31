@@ -41,6 +41,8 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
         'FallbackCheckpointRequested' { $role='repair_authority_terminal'; $kinds=@('regular_v4_pressure_decision_adopted') }
         'FallbackCheckpointAccepted' { $role='repair_authority_terminal'; $kinds=@('regular_v4_pressure_decision_adopted') }
     }
+    if ($envelope.decisionKind -in @('FallbackCheckpointRequested','FallbackCheckpointAccepted') -and
+        @($envelope.aggregate.operations | Where-Object family -CEQ 'regular_v4_frontier_repair_pressure').Count -eq 0) { $role = $null }
     if ($null -ne $role) {
         $matches = @($envelope.aggregate.operations | Where-Object { $_.operationRole -ceq $role -and $_.afterState -cne 'None' })
         if ($matches.Count -ne 1 -or -not $matches[0].receiptValidated) { throw "Effect subject not exact: $role; $($envelope.aggregate.operations | ConvertTo-Json -Depth 16 -Compress)" }
@@ -59,7 +61,8 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
             $kinds = @('route_commit_local_lifecycle_adopted')
         }
         elseif ($operation.family -ceq 'responder_probe_handoff') {
-            $kinds = @(if ($operation.operationRole -ceq 'route_transition_handoff_pending') { 'route_transition_handoff_supplied' } else { 'convergence_observed' })
+            $kinds = @(if ($operation.operationRole -ceq 'route_transition_handoff_pending') { 'route_transition_handoff_supplied' }
+                elseif ($operation.receiptStatus -ceq 'Invalidated') { 'handoff_invalidated' } else { 'convergence_observed' })
         }
         elseif ($operation.family -ceq 'route_runtime' -and $operation.operationRole -ceq 'route_publication' -and $operation.afterState -ceq 'Published') {
             $kinds = @('route_publication_forwarded')
