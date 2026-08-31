@@ -4347,6 +4347,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(7)]
+    public async Task FileTransferOps_ProofPublicationCancellationUsesParentRecoveryGeneration(long recoveryGeneration)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-proof-cancellation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateProofPublicationCancellationSnapshotFixture(recoveryGeneration)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "ProofPublicationCancellationSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task FileTransferOps_StagedRetryInstallReceiptUsesExactSharedValidation(bool fallback)

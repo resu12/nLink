@@ -8401,6 +8401,69 @@ public sealed class FileTransferCoordinatorTests
             });
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(7)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public void FileTransferReceiveRecoveryProofStatePublication_ProofCancelsIndependentPublicationGeneration(long recoveryGeneration)
+    {
+        var envelopes = CreateProofPublicationCancellationSnapshotFixture(recoveryGeneration);
+        var arm = Assert.Single(envelopes[4].Aggregate.Operations,
+            operation => operation.OperationRole == "proof_publication_recheck");
+        var cancellation = envelopes[5];
+        var retired = Assert.Single(cancellation.Aggregate.Operations,
+            operation => operation.OperationRole == "proof_publication_recheck");
+        var parent = Assert.Single(cancellation.Aggregate.Operations,
+            operation => operation.OperationRole == "operation_current");
+        Assert.Equal(1, arm.OperationGeneration);
+        Assert.Equal(recoveryGeneration, parent.OperationGeneration);
+        Assert.Equal("Armed", arm.AfterState);
+        Assert.Equal("Armed", retired.BeforeState);
+        Assert.Equal("None", retired.AfterState);
+        Assert.Equal(arm.OperationKey, retired.OperationKey);
+        Assert.Equal(arm.CommandFingerprint, retired.CommandFingerprint);
+        Assert.Equal(arm.AuthorityId, parent.AuthorityId);
+        Assert.Equal(arm.ReceiveRecovery!.SourceBoundary, parent.ReceiveRecovery!.SourceBoundary);
+        Assert.Equal("Completed:Adopted", parent.AfterState);
+        Assert.True(parent.ReceiptValidated);
+        Assert.Equal("proof-cancels-arm", parent.ReceiveRecovery.ProofIdentity);
+        Assert.Equal(cancellation.Aggregate.BeforeStateGeneration + 1,
+            cancellation.Aggregate.AfterStateGeneration);
+        Assert.NotEqual(cancellation.Aggregate.BeforeStateFingerprint,
+            cancellation.Aggregate.AfterStateFingerprint);
+        Assert.Equal("Armed", arm.AfterState); // The earlier graph remains immutable.
+    }
+
+    internal static FileTransferCoordinatorTransitionEnvelope[] CreateProofPublicationCancellationSnapshotFixture(
+        long recoveryGeneration)
+    {
+        var fixture = CreateReceiveRecoveryOperationFixture(FileTransferDirection.Inbound,
+            "proof-cancellation-generations", recoveryGeneration - 1);
+        var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(fixture.Decision.Authority);
+        var execution = new FileTransferBridgeRecoveryExecutionReceipt(authority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed, "hard", "bridge_recovery_completed");
+        var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(fixture.Decision.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(authority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started, "bridge_recovery_execution_started",
+                Task.FromResult(execution)), 100);
+        var completed = FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(started.State, execution, 200);
+        var reachable = FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(completed.State,
+            CreateReceiveRecoveryPeerReachabilityObservation(authority.ExecutionCommand, 300));
+        var command = Assert.IsType<FileTransferReceiveRecoveryProofStatePublicationCommand>(
+            reachable.ProofStatePublicationCommand);
+        var delivered = FileTransferCoordinator.ApplyReceiveRecoveryProofStatePublicationReceipt(reachable.State,
+            new FileTransferReceiveRecoveryProofStatePublicationReceipt(command,
+                FileTransferReceiveRecoveryProofStatePublicationOutcome.Delivered, "published-state", "delivered"), 350);
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(delivered.State,
+            new FileTransferReceiveRecoveryProof(authority, "proof-cancels-arm", "file_transfer_data_frame", 375));
+        Assert.True(proof.Accepted, proof.Reason);
+        Assert.Null(proof.State.PersistentState.FileTransferReceiveRecovery.ProofStatePublication);
+        return new[] { fixture.Decision, started, completed, reachable, delivered, proof }
+            .Select(decision => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(decision.SnapshotEnvelope))
+            .ToArray();
+    }
+
     [Fact]
     public void FileTransferReceiveRecoveryProofStatePublication_DeliveredReceiptArmsOneHeartbeatRecheckAndProofInvalidatesPendingCommand()
     {
@@ -23254,7 +23317,8 @@ public sealed class FileTransferCoordinatorTests
         CreateReceiveRecoveryOperationFixture(
             FileTransferDirection direction =
                 FileTransferDirection.Outbound,
-            string? coordinatorInstanceId = null)
+            string? coordinatorInstanceId = null,
+            long lastOperationGeneration = 0)
     {
         var regular =
             FileTransferRouteResolver.Resolve(
@@ -23307,6 +23371,19 @@ public sealed class FileTransferCoordinatorTests
         var observation = CreateReceiveRecoveryObservationForTest(
             state,
             "receive_recovery_operation");
+        if (lastOperationGeneration > 0)
+        {
+            state = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    FileTransferReceiveRecovery = state.PersistentState.FileTransferReceiveRecovery with
+                    {
+                        LastOperationGeneration = lastOperationGeneration,
+                    },
+                },
+            };
+        }
         var decision =
             FileTransferCoordinator.IssueReceiveRecoveryOperation(
                 state,

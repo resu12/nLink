@@ -3043,6 +3043,127 @@ function ConvertFrom-FileTransferCoordinatorSnapshotPayload {
     }
 }
 
+function Test-FileTransferCoordinatorReceiveRecoveryRecheckCancellation {
+    param(
+        [Parameter(Mandatory = $true)]$Arm,
+        [Parameter(Mandatory = $true)]$Closure,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$ParentHistory,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Effects
+    )
+
+    if ([string]$Closure.Boundary.decisionStatus -cne 'Accepted' -or
+        -not [bool]$Closure.Operation.stateApplied -or
+        [string]$Closure.Boundary.coordinatorInstanceId -cne [string]$Arm.Boundary.coordinatorInstanceId -or
+        [string]$Closure.Boundary.writer -cne [string]$Arm.Boundary.writer -or
+        [string]$Closure.Operation.predecessorAuthorityId -cne [string]$Arm.Operation.predecessorAuthorityId -or
+        [string]$Closure.Operation.receiveRecovery.recoveryKind -cne [string]$Arm.Operation.receiveRecovery.recoveryKind -or
+        [long]$Closure.Operation.receiveRecovery.bridgeDecisionGeneration -ne [long]$Arm.Operation.receiveRecovery.bridgeDecisionGeneration -or
+        [long]$Closure.Operation.receiveRecovery.recoveryLivenessLeaseGeneration -ne [long]$Arm.Operation.receiveRecovery.recoveryLivenessLeaseGeneration -or
+        [long]$Closure.Operation.receiveRecovery.closureGeneration -ne [long]$Arm.Operation.receiveRecovery.closureGeneration) {
+        return $false
+    }
+
+    # The child key uses PublicationGeneration. Resolve the independent recovery
+    # generation from its exact parent state, never from a child/lease counter.
+    $parents = @($ParentHistory | Where-Object {
+            [bool]$_.Operation.stateApplied -and
+            [long]$_.Boundary.afterStateGeneration -le
+                [long]$Closure.Boundary.afterStateGeneration
+        } | Sort-Object { [long]$_.Boundary.afterStateGeneration }, {
+            [string]$_.Boundary.boundaryId
+        })
+    $generations = @($parents | ForEach-Object {
+            [long]$_.Operation.operationGeneration
+        } | Sort-Object -Unique)
+    if ($generations.Count -ne 1 -or $generations[0] -le 0) {
+        return $false
+    }
+
+    $states = @{}
+    $parentAtArm = @()
+    foreach ($entry in $parents) {
+        $operation = $entry.Operation
+        $typed = $operation.receiveRecovery
+        if ([string]$entry.Boundary.coordinatorInstanceId -cne
+                [string]$Arm.Boundary.coordinatorInstanceId -or
+            [string]$entry.Boundary.writer -cne [string]$Arm.Boundary.writer -or
+            [string]$operation.authorityId -cne [string]$Arm.Operation.authorityId -or
+            [string]$operation.predecessorAuthorityId -cne
+                [string]$Arm.Operation.predecessorAuthorityId -or
+            [string]$operation.operationKind -cne
+                [string]$Arm.Operation.receiveRecovery.recoveryKind -or
+            [string]$typed.recoveryKind -cne
+                [string]$Arm.Operation.receiveRecovery.recoveryKind -or
+            [long]$typed.bridgeDecisionGeneration -ne
+                [long]$Arm.Operation.receiveRecovery.bridgeDecisionGeneration -or
+            [long]$typed.recoveryLivenessLeaseGeneration -ne
+                [long]$Arm.Operation.receiveRecovery.recoveryLivenessLeaseGeneration -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $typed.sourceBoundary `
+                -Right $Arm.Operation.receiveRecovery.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $typed.effectiveBoundary `
+                -Right $Arm.Operation.receiveRecovery.effectiveBoundary)) {
+            return $false
+        }
+
+        $key = [string]$operation.operationKey
+        if ($states.ContainsKey($key)) {
+            # A retired key cannot be revived, even if a later tuple is equal.
+            if ([string]$states[$key].afterState -ceq 'None' -or
+                [string]$states[$key].afterState -cne [string]$operation.beforeState) {
+                return $false
+            }
+        }
+        elseif ([string]$operation.beforeState -cne 'None') {
+            return $false
+        }
+        $states[$key] = $operation
+        if ([long]$entry.Boundary.afterStateGeneration -le
+                [long]$Arm.Boundary.afterStateGeneration) {
+            $parentAtArm = @($states.Values | Where-Object {
+                    [string]$_.afterState -cne 'None'
+                })
+        }
+    }
+    if ($parentAtArm.Count -ne 1 -or
+        [long]$parentAtArm[0].receiveRecovery.closureGeneration -ne
+            [long]$Arm.Operation.receiveRecovery.closureGeneration -or
+        [string]$parentAtArm[0].receiveRecovery.proofIdentity -notin @('', '(none)')) {
+        return $false
+    }
+
+    $cancellations = @($parents | Where-Object {
+            [string]$_.Boundary.boundaryId -ceq [string]$Closure.Boundary.boundaryId -and
+            [string]$_.Operation.afterState -cne 'None' -and
+            [long]$_.Operation.receiveRecovery.closureGeneration -eq
+                [long]$Arm.Operation.receiveRecovery.closureGeneration -and
+            (([string]$_.Operation.receiveRecovery.proofIdentity -notin @('', '(none)')) -or
+             ([string]$_.Operation.receiveRecovery.executionState -ceq 'Invalidated'))
+        })
+    if ($cancellations.Count -ne 1) { return $false }
+    $cancellation = $cancellations[0]
+    if ([string]$Closure.Boundary.decisionKind -cne 'ObserveReceiveRecoveryProof') {
+        return [string]$cancellation.Operation.receiveRecovery.executionState -ceq 'Invalidated'
+    }
+    if (-not [bool]$cancellation.Operation.receiptValidated -or
+        [string]$cancellation.Operation.receiveRecovery.proofIdentity -in @('', '(none)') -or
+        [long]$cancellation.Operation.receiveRecovery.proofObservedUtcMs -le 0) {
+        return $false
+    }
+    $proofEffects = @($Effects | Where-Object {
+            [string]$_.EffectKind -ceq 'receive_proof_observed' -and
+            [string]$_.ReceiptIdentity -ceq [string]$cancellation.Operation.receiptIdentity -and
+            [long]$_.ReceiptGeneration -eq [long]$cancellation.Operation.receiptGeneration -and
+            [string]$_.ReceiptStatus -ceq [string]$cancellation.Operation.receiptStatus -and
+            [string]$_.ReceiptFingerprint -ceq [string]$cancellation.Operation.receiptFingerprint -and
+            (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                -Boundary $cancellation.Boundary -Operation $cancellation.Operation `
+                -Effect $_)
+        })
+    return $proofEffects.Count -eq 1
+}
+
 function Get-FileTransferCoordinatorRouteTransitionLifecycleKey {
     param(
         [Parameter(Mandatory = $true)]$Boundary,
@@ -6639,27 +6760,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                     elseif ([string]$closure.Boundary.decisionStatus -ceq
                             'Accepted') {
-                        $typedCancellation = @($history | Where-Object {
-                                [string]$_.Boundary.boundaryId -ceq
-                                    [string]$closure.Boundary.boundaryId -and
-                                [string]$_.Operation.operationRole -in @(
-                                    'operation_current', 'operation_terminal') -and
-                                [string]$_.Operation.authorityId -ceq
-                                    [string]$arm.Operation.authorityId -and
-                                [long]$_.Operation.operationGeneration -eq
-                                    [long]$arm.Operation.operationGeneration -and
-                                (([string]$_.Operation.receiveRecovery.proofIdentity -notin
-                                      @('', '(none)')) -or
-                                 ([string]$_.Operation.afterState -like
-                                      'Invalidated*')) -and
-                                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
-                                    -Left $_.Operation.receiveRecovery.sourceBoundary `
-                                    -Right $arm.Operation.receiveRecovery.sourceBoundary) -and
-                                (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
-                                    -Left $_.Operation.receiveRecovery.effectiveBoundary `
-                                    -Right $arm.Operation.receiveRecovery.effectiveBoundary)
-                            })
-                        $closed = $typedCancellation.Count -eq 1
+                        $closed = Test-FileTransferCoordinatorReceiveRecoveryRecheckCancellation `
+                            -Arm $arm -Closure $closure `
+                            -ParentHistory $operationEntries -Effects $authorityEffects
                     }
                 }
 
