@@ -2662,6 +2662,8 @@ function Get-FileTransferCoordinatorSnapshotFamily5RepairReplayFailure {
 function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
     param([Parameter(Mandatory = $true)]$Envelope)
 
+    $crossSourceFailure = ''
+
     if ([string]$Envelope.decisionKind -cne
             'CommitRegularV4FrontierRepairPressureSettlement' -or
         [string]$Envelope.decisionStatus -cne 'Accepted') {
@@ -2820,13 +2822,22 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             [string]$retiredSettlement.receiptIdentity -ceq
                 [string]$settlement.receiptIdentity -or
             -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
-                -Left $retiredSettlement.regularV4FrontierRepairPressure.sourceBoundary `
-                -Right $payload.sourceBoundary) -or
-            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
                 -Left $retiredSettlement.regularV4FrontierRepairPressure.effectiveBoundary `
                 -Right $payload.effectiveBoundary)) {
             return ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
                 'pressure_settlement_terminal_rollover_invalid')
+        }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                -Left $retiredSettlement.regularV4FrontierRepairPressure.sourceBoundary `
+                -Right $payload.sourceBoundary)) {
+            $crossSourceFailure = ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+                'terminal_settlement_rollover_compared_historical_source_with_current_route_source')
+            if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                    -Left $payload.effectiveBoundary -Right $Envelope.aggregate.beforeBoundary) -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                    -Left $payload.effectiveBoundary -Right $Envelope.aggregate.afterBoundary)) {
+                return 'snapshot_regular_v4_pressure_settlement_transition_invalid|pressure_settlement_terminal_rollover_invalid'
+            }
         }
         $retiredMirrors = @($terminalMirrors | Where-Object {
                 [string]$_.authorityId -ceq
@@ -2900,7 +2911,7 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
             $successorMutations.Count -ne 0) {
             return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
         }
-        return ''
+        return $crossSourceFailure
     }
 
     $matchingRetirements = @($currentRetirements | Where-Object {
@@ -2929,7 +2940,7 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
     if ($successors.Count -ne 0) {
         return 'snapshot_regular_v4_pressure_settlement_transition_invalid'
     }
-    return ''
+    return $crossSourceFailure
 }
 
 function Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog {
@@ -3304,6 +3315,161 @@ function New-FileTransferCoordinatorSnapshotAggregateIntervalIndex {
         $stream.Mutations[$generation].Add($entry)
     }
     return $index
+}
+
+function Get-FileTransferCoordinatorPressureTerminalIdentity {
+    param($Operation, [switch]$IgnoreRole)
+
+    $excluded = @('beforeState', 'afterState', 'stateApplied', 'regularV4FrontierRepairPressure')
+    if ($IgnoreRole) { $excluded += @('operationRole', 'operationKey') }
+    $identity = $Operation | Select-Object * -ExcludeProperty $excluded
+    $payloadExcluded = @('effectiveBoundary')
+    if ($IgnoreRole) { $payloadExcluded += 'role' }
+    $identity | Add-Member -NotePropertyName regularV4FrontierRepairPressure -NotePropertyValue (
+        $Operation.regularV4FrontierRepairPressure | Select-Object * -ExcludeProperty $payloadExcluded)
+    return ConvertTo-Json -InputObject $identity -Depth 64 -Compress
+}
+
+function Resolve-FileTransferCoordinatorPressureTerminalRollovers {
+    param(
+        [Parameter(Mandatory = $true)]$AggregateIndex,
+        [Parameter(Mandatory = $true)]$Candidates,
+        [Parameter(Mandatory = $true)]$InvalidBoundaries
+    )
+
+    # Reduce the single LastSettlement slot once per stream. No callback performs
+    # a latest-prior search, and a rejected boundary cannot seed a later slot.
+    $resolved = @{}
+    foreach ($stream in $AggregateIndex.Values) {
+        $slot = $null
+        $previous = $null
+        $seen = @{}
+        foreach ($generation in @($stream.Mutations.Keys | Sort-Object)) {
+            $entries = $stream.Mutations[$generation]
+            if ($entries.Count -ne 1) {
+                foreach ($conflict in $entries) {
+                    $id = [string]$conflict.Boundary.boundaryId
+                    $InvalidBoundaries[$id] = $true
+                    [void]$stream.Boundaries.Remove($id)
+                    if ($Candidates.ContainsKey($id) -and -not $resolved.ContainsKey($id)) {
+                        $resolved[$id] = $true
+                        "$($Candidates[$id].Failure):$($conflict.Boundary.evidenceLineIndex)"
+                    }
+                }
+                [void]$stream.Mutations.Remove($generation)
+                $slot = $null; $previous = $null
+                continue
+            }
+            $entry = $entries[0]
+            $boundary = $entry.Boundary
+            $id = [string]$boundary.boundaryId
+            $valid = -not $InvalidBoundaries.ContainsKey($id) -and
+                [long]$boundary.afterStateGeneration -eq ([long]$generation + 1L) -and
+                [string]$boundary.beforeStateHash -cne [string]$boundary.afterStateHash
+            if ($null -ne $previous) {
+                $valid = $valid -and
+                    [long]$previous.Boundary.afterStateGeneration -eq [long]$generation -and
+                    [string]$previous.Boundary.afterStateHash -ceq [string]$boundary.beforeStateHash -and
+                    [string]$previous.SessionId -ceq [string]$entry.SessionId -and
+                    [string]$previous.TransferId -ceq [string]$entry.TransferId -and
+                    [string]$previous.Direction -ceq [string]$entry.Direction -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                        -Left $previous.AfterBoundary -Right $entry.BeforeBoundary)
+            }
+            if (-not $valid -or
+                [long]$entry.BeforeBoundary.terminalGeneration -ne 0 -or
+                [long]$entry.AfterBoundary.terminalGeneration -ne 0 -or
+                [string]$entry.BeforeBoundary.dataSessionIdentity -cne [string]$entry.AfterBoundary.dataSessionIdentity -or
+                [long]$entry.BeforeBoundary.dataSessionGeneration -ne [long]$entry.AfterBoundary.dataSessionGeneration) {
+                $slot = $null
+            }
+
+            $terminals = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq 'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq 'pressure_settlement_terminal' -and
+                    [bool]$_.stateApplied
+                })
+            $mirrors = @($boundary.operations | Where-Object {
+                    [string]$_.family -ceq 'regular_v4_frontier_repair_pressure' -and
+                    [string]$_.operationRole -ceq 'repair_authority_terminal' -and
+                    [string]$_.operationKind -ceq 'PressureSettlement' -and
+                    [bool]$_.stateApplied
+                })
+            $entering = @($terminals | Where-Object { $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Applied' })
+            $retiring = @($terminals | Where-Object { $_.beforeState -ceq 'Applied' -and $_.afterState -ceq 'None' })
+            $carrying = @($terminals | Where-Object { $_.beforeState -ceq 'Applied' -and $_.afterState -ceq 'Applied' })
+            $valid = $valid -and $entering.Count -le 1 -and $retiring.Count -le 1 -and $carrying.Count -le 1 -and
+                $terminals.Count -eq ($entering.Count + $retiring.Count + $carrying.Count) -and
+                $mirrors.Count -eq $terminals.Count
+            foreach ($terminal in $terminals) {
+                $matchingMirrors = @($mirrors | Where-Object {
+                        [string]$_.authorityId -ceq [string]$terminal.authorityId -and
+                        [long]$_.operationGeneration -eq [long]$terminal.operationGeneration -and
+                        [string]$_.beforeState -ceq [string]$terminal.beforeState -and
+                        [string]$_.afterState -ceq [string]$terminal.afterState
+                    })
+                $valid = $valid -and $matchingMirrors.Count -eq 1 -and [bool]$terminal.receiptValidated
+                if ($matchingMirrors.Count -eq 1) {
+                    $valid = $valid -and [bool]$matchingMirrors[0].receiptValidated -and
+                        (Get-FileTransferCoordinatorPressureTerminalIdentity $terminal -IgnoreRole) -ceq
+                            (Get-FileTransferCoordinatorPressureTerminalIdentity $matchingMirrors[0] -IgnoreRole) -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                            -Left $terminal.regularV4FrontierRepairPressure.effectiveBoundary `
+                            -Right $matchingMirrors[0].regularV4FrontierRepairPressure.effectiveBoundary)
+                }
+            }
+
+            if ($retiring.Count + $carrying.Count -gt 0) {
+                $existing = @($retiring) + @($carrying)
+                $valid = $valid -and $existing.Count -eq 1 -and $null -ne $slot
+                if ($existing.Count -eq 1 -and $null -ne $slot) {
+                    $valid = $valid -and $slot.Identity -ceq
+                        (Get-FileTransferCoordinatorPressureTerminalIdentity $existing[0]) -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                            -Left $slot.Effective -Right $entry.BeforeBoundary) -and
+                        (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                            -Left $existing[0].regularV4FrontierRepairPressure.effectiveBoundary `
+                            -Right $(if ($retiring.Count -eq 1) { $entry.BeforeBoundary } else { $entry.AfterBoundary }))
+                }
+            }
+            elseif ($null -ne $slot) {
+                $valid = $valid -and $entering.Count -eq 0 -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual -Left $slot.Effective -Right $entry.AfterBoundary)
+            }
+            if ($entering.Count -eq 1) {
+                $key = [string]$entering[0].operationKey
+                $valid = $valid -and -not $seen.ContainsKey($key) -and $carrying.Count -eq 0 -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                        -Left $entering[0].regularV4FrontierRepairPressure.effectiveBoundary -Right $entry.AfterBoundary)
+                $seen[$key] = $true
+            }
+            if ($Candidates.ContainsKey($id)) {
+                $resolved[$id] = $true
+                if (-not $valid -or $retiring.Count -ne 1 -or $entering.Count -ne 1) {
+                    $InvalidBoundaries[$id] = $true
+                    # Remove provisional evidence before another family uses the index.
+                    [void]$stream.Boundaries.Remove($id)
+                    [void]$stream.Mutations.Remove($generation)
+                    $candidate = $Candidates[$id]
+                    "$($candidate.Failure):$($boundary.evidenceLineIndex)"
+                    $valid = $false
+                }
+            }
+            if (-not $valid) { $slot = $null }
+            elseif ($entering.Count -eq 1 -or $carrying.Count -eq 1) {
+                $terminal = if ($entering.Count -eq 1) { $entering[0] } else { $carrying[0] }
+                $slot = @{ Identity = Get-FileTransferCoordinatorPressureTerminalIdentity $terminal
+                    Effective = $terminal.regularV4FrontierRepairPressure.effectiveBoundary }
+            }
+            elseif ($retiring.Count -eq 1) { $slot = $null }
+            $previous = $entry
+        }
+    }
+    foreach ($id in $Candidates.Keys) {
+        if (-not $resolved.ContainsKey($id)) {
+            "$($Candidates[$id].Failure):$($Candidates[$id].LineIndex)"
+        }
+    }
 }
 
 function Test-FileTransferCoordinatorResponderHandoffConsumedInterval {
@@ -4144,6 +4310,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $errors = [System.Collections.Generic.List[string]]::new()
     $boundaries = [System.Collections.Generic.List[object]]::new()
     $aggregateEntries = [System.Collections.Generic.List[object]]::new()
+    $pressureTerminalRolloverCandidates = @{}
     $effects = [System.Collections.Generic.List[object]]::new()
     $seenTransitions = @{}
     $seenEffects = @{}
@@ -4608,7 +4775,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 $pressureSettlementFailure =
                     Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure `
                         -Envelope $envelope
-                if (-not [string]::IsNullOrWhiteSpace(
+                if ($pressureSettlementFailure -ceq
+                    ('snapshot_regular_v4_pressure_settlement_transition_invalid|' +
+                     'terminal_settlement_rollover_compared_historical_source_with_current_route_source')) {
+                    $pressureTerminalRolloverCandidates[$transitionId] = @{
+                        Failure = $pressureSettlementFailure; LineIndex = $record.LineIndex }
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace(
                         $pressureSettlementFailure)) {
                     $errors.Add(
                         "$pressureSettlementFailure`:$($record.LineIndex)")
@@ -5857,6 +6030,18 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
 
     $aggregateBoundaryIndex = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex `
         -Entries @($aggregateEntries)
+    if ($pressureTerminalRolloverCandidates.Count -gt 0) {
+        $invalidAggregateBoundaries = @{}
+        foreach ($failure in @(ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
+                -Errors @($errors) -Records @($records) -Boundaries @($boundaries))) {
+            $invalidAggregateBoundaries[[string]$failure.TransitionId] = $true
+        }
+        foreach ($failure in @(Resolve-FileTransferCoordinatorPressureTerminalRollovers `
+                -AggregateIndex $aggregateBoundaryIndex -Candidates $pressureTerminalRolloverCandidates `
+                -InvalidBoundaries $invalidAggregateBoundaries)) {
+            $errors.Add([string]$failure)
+        }
+    }
     $responderEntries = @($operationHistory | Where-Object {
             [string]$_.Operation.family -ceq 'responder_probe_handoff'
         })

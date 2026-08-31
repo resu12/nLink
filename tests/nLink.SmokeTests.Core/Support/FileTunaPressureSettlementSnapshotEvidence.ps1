@@ -10,9 +10,15 @@ $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Author
 $families = $catalog.RequiredFamilies -join ','
 $coverage = "emitted_family_coverage=$families; shadow_family_coverage=; authoritative_family_coverage=$families"
 function New-Effect($envelope, $operation, [string]$kind, [long]$sequence) {
-    $scope = $operation.regularV4FrontierRepairPressure.sourceBoundary
+    $scope = switch -Exact ($operation.family) {
+        'regular_v4_frontier_repair_pressure' { $operation.regularV4FrontierRepairPressure.sourceBoundary }
+        'responder_probe_handoff' { $operation.responderProbeHandoff.sourceBoundary }
+        'route_transition' { $operation.routeTransition.sourceBoundary }
+        'route_runtime' { $operation.routeRuntime.boundary }
+    }
     "event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$($envelope.transitionId); coordinator_state_generation=$($envelope.aggregate.afterStateGeneration); operation_family=$($operation.family); operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=$kind; effect_identity=$($operation.operationKey):$kind; effect_generation=$($operation.receiptGeneration); receipt_identity=$($operation.receiptIdentity); receipt_generation=$($operation.receiptGeneration); receipt_status=$($operation.receiptStatus); receipt_fingerprint=$($operation.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=fixture-writer; log_writer_sequence=$sequence"
 }
+function New-Lines([object[]]$envelopes) {
 $lines = [Collections.Generic.List[string]]::new()
 $lines.Add("event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=$($first.aggregate.beforeStateGeneration); initial_state_hash=$($first.aggregate.beforeStateFingerprint); $coverage; authority_effect=none")
 for ($i=0; $i -lt $envelopes.Count; $i++) {
@@ -35,9 +41,40 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
         if ($matches.Count -ne 1 -or -not $matches[0].receiptValidated) { throw "Effect subject not exact: $role; $($envelope.aggregate.operations | ConvertTo-Json -Depth 16 -Compress)" }
         foreach ($kind in $kinds) { $sequence++; $lines.Add((New-Effect $envelope $matches[0] $kind $sequence)) }
     }
+    foreach ($operation in $envelope.aggregate.operations) {
+        $kinds = @()
+        if ($operation.family -ceq 'regular_v4_frontier_repair_pressure' -and
+            $envelope.decisionKind -ceq 'CommitFileTransferRouteTransition' -and
+            $operation.operationRole -ceq 'repair_authority_terminal' -and $operation.afterState -ceq 'Applied') {
+            $kinds = @('route_commit_local_lifecycle_adopted')
+        }
+        elseif ($operation.family -ceq 'responder_probe_handoff') {
+            $kinds = @(if ($operation.operationRole -ceq 'route_transition_handoff_pending') { 'route_transition_handoff_supplied' } else { 'convergence_observed' })
+        }
+        elseif ($operation.family -ceq 'route_runtime' -and $operation.operationRole -ceq 'route_publication' -and $operation.afterState -ceq 'Published') {
+            $kinds = @('route_publication_forwarded')
+        }
+        elseif ($operation.family -ceq 'route_runtime' -and $operation.operationRole -ceq 'route_commit' -and $operation.afterState -ceq 'Committed') {
+            $kinds = @('route_commit_adopted','target_runtime_leg_installed')
+        }
+        elseif ($operation.family -ceq 'route_transition') {
+            if ($envelope.decisionKind -ceq 'BeginFileTransferRouteTransitionPhysicalDrain' -and $operation.operationRole -ceq 'current') { $kinds=@('pause_installed') }
+            elseif ($envelope.decisionKind -ceq 'CommitFileTransferRouteTransition') {
+                if ($operation.operationRole -ceq 'terminal') { $kinds=@('route_commit_adopted','target_runtime_leg_installed') }
+                elseif ($operation.operationRole -ceq $envelope.direction) { $kinds=@('completed_drain_receipt') }
+            }
+            elseif ($envelope.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and $operation.operationRole -ceq $envelope.direction) {
+                $kinds=@('route_transition_disposition_applied','transition_pause_released','recovered_epoch_publication')
+            }
+        }
+        foreach ($kind in $kinds) { $sequence++; $lines.Add((New-Effect $envelope $operation $kind $sequence)) }
+    }
 }
 $last = $envelopes[-1]
 $lines.Add("event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=$($last.aggregate.afterStateGeneration); final_state_hash=$($last.aggregate.afterStateFingerprint); transition_count=$($envelopes.Count); $coverage; authority_effect=none")
+$lines.ToArray()
+}
+$lines = @(New-Lines $envelopes)
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),[ref]$null,[ref]$null)
 foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult','Get-TunaGuiExplicitFailureClassification','Get-TunaGuiFileTransferSetupFailureClassification')) {
     $definitions = @($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
@@ -68,7 +105,10 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
     }
     elseif ($null -ne $gui) { throw 'GUI rejected the exact settlement.' }
 }
-Assert-Parity $lines.ToArray() $false
+Assert-Parity $lines $false
 Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $false
 Assert-Parity @($lines | Where-Object { $_ -notmatch 'effect_kind=local_contract_reference_cleared;' }) $true
+if (@($envelopes | Where-Object decisionKind -ceq 'CommitRegularV4FrontierRepairPressureSettlement').Count -eq 2) {
+    . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/CrossRoutePressureTerminalRolloverControls.ps1')
+}
 'File-Tuna Coordinator/projector/full/compact/GUI settlement contract passed.'

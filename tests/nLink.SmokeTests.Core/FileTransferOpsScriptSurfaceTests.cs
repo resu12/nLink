@@ -4448,8 +4448,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     [Theory]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, true)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, true)]
     public async Task FileTransferOps_FileTunaPressureSettlementUsesSharedSnapshotEvaluation(
-        NLink.Core.FileTransfer.FileTransferDirection direction)
+        NLink.Core.FileTransfer.FileTransferDirection direction, bool crossRoute = false)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
@@ -4457,7 +4459,9 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Directory.CreateDirectory(tempRoot);
         try
         {
-            var envelopes = FileTransferCoordinatorTests.CreateFileTunaPressureSettlementSnapshotFixture(direction)
+            var envelopes = (crossRoute
+                    ? FileTransferCoordinatorTests.CreateCrossRoutePressureSettlementSnapshotFixture(direction)
+                    : FileTransferCoordinatorTests.CreateFileTunaPressureSettlementSnapshotFixture(direction))
                 .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
             var fixturePath = Path.Combine(tempRoot, "envelopes.json");
             await File.WriteAllTextAsync(fixturePath,

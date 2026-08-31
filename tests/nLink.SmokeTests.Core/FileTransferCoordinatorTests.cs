@@ -22019,7 +22019,8 @@ public sealed class FileTransferCoordinatorTests
         FileTransferRouteTransitionPrepareRequest Request,
         RuntimeUnlockRouteCommitProof FinalProof)
         CreateRegularV4ToTunaRouteTransitionSetup(
-            FileTransferCoordinatorState? sourceState = null)
+            FileTransferCoordinatorState? sourceState = null,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var state = sourceState ?? StartRegular(regular).State;
@@ -22044,13 +22045,16 @@ public sealed class FileTransferCoordinatorTests
                     TargetProtocolVersion: regular.ProtocolVersion,
                     TargetTransport: FileTransferTransportKind.RegularNkn));
             Assert.True(publication.Accepted);
+            capture?.Invoke(publication.SnapshotEnvelope!);
             state = publication.State;
         }
 
         var admitted = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
+        capture?.Invoke(admitted.SnapshotEnvelope!);
         var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
             admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
         var pendingDecision = RecordPendingPreCommitProbe(admitted.State, admission);
+        capture?.Invoke(pendingDecision.SnapshotEnvelope!);
         var pending = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
             pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
         state = pendingDecision.State;
@@ -22301,7 +22305,8 @@ public sealed class FileTransferCoordinatorTests
             FileTransferCoordinatorState state,
             FileTransferRouteTransitionPrepareRequest request,
             RuntimeUnlockRouteCommitProof? finalProof,
-            bool invalidateRuntimeUnlockRetryLifecycle = true)
+            bool invalidateRuntimeUnlockRetryLifecycle = true,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
             state,
@@ -22309,6 +22314,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Prepared,
             prepared.Status);
+        capture?.Invoke(prepared.SnapshotEnvelope!);
         var authority = prepared.Authority!.Value;
         var emptyFingerprint =
             FileTransferCoordinator
@@ -22327,6 +22333,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Draining,
             draining.Status);
+        capture?.Invoke(draining.SnapshotEnvelope!);
         var drain = draining.DrainCommand!.Value;
         var commitState = draining.State;
         if (invalidateRuntimeUnlockRetryLifecycle)
@@ -22370,6 +22377,7 @@ public sealed class FileTransferCoordinatorTests
             committed.Status ==
                 FileTransferRouteTransitionDecisionStatus.Committed,
             committed.Reason);
+        capture?.Invoke(committed.SnapshotEnvelope!);
 
         var committedState = committed.State;
         if (committed.RetainedFrameApplyCommand is { } frameCommand)
@@ -22385,14 +22393,15 @@ public sealed class FileTransferCoordinatorTests
         }
 
         var disposition = committed.DispositionCommand!.Value;
-        committedState = FileTransferCoordinator
+        var appliedDisposition = FileTransferCoordinator
             .ApplyFileTransferRouteTransitionDispositionReceipt(
                 committedState,
                 new FileTransferRouteTransitionDispositionReceipt(
                     disposition,
                     FileTransferRouteTransitionDispositionApplyStatus.Applied,
-                    "filetransfer_route_transition_committed"))
-            .State;
+                    "filetransfer_route_transition_committed"));
+        capture?.Invoke(appliedDisposition.SnapshotEnvelope!);
+        committedState = appliedDisposition.State;
         return Assert.IsType<FileTransferCoordinatorDecision>(
             committed.RouteDecision) with
         {
@@ -22641,7 +22650,8 @@ public sealed class FileTransferCoordinatorTests
 
     private static FileTransferCoordinatorDecision
         ActivateInitialResponderTunaForFallbackFixture(
-            FileTransferCoordinatorState state)
+            FileTransferCoordinatorState state,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         Assert.Equal(FileTransferDirection.Inbound, state.Direction);
         state = state with
@@ -22650,7 +22660,7 @@ public sealed class FileTransferCoordinatorTests
                 "initial-responder-fallback-fixture-data-session",
             CurrentDataSessionGeneration = 17,
         };
-        var setup = CreateRegularV4ToTunaRouteTransitionSetup(state);
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup(state, capture);
         var activation = Assert.IsType<
             FileTransferTunaActivationTransitionProofBoundary>(
                 setup.Request.ProofBoundary);
@@ -22707,7 +22717,8 @@ public sealed class FileTransferCoordinatorTests
                     InitialResponderPeerProbeObservation = observation,
                 },
             },
-            setup.FinalProof);
+            setup.FinalProof,
+            capture: capture);
     }
 
     private static FileTransferCoordinatorState ActiveFallbackStateWithoutCheckpoint(
@@ -23282,6 +23293,112 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, settled.Status);
         return [authorized.SnapshotEnvelope!, staged.SnapshotEnvelope!, installed.SnapshotEnvelope!,
             prepared.SnapshotEnvelope!, settled.SnapshotEnvelope!];
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void RegularV4FrontierRepairPressure_TerminalRolloverRetainsHistoricalSourceAcrossTunaCommit(
+        FileTransferDirection direction) => CreateCrossRoutePressureSettlementSnapshotFixture(direction);
+
+    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CreateCrossRoutePressureSettlementSnapshotFixture(FileTransferDirection direction)
+    {
+        var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
+        {
+            Assert.NotNull(envelope);
+            if (envelopes.Count > 0)
+            {
+                Assert.Equal(envelopes[^1].Aggregate.AfterStateGeneration, envelope.Aggregate.BeforeStateGeneration);
+                Assert.Equal(envelopes[^1].Aggregate.AfterStateFingerprint, envelope.Aggregate.BeforeStateFingerprint);
+            }
+            envelopes.Add(envelope);
+        }
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular, direction).State with
+        {
+            CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var publication = FileTransferCoordinator.AuthorizeAction(state,
+            RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
+                state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
+                targetRoute: regular.Route, targetProtocolVersion: 4,
+                targetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+        state = publication.State with
+        {
+            PersistentState = publication.State.PersistentState with
+            {
+                CoordinatorInstanceId = $"cross-route-pressure-{direction}",
+            },
+        };
+
+        FileTransferCoordinatorState Settle(FileTransferCoordinatorState source)
+        {
+            var authorized = FileTransferCoordinator.AuthorizeAction(source,
+                RecoveryActionRequest(FileTransferCoordinatorActionKind.RepairReplay,
+                    source.CurrentRuntimeOwner!.Value, source.CurrentLeg!, repairReplayKind: RepairReplayKind.V4Repair));
+            Assert.True(authorized.Accepted);
+            Capture(authorized.SnapshotEnvelope!);
+            var staged = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
+                authorized.State, authorized.RepairReplayDecision!.Value,
+                RegularV4PressureAuthorityRequest($"cross-route-pressure:{source.RouteSelection.Route}"),
+                "regular_v4_receiver_frontier_repair_due");
+            Capture(staged.SnapshotEnvelope!);
+            var binding = staged.Binding!.Value;
+            var installed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureBinding(staged.State,
+                new FileTransferRegularV4FrontierRepairPressureInstallReceipt(binding.Authority,
+                    FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed,
+                    "installed", binding.InstallGeneration, binding.PressureReason));
+            Capture(installed.SnapshotEnvelope!);
+            var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
+                installed.State, RegularV4PressureSettlement(binding.Authority,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved));
+            Capture(prepared.SnapshotEnvelope!);
+            var settled = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureSettlement(prepared.State,
+                new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(prepared.SettlementCommand!,
+                    FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+                    "regular_v4_frontier_repair_pressure_settlement_applied", true, false));
+            Assert.Equal(RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted, settled.Status);
+            Capture(settled.SnapshotEnvelope!);
+            return settled.State;
+        }
+
+        state = Settle(state);
+        var firstTerminal = Assert.Single(envelopes[^1].Aggregate.Operations,
+            operation => operation.OperationRole == "pressure_settlement_terminal");
+        if (direction == FileTransferDirection.Inbound)
+        {
+            state = ActivateInitialResponderTunaForFallbackFixture(state, Capture).State;
+        }
+        else
+        {
+            var setup = CreateRegularV4ToTunaRouteTransitionSetup(state, Capture);
+            state = CommitEmptyFileTransferRouteTransitionForTest(setup.State, setup.Request,
+                setup.FinalProof, capture: Capture).State;
+        }
+        Settle(state);
+        var rollover = envelopes[^1];
+        Assert.Equal(rollover.Aggregate.BeforeStateGeneration + 1, rollover.Aggregate.AfterStateGeneration);
+        var retired = Assert.Single(rollover.Aggregate.Operations,
+            operation => operation.OperationRole == "pressure_settlement_terminal" && operation.AfterState == "None");
+        var entering = Assert.Single(rollover.Aggregate.Operations,
+            operation => operation.OperationRole == "pressure_settlement_terminal" && operation.BeforeState == "None");
+        Assert.Equal(firstTerminal.OperationKey, retired.OperationKey);
+        Assert.Equal(firstTerminal.ReceiptFingerprint, retired.ReceiptFingerprint);
+        Assert.Equal(firstTerminal.RegularV4FrontierRepairPressure!.SourceBoundary,
+            retired.RegularV4FrontierRepairPressure!.SourceBoundary);
+        Assert.Equal("regular_nkn_v4_fast", retired.RegularV4FrontierRepairPressure.SourceBoundary.Route);
+        Assert.Equal("file_tuna_v4", entering.RegularV4FrontierRepairPressure!.SourceBoundary.Route);
+        Assert.Equal(retired.RegularV4FrontierRepairPressure.EffectiveBoundary,
+            entering.RegularV4FrontierRepairPressure.EffectiveBoundary);
+        Assert.Equal("(none)", entering.PredecessorAuthorityId);
+        Assert.Equal(2, rollover.Aggregate.Operations.Count(operation => operation.OperationRole == "repair_authority_terminal"));
+        return envelopes;
     }
 
     private static FileTransferCoordinatorState StateWithInstalledRegularV4FrontierRepairPressure(
