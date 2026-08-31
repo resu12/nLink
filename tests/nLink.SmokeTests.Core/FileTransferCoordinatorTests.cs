@@ -19247,6 +19247,10 @@ public sealed class FileTransferCoordinatorTests
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
     public void FileTransferRouteTransition_InitialResponderObservationUsesOnlyRegularV4AuthorityMode()
+        => CreatePreparationFirstResponderSnapshotFixture();
+
+    internal static System.Collections.Immutable.ImmutableArray<FileTransferCoordinatorTransitionEnvelope>
+        CreatePreparationFirstResponderSnapshotFixture()
     {
         var regular = FileTransferRouteResolver.Resolve(
             FileTransferRoute.RegularNknV4Fast);
@@ -19325,6 +19329,13 @@ public sealed class FileTransferCoordinatorTests
             missingObservation.Status);
         Assert.Same(state, missingObservation.State);
 
+        state = state with
+        {
+            PersistentState = state.PersistentState with
+            {
+                CoordinatorInstanceId = "preparation-first-responder-fixture",
+            },
+        };
         var prepared =
             FileTransferCoordinator.PrepareFileTransferRouteTransition(
                 state,
@@ -19350,6 +19361,15 @@ public sealed class FileTransferCoordinatorTests
         var command = Assert.IsType<
             FileTransferRouteTransitionPhysicalDrainCommand>(
                 draining.DrainCommand);
+        var acceptance = FileTransferCoordinator.CreateResponderProbeHandoffAttemptSnapshot(
+            draining.State, observation, "ObserveRuntimeUnlockResponderPeerProbeHandoff",
+            "Accepted", "runtime_unlock_initial_responder_peer_probe_transition_already_prepared");
+        Assert.Equal("Idempotent", acceptance.Envelope.DecisionStatus);
+        Assert.Equal("Accepted", Assert.Single(acceptance.Envelope.Aggregate.Operations).ReceiptStatus);
+        Assert.Equal(draining.State.PersistentState.SnapshotStateGeneration,
+            acceptance.State.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(draining.State.PersistentState.SnapshotStateFingerprint,
+            acceptance.State.PersistentState.SnapshotStateFingerprint);
         var finalProof = setup.FinalProof with
         {
             Reason = "runtime_unlock_transaction_peer_proof",
@@ -19428,6 +19448,20 @@ public sealed class FileTransferCoordinatorTests
             duplicate.Status);
         Assert.Same(committed.State, duplicate.State);
 
+        var disposition = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(
+            committed.State,
+            new FileTransferRouteTransitionDispositionReceipt(
+                committed.DispositionCommand!.Value,
+                FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                "filetransfer_route_transition_committed"));
+        var late = FileTransferCoordinator.CreateResponderProbeHandoffAttemptSnapshot(
+            disposition.State, observation, "ObserveRuntimeUnlockResponderPeerProbeHandoff",
+            "Rejected", "accepted");
+        Assert.Equal(disposition.State.PersistentState.SnapshotStateGeneration,
+            late.State.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(disposition.State.PersistentState.SnapshotStateFingerprint,
+            late.State.PersistentState.SnapshotStateFingerprint);
+
         var wrongModeObservation = observation with
         {
             PeerReceiveScope = receiveScope with
@@ -19467,6 +19501,8 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Rejected,
             mixedAuthority.Status);
+        return [prepared.SnapshotEnvelope!, draining.SnapshotEnvelope!, acceptance.Envelope,
+            committed.SnapshotEnvelope!, disposition.SnapshotEnvelope!, late.Envelope];
     }
 
     [Fact]

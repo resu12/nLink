@@ -1118,6 +1118,83 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $other=$entries | ConvertTo-Json -Depth 32 | ConvertFrom-Json
             foreach ($entry in $other) { $entry.Boundary.coordinatorInstanceId='other-cycle'; $entry.Boundary.writer='other-writer' }
             Assert-LateConsumed ($entries+$other) $true
+
+            function New-PreparationIntervalEntry([object]$entry) {
+                [pscustomobject]@{
+                    Boundary=$entry.Boundary; BeforeBoundary=$source; AfterBoundary=$source
+                    SessionId='session-1'; TransferId='transfer-1'; Direction='inbound'
+                }
+            }
+            function Assert-PreparationFirst([object[]]$h, [object[]]$interval, [bool]$expected) {
+                $index=New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries $interval
+                $actual=Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History $h -Candidate $candidate -AggregateIndex $index
+                if ($actual -ne $expected) { throw "Preparation-first acceptance: expected=$expected" }
+            }
+            foreach ($observationGeneration in @(1L,2L)) {
+                $preparationFirst=$history | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                $observation=$preparationFirst[0]
+                $observation.Boundary.boundaryId="acceptance-at-$observationGeneration"
+                $observation.Boundary.beforeStateGeneration=$observationGeneration
+                $observation.Boundary.afterStateGeneration=$observationGeneration
+                $observation.Boundary.beforeStateHash="hash-$observationGeneration"
+                $observation.Boundary.afterStateHash="hash-$observationGeneration"
+                $observation.Operation.responderProbeHandoff.linkedTransitionAuthorityId='route-transition-1'
+                $observation.Operation.responderProbeHandoff.linkedTransitionGeneration=1L
+                $interval=@($preparationFirst | ForEach-Object { New-PreparationIntervalEntry $_ })
+                Assert-PreparationFirst $preparationFirst $interval $true
+                $index=New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries $interval
+                foreach ($copy in @(1..65 | ForEach-Object { $candidate })) {
+                    if (-not (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                        -History ($preparationFirst+@($copy)) -Candidate $copy -AggregateIndex $index)) {
+                        throw 'An exact preparation-first completed lineage reopened.'
+                    }
+                }
+                Assert-PreparationFirst $preparationFirst @() $false
+                foreach ($mutation in @(
+                    { param($h) $h[0].Boundary.decisionStatus='Accepted' },
+                    { param($h) $h[0].Boundary.beforeStateGeneration-- },
+                    { param($h) $h[0].Boundary.beforeStateHash='conflict' },
+                    { param($h) $h[0].Operation.stateApplied=$true },
+                    { param($h) $h[0].Operation.receiptValidated=$false },
+                    { param($h) $h[0].Operation.receiptStatus='Held' },
+                    { param($h) $h[0].Operation.commandFingerprint='wrong-observation' },
+                    { param($h) $h[0].Operation.receiptIdentity='wrong-receipt' },
+                    { param($h) $h[0].Operation.responderProbeHandoff.linkedTransitionAuthorityId='wrong-transition' },
+                    { param($h) $h[0].Operation.responderProbeHandoff.linkedTransitionGeneration=2L },
+                    { param($h) $h[0].Operation.responderProbeHandoff.pendingPreCommitGeneration=2L },
+                    { param($h) $h[0].Operation.responderProbeHandoff.admissionGeneration=2L },
+                    { param($h) $h[0].Operation.responderProbeHandoff.probeId='wrong-probe' },
+                    { param($h) $h[0].Operation.responderProbeHandoff.sourceBoundary.dataSessionIdentity='other-data' },
+                    { param($h) $h[0].Operation.responderProbeHandoff.effectiveBoundary.checkpointGeneration=2L },
+                    { param($h) $h[0].Operation.responderProbeHandoff.targetBoundary.dataSessionGeneration=2L })) {
+                    $wrong=$preparationFirst | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                    & $mutation $wrong
+                    Assert-PreparationFirst $wrong @($wrong | ForEach-Object { New-PreparationIntervalEntry $_ }) $false
+                }
+                foreach ($missing in @(1,2,3,4)) {
+                    Assert-PreparationFirst @($preparationFirst | Where-Object { $_ -ne $preparationFirst[$missing] }) $interval $false
+                }
+                $afterCommit=$preparationFirst | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                $afterCommit[0].Boundary.beforeStateGeneration=3L
+                $afterCommit[0].Boundary.afterStateGeneration=3L
+                $afterCommit[0].Boundary.beforeStateHash='hash-3'
+                $afterCommit[0].Boundary.afterStateHash='hash-3'
+                Assert-PreparationFirst $afterCommit @($afterCommit | ForEach-Object { New-PreparationIntervalEntry $_ }) $false
+                if ($observationGeneration -eq 2L) {
+                    Assert-PreparationFirst $preparationFirst @($interval | Where-Object { $_ -ne $interval[2] }) $false
+                    Assert-PreparationFirst $preparationFirst ($interval+@($interval[2])) $false
+                    foreach ($field in @('route','protocolVersion','liveRouteEpoch','routePublicationGeneration',
+                        'routeCommitGeneration','runtimeGeneration','terminalGeneration','legGeneration',
+                        'transportEpoch','bridgeRecoveryGeneration','checkpointGeneration','checkpointRequestId',
+                        'dataSessionIdentity','dataSessionGeneration')) {
+                        $wrong=$interval | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                        if ($wrong[2].AfterBoundary.$field -is [string]) { $wrong[2].AfterBoundary.$field='mutated' }
+                        else { $wrong[2].AfterBoundary.$field++ }
+                        Assert-PreparationFirst $preparationFirst $wrong $false
+                    }
+                }
+            }
             """;
 
         var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
@@ -4344,6 +4421,28 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.True(
             result.ExitCode == 0,
             $"GUI shared-boundary validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public async Task FileTransferOps_PreparationFirstResponderUsesSharedSnapshotEvaluation()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-preparation-first", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreatePreparationFirstResponderSnapshotFixture()
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "PreparationFirstResponderSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
     }
 
     [Theory]
