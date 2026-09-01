@@ -999,6 +999,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
             -Family 'route_transition'
+    $snapshotReceiveRecoveryAuthoritative =
+        Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -Evaluation $snapshotEvaluation `
+            -Family 'receive_recovery'
+    $snapshotReceiveRecoveryEvidenceSelected =
+        $snapshotEvaluation.Mode -ne 'LegacyV0' -and
+        ($snapshotEvaluation.Mode -eq 'SnapshotV1Authoritative' -or
+         @($snapshotEvaluation.AuthoritativeFamilies) -contains 'receive_recovery')
     $snapshotFallbackTailYieldAuthoritative =
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
@@ -1028,6 +1036,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -TaxonomyClasses @(
                 'fallback_tail_yield_authority_invalid',
                 'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
+    $snapshotReceiveRecoveryOperationProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $snapshotEvaluation `
+            -Family 'receive_recovery' `
+            -TaxonomyClasses @(
+                'filetransfer_receive_recovery_operation_incomplete')
 
     function Invoke-FileTransferCompactCorrelator {
         param(
@@ -1888,7 +1902,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $runtimeUnlockRegularV4RecoveryLeaseEvents +
         $runtimeUnlockRetryDispatchInstallEvents
     )
-    $fileTransferReceiveRecoveryOperationProof =
+    $fileTransferReceiveRecoveryOperationLegacyProof =
         Invoke-FileTransferCompactCorrelator `
             -Name 'receive_recovery_operation' `
             -InputCount $fileTransferReceiveRecoveryOperationInput.Count `
@@ -1896,6 +1910,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 Get-FileTransferReceiveRecoveryOperationCorrelation `
                     -Events $fileTransferReceiveRecoveryOperationInput
             }
+    $fileTransferReceiveRecoveryOperationProof = if (
+        $snapshotReceiveRecoveryEvidenceSelected) {
+        $snapshotReceiveRecoveryOperationProof
+    }
+    else {
+        $fileTransferReceiveRecoveryOperationLegacyProof
+    }
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =
         Invoke-FileTransferCompactCorrelator `
             -Name 'receive_recovery_completed_unproven_payload_hold' `
@@ -2929,8 +2950,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Evaluation $snapshotEvaluation `
             -Family 'route_transition' `
             -TaxonomyClasses @(
-                'filetransfer_route_transition_incomplete',
-                'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+                'filetransfer_route_transition_incomplete')
     }
     else {
         Invoke-FileTransferCompactCorrelator `
@@ -2944,6 +2964,40 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -AlreadyChronologicallyOrdered
             }
     }
+    $fileTransferFallbackV6ProofBootstrapProof =
+        if ($snapshotRouteTransitionAuthoritative) {
+            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $snapshotEvaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @(
+                    'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+        }
+        else {
+            $fallbackBootstrapUnresolvedRecords = @(
+                $fileTransferRouteTransitionProof.UnresolvedCandidateRecords |
+                    Where-Object {
+                        [string]$_.Class -ceq
+                            'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
+                    })
+            [pscustomobject]@{
+                RawCount =
+                    $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
+                DistinctCount =
+                    $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount
+                RecoveredCount =
+                    $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount
+                UnresolvedCount =
+                    $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount
+                Verdict = if (
+                    $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) {
+                    'fail'
+                }
+                else {
+                    'pass'
+                }
+                UnresolvedCandidateRecords = $fallbackBootstrapUnresolvedRecords
+            }
+        }
     if ($snapshotRegularV4PressureAuthoritative) {
         $regularV4FrontierRepairSettlementDispositionProof =
             Get-FileTransferCoordinatorSnapshotCorrelationResult `
@@ -3434,7 +3488,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = $candidateRecord.Reason
         }) | Out-Null
     }
-    foreach ($candidateRecord in @($fileTransferRouteTransitionProof.UnresolvedCandidateRecords)) {
+    foreach ($candidateRecord in @(
+            $fileTransferRouteTransitionProof.UnresolvedCandidateRecords |
+                Where-Object {
+                    [string]$_.Class -ceq 'filetransfer_route_transition_incomplete'
+                })) {
         $candidateClass = if (-not [string]::IsNullOrWhiteSpace([string]$candidateRecord.Class)) {
             [string]$candidateRecord.Class
         }
@@ -3495,12 +3553,25 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 -Default 'fallback_tail_yield_authority_invalid'
         }) | Out-Null
     }
-    foreach ($candidateEvent in @($fileTransferReceiveRecoveryOperationProof.UnresolvedCandidateEvents)) {
-        $compactProofChainCandidates.Add([pscustomobject]@{
-            Class = 'filetransfer_receive_recovery_operation_incomplete'
-            Event = $candidateEvent
-            Reason = 'receive_recovery_operation_terminal_handoff_incomplete'
-        }) | Out-Null
+    if ($snapshotReceiveRecoveryAuthoritative) {
+        foreach ($candidateRecord in @(
+                $snapshotReceiveRecoveryOperationProof.UnresolvedCandidateRecords)) {
+            $compactProofChainCandidates.Add([pscustomobject]@{
+                Class = 'filetransfer_receive_recovery_operation_incomplete'
+                Event = $candidateRecord.Event
+                Reason = $candidateRecord.Reason
+            }) | Out-Null
+        }
+    }
+    elseif (-not $snapshotReceiveRecoveryEvidenceSelected) {
+        foreach ($candidateEvent in @(
+                $fileTransferReceiveRecoveryOperationLegacyProof.UnresolvedCandidateEvents)) {
+            $compactProofChainCandidates.Add([pscustomobject]@{
+                Class = 'filetransfer_receive_recovery_operation_incomplete'
+                Event = $candidateEvent
+                Reason = 'receive_recovery_operation_terminal_handoff_incomplete'
+            }) | Out-Null
+        }
     }
     foreach ($candidateEvent in @($fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
@@ -3915,6 +3986,15 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = $candidateRecord.Reason
         }) | Out-Null
     }
+    foreach ($candidateRecord in @(
+            $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class =
+                'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
+            Event = $candidateRecord.Event
+            Reason = $candidateRecord.Reason
+        }) | Out-Null
+    }
     foreach ($candidateRecord in @($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCandidateRecords)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing'
@@ -3999,12 +4079,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $snapshotFallbackTailYieldPureClasses = @(
         'fallback_tail_yield_authority_invalid',
         'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing')
+    $snapshotReceiveRecoveryPureClasses = @(
+        'filetransfer_receive_recovery_operation_incomplete')
     $firstCompactProofChainFailure = @(
         $compactProofChainCandidates.ToArray() |
             Where-Object {
-                -not $snapshotFallbackTailYieldAuthoritative -or
-                $_.Class -notin $snapshotFallbackTailYieldPureClasses -or
-                [string]$_.Event.FilePath -ceq '(coordinator_snapshot)'
+                (-not $snapshotFallbackTailYieldAuthoritative -or
+                 $_.Class -notin $snapshotFallbackTailYieldPureClasses -or
+                 [string]$_.Event.FilePath -ceq '(coordinator_snapshot)') -and
+                (-not $snapshotReceiveRecoveryEvidenceSelected -or
+                 $_.Class -notin $snapshotReceiveRecoveryPureClasses -or
+                 [string]$_.Event.FilePath -ceq '(coordinator_snapshot)')
             } |
             Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
             Select-Object -First 1
@@ -4122,6 +4207,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $regularV4FrontierTailRepairStatePublicationProof.UnresolvedCount -gt 0 -or
         $regularV4FrontierRepairPressureAuthorityLifecycleSplitProof.UnresolvedCount -gt 0 -or
         $fileTransferRouteTransitionDrainingTransportGraceProof.UnresolvedCount -gt 0 -or
+        $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount -gt 0 -or
         $fileTransferRouteTransitionProof.UnresolvedCount -gt 0 -or
         $runtimeUnlockRegularV4RouteCommitSendDrainProof.UnresolvedCount -gt 0) {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
@@ -4444,11 +4530,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_gui_live_reactivation_action_window_missed_recovered_count=0"),
         ("filetransfer_gui_live_reactivation_action_window_missed_unresolved_count={0}" -f $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCount),
         ("filetransfer_gui_live_reactivation_action_window_missed_verdict={0}" -f $fileTransferGuiLiveReactivationActionWindowProof.Verdict),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f ($(if ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) { 'fail' } else { 'pass' }))),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RawCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.DistinctCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RecoveredCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f $fileTransferFallbackV6ProofBootstrapProof.Verdict),
         ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount),
         ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount),
         ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount),
@@ -4594,13 +4680,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_operation_recovered_count={0}" -f $fileTransferReceiveRecoveryOperationProof.RecoveredCount),
         ("filetransfer_receive_recovery_operation_unresolved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.UnresolvedCount),
         ("filetransfer_receive_recovery_operation_verdict={0}" -f $fileTransferReceiveRecoveryOperationProof.Verdict),
-        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationProof.StartedCount),
-        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ExecutionReceiptAppliedCount),
-        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ProofObservedCount),
-        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureRetainedCount),
-        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureAdoptedCount),
-        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureReservedCount),
-        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureConsumedCount),
+        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.StartedCount),
+        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ExecutionReceiptAppliedCount),
+        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ProofObservedCount),
+        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureRetainedCount),
+        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureAdoptedCount),
+        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureReservedCount),
+        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureConsumedCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RecoveredCount),
@@ -4993,11 +5079,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count=0"),
         ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.Verdict),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f ($(if ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) { 'fail' } else { 'pass' }))),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RawCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.DistinctCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RecoveredCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f $fileTransferFallbackV6ProofBootstrapProof.Verdict),
         ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
@@ -5095,13 +5181,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_operation_recovered_count={0}" -f $fileTransferReceiveRecoveryOperationProof.RecoveredCount),
         ("filetransfer_receive_recovery_operation_unresolved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.UnresolvedCount),
         ("filetransfer_receive_recovery_operation_verdict={0}" -f $fileTransferReceiveRecoveryOperationProof.Verdict),
-        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationProof.StartedCount),
-        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ExecutionReceiptAppliedCount),
-        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ProofObservedCount),
-        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureRetainedCount),
-        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureAdoptedCount),
-        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureReservedCount),
-        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureConsumedCount),
+        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.StartedCount),
+        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ExecutionReceiptAppliedCount),
+        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ProofObservedCount),
+        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureRetainedCount),
+        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureAdoptedCount),
+        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureReservedCount),
+        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureConsumedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.DistinctCount),
@@ -5442,11 +5528,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count=0"),
         ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.Verdict),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f ($(if ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) { 'fail' } else { 'pass' }))),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RawCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.DistinctCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RecoveredCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f $fileTransferFallbackV6ProofBootstrapProof.Verdict),
         ("filetransfer_route_transition_incomplete_raw_count={0}" -f $fileTransferRouteTransitionProof.RawCount),
         ("filetransfer_route_transition_incomplete_distinct_count={0}" -f $fileTransferRouteTransitionProof.DistinctCount),
         ("filetransfer_route_transition_incomplete_recovered_count={0}" -f $fileTransferRouteTransitionProof.RecoveredCount),
@@ -5544,13 +5630,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_operation_recovered_count={0}" -f $fileTransferReceiveRecoveryOperationProof.RecoveredCount),
         ("filetransfer_receive_recovery_operation_unresolved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.UnresolvedCount),
         ("filetransfer_receive_recovery_operation_verdict={0}" -f $fileTransferReceiveRecoveryOperationProof.Verdict),
-        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationProof.StartedCount),
-        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ExecutionReceiptAppliedCount),
-        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ProofObservedCount),
-        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureRetainedCount),
-        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureAdoptedCount),
-        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureReservedCount),
-        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureConsumedCount),
+        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.StartedCount),
+        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ExecutionReceiptAppliedCount),
+        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ProofObservedCount),
+        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureRetainedCount),
+        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureAdoptedCount),
+        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureReservedCount),
+        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureConsumedCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
         ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RawCount),
@@ -5868,11 +5954,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_gui_live_fallback_fault_window_missed_recovered_count=0"),
         ("filetransfer_gui_live_fallback_fault_window_missed_unresolved_count={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.UnresolvedCount),
         ("filetransfer_gui_live_fallback_fault_window_missed_verdict={0}" -f $fileTransferGuiLiveFallbackFaultWindowProof.Verdict),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount),
-        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f ($(if ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) { 'fail' } else { 'pass' }))),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_raw_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RawCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.DistinctCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.RecoveredCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count={0}" -f $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount),
+        ("filetransfer_fallback_v6_proof_bootstrap_missing_verdict={0}" -f $fileTransferFallbackV6ProofBootstrapProof.Verdict),
         ("filetransfer_live_route_epoch_projection_missing_raw_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RawCount),
         ("filetransfer_live_route_epoch_projection_missing_distinct_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.DistinctCount),
         ("filetransfer_live_route_epoch_projection_missing_recovered_count={0}" -f $fileTransferRouteTransitionLiveEpochProjectionProof.RecoveredCount),
@@ -5998,13 +6084,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_receive_recovery_operation_recovered_count={0}" -f $fileTransferReceiveRecoveryOperationProof.RecoveredCount),
         ("filetransfer_receive_recovery_operation_unresolved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.UnresolvedCount),
         ("filetransfer_receive_recovery_operation_verdict={0}" -f $fileTransferReceiveRecoveryOperationProof.Verdict),
-        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationProof.StartedCount),
-        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ExecutionReceiptAppliedCount),
-        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ProofObservedCount),
-        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureRetainedCount),
-        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureAdoptedCount),
-        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureReservedCount),
-        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationProof.ClosureConsumedCount),
+        ("filetransfer_receive_recovery_operation_started_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.StartedCount),
+        ("filetransfer_receive_recovery_operation_execution_receipt_applied_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ExecutionReceiptAppliedCount),
+        ("filetransfer_receive_recovery_operation_proof_observed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ProofObservedCount),
+        ("filetransfer_receive_recovery_operation_closure_retained_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureRetainedCount),
+        ("filetransfer_receive_recovery_operation_closure_adopted_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureAdoptedCount),
+        ("filetransfer_receive_recovery_operation_closure_reserved_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureReservedCount),
+        ("filetransfer_receive_recovery_operation_closure_consumed_count={0}" -f $fileTransferReceiveRecoveryOperationLegacyProof.ClosureConsumedCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RawCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.DistinctCount),
         ("filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count={0}" -f $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RecoveredCount),
@@ -6362,11 +6448,11 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_gui_live_reactivation_action_window_missed_recovered_count = 0
         filetransfer_gui_live_reactivation_action_window_missed_unresolved_count = $fileTransferGuiLiveReactivationActionWindowProof.UnresolvedCount
         filetransfer_gui_live_reactivation_action_window_missed_verdict = $fileTransferGuiLiveReactivationActionWindowProof.Verdict
-        filetransfer_fallback_v6_proof_bootstrap_missing_raw_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
-        filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount
-        filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount
-        filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount
-        filetransfer_fallback_v6_proof_bootstrap_missing_verdict = if ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) { 'fail' } else { 'pass' }
+        filetransfer_fallback_v6_proof_bootstrap_missing_raw_count = $fileTransferFallbackV6ProofBootstrapProof.RawCount
+        filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count = $fileTransferFallbackV6ProofBootstrapProof.DistinctCount
+        filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count = $fileTransferFallbackV6ProofBootstrapProof.RecoveredCount
+        filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count = $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount
+        filetransfer_fallback_v6_proof_bootstrap_missing_verdict = $fileTransferFallbackV6ProofBootstrapProof.Verdict
         filetransfer_route_transition_incomplete_raw_count = $fileTransferRouteTransitionProof.RawCount
         filetransfer_route_transition_incomplete_distinct_count = $fileTransferRouteTransitionProof.DistinctCount
         filetransfer_route_transition_incomplete_recovered_count = $fileTransferRouteTransitionProof.RecoveredCount
@@ -6512,13 +6598,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_receive_recovery_operation_recovered_count = $fileTransferReceiveRecoveryOperationProof.RecoveredCount
         filetransfer_receive_recovery_operation_unresolved_count = $fileTransferReceiveRecoveryOperationProof.UnresolvedCount
         filetransfer_receive_recovery_operation_verdict = $fileTransferReceiveRecoveryOperationProof.Verdict
-        filetransfer_receive_recovery_operation_started_count = $fileTransferReceiveRecoveryOperationProof.StartedCount
-        filetransfer_receive_recovery_operation_execution_receipt_applied_count = $fileTransferReceiveRecoveryOperationProof.ExecutionReceiptAppliedCount
-        filetransfer_receive_recovery_operation_proof_observed_count = $fileTransferReceiveRecoveryOperationProof.ProofObservedCount
-        filetransfer_receive_recovery_operation_closure_retained_count = $fileTransferReceiveRecoveryOperationProof.ClosureRetainedCount
-        filetransfer_receive_recovery_operation_closure_adopted_count = $fileTransferReceiveRecoveryOperationProof.ClosureAdoptedCount
-        filetransfer_receive_recovery_operation_closure_reserved_count = $fileTransferReceiveRecoveryOperationProof.ClosureReservedCount
-        filetransfer_receive_recovery_operation_closure_consumed_count = $fileTransferReceiveRecoveryOperationProof.ClosureConsumedCount
+        filetransfer_receive_recovery_operation_started_count = $fileTransferReceiveRecoveryOperationLegacyProof.StartedCount
+        filetransfer_receive_recovery_operation_execution_receipt_applied_count = $fileTransferReceiveRecoveryOperationLegacyProof.ExecutionReceiptAppliedCount
+        filetransfer_receive_recovery_operation_proof_observed_count = $fileTransferReceiveRecoveryOperationLegacyProof.ProofObservedCount
+        filetransfer_receive_recovery_operation_closure_retained_count = $fileTransferReceiveRecoveryOperationLegacyProof.ClosureRetainedCount
+        filetransfer_receive_recovery_operation_closure_adopted_count = $fileTransferReceiveRecoveryOperationLegacyProof.ClosureAdoptedCount
+        filetransfer_receive_recovery_operation_closure_reserved_count = $fileTransferReceiveRecoveryOperationLegacyProof.ClosureReservedCount
+        filetransfer_receive_recovery_operation_closure_consumed_count = $fileTransferReceiveRecoveryOperationLegacyProof.ClosureConsumedCount
         filetransfer_receive_recovery_completed_unproven_successor_missing_raw_count = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RawCount
         filetransfer_receive_recovery_completed_unproven_successor_missing_distinct_count = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.DistinctCount
         filetransfer_receive_recovery_completed_unproven_successor_missing_recovered_count = $fileTransferReceiveRecoveryCompletedUnprovenSuccessorProof.RecoveredCount

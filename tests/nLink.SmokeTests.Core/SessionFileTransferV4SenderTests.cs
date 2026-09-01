@@ -5636,11 +5636,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.True(yieldAuthority.Accepted);
         Assert.NotNull(yieldAuthority.FallbackTailYieldDecision);
         var yieldDecision = yieldAuthority.FallbackTailYieldDecision.Value;
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            yieldAuthority.State.PersistentState);
-        return (yieldAuthority.State, yieldDecision);
+        ApplyCoordinatorActionDecisionForTest(context, yieldAuthority);
+        return (CreateCoordinatorStateForTest(context), yieldDecision);
     }
 
     private static (
@@ -5663,11 +5660,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 yieldState,
                 localReceipt);
         Assert.True(localApplied.Accepted);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            localApplied.State.PersistentState);
-        return (localApplied.State, yieldDecision);
+        var adoptedState =
+            AdoptFallbackTailYieldDecisionForTest(context, localApplied);
+        return (adoptedState, yieldDecision);
     }
 
     private static void SeedPairedFallbackTailYieldForTest(object context, FileTransferLeg leg)
@@ -5709,10 +5704,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 peerReceipt);
         Assert.True(peerApplied.Accepted);
         Assert.NotNull(peerApplied.PairedRelease);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            peerApplied.State.PersistentState);
+        _ = AdoptFallbackTailYieldDecisionForTest(context, peerApplied);
         TrySetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
         TrySetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
         TrySetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", false);
@@ -19355,12 +19347,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             state,
             receipt);
         Assert.True(applied.Accepted, applied.Reason);
-        SetPrivateProperty(
-            context,
-            "CoordinatorPersistentState",
-            applied.State.PersistentState);
+        var adoptedState =
+            AdoptFallbackTailYieldDecisionForTest(context, applied);
         return Assert.IsType<FileTransferFallbackTailYieldOperation>(
-            applied.State.PersistentState.FallbackTailYield.CurrentOperation);
+            adoptedState.PersistentState.FallbackTailYield.CurrentOperation);
     }
 
     [Fact]
@@ -31962,6 +31952,23 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 candidate.GetParameters()[0].ParameterType == context.GetType() &&
                 candidate.GetParameters()[1].ParameterType ==
                     typeof(FileTransferFallbackV6ProofBootstrapDecision));
+        return Assert.IsType<FileTransferCoordinatorState>(
+            method.Invoke(null, [context, decision]));
+    }
+
+    private static FileTransferCoordinatorState
+        AdoptFallbackTailYieldDecisionForTest(
+            object context,
+            FileTransferFallbackTailYieldTransitionDecision decision)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "AdoptCoordinatorStateLocked" &&
+                candidate.GetParameters().Length == 2 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters()[1].ParameterType ==
+                    typeof(FileTransferFallbackTailYieldTransitionDecision));
         return Assert.IsType<FileTransferCoordinatorState>(
             method.Invoke(null, [context, decision]));
     }

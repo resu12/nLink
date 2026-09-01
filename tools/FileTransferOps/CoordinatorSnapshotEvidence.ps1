@@ -7352,12 +7352,20 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     break
                 }
                 $seenEffects[$effectIdentity] = $effectFingerprint
-                if ($effect.Family -ceq
+                $isPressureSettlementOneShotEffect =
+                    $effect.Family -ceq
                         'regular_v4_frontier_repair_pressure' -and
                     $effect.EffectKind -in @(
                         'pressure_settlement_bridge_applied',
                         'local_contract_settled',
-                        'local_contract_reference_cleared')) {
+                        'local_contract_reference_cleared')
+                $isFallbackTailRecoveryOwnerRetirementEffect =
+                    $effect.Family -ceq 'fallback_tail_yield' -and
+                    $effect.EffectKind -ceq
+                        'recovery_owner_retired_after_yield'
+                $oneShotEffectReuseDetected = $false
+                if ($isPressureSettlementOneShotEffect -or
+                    $isFallbackTailRecoveryOwnerRetirementEffect) {
                     $oneShotIdentity =
                         "$instanceId|$($effect.Family)|$($effect.EffectIdentity)"
                     if ($seenOneShotEffectIdentities.ContainsKey(
@@ -7366,16 +7374,26 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             $oneShotIdentity]
                         if ([string]$priorEffect.TransitionId -cne
                             [string]$effect.TransitionId) {
+                            $variant = if (
+                                $isFallbackTailRecoveryOwnerRetirementEffect) {
+                                'terminal_cleanup_reemitted_already_applied_fallback_tail_recovery_owner_retirement'
+                            }
+                            else {
+                                'route_commit_reemitted_already_applied_pressure_settlement_lifecycle'
+                            }
                             $errors.Add(
                                 'snapshot_authority_effect_identity_reused_across_transitions|' +
-                                'route_commit_reemitted_already_applied_pressure_settlement_lifecycle:' +
-                                $record.LineIndex)
+                                $variant + ':' + $record.LineIndex)
+                            $oneShotEffectReuseDetected = $true
                         }
                     }
                     else {
                         $seenOneShotEffectIdentities[$oneShotIdentity] =
                             $effect
                     }
+                }
+                if ($oneShotEffectReuseDetected) {
+                    break
                 }
                 $effects.Add($effect) | Out-Null
             }

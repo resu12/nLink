@@ -692,6 +692,194 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_FallbackTailRecoveryOwnerRetirementEffectIsOneShotAcrossTransitions()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+            $coverage = @($catalog.RequiredFamilies) -join ','
+            $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator; session_id=session; transfer_id=transfer; direction=inbound"
+            $scope = [ordered]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6
+                liveRouteEpoch=2L; routePublicationGeneration=3L
+                routeCommitGeneration=0L; runtimeGeneration=3L
+                terminalGeneration=0L; legGeneration=3L
+                transportEpoch=1L; bridgeRecoveryGeneration=1L
+                checkpointGeneration=1L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session'; dataSessionGeneration=1L
+            }
+            $yieldReceipt = [ordered]@{
+                stage='yield'; commandIdentity='yield-command'
+                commandGeneration=1L; commandFingerprint='yield-command-fingerprint'
+                receiptIdentity='yield-receipt'; receiptGeneration=1L
+                receiptStatus='Accepted'; receiptReason='accepted'
+                receiptFingerprint='yield-receipt-fingerprint'
+                receiptValidated=$true
+            }
+            $operationKey =
+                'fallback_tail_yield|yield_current|yield-authority|1|Quiescent'
+
+            function New-Operation([string]$beforeState, [string]$afterState) {
+                [ordered]@{
+                    family='fallback_tail_yield'; operationRole='yield_current'
+                    operationKey=$operationKey; operationKind='Quiescent'
+                    authorityId='yield-authority'; predecessorAuthorityId='(none)'
+                    operationGeneration=1L; beforeState=$beforeState
+                    afterState=$afterState; commandIdentity=$yieldReceipt.commandIdentity
+                    commandGeneration=1L
+                    commandFingerprint=$yieldReceipt.commandFingerprint
+                    receiptIdentity=$yieldReceipt.receiptIdentity
+                    receiptGeneration=1L; receiptStatus='Accepted'
+                    receiptFingerprint=$yieldReceipt.receiptFingerprint
+                    receiptValidated=$true; stateApplied=$true
+                    fallbackTailYield=[ordered]@{
+                        role='yield_current'; yieldKind='Quiescent'
+                        pairingState=$afterState; ownerKey='owner'; pairKey='pair'
+                        localProofIdentity='(none)'; localProofFingerprint='(none)'
+                        peerProofAuthorityId='(none)'; peerProofGeneration=0L
+                        peerProofIdentity='(none)'; peerProofFingerprint='(none)'
+                        peerProofYieldGeneration=0L
+                        pairedReleaseAuthorityId='(none)'
+                        pairedReleaseGeneration=0L; pairedReleaseOutcome='(none)'
+                        pairingGeneration=0L; failedPredecessorAuthorityId='(none)'
+                        failedSupersessionCarriedPeerProof=$false
+                        reauthorizationGeneration=0L
+                        reauthorizationSourceTransportEpoch=1L
+                        reauthorizationTargetTransportEpoch=1L
+                        reservationGeneration=0L
+                        reservedRetryAuthorityId='(none)'
+                        consumingInstallGeneration=0L; retryHoldGeneration=0L
+                        retryRecheckGeneration=0L; invalidationReason='(none)'
+                        sourceBoundary=$scope; effectiveBoundary=$scope
+                        targetBoundary=$scope; receipts=@($yieldReceipt)
+                    }
+                }
+            }
+
+            function New-Transition(
+                [string]$transitionId,
+                [long]$beforeGeneration,
+                [long]$afterGeneration,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [string]$beforeState,
+                [string]$afterState) {
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Authoritative'
+                    coordinatorInstanceId='coordinator'; sessionId='session'
+                    transferId='transfer'; direction='inbound'
+                    decisionUtcMilliseconds=$afterGeneration
+                    transitionId=$transitionId
+                    decisionKind='FallbackTailYieldTransition'
+                    decisionStatus='Accepted'; decisionReason='accepted'
+                    aggregate=[ordered]@{
+                        beforeStateGeneration=$beforeGeneration
+                        afterStateGeneration=$afterGeneration
+                        beforeStateFingerprint=$beforeHash
+                        afterStateFingerprint=$afterHash
+                        beforeBoundary=$scope; afterBoundary=$scope
+                        changedFamilies=@('fallback_tail_yield')
+                        operations=@((New-Operation $beforeState $afterState))
+                    }
+                }
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+                    ($envelope | ConvertTo-Json -Depth 64 -Compress))
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes)
+                $payload = $payload.TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; $prefix; transition_id=$transitionId; before_state_generation=$beforeGeneration; after_state_generation=$afterGeneration; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+
+            function New-RetirementEffect(
+                [string]$transitionId,
+                [long]$stateGeneration,
+                [string]$effectIdentity,
+                [long]$writerSequence) {
+                "event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$transitionId; coordinator_state_generation=$stateGeneration; operation_family=fallback_tail_yield; operation_key=$operationKey; operation_authority_id=yield-authority; operation_generation=1; effect_kind=recovery_owner_retired_after_yield; effect_identity=$effectIdentity; effect_generation=1; receipt_identity=$($yieldReceipt.receiptIdentity); receipt_generation=1; receipt_status=Accepted; receipt_fingerprint=$($yieldReceipt.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=writer; log_writer_sequence=$writerSequence"
+            }
+
+            function New-Start {
+                "event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=0; initial_state_hash=state-0; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none"
+            }
+            function New-End([long]$generation, [string]$hash, [long]$count) {
+                "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=$generation; final_state_hash=$hash; transition_count=$count; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none"
+            }
+
+            $transition1 = New-Transition `
+                'transition-1' 0L 1L 'state-0' 'state-1' `
+                'None' 'YieldIssued'
+            $effect1 = New-RetirementEffect `
+                'transition-1' 1L 'retirement-effect' 3L
+            $sameTransitionDuplicate = Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines @((New-Start),$transition1,$effect1,$effect1,
+                    (New-End 1L 'state-1' 1L))
+            if ($sameTransitionDuplicate.ArtifactEvidenceVerdict -cne 'pass' -or
+                $sameTransitionDuplicate.EffectCount -ne 1 -or
+                $null -ne $sameTransitionDuplicate.FirstUnresolvedBoundary) {
+                throw "A byte-identical same-transition duplicate did not coalesce: $($sameTransitionDuplicate | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $transition2 = New-Transition `
+                'transition-2' 1L 2L 'state-1' 'state-2' `
+                'YieldIssued' 'LocalProofObserved'
+            $reusedEffect = New-RetirementEffect `
+                'transition-2' 2L 'retirement-effect' 5L
+            $crossTransitionReuse = Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines @((New-Start),$transition1,$effect1,$transition2,
+                    $reusedEffect,(New-End 2L 'state-2' 2L))
+            $failure = $crossTransitionReuse.FirstUnresolvedBoundary
+            if ($crossTransitionReuse.ArtifactEvidenceVerdict -cne 'fail' -or
+                $failure.decisionReason -cne
+                    'snapshot_authority_effect_identity_reused_across_transitions' -or
+                $failure.variant -cne
+                    'terminal_cleanup_reemitted_already_applied_fallback_tail_recovery_owner_retirement' -or
+                $failure.eventName -cne
+                    'filetransfer_coordinator_authority_effect' -or
+                $failure.referencedTransitionId -cne 'transition-2' -or
+                $failure.effectIdentity -cne 'retirement-effect' -or
+                $failure.evidenceLineIndex -ne 4) {
+                throw "Cross-transition retirement reuse was not attributed to the later effect: $($crossTransitionReuse | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $semanticFailures = @(
+                $crossTransitionReuse.Boundaries | Where-Object {
+                    $_.boundaryId -in @('transition-1','transition-2') -and
+                    $_.verdict -ceq 'fail'
+                })
+            if ($semanticFailures.Count -ne 0) {
+                throw "The rejected replay contaminated the valid Family-4 lifecycle: $($semanticFailures | ConvertTo-Json -Depth 8 -Compress)"
+            }
+
+            $distinctEffect = New-RetirementEffect `
+                'transition-2' 2L 'distinct-retirement-effect' 5L
+            $distinctSemanticEffects =
+                Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+                    (New-Start),$transition1,$effect1,$transition2,$distinctEffect,
+                    (New-End 2L 'state-2' 2L))
+            if ($distinctSemanticEffects.ArtifactEvidenceVerdict -cne 'pass' -or
+                $distinctSemanticEffects.FirstUnresolvedBoundary.taxonomyClass -cne
+                    'fallback_tail_yield_authority_invalid') {
+                throw "Distinct retirement effects did not retain strict Family-4 exact-count validation: $($distinctSemanticEffects | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Fallback-tail one-shot retirement validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public void FileTransferOps_EfficiencySummaryUsesBoundedSemanticNameIndex()
     {
         var repoRoot = FindRepoRoot();
@@ -4200,6 +4388,363 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.True(
             result.ExitCode == 0,
             $"Coordinator bootstrap rollover validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public async Task FileTransferOps_AuthoritativeSnapshotBootstrapCorrelationIsIndependentFromGenericRouteTransition()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            function New-Boundary(
+                [string]$taxonomy,
+                [long]$sequence,
+                [int]$raw,
+                [int]$distinct,
+                [int]$recovered,
+                [int]$unresolved) {
+                [pscustomobject]@{
+                    families = @('route_transition')
+                    taxonomyClass = $taxonomy
+                    rawCount = $raw
+                    distinctCount = $distinct
+                    recoveredCount = $recovered
+                    unresolvedCount = $unresolved
+                    verdict = if ($unresolved -gt 0) { 'fail' } else { 'pass' }
+                    writerSequence = $sequence
+                    evidenceLineIndex = [int]$sequence - 1
+                    writer = 'snapshot-writer'
+                    decisionReason = 'test-boundary'
+                }
+            }
+
+            $evaluation = [pscustomobject]@{
+                Mode = 'SnapshotV1Authoritative'
+                Boundaries = @(
+                    (New-Boundary 'filetransfer_route_transition_incomplete' 10 7 4 2 2)
+                    (New-Boundary `
+                        'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing' `
+                        20 3 2 1 1)
+                )
+            }
+            $generic = Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $evaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @('filetransfer_route_transition_incomplete')
+            $bootstrap = Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $evaluation `
+                -Family 'route_transition' `
+                -TaxonomyClasses @(
+                    'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+
+            if ($generic.RawCount -ne 7 -or
+                $generic.DistinctCount -ne 4 -or
+                $generic.RecoveredCount -ne 2 -or
+                $generic.UnresolvedCount -ne 2 -or
+                $bootstrap.RawCount -ne 3 -or
+                $bootstrap.DistinctCount -ne 2 -or
+                $bootstrap.RecoveredCount -ne 1 -or
+                $bootstrap.UnresolvedCount -ne 1) {
+                throw "Snapshot route/bootstrap quartets were combined: generic=$($generic | ConvertTo-Json -Compress), bootstrap=$($bootstrap | ConvertTo-Json -Compress)"
+            }
+            if ($null -ne $generic.PSObject.Properties['FallbackV6ProofBootstrapMissingRawCount']) {
+                throw 'The generic Snapshot V1 correlation unexpectedly exposes the LegacyV0 composite bootstrap contract.'
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Snapshot route/bootstrap correlation separation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public void FileTransferOps_CompactWriterUsesDedicatedFallbackBootstrapCorrelation()
+    {
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "FileTransferOps",
+            "AnalyzerOrchestration.ps1"));
+        var compactWriterBody = ExtractPowerShellFunctionBody(
+            orchestrationText,
+            "Write-FileTransferCompactRetainedAnalysisArtifacts",
+            "Get-FileTransferEfficiencyAllEventsFromIndex");
+
+        Assert.Contains(
+            "$fileTransferFallbackV6ProofBootstrapProof =",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'",
+            compactWriterBody,
+            StringComparison.Ordinal);
+
+        var bootstrapOutputLines = compactWriterBody
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains(
+                "filetransfer_fallback_v6_proof_bootstrap_missing_",
+                StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(bootstrapOutputLines);
+        Assert.All(
+            bootstrapOutputLines,
+            line => Assert.Contains(
+                "$fileTransferFallbackV6ProofBootstrapProof.",
+                line,
+                StringComparison.Ordinal));
+        Assert.Contains(
+            "$fileTransferRouteTransitionProof.RawCount",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissing",
+            string.Join(Environment.NewLine, bootstrapOutputLines),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FileTransferOps_ReceiveRecoverySnapshotCorrelationPreservesCleanAndOpenV1Results()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            function New-Evaluation(
+                [string]$mode,
+                [string]$artifactVerdict,
+                [object[]]$boundaries,
+                [string[]]$authoritativeFamilies) {
+                [pscustomobject]@{
+                    Mode = $mode
+                    ArtifactEvidenceVerdict = $artifactVerdict
+                    AuthoritativeFamilies = @($authoritativeFamilies)
+                    Boundaries = @($boundaries)
+                }
+            }
+
+            $clean = New-Evaluation `
+                'SnapshotV1Authoritative' `
+                'pass' `
+                @() `
+                @('receive_recovery')
+            $cleanProof = Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $clean `
+                -Family 'receive_recovery' `
+                -TaxonomyClasses @('filetransfer_receive_recovery_operation_incomplete')
+            if (-not (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+                    -Evaluation $clean `
+                    -Family 'receive_recovery') -or
+                $cleanProof.RawCount -ne 0 -or
+                $cleanProof.DistinctCount -ne 0 -or
+                $cleanProof.RecoveredCount -ne 0 -or
+                $cleanProof.UnresolvedCount -ne 0 -or
+                $cleanProof.Verdict -cne 'pass') {
+                throw "A clean authoritative Family-3 result was not preserved: $($cleanProof | ConvertTo-Json -Compress)"
+            }
+
+            $issuedBoundary = [pscustomobject]@{
+                families = @('receive_recovery')
+                taxonomyClass = 'filetransfer_receive_recovery_operation_incomplete'
+                rawCount = 1
+                distinctCount = 1
+                recoveredCount = 0
+                unresolvedCount = 1
+                verdict = 'fail'
+                writerSequence = 6246L
+                evidenceLineIndex = 7164
+                writer = 'writer-helper'
+                decisionReason = 'receive_recovery_execution_still_running'
+            }
+            $issued = New-Evaluation `
+                'SnapshotV1Authoritative' `
+                'pass' `
+                @($issuedBoundary) `
+                @('receive_recovery')
+            $issuedProof = Get-FileTransferCoordinatorSnapshotCorrelationResult `
+                -Evaluation $issued `
+                -Family 'receive_recovery' `
+                -TaxonomyClasses @('filetransfer_receive_recovery_operation_incomplete')
+            if ($issuedProof.RawCount -ne 1 -or
+                $issuedProof.DistinctCount -ne 1 -or
+                $issuedProof.RecoveredCount -ne 0 -or
+                $issuedProof.UnresolvedCount -ne 1 -or
+                $issuedProof.Verdict -cne 'fail' -or
+                $issuedProof.UnresolvedCandidateRecords.Count -ne 1 -or
+                $issuedProof.UnresolvedCandidateRecords[0].Event.FilePath -cne
+                    '(coordinator_snapshot)') {
+                throw "An open authoritative Family-3 operation was not retained exactly: $($issuedProof | ConvertTo-Json -Depth 6 -Compress)"
+            }
+
+            $malformed = New-Evaluation `
+                'SnapshotV1Authoritative' `
+                'fail' `
+                @() `
+                @('receive_recovery')
+            if ($malformed.Mode -ceq 'LegacyV0' -or
+                (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+                    -Evaluation $malformed `
+                    -Family 'receive_recovery')) {
+                throw 'Malformed declared V1 evidence was mistaken for valid authority or LegacyV0.'
+            }
+
+            $legacy = New-Evaluation 'LegacyV0' 'pass' @() @()
+            if ($legacy.Mode -cne 'LegacyV0' -or
+                (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+                    -Evaluation $legacy `
+                    -Family 'receive_recovery')) {
+                throw 'Markerless LegacyV0 evidence did not retain its frozen ownership mode.'
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Receive-recovery Snapshot V1 correlation validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public void FileTransferOps_CompactWriterDoesNotReenterLegacyReceiveRecoveryForDeclaredV1()
+    {
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "FileTransferOps",
+            "AnalyzerOrchestration.ps1"));
+        var compactWriterBody = ExtractPowerShellFunctionBody(
+            orchestrationText,
+            "Write-FileTransferCompactRetainedAnalysisArtifacts",
+            "Get-FileTransferEfficiencyAllEventsFromIndex");
+
+        Assert.Contains(
+            "$snapshotReceiveRecoveryAuthoritative =",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$snapshotReceiveRecoveryEvidenceSelected =",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$snapshotEvaluation.Mode -ne 'LegacyV0'",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$snapshotReceiveRecoveryOperationProof =",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferReceiveRecoveryOperationLegacyProof =",
+            compactWriterBody,
+            StringComparison.Ordinal);
+
+        var semanticSelection = compactWriterBody.IndexOf(
+            "$fileTransferReceiveRecoveryOperationProof = if",
+            StringComparison.Ordinal);
+        var nextCorrelation = compactWriterBody.IndexOf(
+            "$fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =",
+            semanticSelection,
+            StringComparison.Ordinal);
+        Assert.True(
+            semanticSelection >= 0 && nextCorrelation > semanticSelection,
+            "Expected a bounded receive-recovery semantic selection branch.");
+        var semanticSelectionBody = compactWriterBody[semanticSelection..nextCorrelation];
+        Assert.Contains(
+            "$snapshotReceiveRecoveryEvidenceSelected",
+            semanticSelectionBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$snapshotReceiveRecoveryOperationProof",
+            semanticSelectionBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferReceiveRecoveryOperationLegacyProof",
+            semanticSelectionBody,
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            "$snapshotReceiveRecoveryPureClasses = @(",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_receive_recovery_operation_incomplete'",
+            compactWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[string]$_.Event.FilePath -ceq '(coordinator_snapshot)'",
+            compactWriterBody,
+            StringComparison.Ordinal);
+
+        var artifactWriterText = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "FileTransferSoak",
+            "ArtifactWriters.ps1"));
+        var fullWriterBody = ExtractPowerShellFunctionBody(
+            artifactWriterText,
+            "Get-FileTransferRecoveryFailureClassification",
+            "New-FileTransferInvariantLedgerObject");
+        Assert.Contains(
+            "$snapshotReceiveRecoveryEvidenceSelected =",
+            fullWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$coordinatorSnapshotEvaluation.Mode -ceq 'SnapshotV1Authoritative'",
+            fullWriterBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$fileTransferReceiveRecoveryOperationSemanticProof =",
+            fullWriterBody,
+            StringComparison.Ordinal);
+        foreach (var semanticField in new[]
+                 {
+                     "RawCount",
+                     "DistinctCount",
+                     "RecoveredCount",
+                     "UnresolvedCount",
+                     "Verdict",
+                 })
+        {
+            Assert.Contains(
+                $"FileTransferReceiveRecoveryOperation{semanticField} = $fileTransferReceiveRecoveryOperationSemanticProof.{semanticField}",
+                fullWriterBody,
+                StringComparison.Ordinal);
+        }
+
+        foreach (var diagnosticField in new[]
+                 {
+                     "StartedCount",
+                     "ExecutionReceiptAppliedCount",
+                     "ProofObservedCount",
+                     "ClosureRetainedCount",
+                     "ClosureAdoptedCount",
+                     "ClosureReservedCount",
+                     "ClosureConsumedCount",
+                 })
+        {
+            Assert.Contains(
+                $"FileTransferReceiveRecoveryOperation{diagnosticField} = $fileTransferReceiveRecoveryOperationProof.{diagnosticField}",
+                fullWriterBody,
+                StringComparison.Ordinal);
+        }
     }
 
     [Fact]

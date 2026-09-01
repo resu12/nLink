@@ -2527,6 +2527,9 @@ public sealed partial class SessionFileTransferService
                 new(StringComparer.Ordinal);
         private readonly HashSet<string> authorityEffectMessages =
             new(StringComparer.Ordinal);
+        private readonly HashSet<string>
+            fallbackTailRecoveryOwnerRetirementEffectIdentities =
+                new(StringComparer.Ordinal);
 
         internal bool Start(
             string coordinatorInstanceId,
@@ -2736,6 +2739,36 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
+                var resolvedEffectIdentity = effectIdentity ?? receiptIdentity;
+                var resolvedEffectGeneration = effectGeneration > 0
+                    ? effectGeneration
+                    : receiptGeneration;
+                if (string.Equals(
+                        family,
+                        "fallback_tail_yield",
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        effectKind,
+                        "recovery_owner_retired_after_yield",
+                        StringComparison.Ordinal) &&
+                    !fallbackTailRecoveryOwnerRetirementEffectIdentities.Add(
+                        string.Join(
+                            "|",
+                            authorityId,
+                            operationGeneration.ToString(
+                                System.Globalization.CultureInfo.InvariantCulture),
+                            resolvedEffectIdentity,
+                            resolvedEffectGeneration.ToString(
+                                System.Globalization.CultureInfo.InvariantCulture),
+                            receiptIdentity,
+                            receiptGeneration.ToString(
+                                System.Globalization.CultureInfo.InvariantCulture),
+                            receiptStatus,
+                            receiptFingerprint)))
+                {
+                    return;
+                }
+
                 string transitionId;
                 string operationKey;
                 FileTransferCoordinatorStateBoundarySnapshot? scope;
@@ -2786,8 +2819,8 @@ public sealed partial class SessionFileTransferService
                 $"transition_id={transitionId}; coordinator_state_generation={boundStateGeneration}; " +
                 $"operation_family={family}; operation_key={operationKey}; " +
                 $"operation_authority_id={EvidenceToken(authorityId)}; operation_generation={operationGeneration}; " +
-                $"effect_kind={effectKind}; effect_identity={EvidenceToken(effectIdentity ?? receiptIdentity)}; " +
-                $"effect_generation={(effectGeneration > 0 ? effectGeneration : receiptGeneration)}; " +
+                $"effect_kind={effectKind}; effect_identity={EvidenceToken(resolvedEffectIdentity)}; " +
+                $"effect_generation={resolvedEffectGeneration}; " +
                 $"receipt_identity={EvidenceToken(receiptIdentity)}; receipt_generation={receiptGeneration}; " +
                 $"receipt_status={receiptStatus}; receipt_fingerprint={EvidenceToken(receiptFingerprint)}; " +
                 $"route={scope?.Route ?? "(none)"}; protocol_version={scope?.ProtocolVersion ?? 0}; " +

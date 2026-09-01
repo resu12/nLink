@@ -63783,6 +63783,13 @@ function Get-FileTransferRecoveryFailureClassification {
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'receive_recovery'
+    $snapshotReceiveRecoveryEvidenceSelected =
+        $coordinatorSnapshotEvaluation.Mode -ceq 'SnapshotV1Authoritative' -or
+        (
+            $coordinatorSnapshotEvaluation.Mode -ne 'LegacyV0' -and
+            @($coordinatorSnapshotEvaluation.AuthoritativeFamilies) -contains
+                'receive_recovery'
+        )
     $snapshotFallbackTailYieldAuthoritative =
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $coordinatorSnapshotEvaluation `
@@ -63814,6 +63821,12 @@ function Get-FileTransferRecoveryFailureClassification {
                 'filetransfer_receive_recovery_completed_retained_proof_state_publication_missing',
                 'filetransfer_receive_recovery_fallback_checkpoint_scope_handoff_missing',
                 'runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing')
+    $snapshotReceiveRecoveryOperationProof =
+        Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            -Evaluation $coordinatorSnapshotEvaluation `
+            -Family 'receive_recovery' `
+            -TaxonomyClasses @(
+                'filetransfer_receive_recovery_operation_incomplete')
     $snapshotFallbackTailYieldProof =
         Get-FileTransferCoordinatorSnapshotCorrelationResult `
             -Evaluation $coordinatorSnapshotEvaluation `
@@ -63915,6 +63928,13 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $fileTransferReceiveRecoveryOperationProof =
         Get-FileTransferReceiveRecoveryOperationCorrelation -Events $events
+    $fileTransferReceiveRecoveryOperationSemanticProof =
+        if ($snapshotReceiveRecoveryEvidenceSelected) {
+            $snapshotReceiveRecoveryOperationProof
+        }
+        else {
+            $fileTransferReceiveRecoveryOperationProof
+        }
     $fileTransferReceiveRecoveryCompletedUnprovenPayloadHoldProof =
         Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation `
             -Events $events
@@ -64796,8 +64816,7 @@ function Get-FileTransferRecoveryFailureClassification {
             -Evaluation $coordinatorSnapshotEvaluation `
             -Family 'route_transition' `
             -TaxonomyClasses @(
-                'filetransfer_route_transition_incomplete',
-                'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+                'filetransfer_route_transition_incomplete')
     }
     else {
         $fileTunaV4DataPathProof.RouteTransitionProof
@@ -64811,11 +64830,25 @@ function Get-FileTransferRecoveryFailureClassification {
                     'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
         }
         else {
+            $fallbackBootstrapUnresolvedRecords = @(
+                $fileTransferRouteTransitionProof.UnresolvedCandidateRecords |
+                    Where-Object {
+                        [string]$_.Class -ceq
+                            'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
+                    })
             [pscustomobject]@{
                 RawCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRawCount
                 DistinctCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingDistinctCount
                 RecoveredCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingRecoveredCount
                 UnresolvedCount = $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount
+                Verdict = if (
+                    $fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) {
+                    'fail'
+                }
+                else {
+                    'pass'
+                }
+                UnresolvedCandidateRecords = $fallbackBootstrapUnresolvedRecords
             }
         }
     $fileTransferGuiLiveFallbackFaultWindowProof =
@@ -68356,7 +68389,11 @@ function Get-FileTransferRecoveryFailureClassification {
             -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
     }
-    foreach ($candidateRecord in @($fileTransferRouteTransitionProof.UnresolvedCandidateRecords)) {
+    foreach ($candidateRecord in @(
+            $fileTransferRouteTransitionProof.UnresolvedCandidateRecords |
+                Where-Object {
+                    [string]$_.Class -ceq 'filetransfer_route_transition_incomplete'
+                })) {
         $candidateClass = if (-not [string]::IsNullOrWhiteSpace([string]$candidateRecord.Class)) {
             [string]$candidateRecord.Class
         }
@@ -68366,6 +68403,15 @@ function Get-FileTransferRecoveryFailureClassification {
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
             -Class $candidateClass `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -UseDefaultReason
+    }
+    foreach ($candidateRecord in @(
+            $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing' `
             -Events @($candidateRecord.Event) `
             -DefaultReason ([string]$candidateRecord.Reason) `
             -UseDefaultReason
@@ -68655,7 +68701,7 @@ function Get-FileTransferRecoveryFailureClassification {
                 $_.Class -notin $snapshotRuntimeUnlockRetryPureClasses -or
                 [string]$_.SourcePath -ceq '(coordinator_snapshot)'
             } | Where-Object {
-                -not $snapshotReceiveRecoveryAuthoritative -or
+                -not $snapshotReceiveRecoveryEvidenceSelected -or
                 $_.Class -notin $snapshotReceiveRecoveryPureClasses -or
                 [string]$_.SourcePath -ceq '(coordinator_snapshot)'
             } | Where-Object {
@@ -68837,7 +68883,7 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockResponderPeerProbeHandoffProof.UnresolvedCount -gt 0) {
         $class = 'runtime_unlock_responder_acked_probe_route_transition_handoff_missing'
     }
-    elseif ($fileTransferRouteTransitionProof.FallbackV6ProofBootstrapMissingUnresolvedCount -gt 0) {
+    elseif ($fileTransferFallbackV6ProofBootstrapProof.UnresolvedCount -gt 0) {
         $class =
             'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
     }
@@ -69627,11 +69673,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureAdoptedEvents.Count
         RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureRejectedEvents.Count
         RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureConsumedEvents.Count
-        FileTransferReceiveRecoveryOperationRawCount = $fileTransferReceiveRecoveryOperationProof.RawCount
-        FileTransferReceiveRecoveryOperationDistinctCount = $fileTransferReceiveRecoveryOperationProof.DistinctCount
-        FileTransferReceiveRecoveryOperationRecoveredCount = $fileTransferReceiveRecoveryOperationProof.RecoveredCount
-        FileTransferReceiveRecoveryOperationUnresolvedCount = $fileTransferReceiveRecoveryOperationProof.UnresolvedCount
-        FileTransferReceiveRecoveryOperationVerdict = $fileTransferReceiveRecoveryOperationProof.Verdict
+        FileTransferReceiveRecoveryOperationRawCount = $fileTransferReceiveRecoveryOperationSemanticProof.RawCount
+        FileTransferReceiveRecoveryOperationDistinctCount = $fileTransferReceiveRecoveryOperationSemanticProof.DistinctCount
+        FileTransferReceiveRecoveryOperationRecoveredCount = $fileTransferReceiveRecoveryOperationSemanticProof.RecoveredCount
+        FileTransferReceiveRecoveryOperationUnresolvedCount = $fileTransferReceiveRecoveryOperationSemanticProof.UnresolvedCount
+        FileTransferReceiveRecoveryOperationVerdict = $fileTransferReceiveRecoveryOperationSemanticProof.Verdict
         FileTransferReceiveRecoveryOperationStartedCount = $fileTransferReceiveRecoveryOperationProof.StartedCount
         FileTransferReceiveRecoveryOperationExecutionReceiptAppliedCount = $fileTransferReceiveRecoveryOperationProof.ExecutionReceiptAppliedCount
         FileTransferReceiveRecoveryOperationProofObservedCount = $fileTransferReceiveRecoveryOperationProof.ProofObservedCount
