@@ -6,6 +6,7 @@ $entries = @($envelopes | ForEach-Object {
             beforeStateGeneration=$_.aggregate.beforeStateGeneration; afterStateGeneration=$_.aggregate.afterStateGeneration
             beforeStateHash=$_.aggregate.beforeStateFingerprint; afterStateHash=$_.aggregate.afterStateFingerprint
             evidenceLineIndex=$_.aggregate.afterStateGeneration; operations=$_.aggregate.operations
+            decisionKind=$_.decisionKind; decisionStatus=$_.decisionStatus; decisionReason=$_.decisionReason
         }
         BeforeBoundary=$_.aggregate.beforeBoundary; AfterBoundary=$_.aggregate.afterBoundary
         SessionId=$_.sessionId; TransferId=$_.transferId; Direction=$_.direction

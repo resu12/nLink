@@ -6538,6 +6538,22 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(retired.RuntimeUnlockRetry!.SourceBoundary, installed.RuntimeUnlockRetry!.SourceBoundary);
         Assert.Equal("Staged", pending.AfterState); // Earlier immutable envelope remains pending.
 
+        var lateExpiry = envelopes[9];
+        Assert.Equal("Rejected", lateExpiry.DecisionStatus);
+        Assert.Equal("retry_dispatch_stage_not_current", lateExpiry.DecisionReason);
+        Assert.Equal(
+            lateExpiry.Aggregate.BeforeStateGeneration,
+            lateExpiry.Aggregate.AfterStateGeneration);
+        Assert.Equal(
+            lateExpiry.Aggregate.BeforeStateFingerprint,
+            lateExpiry.Aggregate.AfterStateFingerprint);
+        var lateTerminal = Assert.Single(
+            lateExpiry.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_terminal");
+        Assert.Equal("Settled", lateTerminal.BeforeState);
+        Assert.Equal("Settled", lateTerminal.AfterState);
+        Assert.False(lateTerminal.StateApplied);
+
         var binding = Assert.IsType<FileTransferCoordinatorAuthorityEffectBinding>(
             SessionFileTransferService
                 .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
@@ -6614,6 +6630,23 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(SessionFileTransferService
             .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
                 alias));
+        var settlement = envelopes[8];
+        var retiredInstalled = Assert.Single(
+            settlement.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_installed");
+        var terminalAttempt = Assert.Single(
+            settlement.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_terminal");
+        Assert.Equal("SendInFlight", retiredInstalled.BeforeState);
+        Assert.Equal("None", retiredInstalled.AfterState);
+        Assert.Equal("None", terminalAttempt.BeforeState);
+        Assert.Equal("Settled", terminalAttempt.AfterState);
+        Assert.Equal(retiredInstalled.AuthorityId, terminalAttempt.AuthorityId);
+        Assert.Equal(
+            Assert.Single(retiredInstalled.RuntimeUnlockRetry!.Receipts,
+                item => item.Stage == "install").ReceiptFingerprint,
+            Assert.Single(terminalAttempt.RuntimeUnlockRetry!.Receipts,
+                item => item.Stage == "install").ReceiptFingerprint);
     }
 
     internal static FileTransferCoordinatorTransitionEnvelope[] CreatePendingScopeInvalidationSnapshotFixture(bool fallback)
@@ -6757,9 +6790,43 @@ public sealed class FileTransferCoordinatorTests
                 "staged-install-offer",
                 dispatchObserved: false);
         Assert.True(aliasBound.Accepted, aliasBound.Reason);
+        var sending = FileTransferCoordinator
+            .ObserveRuntimeUnlockRetryDispatchExecutionState(
+                aliasBound.State,
+                receipt,
+                RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight,
+                71,
+                "staged-install-offer",
+                dispatchObserved: false);
+        Assert.True(sending.Accepted, sending.Reason);
+        var settlement = FileTransferCoordinator
+            .ObserveRuntimeUnlockRetryDispatchSettlement(
+                sending.State,
+                new RuntimeUnlockRetryDispatchSettlementReport(
+                    receipt.Authority,
+                    RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+                    "peer_visible_offer_send_observed")
+                {
+                    OfferGeneration = 71,
+                    OfferNonce = "staged-install-offer",
+                    DispatchObserved = true,
+                });
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted,
+            settlement.Status);
+        var lateExpiry = FileTransferCoordinator
+            .PrepareRuntimeUnlockRetryDispatchStageExpiry(
+                settlement.State,
+                receipt.Authority.AuthorityId,
+                90_000);
+        Assert.Equal(
+            RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+            lateExpiry.Status);
+        Assert.Equal("retry_dispatch_stage_not_current", lateExpiry.Reason);
         return new[] { granted.SnapshotEnvelope, staged.SnapshotEnvelope, issued.SnapshotEnvelope,
                 duplicate.SnapshotEnvelope, installed.SnapshotEnvelope, duplicateInstall.SnapshotEnvelope,
-                aliasBound.SnapshotEnvelope }
+                aliasBound.SnapshotEnvelope, sending.SnapshotEnvelope,
+                settlement.SnapshotEnvelope, lateExpiry.SnapshotEnvelope }
             .Select(envelope => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(envelope)).ToArray();
     }
 

@@ -4501,6 +4501,13 @@ function Get-FileTransferCoordinatorRouteTransitionLifecycleKey {
     }
     $source = ConvertTo-Json -InputObject $transition.sourceBoundary `
         -Depth 16 -Compress
+    $targetTransportEpochKey = if ([string]$transition.transitionKind -ceq
+            'PostTunaFallbackV6ToTunaV4') {
+        0L
+    }
+    else {
+        [long]$transition.targetBoundary.transportEpoch
+    }
     return @(
         [string]$Boundary.coordinatorInstanceId,
         [string]$Boundary.writer,
@@ -4517,7 +4524,7 @@ function Get-FileTransferCoordinatorRouteTransitionLifecycleKey {
         [string]$transition.handoffKind,
         [string]$transition.targetBoundary.dataSessionIdentity,
         [long]$transition.targetBoundary.dataSessionGeneration,
-        [long]$transition.targetBoundary.transportEpoch,
+        $targetTransportEpochKey,
         $source) -join '|'
 }
 
@@ -4680,6 +4687,12 @@ function Get-FileTransferCoordinatorReceiveRecoveryRootLifecycle {
                     $operation.receiveRecovery.sourceBoundary.checkpointRequestId -ceq '(none)' -and
                     (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.receiveRecovery.sourceBoundary $operation.receiveRecovery.effectiveBoundary)
             }
+            if (-not $sameSource -and $role -ceq 'operation_terminal' -and
+                $operation.beforeState -ceq $operation.afterState) {
+                $sameSource = Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotCarry `
+                    -Prior $prior -Operation $operation -Boundary $boundary `
+                    -AggregateEntry $aggregateEntry
+            }
             $valid = $valid -and $sameSource -and
                 $operation.receiveRecovery.recoveryKind -ceq $prior.receiveRecovery.recoveryKind -and
                 $operation.receiveRecovery.effectiveBoundary.dataSessionIdentity -ceq $prior.receiveRecovery.effectiveBoundary.dataSessionIdentity -and
@@ -4817,7 +4830,34 @@ function Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotCarry {
             [string]$Operation.receiveRecovery.effectiveBoundary.checkpointRequestId -ceq '(none)' -and
             (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
                 $Operation.receiveRecovery.sourceBoundary $Operation.receiveRecovery.effectiveBoundary)
-        if (-not $checkpointCarry) { return $false }
+        $routeCommitCheckpointConvergence =
+            $null -ne $Boundary -and $null -ne $AggregateEntry -and
+            [string]$Boundary.decisionKind -ceq 'CommitFileTransferRouteTransition' -and
+            [string]$Boundary.decisionStatus -ceq 'Committed' -and
+            [string]$Operation.beforeState -ceq [string]$Operation.afterState -and
+            (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint `
+                $Operation.receiveRecovery.sourceBoundary $Prior.receiveRecovery.sourceBoundary) -and
+            (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint `
+                $Operation.receiveRecovery.effectiveBoundary $Prior.receiveRecovery.effectiveBoundary) -and
+            [long]$Prior.receiveRecovery.sourceBoundary.checkpointGeneration -gt 0 -and
+            [long]$Prior.receiveRecovery.effectiveBoundary.checkpointGeneration -eq
+                [long]$Prior.receiveRecovery.sourceBoundary.checkpointGeneration -and
+            [string]$Prior.receiveRecovery.sourceBoundary.checkpointRequestId -ceq '(none)' -and
+            [string]$Prior.receiveRecovery.effectiveBoundary.checkpointRequestId -ceq '(none)' -and
+            [long]$Operation.receiveRecovery.sourceBoundary.checkpointGeneration -eq 0 -and
+            [long]$Operation.receiveRecovery.effectiveBoundary.checkpointGeneration -eq 0 -and
+            [string]$Operation.receiveRecovery.sourceBoundary.checkpointRequestId -ceq '(none)' -and
+            [string]$Operation.receiveRecovery.effectiveBoundary.checkpointRequestId -ceq '(none)' -and
+            [long]$AggregateEntry.BeforeBoundary.checkpointGeneration -eq 0 -and
+            [string]$AggregateEntry.BeforeBoundary.checkpointRequestId -ceq '(none)' -and
+            [long]$AggregateEntry.AfterBoundary.checkpointGeneration -eq 0 -and
+            [string]$AggregateEntry.AfterBoundary.checkpointRequestId -ceq '(none)' -and
+            (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+                $Operation.receiveRecovery.sourceBoundary `
+                $Operation.receiveRecovery.effectiveBoundary)
+        if (-not $checkpointCarry -and -not $routeCommitCheckpointConvergence) {
+            return $false
+        }
     }
     return $true
 }
@@ -5507,16 +5547,62 @@ function Resolve-FileTransferCoordinatorCheckpointResponderCarries {
 }
 
 function Get-FileTransferCoordinatorPressureTerminalIdentity {
-    param($Operation, [switch]$IgnoreRole)
+    param($Operation, [switch]$IgnoreRole, [switch]$IgnoreSourceBoundary)
 
     $excluded = @('beforeState', 'afterState', 'stateApplied', 'regularV4FrontierRepairPressure')
     if ($IgnoreRole) { $excluded += @('operationRole', 'operationKey') }
     $identity = $Operation | Select-Object * -ExcludeProperty $excluded
     $payloadExcluded = @('effectiveBoundary')
+    if ($IgnoreSourceBoundary) { $payloadExcluded += 'sourceBoundary' }
     if ($IgnoreRole) { $payloadExcluded += 'role' }
     $identity | Add-Member -NotePropertyName regularV4FrontierRepairPressure -NotePropertyValue (
         $Operation.regularV4FrontierRepairPressure | Select-Object * -ExcludeProperty $payloadExcluded)
     return ConvertTo-Json -InputObject $identity -Depth 64 -Compress
+}
+
+function Test-FileTransferCoordinatorPressureTerminalSourceCarry {
+    param(
+        [Parameter(Mandatory = $true)]$PreviousSource,
+        [Parameter(Mandatory = $true)]$CurrentSource,
+        [Parameter(Mandatory = $true)]$Boundary,
+        [Parameter(Mandatory = $true)]$Entry
+    )
+
+    if (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            -Left $PreviousSource -Right $CurrentSource) {
+        return $true
+    }
+    if ([string]$Boundary.decisionKind -notin @(
+            'FallbackCheckpointRequested', 'FallbackCheckpointAccepted') -or
+        [string]$Boundary.decisionStatus -cne 'Accepted' -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint `
+            -Left $PreviousSource -Right $CurrentSource) -or
+        [long]$PreviousSource.checkpointGeneration -ne
+            [long]$Entry.BeforeBoundary.checkpointGeneration -or
+        [string]$PreviousSource.checkpointRequestId -cne
+            [string]$Entry.BeforeBoundary.checkpointRequestId -or
+        [long]$CurrentSource.checkpointGeneration -ne
+            [long]$Entry.AfterBoundary.checkpointGeneration -or
+        [string]$CurrentSource.checkpointRequestId -cne
+            [string]$Entry.AfterBoundary.checkpointRequestId) {
+        return $false
+    }
+
+    $checkpointEnvelope = [pscustomobject]@{
+        decisionKind = [string]$Boundary.decisionKind
+        decisionStatus = [string]$Boundary.decisionStatus
+        decisionReason = [string]$Boundary.decisionReason
+        aggregate = [pscustomobject]@{
+            beforeStateGeneration = [long]$Boundary.beforeStateGeneration
+            afterStateGeneration = [long]$Boundary.afterStateGeneration
+            beforeStateFingerprint = [string]$Boundary.beforeStateHash
+            afterStateFingerprint = [string]$Boundary.afterStateHash
+            beforeBoundary = $Entry.BeforeBoundary
+            afterBoundary = $Entry.AfterBoundary
+        }
+    }
+    return Test-FileTransferCoordinatorSnapshotFallbackCheckpointScopeMutation `
+        -Envelope $checkpointEnvelope
 }
 
 function Resolve-FileTransferCoordinatorPressureTerminalRollovers {
@@ -5613,7 +5699,12 @@ function Resolve-FileTransferCoordinatorPressureTerminalRollovers {
                 $valid = $valid -and $existing.Count -eq 1 -and $null -ne $slot
                 if ($existing.Count -eq 1 -and $null -ne $slot) {
                     $valid = $valid -and $slot.Identity -ceq
-                        (Get-FileTransferCoordinatorPressureTerminalIdentity $existing[0]) -and
+                        (Get-FileTransferCoordinatorPressureTerminalIdentity `
+                            $existing[0] -IgnoreSourceBoundary) -and
+                        (Test-FileTransferCoordinatorPressureTerminalSourceCarry `
+                            -PreviousSource $slot.Source `
+                            -CurrentSource $existing[0].regularV4FrontierRepairPressure.sourceBoundary `
+                            -Boundary $boundary -Entry $entry) -and
                         (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
                             -Left $slot.Effective -Right $entry.BeforeBoundary) -and
                         (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
@@ -5647,7 +5738,9 @@ function Resolve-FileTransferCoordinatorPressureTerminalRollovers {
             if (-not $valid) { $slot = $null }
             elseif ($entering.Count -eq 1 -or $carrying.Count -eq 1) {
                 $terminal = if ($entering.Count -eq 1) { $entering[0] } else { $carrying[0] }
-                $slot = @{ Identity = Get-FileTransferCoordinatorPressureTerminalIdentity $terminal
+                $slot = @{ Identity = Get-FileTransferCoordinatorPressureTerminalIdentity `
+                        $terminal -IgnoreSourceBoundary
+                    Source = $terminal.regularV4FrontierRepairPressure.sourceBoundary
                     Effective = $terminal.regularV4FrontierRepairPressure.effectiveBoundary }
             }
             elseif ($retiring.Count -eq 1) { $slot = $null }
@@ -9074,6 +9167,47 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         $missingRequiredReceiptEffect = $null
         foreach ($entry in $history) {
+            if (-not [bool]$entry.Operation.stateApplied -and
+                [string]$entry.Operation.beforeState -ceq
+                    [string]$entry.Operation.afterState -and
+                [string]$entry.Operation.beforeState -cne 'None') {
+                $receiptSignature = $entry.Operation.runtimeUnlockRetry.receipts |
+                    ConvertTo-Json -Depth 32 -Compress
+                $priorAppliedHistory = @($history | Where-Object {
+                        [bool]$_.Operation.stateApplied -and
+                        [string]$_.Operation.operationRole -ceq
+                            [string]$entry.Operation.operationRole -and
+                        [string]$_.Operation.authorityId -ceq
+                            [string]$entry.Operation.authorityId -and
+                        [long]$_.Operation.operationGeneration -eq
+                            [long]$entry.Operation.operationGeneration -and
+                        [long]$_.Boundary.afterStateGeneration -le
+                            [long]$entry.Boundary.beforeStateGeneration
+                    } | Sort-Object {
+                        [long]$_.Boundary.afterStateGeneration
+                    }, {
+                        [long]$_.Boundary.decisionUtcMilliseconds
+                    }, {
+                        [string]$_.Boundary.boundaryId
+                    })
+                $latestPrior = if ($priorAppliedHistory.Count -gt 0) {
+                    $priorAppliedHistory[-1]
+                }
+                else {
+                    $null
+                }
+                if ($null -ne $latestPrior -and
+                    [string]$latestPrior.Operation.afterState -ceq
+                        [string]$entry.Operation.beforeState -and
+                    (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                        -Left $latestPrior.Operation.runtimeUnlockRetry.sourceBoundary `
+                        -Right $entry.Operation.runtimeUnlockRetry.sourceBoundary) -and
+                    ($latestPrior.Operation.runtimeUnlockRetry.receipts |
+                        ConvertTo-Json -Depth 32 -Compress) -ceq
+                        $receiptSignature) {
+                    continue
+                }
+            }
             foreach ($receipt in @($entry.Operation.runtimeUnlockRetry.receipts)) {
                 if (-not [bool]$receipt.receiptValidated) {
                     continue
@@ -9092,10 +9226,18 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             'install_committed'
                             break
                         }
+                        if ([string]$entry.Operation.operationRole -ceq
+                                'attempt_terminal' -and
+                            [string]$entry.Operation.beforeState -cne 'None') {
+                            'install_committed'
+                            break
+                        }
                         $priorInstallProofs = @($committedInstallProofs |
                             Where-Object {
-                                [string]$_.Entry.Operation.operationKey -ceq
-                                    [string]$entry.Operation.operationKey -and
+                                [string]$_.Entry.Operation.operationRole -ceq
+                                    'attempt_installed' -and
+                                [string]$_.Entry.Operation.authorityId -ceq
+                                    [string]$entry.Operation.authorityId -and
                                 [long]$_.Entry.Operation.operationGeneration -eq
                                     [long]$entry.Operation.operationGeneration -and
                                 [long]$_.Entry.Boundary.afterStateGeneration -le
@@ -9120,6 +9262,95 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                     'execution' {
                         if ([bool]$entry.Operation.runtimeUnlockRetry.dispatchObserved) {
+                            if ([string]$entry.Operation.operationRole -ceq
+                                    'attempt_terminal' -and
+                                [string]$entry.Operation.beforeState -ceq 'None' -and
+                                [string]$entry.Operation.afterState -ceq 'Settled') {
+                                $retiredInstalled = @($history | Where-Object {
+                                        [string]$_.Boundary.boundaryId -ceq
+                                            [string]$entry.Boundary.boundaryId -and
+                                        [string]$_.Operation.operationRole -ceq
+                                            'attempt_installed' -and
+                                        [string]$_.Operation.authorityId -ceq
+                                            [string]$entry.Operation.authorityId -and
+                                        [long]$_.Operation.operationGeneration -eq
+                                            [long]$entry.Operation.operationGeneration -and
+                                        [string]$_.Operation.afterState -ceq 'None' -and
+                                        [bool]$_.Operation.stateApplied -and
+                                        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                                            -Left $_.Operation.runtimeUnlockRetry.sourceBoundary `
+                                            -Right $entry.Operation.runtimeUnlockRetry.sourceBoundary)
+                                    })
+                                $retiredInstalledState = if ($retiredInstalled.Count -eq 1) {
+                                    [string]$retiredInstalled[0].Operation.beforeState
+                                }
+                                else {
+                                    ''
+                                }
+                                $priorExecutionProofs = @($history | Where-Object {
+                                        [string]$_.Operation.operationRole -ceq
+                                            'attempt_installed' -and
+                                        [string]$_.Operation.authorityId -ceq
+                                            [string]$entry.Operation.authorityId -and
+                                        [long]$_.Operation.operationGeneration -eq
+                                            [long]$entry.Operation.operationGeneration -and
+                                        [string]$_.Operation.afterState -ceq $retiredInstalledState -and
+                                        [long]$_.Boundary.afterStateGeneration -le
+                                            [long]$entry.Boundary.beforeStateGeneration -and
+                                        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                                            -Left $_.Operation.runtimeUnlockRetry.sourceBoundary `
+                                            -Right $entry.Operation.runtimeUnlockRetry.sourceBoundary) -and
+                                        @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                                                [string]$_.stage -ceq 'execution' -and
+                                                [bool]$_.receiptValidated -and
+                                                [string]$_.commandIdentity -ceq
+                                                    [string]$receipt.commandIdentity -and
+                                                [long]$_.commandGeneration -eq
+                                                    [long]$receipt.commandGeneration -and
+                                                [string]$_.commandFingerprint -ceq
+                                                    [string]$receipt.commandFingerprint -and
+                                                [string]$_.receiptIdentity -ceq
+                                                    [string]$receipt.receiptIdentity -and
+                                                [long]$_.receiptGeneration -eq
+                                                    [long]$receipt.receiptGeneration -and
+                                                [string]$_.receiptStatus -ceq
+                                                    $retiredInstalledState
+                                            }).Count -eq 1
+                                    })
+                                $boundPriorExecutionProofs = @($priorExecutionProofs | Where-Object {
+                                        $priorEntry = $_
+                                        $priorReceipt = @($priorEntry.Operation.runtimeUnlockRetry.receipts |
+                                            Where-Object {
+                                                [string]$_.stage -ceq 'execution' -and
+                                                [string]$_.receiptStatus -ceq
+                                                    $retiredInstalledState
+                                            })[0]
+                                        @($exactEffects | Where-Object {
+                                                [string]$_.EffectKind -ceq 'execution_observed' -and
+                                                [string]$_.TransitionId -ceq
+                                                    [string]$priorEntry.Boundary.boundaryId -and
+                                                [string]$_.OperationKey -ceq
+                                                    [string]$priorEntry.Operation.operationKey -and
+                                                [long]$_.StateGeneration -eq
+                                                    [long]$priorEntry.Boundary.afterStateGeneration -and
+                                                [string]$_.ReceiptIdentity -ceq
+                                                    [string]$priorReceipt.receiptIdentity -and
+                                                [long]$_.ReceiptGeneration -eq
+                                                    [long]$priorReceipt.receiptGeneration -and
+                                                [string]$_.ReceiptStatus -ceq
+                                                    [string]$priorReceipt.receiptStatus -and
+                                                [string]$_.ReceiptFingerprint -ceq
+                                                    [string]$priorReceipt.receiptFingerprint -and
+                                                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                                                    -Boundary $priorEntry.Boundary `
+                                                    -Operation $priorEntry.Operation `
+                                                    -Effect $_)
+                                            }).Count -eq 1
+                                    })
+                                if ($boundPriorExecutionProofs.Count -eq 1) {
+                                    break
+                                }
+                            }
                             'execution_observed'
                         }
                         break

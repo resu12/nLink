@@ -6,6 +6,51 @@ $catalog = Get-FileTransferCoordinatorEvidenceCatalog
 if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2') {
     throw 'Frozen Snapshot V1 catalog changed.'
 }
+$routeKeyBoundary = [pscustomobject]@{
+    coordinatorInstanceId = 'route-key-coordinator'
+    writer = 'route-key-writer'
+}
+$routeKeyOperation = [pscustomobject]@{
+    operationKey = 'route-transition-key'
+    authorityId = 'route-authority'
+    operationGeneration = 3L
+    routeTransition = [pscustomobject]@{
+        transitionKind = 'PostTunaFallbackV6ToTunaV4'
+        sourceTransport = 'RegularNkn'
+        proofBoundaryKind = 'FileTransferTunaActivationTransitionProofBoundary'
+        proofBoundaryFingerprint = 'proof'
+        durableCheckpointFingerprint = 'checkpoint'
+        targetRoute = 'file_tuna_v4'
+        targetProtocolVersion = 4
+        targetTransport = 'Tuna'
+        handoffKind = 'NormalToTunaActivation'
+        sourceBoundary = [pscustomobject]@{ route = 'post_tuna_fallback_v6' }
+        targetBoundary = [pscustomobject]@{
+            dataSessionIdentity = 'target-data-session'
+            dataSessionGeneration = 1L
+            transportEpoch = 1L
+        }
+    }
+}
+$preparedRouteKey = Get-FileTransferCoordinatorRouteTransitionLifecycleKey `
+    -Boundary $routeKeyBoundary -Operation $routeKeyOperation
+$committedRouteKeyOperation = $routeKeyOperation | ConvertTo-Json -Depth 16 -Compress | ConvertFrom-Json
+$committedRouteKeyOperation.routeTransition.targetBoundary.transportEpoch = 0L
+$committedRouteKey = Get-FileTransferCoordinatorRouteTransitionLifecycleKey `
+    -Boundary $routeKeyBoundary -Operation $committedRouteKeyOperation
+if ($preparedRouteKey -cne $committedRouteKey) {
+    throw 'PostFallback Tuna target-epoch finalization split one route lifecycle.'
+}
+$regularRouteKeyOperation = $routeKeyOperation | ConvertTo-Json -Depth 16 -Compress | ConvertFrom-Json
+$regularRouteKeyOperation.routeTransition.transitionKind = 'RegularV4ToTunaV4'
+$regularPreparedKey = Get-FileTransferCoordinatorRouteTransitionLifecycleKey `
+    -Boundary $routeKeyBoundary -Operation $regularRouteKeyOperation
+$regularRouteKeyOperation.routeTransition.targetBoundary.transportEpoch = 0L
+$regularCommittedKey = Get-FileTransferCoordinatorRouteTransitionLifecycleKey `
+    -Boundary $routeKeyBoundary -Operation $regularRouteKeyOperation
+if ($regularPreparedKey -ceq $regularCommittedKey) {
+    throw 'A non-PostFallback target-epoch mutation was treated as route finalization.'
+}
 $envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
 # Isolate the production-generated Family-2 graph; other families retain their own lanes.
 foreach ($envelope in $envelopes) {
@@ -132,6 +177,39 @@ function New-Lines([bool]$includeCommit = $true, [bool]$forgedPending = $false) 
         if ($i -eq 4 -and $includeCommit) {
             $lines.Add((New-Effect $envelope $installed (Install-Receipt $installed) 'install_committed' ($sequence + 1)))
         }
+        $executionOperations = @($envelope.aggregate.operations | Where-Object {
+                $_.operationRole -ceq 'attempt_installed' -and
+                $_.afterState -in @('AliasBound', 'SendInFlight') -and
+                $_.stateApplied
+            })
+        foreach ($executionOperation in $executionOperations) {
+            $executionReceipts = @($executionOperation.runtimeUnlockRetry.receipts |
+                Where-Object stage -CEQ 'execution')
+            if ($executionReceipts.Count -ne 1) {
+                throw 'Installed execution receipt not unique.'
+            }
+            $lines.Add((New-Effect $envelope $executionOperation `
+                $executionReceipts[0] 'execution_observed' ($sequence + 1)))
+        }
+        if ($envelope.decisionKind -ceq
+                'ObserveRuntimeUnlockRetryDispatchSettlement') {
+            $terminal = @($envelope.aggregate.operations | Where-Object {
+                    $_.operationRole -ceq 'attempt_terminal' -and
+                    $_.beforeState -ceq 'None' -and
+                    $_.afterState -ceq 'Settled'
+                })
+            if ($terminal.Count -ne 1) {
+                throw 'Settlement terminal subject not unique.'
+            }
+            $settlement = @($terminal[0].runtimeUnlockRetry.receipts |
+                Where-Object stage -CEQ 'settlement')
+            if ($settlement.Count -ne 1) {
+                throw 'Settlement receipt not unique.'
+            }
+            $settlementEffect = New-Effect $envelope $terminal[0] `
+                $settlement[0] 'settlement_observed' ($sequence + 1)
+            $lines.Add($settlementEffect)
+        }
     }
     $last = $envelopes[$envelopes.Count - 1]
     $lines.Add("event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=$($last.aggregate.afterStateGeneration); final_state_hash=$($last.aggregate.afterStateFingerprint); transition_count=$($envelopes.Count); $coverage; authority_effect=none")
@@ -150,8 +228,7 @@ if ($full.ArtifactEvidenceVerdict -cne 'pass' -or $parity.Verdict -cne 'pass' -o
     @($full.Boundaries | Where-Object {
         $_.taxonomyClass -ceq 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
     }).Count -ne 0 -or
-    $full.FirstUnresolvedBoundary.boundaryId -cne $envelopes[6].transitionId -or
-    $full.FirstUnresolvedBoundary.taxonomyClass -cne 'runtime_unlock_retry_dispatch_contract_unsettled') {
+    $null -ne $full.FirstUnresolvedBoundary) {
     throw "Production issuance-to-install fixture failed: $($full | Select-Object * -ExcludeProperty Boundaries | ConvertTo-Json -Depth 16 -Compress)"
 }
 $missing = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (New-Lines $false)
@@ -191,11 +268,18 @@ foreach ($case in @(
     @{ Lines = @(New-Lines $false); Evaluation = $missing },
     @{ Lines = @(New-Lines $true $true); Evaluation = $forged }
 )) {
+    $boundary = $case.Evaluation.FirstUnresolvedBoundary
+    if ($null -eq $boundary) {
+        # SnapshotV1Shadow deliberately falls through to the legacy GUI rules
+        # when the shared evaluator has no boundary. Those rules are outside
+        # this focused fixture; the full/compact clean result above is the
+        # authoritative assertion for the settled lifecycle.
+        continue
+    }
     $compactPath = Join-Path $OutputRoot 'compact.log'
     [IO.File]::WriteAllLines($compactPath, [string[]]$case.Lines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'diagnostic evidence evaluation' `
         -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($compactPath)
-    $boundary = $case.Evaluation.FirstUnresolvedBoundary
     if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
         $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
         $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
