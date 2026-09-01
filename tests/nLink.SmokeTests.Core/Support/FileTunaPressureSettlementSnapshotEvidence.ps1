@@ -97,7 +97,7 @@ foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult','Get-Tu
     if ($definitions.Count -ne 1) { throw "GUI function not unique: $name" }
     . ([scriptblock]::Create($definitions[0].Extent.Text))
 }
-function Assert-Parity([string[]]$inputLines, [bool]$missingClosure, [bool]$retainedRouteControl = $false) {
+function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated_diagnostic')+$inputLines)
     $compactLines = @($inputLines | Where-Object {
         $name = Get-FileTransferCoordinatorSnapshotEventName -Line $_
@@ -106,7 +106,7 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure, [bool]$reta
     $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $compactLines
     if ((Compare-FileTransferCoordinatorSnapshotEvaluations -Full $full -Compact $compact).Verdict -cne 'pass') { throw 'Full/compact parity failed.' }
     if ($full.LegacySelectionCount -ne 0 -or
-        ($null -ne $full.FirstUnresolvedBoundary) -ne ($missingClosure -or $retainedRouteControl) -or
+        ($null -ne $full.FirstUnresolvedBoundary) -ne $missingClosure -or
         (-not $missingClosure -and $full.ArtifactEvidenceVerdict -cne 'pass')) {
         $catalogFailures = @($full.ArtifactEvidenceFailureReason -split ';' | Where-Object { $_ -match 'snapshot_operation_catalog_mismatch:(\d+)$' } | ForEach-Object {
             $index = [int]($_ -replace '^.*:', '')
@@ -122,18 +122,10 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure, [bool]$reta
         })
         throw "Tuna settlement contract failed: $($full.ArtifactEvidenceFailureReason); catalog=$($catalogFailures -join ','); first=$($full.FirstUnresolvedBoundary | Select-Object * -ExcludeProperty operations | ConvertTo-Json -Depth 4 -Compress)"
     }
-    if ($retainedRouteControl -and -not $missingClosure) {
-        foreach ($failure in @($full.Boundaries | Where-Object unresolvedCount -gt 0)) {
-            if ($failure.taxonomyClass -cne 'filetransfer_route_transition_incomplete' -or
-                @($failure.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationKind -ceq 'TunaV4ToPostTunaFallbackV6' }).Count -eq 0) {
-                throw 'Unexpected failure beside the independent retained-frame route control.'
-            }
-        }
-    }
     $path = Join-Path $OutputRoot 'gui-input.log'
     [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($missingClosure -or $retainedRouteControl) {
+    if ($missingClosure) {
         $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
             $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
@@ -142,10 +134,8 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure, [bool]$reta
     elseif ($null -ne $gui) { throw 'GUI rejected the exact settlement.' }
 }
 $retainedHandoffFixture = @($envelopes | Where-Object decisionKind -ceq 'CommitRegularV4FrontierRepairPressureRecoveryHandoff').Count -gt 0
-# The existing route reducer splits the retained-frame lifecycle when its frame first
-# appears at commit. Preserve that independent finding; all receipt evidence must pass.
-Assert-Parity $lines $false $retainedHandoffFixture
-Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $false $retainedHandoffFixture
+Assert-Parity $lines $false
+Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $false
 Assert-Parity @($lines | Where-Object { $_ -notmatch 'effect_kind=local_contract_reference_cleared;' }) $true
 if (@($envelopes | Where-Object decisionKind -ceq 'CommitRegularV4FrontierRepairPressureSettlement').Count -eq 2) {
     . (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/CrossRoutePressureTerminalRolloverControls.ps1')

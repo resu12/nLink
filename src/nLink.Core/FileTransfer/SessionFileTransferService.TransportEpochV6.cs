@@ -5758,6 +5758,38 @@ public sealed partial class SessionFileTransferService
         }
 
         _ = SendV6TransportProbeAckAsync(sessionId, transferId, direction, frame, targetTransport);
+        if (frame.ProbeId.StartsWith(
+                "receive-recovery-proof:",
+                StringComparison.Ordinal))
+        {
+            InboundTransferContext? inboundToPublish = null;
+            lock (gate)
+            {
+                if (direction == FileTransferDirection.Inbound &&
+                    inboundTransfer is { IsTerminal: false } inbound &&
+                    ReferenceEquals(inboundTransfer, inbound) &&
+                    string.Equals(inbound.SessionId, sessionId, StringComparison.Ordinal) &&
+                    string.Equals(inbound.TransferId, transferId, StringComparison.Ordinal) &&
+                    inbound.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+                    inbound.NegotiatedDataProtocolVersion ==
+                        FileTransferProtocol.ProtocolVersionV6 &&
+                    inbound.V6TransportEpoch?.EpochId == frame.TransportEpoch)
+                {
+                    inboundToPublish = inbound;
+                }
+            }
+
+            if (inboundToPublish is not null)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_receive_recovery_proof_solicitation_peer_decided; decision_status=Accepted; decision_reason=current_post_tuna_fallback_receiver_state; authority_effect=none; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction=inbound; transport_epoch={frame.TransportEpoch}; probe_id={FormatProtocolLogValue(frame.ProbeId)}");
+                _ = SendInboundV6ReceiverStateAsync(
+                    inboundToPublish,
+                    "receive_recovery_proof_solicitation",
+                    forceSend: true);
+            }
+        }
         return Task.CompletedTask;
     }
 

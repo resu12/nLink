@@ -49,7 +49,7 @@ foreach ($envelope in $envelopes) {
 }
 $shuffled = $envelopes | ConvertTo-Json -Depth 64 | ConvertFrom-Json
 foreach ($envelope in $shuffled) { [array]::Reverse($envelope.aggregate.operations) }
-Assert-Parity (New-Lines $shuffled) $false $true
+Assert-Parity (New-Lines $shuffled) $false
 
 foreach ($mutation in @('historical_missing_receipt','immutable_receipt_mutation','data_session_mutation','retired_authority_aba')) {
     $values = $envelopes | ConvertTo-Json -Depth 64 | ConvertFrom-Json

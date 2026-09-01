@@ -23826,6 +23826,12 @@ public sealed partial class SessionFileTransferService :
         public BridgeRecoveryExecutionDispatchOrdering?
             BridgeRecoveryExecutionDispatchOrdering { get; set; }
 
+        public long ReceiveRecoveryProofSolicitationOperationGeneration
+        {
+            get;
+            set;
+        }
+
         public long LastBridgeRecoveryEvaluationObservationGeneration { get; set; }
 
         public long LastReceiveRecoveryHealthEvaluationGeneration { get; set; }

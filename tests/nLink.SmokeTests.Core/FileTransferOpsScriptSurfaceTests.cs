@@ -1896,7 +1896,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw "An incomplete receive-recovery operation was not selected exactly: $($receiveIncomplete | ConvertTo-Json -Depth 8 -Compress)"
             }
 
-            $receiveTerminalOperation = New-ReceiveRecoveryOperation 'operation_terminal' 'Issued:None' 'Completed:Adopted' 'Completed' 'Adopted' 'receive-proof-1'
+            $receiveTerminalOperation = New-ReceiveRecoveryOperation 'operation_terminal' 'None' 'Completed:Adopted' 'Completed' 'Adopted' 'receive-proof-1'
+            $receiveCurrentRetirement = New-ReceiveRecoveryOperation 'operation_current' 'Issued:None' 'None' 'Issued' 'None' '(none)'
             $receiveProofReceipt = [ordered]@{
                 stage='operation'; commandIdentity='receive-command'
                 commandGeneration=1L; commandFingerprint='receive-command-fingerprint'
@@ -1911,7 +1912,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $receiveTerminalOperation.receiptFingerprint = 'receive-proof-fingerprint'
             $receiveTerminalOperation.receiptValidated = $true
             $receiveTerminalOperation.receiveRecovery.receipts = @($receiveProofReceipt)
-            $receiveCompleted = New-ReceiveRecoveryEnvelopeLine 'receive-completed' 1L 2L 'receive-issued-hash' 'receive-completed-hash' $receiveTerminalOperation 31L 'ObserveReceiveRecoveryProof' 'Accepted' 'filetransfer_receive_recovery_proof_adopted'
+            $receiveCompleted = New-ReceiveRecoveryEnvelopeLine 'receive-completed' 1L 2L 'receive-issued-hash' 'receive-completed-hash' @($receiveCurrentRetirement,$receiveTerminalOperation) 31L 'ObserveReceiveRecoveryProof' 'Accepted' 'filetransfer_receive_recovery_proof_adopted'
             $receiveProofEffect = "event=filetransfer_coordinator_authority_effect; $receivePrefix; transition_id=receive-completed; coordinator_state_generation=2; operation_family=receive_recovery; operation_key=$($receiveTerminalOperation.operationKey); operation_authority_id=receive-authority; operation_generation=1; effect_kind=receive_proof_observed; effect_identity=receive-proof-effect; receipt_identity=$($receiveProofReceipt.receiptIdentity); receipt_generation=1; receipt_status=Adopted; receipt_fingerprint=receive-proof-fingerprint; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; route_publication_generation=1; route_commit_generation=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=2; bridge_recovery_generation=3; checkpoint_generation=4; checkpoint_request_id=root-checkpoint; data_session_identity=receive-data-session; data_session_generation=5"
             $receiveCompletedEnd = "event=filetransfer_coordinator_snapshot_stream_completed; $receivePrefix; final_state_generation=2; final_state_hash=receive-completed-hash; transition_count=2; emitted_family_coverage=receive_recovery; shadow_family_coverage=; authoritative_family_coverage=receive_recovery; authority_effect=none"
             $receiveFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=irrelevant',$receiveStart,$receiveIssued,'event=other',$receiveCompleted,$receiveProofEffect,$receiveCompletedEnd)
@@ -4593,6 +4594,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, false)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, true)]
+    public async Task FileTransferOps_RetainedFrameRouteLifecycleUsesExactSharedGrouping(
+        NLink.Core.FileTransfer.FileTransferDirection direction, bool frontier)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-retained-route-lifecycle", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateRetainedFrameRouteLifecycleSnapshotFixture(direction, frontier)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "RetainedFrameRouteLifecycleSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
     public async Task FileTransferOps_ReceiveRecoveryRouteCarryUsesExactSharedHistory(
@@ -4611,6 +4637,31 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "ReceiveRecoveryRouteCarrySnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    public async Task FileTransferOps_ReceiveRecoveryAtomicRolesAreIndependentOfPowerShellSort(
+        NLink.Core.FileTransfer.FileTransferDirection direction)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-recovery-atomic-roles", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateReceiveRecoveryRouteCarrySnapshotFixture(direction, true)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "ReceiveRecoveryAtomicRoleSnapshotEvidence.ps1"));
             var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }

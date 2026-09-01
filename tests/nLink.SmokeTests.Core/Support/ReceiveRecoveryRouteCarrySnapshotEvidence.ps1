@@ -86,17 +86,10 @@ function Assert-Parity([string[]]$lines, [bool]$valid, [string]$reason = '', [st
         throw "Recovery carry changed the independent route control ($context): expected=$script:BaselineSemanticFailures; actual=$(Semantic-Failures $full)"
     }
     if ($valid) {
-        # The existing recovery reducer can select the retiring current record
-        # instead of its terminal sibling at the same proof boundary. Preserve
-        # that independent semantic finding; this test never treats it as pass.
         $otherFailures = @($full.Boundaries | Where-Object {
             $_.unresolvedCount -gt 0 -and $_.taxonomyClass -cne 'filetransfer_route_transition_incomplete'
         })
-        if ($otherFailures.Count -gt 1 -or @($otherFailures | Where-Object {
-                $_.boundaryId -cne $script:ProofTransitionId -or
-                $_.taxonomyClass -cne 'filetransfer_receive_recovery_completed_unproven_successor_missing' -or
-                $_.rawCount -ne 1 -or $_.distinctCount -ne 1 -or $_.recoveredCount -ne 0 -or $_.unresolvedCount -ne 1
-            }).Count -gt 0) { throw "Unexpected independent semantic finding ($context)." }
+        if ($otherFailures.Count -ne 0) { throw "Unexpected independent semantic finding ($context)." }
     }
     $path = Join-Path $OutputRoot 'compact.log'
     [IO.File]::WriteAllLines($path,$compactLines)
@@ -249,9 +242,7 @@ if ((Test-FileTransferCoordinatorReceiveRecoveryRouteTargetCarry $targetRequeste
 }
 $baseline = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (New-Lines $envelopes[0..($issueIndex-1)])
 if ($baseline.ArtifactEvidenceVerdict -cne 'pass') { throw "Original route history malformed: $($baseline.ArtifactEvidenceFailureReason)" }
-foreach ($failure in @($baseline.Boundaries | Where-Object unresolvedCount -GT 0)) {
-    if ($failure.taxonomyClass -cne 'filetransfer_route_transition_incomplete') { throw "Unexpected original route control: $($failure.taxonomyClass)" }
-}
+if ($null -ne $baseline.FirstUnresolvedBoundary) { throw 'The completed retained-frame route must be closed before recovery carries.' }
 $script:BaselineSemanticFailures = Semantic-Failures $baseline
 $lines = @(New-Lines $envelopes)
 Assert-Parity $lines $true '' 'original'

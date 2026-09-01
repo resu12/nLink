@@ -328,40 +328,87 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiveRecoveryOperation? operation = null;
         FileTransferReceiveRecoveryProofStatePublicationCommand? command = null;
         InboundTransferContext? publicationContext = null;
+        OutboundTransferContext? proofSolicitationContext = null;
+        V6TransportEpoch? proofSolicitationEpoch = null;
         lock (gate)
         {
             if (observation.IsDefault ||
                 transport is not IFileTransferBridgeRecoveryExecutionBridge currentBridge ||
-                !ReferenceEquals(currentBridge, executionBridge) ||
-                inboundTransfer is not { IsTerminal: false } inbound)
+                !ReferenceEquals(currentBridge, executionBridge))
             {
                 return;
             }
 
-            var recovery =
-                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery;
-            if (recovery.CurrentOperation is not { } matched ||
-                matched.Authority.ExecutionCommand !=
+            if (outboundTransfer is { IsTerminal: false } outbound &&
+                outbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation is { } outboundOperation &&
+                outboundOperation.Authority.ExecutionCommand ==
+                    observation.ExecutionCommand &&
+                outboundOperation.ExecutionState ==
+                    FileTransferReceiveRecoveryExecutionState.Completed &&
+                outboundOperation.ReceiveProof is null &&
+                outboundOperation.Authority.Observation.Route ==
+                    FileTransferRoute.PostTunaFallbackV6 &&
+                outboundOperation.Authority.Observation.ProtocolVersion ==
+                    FileTransferProtocol.ProtocolVersionV6 &&
+                outbound.V6TransportEpoch is { } currentEpoch &&
+                currentEpoch.EpochId ==
+                    outboundOperation.Authority.Observation.TransportEpoch &&
+                outbound.ReceiveRecoveryProofSolicitationOperationGeneration !=
+                    outboundOperation.Authority.OperationGeneration &&
+                TryAuthorizeTransportEpochActionLocked(
+                    outbound,
+                    FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    TransportEpochActionKind.Adopt,
+                    "receive_recovery_proof_solicitation",
+                    "authenticated_expected_source_receive_resumed",
+                    outbound.CurrentTransferLeg,
+                    ResolveV6TransportEpochAuthorityId(
+                        outbound.CurrentTransferLeg,
+                        currentEpoch),
+                    outbound.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    outbound.RouteSelection.Route,
+                    outbound.NegotiatedDataProtocolVersion,
+                    currentEpoch.TargetTransport,
+                    out _))
+            {
+                outbound.ReceiveRecoveryProofSolicitationOperationGeneration =
+                    outboundOperation.Authority.OperationGeneration;
+                proofSolicitationContext = outbound;
+                proofSolicitationEpoch = new V6TransportEpoch
+                {
+                    EpochId = currentEpoch.EpochId,
+                    Direction = FileTransferDirection.Outbound,
+                    TargetTransport = currentEpoch.TargetTransport,
+                    ProbeId =
+                        $"receive-recovery-proof:{outboundOperation.Authority.OperationGeneration}:{Guid.NewGuid():N}",
+                    Reason = "receive_recovery_proof_solicitation",
+                };
+            }
+
+            if (inboundTransfer is { IsTerminal: false } inbound &&
+                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
+                    .CurrentOperation is { } matched &&
+                matched.Authority.ExecutionCommand ==
                     observation.ExecutionCommand)
             {
-                return;
-            }
-
-            decision =
-                FileTransferCoordinator.ObserveReceiveRecoveryPeerReachability(
-                    CreateCoordinatorStateLocked(inbound),
-                    observation);
-            ApplyReceiveRecoveryStateLocked(inbound, decision.Value);
-            operation =
-                inbound.CoordinatorPersistentState.FileTransferReceiveRecovery
-                    .CurrentOperation;
-            command = decision.Value.ProofStatePublicationCommand;
-            if (command is { } exactCommand &&
-                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand is null)
-            {
-                inbound.ReceiveRecoveryProofStatePublicationInFlightCommand =
-                    exactCommand;
-                publicationContext = inbound;
+                decision = FileTransferCoordinator
+                    .ObserveReceiveRecoveryPeerReachability(
+                        CreateCoordinatorStateLocked(inbound),
+                        observation);
+                ApplyReceiveRecoveryStateLocked(inbound, decision.Value);
+                operation = inbound.CoordinatorPersistentState
+                    .FileTransferReceiveRecovery.CurrentOperation;
+                command = decision.Value.ProofStatePublicationCommand;
+                if (command is { } exactCommand &&
+                    inbound.ReceiveRecoveryProofStatePublicationInFlightCommand
+                        is null)
+                {
+                    inbound.ReceiveRecoveryProofStatePublicationInFlightCommand =
+                        exactCommand;
+                    publicationContext = inbound;
+                }
             }
         }
 
@@ -377,6 +424,20 @@ public sealed partial class SessionFileTransferService
             _ = PublishReceiveRecoveryProofStateAsync(
                 publicationContext,
                 publicationCommand);
+        }
+
+        if (proofSolicitationContext is not null &&
+            proofSolicitationEpoch is not null)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_receive_recovery_proof_solicitation_decided; decision_status=Accepted; decision_reason=authenticated_expected_source_receive_resumed; authority_effect=none; session_id={FormatProtocolLogValue(proofSolicitationContext.SessionId)}; transfer_id={FormatProtocolLogValue(proofSolicitationContext.TransferId)}; direction=outbound; recovery_operation_generation={proofSolicitationContext.ReceiveRecoveryProofSolicitationOperationGeneration}; transport_epoch={proofSolicitationEpoch.EpochId}; probe_id={FormatProtocolLogValue(proofSolicitationEpoch.ProbeId)}");
+            _ = SendV6TransportProbeFrameAsync(
+                proofSolicitationContext.SessionId,
+                proofSolicitationContext.TransferId,
+                proofSolicitationEpoch,
+                proofSolicitationContext.DataSession,
+                proofSolicitationContext.LifetimeCts.Token);
         }
     }
 
