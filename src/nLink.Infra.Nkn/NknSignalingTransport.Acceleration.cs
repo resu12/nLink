@@ -230,6 +230,9 @@ public sealed partial class NknSignalingTransport
     private long runtimeUnlockMissingDispatchOperationCompletionLatchNextGeneration;
     private RuntimeUnlockMissingDispatchOperationCompletionLatch?
         runtimeUnlockMissingDispatchOperationCompletionLatch;
+    private long runtimeUnlockRetryPhysicalSendScopeNextGeneration;
+    private RuntimeUnlockRetryPhysicalSendScope?
+        runtimeUnlockRetryPhysicalSendScope;
     private RuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral?
         runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral;
     private long runtimeUnlockRetryPostFallbackReceiveRecoveryDeferralNextGeneration;
@@ -947,6 +950,130 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockOfferAuthorityBoundary Boundary,
             RuntimeUnlockOfferProofState Proof,
             RuntimeUnlockRetryNegotiationSourceScope SourceScope);
+
+    private sealed class RuntimeUnlockRetryPhysicalSendScope : IDisposable
+    {
+        private readonly object gate = new();
+        private readonly CancellationTokenSource cancellation = new();
+        private readonly List<Task> children = [];
+        private Task? drainTask;
+        private int cancellationRequested;
+        private int completed;
+
+        public RuntimeUnlockRetryPhysicalSendScope(
+            long scopeGeneration,
+            RuntimeUnlockRetryDispatchInstallReceipt installReceipt,
+            long operationGeneration,
+            long payerDecisionId,
+            string trigger)
+        {
+            ScopeGeneration = scopeGeneration;
+            InstallReceipt = installReceipt;
+            OperationGeneration = operationGeneration;
+            PayerDecisionId = payerDecisionId;
+            Trigger = trigger;
+        }
+
+        public long ScopeGeneration { get; }
+
+        public RuntimeUnlockRetryDispatchInstallReceipt InstallReceipt { get; }
+
+        public long OperationGeneration { get; }
+
+        public long PayerDecisionId { get; }
+
+        public string Trigger { get; }
+
+        public RuntimeUnlockOfferAuthorityBoundary? OfferBoundary { get; private set; }
+
+        public CancellationToken Token => cancellation.Token;
+
+        public bool IsCompleted => Volatile.Read(ref completed) != 0;
+
+        public bool IsCancellationRequested =>
+            Volatile.Read(ref cancellationRequested) != 0;
+
+        public int RegisteredChildCount
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return children.Count;
+                }
+            }
+        }
+
+        public void BindOffer(RuntimeUnlockOfferAuthorityBoundary boundary)
+        {
+            lock (gate)
+            {
+                if (OfferBoundary is null)
+                {
+                    OfferBoundary = boundary;
+                }
+            }
+        }
+
+        public void Register(Task child)
+        {
+            lock (gate)
+            {
+                if (drainTask is not null)
+                {
+                    throw new InvalidOperationException(
+                        "Cannot register a send after its scope began draining.");
+                }
+
+                children.Add(child);
+            }
+        }
+
+        public bool RequestCancellation()
+        {
+            if (Interlocked.Exchange(ref cancellationRequested, 1) != 0)
+            {
+                return false;
+            }
+
+            cancellation.Cancel();
+            return true;
+        }
+
+        public Task DrainAsync()
+        {
+            lock (gate)
+            {
+                return drainTask ??= DrainCoreAsync([.. children], this);
+            }
+        }
+
+        private static async Task DrainCoreAsync(
+            Task[] children,
+            RuntimeUnlockRetryPhysicalSendScope scope)
+        {
+            try
+            {
+                await Task.WhenAll(children).ConfigureAwait(false);
+            }
+            catch
+            {
+                foreach (var child in children)
+                {
+                    _ = child.Exception;
+                }
+            }
+            finally
+            {
+                Volatile.Write(ref scope.completed, 1);
+            }
+        }
+
+        public void Dispose()
+        {
+            cancellation.Dispose();
+        }
+    }
 
     private sealed record RuntimeUnlockRetryListenerPreparation(
         long PreparationGeneration,
@@ -13828,6 +13955,7 @@ public sealed partial class NknSignalingTransport
                     await TrySendAccelerationOfferAsync(
                             reason,
                             payerDecisionId,
+                            scheduledOperationGeneration,
                             CancellationToken.None,
                             expectedInstallReceipt,
                             requireRuntimeUnlockRetryDispatchInstall,
@@ -14597,13 +14725,173 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_negotiation_scheduling_{SanitizeLogToken(disposition)}; {authorityTuple}; operation_generation={operationGeneration}; payer_decision_id={payerDecisionId}; retry_authority_id={SanitizeLogToken(effectiveReceipt.Authority.AuthorityId.ToString())}; install_generation={effectiveReceipt.InstallGeneration}; trigger={SanitizeLogToken(trigger)}; decision_reason={SanitizeLogToken(decisionReason)}");
     }
 
+    private void CancelRuntimeUnlockRetryPhysicalSendScopeIfCurrent(
+        RuntimeUnlockRetryDispatchAuthority authority,
+        long offerGeneration,
+        string reason)
+    {
+        RuntimeUnlockRetryPhysicalSendScope? scope;
+        lock (accelerationGate)
+        {
+            scope = runtimeUnlockRetryPhysicalSendScope;
+            if (scope is null ||
+                scope.InstallReceipt.Authority != authority ||
+                scope.IsCompleted ||
+                (scope.OfferBoundary is { } boundary &&
+                 offerGeneration > 0 &&
+                 boundary.OfferGeneration != offerGeneration))
+            {
+                return;
+            }
+        }
+
+        if (scope.RequestCancellation())
+        {
+            LogRuntimeUnlockRetryPhysicalSendScopeCancellation(scope, reason);
+        }
+    }
+
+    private void CancelRuntimeUnlockRetryPhysicalSendScope(string reason)
+    {
+        RuntimeUnlockRetryPhysicalSendScope? scope;
+        lock (accelerationGate)
+        {
+            scope = runtimeUnlockRetryPhysicalSendScope;
+            if (scope is null || scope.IsCompleted)
+            {
+                return;
+            }
+        }
+
+        if (scope.RequestCancellation())
+        {
+            LogRuntimeUnlockRetryPhysicalSendScopeCancellation(scope, reason);
+        }
+    }
+
+    private static void LogRuntimeUnlockRetryPhysicalSendScopeCancellation(
+        RuntimeUnlockRetryPhysicalSendScope scope,
+        string reason)
+    {
+        var boundary = scope.OfferBoundary;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retry_physical_send_scope_cancellation_requested; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(scope.InstallReceipt.Authority)}; physical_send_scope_generation={scope.ScopeGeneration}; operation_generation={scope.OperationGeneration}; payer_decision_id={scope.PayerDecisionId}; offer_generation={boundary?.OfferGeneration ?? 0}; transaction_generation={boundary?.TransactionGeneration ?? 0}; offer_nonce={SanitizeLogToken(boundary?.Nonce ?? "(none)")}; child_count={scope.RegisteredChildCount}; decision_status=Accepted; authority_effect=none; decision_reason={SanitizeLogToken(reason)}");
+    }
+
+    private static void LogRuntimeUnlockRetryPhysicalSendScopeDrain(
+        RuntimeUnlockRetryPhysicalSendScope scope,
+        string status,
+        string reason)
+    {
+        var boundary = scope.OfferBoundary;
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retry_physical_send_drain_decided; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(scope.InstallReceipt.Authority)}; physical_send_scope_generation={scope.ScopeGeneration}; operation_generation={scope.OperationGeneration}; payer_decision_id={scope.PayerDecisionId}; offer_generation={boundary?.OfferGeneration ?? 0}; transaction_generation={boundary?.TransactionGeneration ?? 0}; offer_nonce={SanitizeLogToken(boundary?.Nonce ?? "(none)")}; child_count={scope.RegisteredChildCount}; decision_status={SanitizeLogToken(status)}; authority_effect=none; decision_reason={SanitizeLogToken(reason)}");
+    }
+
     private async Task TrySendAccelerationOfferAsync(
         string reason,
         long payerDecisionId,
+        long operationGeneration,
         CancellationToken ct,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         bool requireRuntimeUnlockRetryDispatchInstall = false,
         bool runtimeUnlockActivation = false)
+    {
+        if (!requireRuntimeUnlockRetryDispatchInstall ||
+            expectedInstallReceipt is not { } installReceipt)
+        {
+            await TrySendAccelerationOfferCoreAsync(
+                    reason,
+                    payerDecisionId,
+                    ct,
+                    expectedInstallReceipt,
+                    requireRuntimeUnlockRetryDispatchInstall,
+                    runtimeUnlockActivation,
+                    physicalSendScope: null)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var physicalSendScope = new RuntimeUnlockRetryPhysicalSendScope(
+            Interlocked.Increment(
+                ref runtimeUnlockRetryPhysicalSendScopeNextGeneration),
+            installReceipt,
+            operationGeneration,
+            payerDecisionId,
+            SanitizeLogToken(reason));
+        var installed = false;
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockRetryPhysicalSendScope is null or
+                    { IsCompleted: true })
+            {
+                runtimeUnlockRetryPhysicalSendScope = physicalSendScope;
+                installed = true;
+            }
+        }
+
+        if (!installed)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_physical_send_scope_started; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(installReceipt.Authority)}; physical_send_scope_generation={physicalSendScope.ScopeGeneration}; operation_generation={operationGeneration}; payer_decision_id={payerDecisionId}; offer_generation=0; child_count=0; decision_status=Held; authority_effect=none; decision_reason=predecessor_physical_send_scope_not_drained");
+            physicalSendScope.Dispose();
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_retry_physical_send_scope_started; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(installReceipt.Authority)}; physical_send_scope_generation={physicalSendScope.ScopeGeneration}; operation_generation={operationGeneration}; payer_decision_id={payerDecisionId}; offer_generation=0; child_count=0; decision_status=Running; authority_effect=none; decision_reason=installed_retry_operation_started");
+        try
+        {
+            await TrySendAccelerationOfferCoreAsync(
+                    reason,
+                    payerDecisionId,
+                    ct,
+                    expectedInstallReceipt,
+                    requireRuntimeUnlockRetryDispatchInstall,
+                    runtimeUnlockActivation,
+                    physicalSendScope)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (physicalSendScope.RequestCancellation())
+            {
+                LogRuntimeUnlockRetryPhysicalSendScopeCancellation(
+                    physicalSendScope,
+                    "operation_completion");
+            }
+
+            await physicalSendScope.DrainAsync().ConfigureAwait(false);
+            lock (accelerationGate)
+            {
+                if (ReferenceEquals(
+                        runtimeUnlockRetryPhysicalSendScope,
+                        physicalSendScope))
+                {
+                    runtimeUnlockRetryPhysicalSendScope = null;
+                }
+            }
+
+            LogRuntimeUnlockRetryPhysicalSendScopeDrain(
+                physicalSendScope,
+                "Drained",
+                "operation_descendants_completed");
+            physicalSendScope.Dispose();
+        }
+    }
+
+    private async Task TrySendAccelerationOfferCoreAsync(
+        string reason,
+        long payerDecisionId,
+        CancellationToken ct,
+        RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt,
+        bool requireRuntimeUnlockRetryDispatchInstall,
+        bool runtimeUnlockActivation,
+        RuntimeUnlockRetryPhysicalSendScope? physicalSendScope)
     {
         var offerAuthorityMode = requireRuntimeUnlockRetryDispatchInstall
             ? RuntimeUnlockOfferAuthorityMode.InstalledRetry
@@ -14906,7 +15194,8 @@ public sealed partial class NknSignalingTransport
                             ? expectedInstallReceipt
                             : null,
                         offerAuthorityMode,
-                        preparedSubmission: payerIntentSubmission)
+                        preparedSubmission: payerIntentSubmission,
+                        physicalSendScope: physicalSendScope)
                     .ConfigureAwait(false);
                 if (!payerIntentQueued.Succeeded &&
                     !payerIntentQueued.UntrustedProbeSent &&
@@ -15745,6 +16034,11 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (runtimeUnlockOfferAuthorityBoundary is { } boundOfferBoundary)
+        {
+            physicalSendScope?.BindOffer(boundOfferBoundary);
+        }
+
         if (!terminalRecoverySettlementReport.IsDefault)
         {
             if (PublishRuntimeUnlockRetryDispatchSettlementReport(terminalRecoverySettlementReport))
@@ -15811,7 +16105,8 @@ public sealed partial class NknSignalingTransport
                                     .InitialActivation,
                             expectedOfferAuthorityBoundary:
                                 initialActivationBoundary,
-                            preparedSubmission: payerIntentSubmission)
+                            preparedSubmission: payerIntentSubmission,
+                            physicalSendScope: physicalSendScope)
                         .ConfigureAwait(false);
             }
             catch
@@ -16026,7 +16321,7 @@ public sealed partial class NknSignalingTransport
                         usesInstalledRetryAuthority &&
                         currentBoundary is
                             { } peerVisibleAuthorityBoundary
-                        ? () => TrySendRuntimeUnlockOfferViaPeerVisibleControlPlaneAsObservedAsync(
+                        ? sendCt => TrySendRuntimeUnlockOfferViaPeerVisibleControlPlaneAsObservedAsync(
                             remoteEndpoint,
                             currentEnvelope,
                             sessionId,
@@ -16034,7 +16329,10 @@ public sealed partial class NknSignalingTransport
                             nonce,
                             offerGeneration,
                             reason,
-                            peerVisibleAuthorityBoundary)
+                            sendCt,
+                            peerVisibleAuthorityBoundary,
+                            drainChildrenOnCompletion:
+                                physicalSendScope is not null)
                          : null,
                     expectedInstallReceipt: isRuntimeUnlockActivation
                         ? expectedInstallReceipt
@@ -16042,7 +16340,8 @@ public sealed partial class NknSignalingTransport
                     expectedOfferAuthorityBoundary:
                         currentBoundary,
                     initialActivationHoldPrevalidation:
-                        holdPrevalidation);
+                        holdPrevalidation,
+                    physicalSendScope: physicalSendScope);
         }
 
         AccelerationControlSendResult offerSend;
@@ -26437,7 +26736,18 @@ public sealed partial class NknSignalingTransport
             settledContract,
             RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
             reason);
-        return PublishRuntimeUnlockRetryDispatchSettlementReport(settlementReport);
+        var accepted =
+            PublishRuntimeUnlockRetryDispatchSettlementReport(
+                settlementReport);
+        if (accepted)
+        {
+            CancelRuntimeUnlockRetryPhysicalSendScopeIfCurrent(
+                settledContract.Authority,
+                offerGeneration,
+                "missing_dispatch_settlement_accepted");
+        }
+
+        return accepted;
     }
 
     private bool TrySettleRuntimeUnlockRetryDispatchMissingBeforeOfferIfCurrent(
@@ -28631,7 +28941,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockOfferAuthorityMode? offerAuthorityMode = null,
         RuntimeUnlockOfferAuthorityBoundary? expectedOfferAuthorityBoundary =
             null,
-        AccelerationPayerIntentSubmission? preparedSubmission = null)
+        AccelerationPayerIntentSubmission? preparedSubmission = null,
+        RuntimeUnlockRetryPhysicalSendScope? physicalSendScope = null)
     {
         var submission =
             preparedSubmission ??
@@ -28667,7 +28978,8 @@ public sealed partial class NknSignalingTransport
                             .PayerIntentPreSend
                         : null,
                 initialActivationHoldPrevalidation:
-                    holdPrevalidation);
+                    holdPrevalidation,
+                physicalSendScope: physicalSendScope);
 
         var queued = await SendCurrentPayerIntentAsync().ConfigureAwait(false);
         while (!queued.Succeeded &&
@@ -33628,7 +33940,8 @@ public sealed partial class NknSignalingTransport
         Action? onQueueAccepted = null,
         Action? onObservedSendWaitStarted = null,
         Func<string?>? queueAcceptedAsObservedReason = null,
-        Func<Task<AccelerationControlSendResult>>? observedSendFallbackAsync = null,
+        Func<CancellationToken, Task<AccelerationControlSendResult>>?
+            observedSendFallbackAsync = null,
         RuntimeUnlockRetryDispatchInstallReceipt? expectedInstallReceipt = null,
         bool allowDispatchObservedInstallReceipt = false,
         RuntimeUnlockOfferAuthorityBoundary? expectedOfferAuthorityBoundary = null,
@@ -33639,7 +33952,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockInitialActivationReceiveRecoveryHoldBoundary?
             initialActivationPhysicalHoldBoundary = null,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldPrevalidation?
-            initialActivationHoldPrevalidation = null)
+            initialActivationHoldPrevalidation = null,
+        RuntimeUnlockRetryPhysicalSendScope? physicalSendScope = null)
     {
         bool ValidateControlSendAuthority(string boundary)
             => expectedOfferAuthorityBoundary is not null
@@ -33924,9 +34238,12 @@ public sealed partial class NknSignalingTransport
             StartRuntimeUnlockRegularV4PeerVisibleWindowBestEffortOfferCopies(
                 target,
                 envelope,
-                purpose);
+                purpose,
+                physicalSendScope);
 
-            var peerVisibleSend = await observedSendFallbackAsync!().ConfigureAwait(false);
+            var peerVisibleSend = await observedSendFallbackAsync!(
+                    physicalSendScope?.Token ?? ct)
+                .ConfigureAwait(false);
             if (!ValidateRetainedRetryAttempt("atomic_peer_visible_send_completion"))
             {
                 return AccelerationControlSendResult.StaleCallback;
@@ -34064,11 +34381,26 @@ public sealed partial class NknSignalingTransport
                 $"event=runtime_unlock_initial_activation_receive_recovery_hold_post_prevalidation_submission; session_id={SanitizeLogToken(submittedBoundary.SessionId)}; transfer_id={SanitizeLogToken(submittedBoundary.TransferId)}; direction={SanitizeLogToken(submittedBoundary.Direction.ToString().ToLowerInvariant())}; offer_nonce={SanitizeLogToken(submittedBoundary.Nonce)}; payer_decision_id={submittedBoundary.PayerDecisionId}; offer_generation={submittedBoundary.OfferGeneration}; transaction_generation={submittedBoundary.TransactionGeneration}; tuna_path_lease_generation={submittedBoundary.TunaPathLeaseGeneration}; tuna_path_lease_listener_run_id={SanitizeLogToken(submittedBoundary.TunaPathLeaseListenerRunId)}; semantic_offer_fingerprint={SanitizeLogToken(submittedBoundary.SemanticOfferFingerprint)}; envelope_generation={submittedBoundary.EnvelopeGeneration}; control_envelope_fingerprint={SanitizeLogToken(submittedBoundary.ControlEnvelopeFingerprint)}; envelope_sent_at_unix_ms={submittedBoundary.EnvelopeSentAtUnixMs}; envelope_expires_at_unix_ms={submittedBoundary.EnvelopeExpiresAtUnixMs}; refresh_generation={refreshGeneration}; message_id={SanitizeLogToken(envelope.MessageId)}; send_path={SanitizeLogToken(purpose)}; decision_reason=exact_prevalidated_envelope_submitted");
         }
 
+        var physicalCt = physicalSendScope?.Token ?? ct;
         var bytes = EnvelopeCodec.Serialize(envelope);
-        var controlTask = QueueControlEnvelopeAsync(target, envelope, ControlOutboundLane.High, ct);
+        var controlTask = QueueControlEnvelopeAsync(
+            target,
+            envelope,
+            ControlOutboundLane.High,
+            physicalCt);
+        physicalSendScope?.Register(controlTask);
         ObserveAccelerationControlSendTask(controlTask, purpose, "control_queue");
 
-        var priorityControlTask = SendAccelerationControlPriorityCopyAsync(target, envelope, bytes, purpose, ct);
+        var priorityControlTask = SendAccelerationControlPriorityCopyAsync(
+            target,
+            envelope,
+            bytes,
+            purpose,
+            physicalCt,
+            physicalSendScope is null
+                ? null
+                : physicalSendScope.Register);
+        physicalSendScope?.Register(priorityControlTask);
         ObserveAccelerationControlSendTask(priorityControlTask, purpose, "control_priority");
 
         Task<AccelerationControlSendResult>? bulkTask = null;
@@ -34094,14 +34426,21 @@ public sealed partial class NknSignalingTransport
                 envelope,
                 bytes,
                 purpose,
-                ct,
+                physicalCt,
                 bulkQueueFallbackSkipReason,
                 bulkQueueFallbackAfterDirectSuccessReason,
-                bulkQueueFallbackObservedProofFailureReason);
+                bulkQueueFallbackObservedProofFailureReason,
+                physicalSendScope is null
+                    ? null
+                    : physicalSendScope.Register);
+            physicalSendScope?.Register(bulkTask);
             ObserveAccelerationControlSendTask(bulkTask, purpose, "control_to_bulk_endpoint");
         }
 
-        if (IsAccelerationControlQueueAccepted(controlTask, ct, out var queueRejected))
+        if (IsAccelerationControlQueueAccepted(
+                controlTask,
+                physicalCt,
+                out var queueRejected))
         {
             var queueCompletedSuccessfully = controlTask.IsCompletedSuccessfully && controlTask.Result;
             LocalOperationalLog.Info(
@@ -34187,7 +34526,8 @@ public sealed partial class NknSignalingTransport
                 attempts,
                 purpose,
                 controlSendLogSessionId,
-                preferPriorityObservedLane || preferBulkObservedLane)
+                preferPriorityObservedLane || preferBulkObservedLane,
+                treatCancellationAsFailure: physicalSendScope is not null)
             .ConfigureAwait(false);
         if (!ValidateRetainedRetryAttempt("observed_send_completion"))
         {
@@ -34198,7 +34538,9 @@ public sealed partial class NknSignalingTransport
             requireObservedSend &&
             observedSendFallbackAsync is not null)
         {
-            observedSend = await observedSendFallbackAsync().ConfigureAwait(false);
+            observedSend = await observedSendFallbackAsync(
+                    physicalSendScope?.Token ?? ct)
+                .ConfigureAwait(false);
             if (!ValidateRetainedRetryAttempt("observed_send_fallback_completion"))
             {
                 return AccelerationControlSendResult.StaleCallback;
@@ -34218,7 +34560,9 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=runtime_unlock_regular_v4_peer_visible_window_confirmation_required; session_id={SanitizeLogToken(activationSessionId ?? "none")}; purpose={SanitizeLogToken(purpose)}; observed_lane={SanitizeLogToken(observedSend.ObservedLane ?? "(none)")}; reason=atomic_peer_visible_window");
 
-            var confirmedSend = await observedSendFallbackAsync().ConfigureAwait(false);
+            var confirmedSend = await observedSendFallbackAsync(
+                    physicalSendScope?.Token ?? ct)
+                .ConfigureAwait(false);
             if (!ValidateRetainedRetryAttempt("peer_visible_confirmation_completion"))
             {
                 return AccelerationControlSendResult.StaleCallback;
@@ -34369,7 +34713,8 @@ public sealed partial class NknSignalingTransport
     private void StartRuntimeUnlockRegularV4PeerVisibleWindowBestEffortOfferCopies(
         string target,
         Envelope envelope,
-        string purpose)
+        string purpose,
+        RuntimeUnlockRetryPhysicalSendScope? physicalSendScope)
     {
         if (envelope.Type != MsgType.TransportAccelerationOffer ||
             !IsTunaActivationOfferSendPurpose(purpose))
@@ -34377,6 +34722,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var sendCt = physicalSendScope?.Token ?? CancellationToken.None;
         var bytes = EnvelopeCodec.Serialize(envelope);
         LocalOperationalLog.Info(
             "NKN.Tuna",
@@ -34386,7 +34732,8 @@ public sealed partial class NknSignalingTransport
             target,
             envelope,
             ControlOutboundLane.High,
-            CancellationToken.None);
+            sendCt);
+        physicalSendScope?.Register(controlTask);
         ObserveAccelerationControlSendTask(controlTask, purpose, "control_queue_atomic_peer_visible_window");
 
         var priorityControlTask = SendAccelerationControlPriorityCopyAsync(
@@ -34394,7 +34741,11 @@ public sealed partial class NknSignalingTransport
             envelope,
             bytes,
             purpose,
-            CancellationToken.None);
+            sendCt,
+            physicalSendScope is null
+                ? null
+                : physicalSendScope.Register);
+        physicalSendScope?.Register(priorityControlTask);
         ObserveAccelerationControlSendTask(priorityControlTask, purpose, "control_priority_atomic_peer_visible_window");
 
         if (string.IsNullOrWhiteSpace(remoteBulkEndpoint))
@@ -34413,7 +34764,11 @@ public sealed partial class NknSignalingTransport
             envelope,
             bytes,
             purpose,
-            CancellationToken.None);
+            sendCt,
+            registerPhysicalChild: physicalSendScope is null
+                ? null
+                : physicalSendScope.Register);
+        physicalSendScope?.Register(bulkTask);
         ObserveAccelerationControlSendTask(bulkTask, purpose, "control_to_bulk_endpoint_atomic_peer_visible_window");
     }
 
@@ -34929,7 +35284,8 @@ public sealed partial class NknSignalingTransport
         List<AccelerationControlSendAttempt> attempts,
         string purpose,
         string? sessionId,
-        bool preferPreferredObservedLane = false)
+        bool preferPreferredObservedLane = false,
+        bool treatCancellationAsFailure = false)
     {
         if (attempts.Count == 0)
         {
@@ -35005,6 +35361,13 @@ public sealed partial class NknSignalingTransport
                     "NKN.Tuna",
                     $"event=tuna_acceleration_control_send_attempt_failed; purpose={SanitizeLogToken(purpose)}; error={ex.GetType().Name}");
             }
+            catch (OperationCanceledException) when (
+                treatCancellationAsFailure)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_acceleration_control_send_attempt_failed; purpose={SanitizeLogToken(purpose)}; error=OperationCanceledException; decision_reason=installed_retry_physical_send_scope_canceled");
+            }
 
             if (preferPreferredObservedLane &&
                 fallbackObservedSend is { Succeeded: true } &&
@@ -35033,7 +35396,9 @@ public sealed partial class NknSignalingTransport
         string nonce,
         long offerGeneration,
         string trigger,
-        RuntimeUnlockOfferAuthorityBoundary expectedOfferAuthorityBoundary)
+        CancellationToken ct,
+        RuntimeUnlockOfferAuthorityBoundary expectedOfferAuthorityBoundary,
+        bool drainChildrenOnCompletion)
     {
         if (expectedOfferAuthorityBoundary.Mode !=
                 RuntimeUnlockOfferAuthorityMode.InstalledRetry ||
@@ -35070,8 +35435,9 @@ public sealed partial class NknSignalingTransport
                 nonce,
                 offerGeneration,
                 trigger,
-                CancellationToken.None,
-                expectedOfferAuthorityBoundary)
+                ct,
+                expectedOfferAuthorityBoundary,
+                drainChildrenOnCompletion)
             .ConfigureAwait(false);
         if (!peerVisible)
         {
@@ -35325,7 +35691,8 @@ public sealed partial class NknSignalingTransport
                 offerGeneration,
                 trigger,
                 CancellationToken.None,
-                expectedOfferAuthorityBoundary),
+                expectedOfferAuthorityBoundary,
+                drainChildrenOnCompletion: false),
             CancellationToken.None);
     }
 
@@ -35338,7 +35705,8 @@ public sealed partial class NknSignalingTransport
         long offerGeneration,
         string trigger,
         CancellationToken ct,
-        RuntimeUnlockOfferAuthorityBoundary expectedOfferAuthorityBoundary)
+        RuntimeUnlockOfferAuthorityBoundary expectedOfferAuthorityBoundary,
+        bool drainChildrenOnCompletion)
     {
         if (!ValidateRuntimeUnlockOfferAuthorityBoundary(
                 expectedOfferAuthorityBoundary,
@@ -35369,12 +35737,15 @@ public sealed partial class NknSignalingTransport
                         LogCategory: "NKN.Tuna",
                         LogEvent: "runtime_unlock_control_plane_delivery",
                         AllowBulkDuplicate: true,
-                        IgnoreCallerCancellation: true,
+                        IgnoreCallerCancellation:
+                            !drainChildrenOnCompletion,
                         AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired,
                         UseControlAckRetry: true,
                         PeerCopyAttempts: 2,
                         ThrowOnFailure: false,
-                        CopyTimeout: ResolveRuntimeUnlockPeerVisibleLifecycleCopyTimeout()),
+                        CopyTimeout: ResolveRuntimeUnlockPeerVisibleLifecycleCopyTimeout(),
+                        DrainChildrenOnCompletion:
+                            drainChildrenOnCompletion),
                     envelope,
                     ct)
                 .ConfigureAwait(false);
@@ -35512,7 +35883,8 @@ public sealed partial class NknSignalingTransport
         Envelope envelope,
         byte[] bytes,
         string purpose,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<Task>? registerPhysicalChild = null)
     {
         LocalOperationalLog.Info(
             "NKN.Tuna",
@@ -35527,7 +35899,8 @@ public sealed partial class NknSignalingTransport
                 "control_priority",
                 "tuna_acceleration_control_priority_sent",
                 "tuna_acceleration_control_priority_failed",
-                ct).ConfigureAwait(false);
+                ct,
+                registerPhysicalChild).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -35546,7 +35919,8 @@ public sealed partial class NknSignalingTransport
         CancellationToken ct,
         Func<string?>? skipBulkQueueFallbackObservedProofReason = null,
         Func<string?>? continueToBulkQueueFallbackAfterDirectSuccessReason = null,
-        Func<string?>? bulkQueueFallbackObservedProofFailureReason = null)
+        Func<string?>? bulkQueueFallbackObservedProofFailureReason = null,
+        Action<Task>? registerPhysicalChild = null)
     {
         try
         {
@@ -35571,7 +35945,8 @@ public sealed partial class NknSignalingTransport
                     "control_to_bulk_endpoint",
                     "tuna_acceleration_control_bulk_bypass_sent",
                     "tuna_acceleration_control_bulk_bypass_priority_failed",
-                    ct).ConfigureAwait(false))
+                    ct,
+                    registerPhysicalChild).ConfigureAwait(false))
             {
                 var continueReason = continueToBulkQueueFallbackAfterDirectSuccessReason?.Invoke();
                 if (!string.IsNullOrWhiteSpace(continueReason))
@@ -35645,7 +36020,8 @@ public sealed partial class NknSignalingTransport
         string lane,
         string sentEvent,
         string failedEvent,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<Task>? registerPhysicalChild)
     {
         if (messageType == MsgType.TransportAccelerationOffer &&
             IsTunaActivationOfferSendPurpose(purpose) &&
@@ -35661,7 +36037,11 @@ public sealed partial class NknSignalingTransport
         try
         {
             NknRuntimeDiagnostics.IncrementMessagesSent();
-            sendTask = client.SendAsync(destination, bytes, ct);
+            sendTask = client.SendAsync(
+                destination,
+                bytes,
+                ct);
+            registerPhysicalChild?.Invoke(sendTask);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -35676,15 +36056,14 @@ public sealed partial class NknSignalingTransport
         var completed = await Task.WhenAny(sendTask, timeoutTask).ConfigureAwait(false);
         if (!ReferenceEquals(completed, sendTask))
         {
-            if (ct.IsCancellationRequested)
-            {
-                ct.ThrowIfCancellationRequested();
-            }
-
+            ct.ThrowIfCancellationRequested();
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event={failedEvent}; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; lane={SanitizeLogToken(lane)}; error=Timeout; wait_ms={(long)waitTimeout.TotalMilliseconds}");
-            ObserveAccelerationControlDirectSendLateTask(sendTask, purpose, lane);
+            ObserveAccelerationControlDirectSendLateTask(
+                sendTask,
+                purpose,
+                lane);
             return false;
         }
 
@@ -35705,7 +36084,10 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private static void ObserveAccelerationControlDirectSendLateTask(Task task, string purpose, string lane)
+    private static void ObserveAccelerationControlDirectSendLateTask(
+        Task task,
+        string purpose,
+        string lane)
     {
         _ = task.ContinueWith(
             completed =>

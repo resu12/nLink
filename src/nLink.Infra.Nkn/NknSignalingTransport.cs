@@ -944,6 +944,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         disposed = true;
+        CancelRuntimeUnlockRetryPhysicalSendScope("dispose");
         InvalidateInboundRuntimeUnlockDialLifecycleForSessionChange("dispose");
         TryCancelHostReady();
 
@@ -2342,7 +2343,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         LifecycleEnvelopeSet envelopes,
         CancellationToken ct)
     {
-        var effectiveCt = options.IgnoreCallerCancellation ? CancellationToken.None : ct;
+        var callerCt = options.IgnoreCallerCancellation
+            ? CancellationToken.None
+            : ct;
+        using var drainCancellation = options.DrainChildrenOnCompletion
+            ? CancellationTokenSource.CreateLinkedTokenSource(callerCt)
+            : null;
+        var effectiveCt = drainCancellation?.Token ?? callerCt;
         var controlEnvelope = envelopes.ControlEnvelope;
         var bulkEnvelope = envelopes.BulkEnvelope ?? envelopes.ControlEnvelope;
         var controlQueueTask = SendLifecycleControlQueueCopyAsync(options, controlEnvelope, effectiveCt);
@@ -2372,6 +2379,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 effectiveCt);
         }
 
+        try
+        {
         LifecycleCopySendResult controlQueueResult;
         LifecycleCopySendResult controlAckResult;
         LifecycleCopySendResult controlCopyResult;
@@ -2446,6 +2455,39 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         return result;
+        }
+        finally
+        {
+            if (drainCancellation is not null)
+            {
+                drainCancellation.Cancel();
+                var children = new List<Task>
+                {
+                    controlQueueTask,
+                    controlCopyTask,
+                };
+                if (controlAckTask is not null)
+                {
+                    children.Add(controlAckTask);
+                }
+                if (bulkCopyTask is not null)
+                {
+                    children.Add(bulkCopyTask);
+                }
+
+                try
+                {
+                    await Task.WhenAll(children).ConfigureAwait(false);
+                }
+                catch
+                {
+                    foreach (var child in children)
+                    {
+                        _ = child.Exception;
+                    }
+                }
+            }
+        }
     }
 
     private async Task<LifecycleCopySendResult> WaitForLifecycleBoundedCopyResultAsync(
@@ -2689,7 +2731,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         int PeerCopyAttempts,
         bool ThrowOnFailure,
         TimeSpan? CopyTimeout = null,
-        Func<bool>? PreSendValidator = null);
+        Func<bool>? PreSendValidator = null,
+        bool DrainChildrenOnCompletion = false);
 
     private sealed class LifecyclePreSendValidationException : Exception
     {

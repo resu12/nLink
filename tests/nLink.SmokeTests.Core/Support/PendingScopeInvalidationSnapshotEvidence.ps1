@@ -196,23 +196,16 @@ function Assert-Parity([string[]]$inputLines, [bool]$valid, [string]$reason = ''
         $catalog.SnapshotAuthorityV1 -contains $name -or $catalog.GenerationStampedEffects -contains $name
     })
     $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $compactLines
-    # The PostFallback prefix retains a reservation over multiple boundaries. The
-    # existing Family-4 authority-wide reservation count reports that independent
-    # carry; this Family-2 fixture must not suppress or reinterpret it.
-    $reservationCarry = $envelopes.Count -gt 6 -and $null -ne $full.FirstUnresolvedBoundary -and
-        $full.FirstUnresolvedBoundary.boundaryId -ceq $envelopes[9].transitionId -and
-        $full.FirstUnresolvedBoundary.taxonomyClass -ceq 'fallback_tail_yield_authority_invalid' -and
-        @($full.Boundaries | Where-Object { $_.unresolvedCount -gt 0 -and $_.taxonomyClass -like 'runtime_unlock_retry*' }).Count -eq 0
     if ((Compare-FileTransferCoordinatorSnapshotEvaluations $full $compact).Verdict -cne 'pass' -or
         ($full.ArtifactEvidenceVerdict -ceq 'pass') -ne $valid -or
-        ($valid -and $null -ne $full.FirstUnresolvedBoundary -and -not $reservationCarry) -or
+        ($valid -and $null -ne $full.FirstUnresolvedBoundary) -or
         (-not $valid -and $full.ArtifactEvidenceFailureReason -notlike "*$reason*" -and
             $full.FirstUnresolvedBoundary.variant -cne $reason)) {
         throw "Unexpected shared result: valid=$valid; expected=$reason; actual=$($full.ArtifactEvidenceFailureReason); boundary=$($full.FirstUnresolvedBoundary | Select-Object decisionKind,taxonomyClass,decisionReason,variant | ConvertTo-Json -Compress); parity=$((Compare-FileTransferCoordinatorSnapshotEvaluations $full $compact) | ConvertTo-Json -Compress)"
     }
     $path = Join-Path $OutputRoot 'compact.log'; [IO.File]::WriteAllLines($path, $compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($valid -and -not $reservationCarry) { if ($null -ne $gui) { throw 'GUI rejected valid preparation.' } }
+    if ($valid) { if ($null -ne $gui) { throw 'GUI rejected valid preparation.' } }
     else {
         $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
@@ -238,6 +231,37 @@ if ($envelopes.Count -gt 6) { $application = @($envelopes[6..($envelopes.Count-1
 foreach ($item in $application) {
     if ($item.decisionKind -ceq 'FallbackTailQuiescent' -and -not (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope $item)) {
         throw 'Production fixture must start after checkpoint acceptance, with an unchanged Quiescent aggregate boundary.'
+    }
+}
+if ($envelopes.Count -gt 6) {
+    $rollback = $envelopes[2]
+    $rollbackYield = @($rollback.aggregate.operations | Where-Object {
+            $_.family -ceq 'fallback_tail_yield' -and
+            $_.operationRole -ceq 'yield_current'
+        })[0]
+    $rollbackEntry = [pscustomobject]@{
+        Boundary = [pscustomobject]@{
+            decisionKind = $rollback.decisionKind
+            decisionStatus = $rollback.decisionStatus
+            decisionReason = $rollback.decisionReason
+            operations = $rollback.aggregate.operations
+        }
+        Operation = $rollbackYield
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotFallbackTailScopeInvalidationRollback $rollbackEntry)) {
+        throw 'Exact fallback reservation rollback was rejected.'
+    }
+    foreach ($mutation in @(
+        { param($e) $e.Boundary.decisionReason = 'unrelated' },
+        { param($e) @($e.Boundary.operations | Where-Object operationRole -CEQ 'release_reservation_current')[0].beforeState = 'Consumed' },
+        { param($e) @($e.Boundary.operations | Where-Object operationRole -CEQ 'attempt_terminal')[0].afterState = 'Installed' },
+        { param($e) @($e.Boundary.operations | Where-Object operationRole -CEQ 'scope_invalidation')[0].receiptValidated = $false }
+    )) {
+        $badEntry = Copy-Value $rollbackEntry
+        & $mutation $badEntry
+        if (Test-FileTransferCoordinatorSnapshotFallbackTailScopeInvalidationRollback $badEntry) {
+            throw "Malformed fallback reservation rollback passed: $mutation"
+        }
     }
 }
 Assert-Parity (New-Lines $application) $true

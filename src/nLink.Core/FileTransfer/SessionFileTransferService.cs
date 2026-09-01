@@ -6607,11 +6607,9 @@ public sealed partial class SessionFileTransferService :
             context,
             commitDecision.State,
             commitDecision.SnapshotEnvelope);
-        EnqueueRuntimeUnlockRetryAuthorityEffect(
+        EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
             context,
-            commitDecision.SnapshotEnvelope,
-            "install",
-            "install_committed");
+            commitDecision.SnapshotEnvelope);
         if (!commitDecision.Accepted)
         {
             return CreateRuntimeUnlockRetryDispatchInstallRejection(
@@ -6731,11 +6729,9 @@ public sealed partial class SessionFileTransferService :
             context,
             commitDecision.State,
             commitDecision.SnapshotEnvelope);
-        EnqueueRuntimeUnlockRetryAuthorityEffect(
+        EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
             context,
-            commitDecision.SnapshotEnvelope,
-            "install",
-            "install_committed");
+            commitDecision.SnapshotEnvelope);
         if (!commitDecision.Accepted)
         {
             return CreateRuntimeUnlockRetryDispatchInstallRejection(

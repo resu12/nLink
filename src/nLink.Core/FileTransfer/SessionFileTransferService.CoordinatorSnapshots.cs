@@ -1006,6 +1006,157 @@ public sealed partial class SessionFileTransferService
             match.Receipt.ReceiptGeneration);
     }
 
+    private static void EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
+        OutboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+        => EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope);
+
+    private static void EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
+        InboundTransferContext context,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+        => EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            envelope);
+
+    private static void EnqueueRuntimeUnlockRetryInstallAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter,
+        string coordinatorInstanceId,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        long stateGeneration,
+        FileTransferCoordinatorTransitionEnvelope? envelope)
+    {
+        if (envelope is null ||
+            CreateRuntimeUnlockRetryInstallAuthorityEffectBinding(envelope)
+                is not { } binding)
+        {
+            return;
+        }
+
+        emitter.EnqueueAuthorityEffect(
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            stateGeneration,
+            binding.Family,
+            binding.AuthorityId,
+            binding.OperationGeneration,
+            binding.ReceiptIdentity,
+            binding.ReceiptGeneration,
+            binding.ReceiptStatus,
+            binding.ReceiptFingerprint,
+            binding.EffectKind,
+            $"{binding.OperationKey}:{binding.EffectKind}",
+            binding.ReceiptGeneration,
+            binding.OperationKey);
+    }
+
+    private static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateRuntimeUnlockRetryInstallAuthorityEffectBinding(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+    {
+        if (envelope.DecisionKind != nameof(
+                FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall) ||
+            envelope.DecisionStatus != "Accepted" ||
+            envelope.Aggregate.AfterStateGeneration !=
+                envelope.Aggregate.BeforeStateGeneration + 1 ||
+            envelope.Aggregate.AfterStateFingerprint ==
+                envelope.Aggregate.BeforeStateFingerprint)
+        {
+            return null;
+        }
+
+        var attempts = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "runtime_unlock_retry_lifecycle" &&
+                operation.OperationKind == "RetryAttempt" &&
+                operation.RuntimeUnlockRetry is not null)
+            .ToArray();
+        var pendingMatches = attempts
+            .Where(operation =>
+                operation.OperationRole == "attempt_pending" &&
+                operation.BeforeState == "Staged" &&
+                operation.AfterState == "None" &&
+                operation.StateApplied)
+            .SelectMany(operation => operation.RuntimeUnlockRetry!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    receipt.Stage == "install" &&
+                    receipt.ReceiptStatus == "Staged" &&
+                    ReceiptMatchesOperation(operation, receipt))
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        var installedMatches = attempts
+            .Where(operation =>
+                operation.OperationRole == "attempt_installed" &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Installed" &&
+                operation.StateApplied)
+            .SelectMany(operation => operation.RuntimeUnlockRetry!.Receipts
+                .Where(receipt =>
+                    receipt.ReceiptValidated &&
+                    receipt.Stage == "install" &&
+                    receipt.ReceiptStatus == "Installed" &&
+                    ReceiptMatchesOperation(operation, receipt))
+                .Select(receipt => (Operation: operation, Receipt: receipt)))
+            .ToArray();
+        if (pendingMatches.Length != 1 || installedMatches.Length != 1)
+        {
+            return null;
+        }
+
+        var pending = pendingMatches[0];
+        var installed = installedMatches[0];
+        if (pending.Operation.AuthorityId != installed.Operation.AuthorityId ||
+            pending.Operation.OperationGeneration !=
+                installed.Operation.OperationGeneration ||
+            pending.Operation.RuntimeUnlockRetry!.AuthorityGeneration !=
+                installed.Operation.RuntimeUnlockRetry!.AuthorityGeneration ||
+            pending.Operation.RuntimeUnlockRetry.DispatchAttemptGeneration !=
+                installed.Operation.RuntimeUnlockRetry.DispatchAttemptGeneration ||
+            pending.Operation.RuntimeUnlockRetry.SourceBoundary !=
+                installed.Operation.RuntimeUnlockRetry.SourceBoundary ||
+            pending.Receipt.CommandIdentity !=
+                installed.Receipt.CommandIdentity ||
+            pending.Receipt.CommandGeneration !=
+                installed.Receipt.CommandGeneration ||
+            pending.Receipt.CommandFingerprint !=
+                installed.Receipt.CommandFingerprint ||
+            pending.Receipt.ReceiptIdentity !=
+                installed.Receipt.ReceiptIdentity ||
+            pending.Receipt.ReceiptGeneration !=
+                installed.Receipt.ReceiptGeneration ||
+            pending.Receipt.ReceiptFingerprint !=
+                installed.Receipt.ReceiptFingerprint)
+        {
+            return null;
+        }
+
+        return CreateAuthorityEffectBinding(
+            "install_committed",
+            installed.Operation,
+            installed.Receipt);
+    }
+
+    internal static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+            FileTransferCoordinatorTransitionEnvelope envelope)
+        => CreateRuntimeUnlockRetryInstallAuthorityEffectBinding(envelope);
+
     private static void EnqueueReceiveRecoveryAuthorityEffect(
         OutboundTransferContext context,
         FileTransferCoordinatorTransitionEnvelope? envelope,

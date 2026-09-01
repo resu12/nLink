@@ -4945,11 +4945,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_tuna_activation_bulk_bypass";
             _ = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
-                "transfer_tuna_activation_bulk_bypass",
+                transferId,
                 cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
 
             hostLane.SetCanListen(true);
             await ((ITransportAccelerationControl)host).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
@@ -5204,11 +5207,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
+            const string transferId = "transfer_tuna_activation_slow_offer";
             _ = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
-                "transfer_tuna_activation_slow_offer",
+                transferId,
                 cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
             var logStart = GetOperationalLogLength();
 
             hostLane.SetCanListen(true);
@@ -16056,15 +16062,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "helper.runtime-unlock-missing-dispatch-stale-completion.address");
             var firstOfferEntered = new TaskCompletionSource<object?>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            var releaseFirstOffer = new TaskCompletionSource<object?>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
+            var blockPredecessorSends = true;
             hostClient.BeforeSendCoreAsync = async (_, payload, _, ct) =>
             {
                 if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
-                    sent.Type == MsgType.TransportAccelerationOffer)
+                    sent.Type == MsgType.TransportAccelerationOffer &&
+                    Volatile.Read(ref blockPredecessorSends))
                 {
                     firstOfferEntered.TrySetResult(null);
-                    await releaseFirstOffer.Task.WaitAsync(ct);
+                    await Task.Delay(Timeout.InfiniteTimeSpan, ct);
                 }
             };
             var hostLane = new RetryableTunaAccelerationSession(
@@ -16131,18 +16137,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 sessionId,
                 predecessorOfferGeneration,
                 "test_missing_dispatch_while_physical_offer_in_flight")));
+            Volatile.Write(ref blockPredecessorSends, false);
             await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "intent_kind=SuccessorEvaluation;",
-                    StringComparison.Ordinal) &&
-                    ReadOperationalLogTail(logStart).Contains(
-                        "decision_reason=retry_dispatch_negotiation_slot_busy",
-                        StringComparison.Ordinal),
-                TimeSpan.FromSeconds(4));
-            releaseFirstOffer.TrySetResult(null);
-
+                    "event=runtime_unlock_retry_physical_send_drain_decided;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided;",
@@ -16163,11 +16165,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                                    .MissingDispatchSuccessorGeneration + 1;
                 },
                 TimeSpan.FromSeconds(5));
-            var successorOfferGeneration = 0L;
             await WaitUntilAsync(
                 () =>
                 {
-                    successorOfferGeneration = Assert.IsType<long>(
+                    var successorOfferGeneration = Assert.IsType<long>(
                         GetPrivateField(
                             host,
                             "outboundAccelerationOfferGeneration"));
@@ -16175,14 +16176,16 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                         predecessorOfferGeneration;
                 },
                 TimeSpan.FromSeconds(5));
-            await WaitUntilAsync(
-                () => Assert.IsType<bool>(InvokePrivateMethod(
+            var successorOfferGeneration = Assert.IsType<long>(
+                GetPrivateField(
                     host,
-                    "MarkRuntimeUnlockRecoveryContractRetryObserved",
-                    sessionId,
-                    successorOfferGeneration,
-                    "test_exact_successor_observed")),
-                TimeSpan.FromSeconds(5));
+                    "outboundAccelerationOfferGeneration"));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                successorOfferGeneration,
+                "test_successor_dispatch_observed_after_predecessor_drain")));
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
                     "event=runtime_unlock_retry_dispatch_observed;",
@@ -16198,6 +16201,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "cleanup_effect=predecessor_offer_retired",
                 tail,
                 StringComparison.Ordinal);
+            var drainIndex = tail.IndexOf(
+                "event=runtime_unlock_retry_physical_send_drain_decided;",
+                StringComparison.Ordinal);
+            var cleanupIndex = tail.IndexOf(
+                "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided;",
+                StringComparison.Ordinal);
+            Assert.True(drainIndex >= 0 && cleanupIndex > drainIndex, tail);
             Assert.DoesNotContain(
                 "event=tuna_acceleration_runtime_unlock_queued_behind_active_negotiation; reason=runtime_unlock; authority_mode=InitialActivation",
                 tail,

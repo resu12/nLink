@@ -31,6 +31,15 @@ function Recovery-Subject($envelope, [string]$role) {
     if ($matches.Count -ne 1) { throw "Recovery subject not unique: $role" }
     $matches[0]
 }
+function Recovery-TerminalEntrant($envelope) {
+    $matches = @($envelope.aggregate.operations | Where-Object {
+        $_.family -ceq 'receive_recovery' -and
+        $_.operationRole -ceq 'operation_terminal' -and
+        $_.beforeState -ceq 'None' -and $_.afterState -cne 'None'
+    })
+    if ($matches.Count -ne 1) { throw 'Recovery terminal entrant not unique.' }
+    $matches[0]
+}
 function New-Lines([object[]]$values, [string]$extraKind = '', [string]$extraRole = 'terminal') {
     $byId = @{}
     foreach ($e in $values) { $byId[$e.transitionId] = $e }
@@ -50,7 +59,8 @@ function New-Lines([object[]]$values, [string]$extraKind = '', [string]$extraRol
             if ($operations.Count -ne 1) { throw 'Recovery effect subject not unique.' }
             New-Effect $e $operations[0] $kind ($sequence + 1)
         }
-        if ($extraKind -and $e.decisionKind -ceq 'IssueReceiveRecoveryOperation') {
+        if ($extraKind -and
+            $e.transitionId -ceq $script:RouteCarryIssueTransitionId) {
             New-Effect $e (Subject $e $extraRole) $extraKind ($sequence + 2)
         }
     }
@@ -110,16 +120,52 @@ function Assert-Parity([string[]]$lines, [bool]$valid, [string]$reason = '', [st
 }
 $carryKinds = @('IssueReceiveRecoveryOperation','ObserveReceiveRecoveryProof')
 $carries = @($envelopes | Where-Object decisionKind -In $carryKinds)
-if ($carries.Count -ne 2) { throw 'Expected exact recovery issue and proof carries.' }
-$script:ProofTransitionId = [string](@($carries | Where-Object decisionKind -CEQ 'ObserveReceiveRecoveryProof')[0].transitionId)
-foreach ($e in $carries) {
+$issueCarries = @($carries | Where-Object decisionKind -CEQ 'IssueReceiveRecoveryOperation')
+$proofCarries = @($carries | Where-Object decisionKind -CEQ 'ObserveReceiveRecoveryProof')
+if (-not (($issueCarries.Count -eq 1 -and $proofCarries.Count -eq 1 -and
+            $carries.Count -eq 2) -or
+        ($issueCarries.Count -eq 2 -and $proofCarries.Count -eq 2 -and
+            $carries.Count -eq 4))) {
+    throw 'Expected one direct issue/proof pair or two exact rollover pairs.'
+}
+$hasTerminalRollover = $issueCarries.Count -eq 2
+$routeCarries = @($carries | Where-Object {
+    $roles = @($_.aggregate.operations | Where-Object {
+        $_.family -ceq 'route_transition' -and
+        $_.operationRole -in @('fallback_v6_bootstrap','terminal')
+    } | Select-Object -ExpandProperty operationRole)
+    $roles.Count -eq 2 -and
+        @($roles | Where-Object { $_ -ceq 'fallback_v6_bootstrap' }).Count -eq 1 -and
+        @($roles | Where-Object { $_ -ceq 'terminal' }).Count -eq 1
+})
+if ($routeCarries.Count -ne 2) {
+    throw 'Expected one exact route-carry issue and its proof.'
+}
+$routeCarryIssue = @($routeCarries | Where-Object {
+    $_.decisionKind -ceq 'IssueReceiveRecoveryOperation'
+})
+$routeCarryProof = @($routeCarries | Where-Object {
+    $_.decisionKind -ceq 'ObserveReceiveRecoveryProof'
+})
+if ($routeCarryIssue.Count -ne 1 -or $routeCarryProof.Count -ne 1) {
+    throw 'Route-carry issue or proof is not unique.'
+}
+$routeCarryIssue = $routeCarryIssue[0]
+$routeCarryProof = $routeCarryProof[0]
+$script:RouteCarryTransitionIds = @{
+    ([string]$routeCarryIssue.transitionId) = $true
+    ([string]$routeCarryProof.transitionId) = $true
+}
+$script:RouteCarryIssueTransitionId = [string]$routeCarryIssue.transitionId
+$script:ProofTransitionId = [string]$routeCarryProof.transitionId
+foreach ($e in $routeCarries) {
     foreach ($role in @('fallback_v6_bootstrap','terminal')) {
         if (-not (Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog $e (Subject $e $role))) {
             throw "Production receive-recovery route carry rejected: $($e.decisionKind)/$role"
         }
     }
 }
-foreach ($e in $carries) {
+foreach ($e in $routeCarries) {
     foreach ($role in @('fallback_v6_bootstrap','terminal')) {
         foreach ($mutation in @(
             { param($e,$o) $o.operationRole='current' },
@@ -162,7 +208,7 @@ foreach ($e in $carries) {
         }
     }
 }
-foreach ($e in $carries) {
+foreach ($e in $routeCarries) {
     foreach ($mutation in @(
         { param($e,$o) $e.aggregate.operations=@($e.aggregate.operations | Where-Object operationRole -CNE 'operation_current') },
         { param($e,$o) $e.aggregate.operations+=Copy-Value $o },
@@ -197,8 +243,8 @@ foreach ($mutation in @(
     { param($e,$o) $o.receiptStatus='Applied' },
     { param($e,$o) $o.receiveRecovery.receipts[0].commandFingerprint+='-foreign' }
 )) {
-    $bad = Copy-Value (@($carries | Where-Object decisionKind -CEQ 'ObserveReceiveRecoveryProof')[0])
-    & $mutation $bad (Recovery-Subject $bad 'operation_terminal')
+    $bad = Copy-Value $routeCarryProof
+    & $mutation $bad (Recovery-TerminalEntrant $bad)
     if (Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry $bad (Subject $bad 'terminal')) {
         throw "Malformed proof subject admitted: $mutation"
     }
@@ -209,14 +255,54 @@ foreach ($mutation in @(
     { param($e,$o) $o.stateApplied=$true },
     { param($e,$o) $o.receiveRecovery.receipts[0].receiptStatus='Rejected' }
 )) {
-    $bad = Copy-Value (@($carries | Where-Object decisionKind -CEQ 'IssueReceiveRecoveryOperation')[0])
+    $bad = Copy-Value $routeCarryIssue
     & $mutation $bad (Recovery-Subject $bad 'attempted_decision')
     if (Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry $bad (Subject $bad 'terminal')) {
         throw "Malformed issued attempt subject admitted: $mutation"
     }
 }
+$rollover = $null
+$rolloverCurrent = $null
+$rolloverOutgoing = $null
+$rolloverEntrant = $null
+if ($hasTerminalRollover) {
+    $rollover = $routeCarryProof
+    $roots = @($rollover.aggregate.operations | Where-Object {
+        $_.family -ceq 'receive_recovery' -and
+        $_.operationRole -in @('operation_current','operation_terminal')
+    })
+    $current = @($roots | Where-Object {
+        $_.operationRole -ceq 'operation_current' -and
+        $_.beforeState -ceq 'Completed:None' -and $_.afterState -ceq 'None'
+    })
+    $outgoing = @($roots | Where-Object {
+        $_.operationRole -ceq 'operation_terminal' -and
+        $_.beforeState -ceq 'Invalidated:None' -and
+        $_.afterState -ceq 'None'
+    })
+    $entrant = @($roots | Where-Object {
+        $_.operationRole -ceq 'operation_terminal' -and
+        $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Completed:None'
+    })
+    if ($roots.Count -ne 3 -or $current.Count -ne 1 -or
+        $outgoing.Count -ne 1 -or $entrant.Count -ne 1) {
+        throw 'Generated proof rollover does not contain the exact three recovery roots.'
+    }
+    $rolloverCurrent = $current[0]
+    $rolloverOutgoing = $outgoing[0]
+    $rolloverEntrant = $entrant[0]
+    if ($rolloverCurrent.authorityId -cne $rolloverEntrant.authorityId -or
+        [long]$rolloverCurrent.operationGeneration -ne [long]$rolloverEntrant.operationGeneration -or
+        $rolloverOutgoing.authorityId -ceq $rolloverEntrant.authorityId -or
+        [long]$rolloverOutgoing.operationGeneration -ge [long]$rolloverEntrant.operationGeneration -or
+        $rolloverCurrent.receiveRecovery.sourceBoundary.route -cne 'post_tuna_fallback_v6') {
+        throw 'Generated proof rollover lost its exact current, outgoing, or historical-source identity.'
+    }
+}
 $issueIndex = 0
-while ($envelopes[$issueIndex].decisionKind -cne 'IssueReceiveRecoveryOperation') { $issueIndex++ }
+while ($envelopes[$issueIndex].transitionId -cne $routeCarryIssue.transitionId) {
+    $issueIndex++
+}
 $checkpointBefore = Copy-Value $envelopes[$issueIndex-1].aggregate.afterBoundary
 $targetBefore = Copy-Value (Subject $envelopes[$issueIndex-1] 'terminal').routeTransition.targetBoundary
 foreach ($scope in @($checkpointBefore,$targetBefore)) {
@@ -256,9 +342,103 @@ foreach ($e in $shuffled) {
     })
 }
 Assert-Parity (New-Lines $shuffled) $true '' 'operation-order'
+if ($hasTerminalRollover) {
+    $allRolesReversed = Copy-Value $envelopes
+    foreach ($e in $allRolesReversed) {
+        [array]::Reverse($e.aggregate.operations)
+    }
+    Assert-Parity (New-Lines $allRolesReversed) $true '' 'terminal-rollover-operation-order'
+}
 Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $true '' 'duplicate-records'
 Assert-Parity @($lines | Where-Object { -not $_.Contains('effect_kind=receive_proof_observed;') }) $false 'snapshot_receive_recovery_required_effect_missing'
 Assert-Parity @($lines | Where-Object { -not $_.Contains('effect_kind=execution_receipt_observed;') }) $false 'snapshot_receive_recovery_required_effect_missing'
+if ($hasTerminalRollover) {
+    $withoutRolloverEffect = @($lines | Where-Object {
+        -not ((Get-FileTransferCoordinatorSnapshotEventName $_) -ceq
+                'filetransfer_coordinator_authority_effect' -and
+            (Get-FileTransferCoordinatorSnapshotLineField $_ transition_id) -ceq
+                $rollover.transitionId -and
+            (Get-FileTransferCoordinatorSnapshotLineField $_ effect_kind) -ceq
+                'receive_proof_observed')
+    })
+    Assert-Parity $withoutRolloverEffect $false 'snapshot_receive_recovery_required_effect_missing'
+
+    $rolloverSnapshotLine = @($lines | Where-Object {
+        (Get-FileTransferCoordinatorSnapshotEventName $_) -ceq
+            'filetransfer_coordinator_transition_snapshot' -and
+        (Get-FileTransferCoordinatorSnapshotLineField $_ transition_id) -ceq
+            $rollover.transitionId
+    })
+    if ($rolloverSnapshotLine.Count -ne 1) {
+        throw 'Rollover snapshot evidence is not unique.'
+    }
+    $rolloverSequence = [long](Get-FileTransferCoordinatorSnapshotLineField `
+        $rolloverSnapshotLine[0] log_writer_sequence)
+    $forgedOutgoingEffect = New-Effect $rollover $rolloverOutgoing `
+        'receive_proof_observed' ($rolloverSequence + 2)
+    $forgedLines = @($lines[0..($lines.Count-2)]) +
+        @($forgedOutgoingEffect, $lines[-1])
+    Assert-Parity $forgedLines $false
+
+    foreach ($mutation in @(
+        'missing-outgoing',
+        'duplicate-outgoing',
+        'outgoing-receipt',
+        'outgoing-source',
+        'outgoing-generation',
+        'entrant-authority')) {
+        $values = Copy-Value $envelopes
+        $candidate = @($values | Where-Object {
+            $_.transitionId -ceq $rollover.transitionId
+        })[0]
+        $roots = @($candidate.aggregate.operations | Where-Object {
+            $_.family -ceq 'receive_recovery' -and
+            $_.operationRole -in @('operation_current','operation_terminal')
+        })
+        $current = @($roots | Where-Object {
+            $_.operationRole -ceq 'operation_current'
+        })[0]
+        $outgoing = @($roots | Where-Object {
+            $_.operationRole -ceq 'operation_terminal' -and
+            $_.afterState -ceq 'None'
+        })[0]
+        $entrant = @($roots | Where-Object {
+            $_.operationRole -ceq 'operation_terminal' -and
+            $_.beforeState -ceq 'None'
+        })[0]
+        switch ($mutation) {
+            'missing-outgoing' {
+                $candidate.aggregate.operations = @(
+                    $candidate.aggregate.operations | Where-Object {
+                        $_.operationKey -cne $outgoing.operationKey
+                    })
+            }
+            'duplicate-outgoing' {
+                $candidate.aggregate.operations += Copy-Value $outgoing
+            }
+            'outgoing-receipt' {
+                $outgoing.receiptFingerprint += '-mutated'
+                $outgoing.receiveRecovery.receipts[0].receiptFingerprint =
+                    $outgoing.receiptFingerprint
+            }
+            'outgoing-source' {
+                $outgoing.receiveRecovery.sourceBoundary.transportEpoch++
+            }
+            'outgoing-generation' {
+                $outgoing.operationGeneration++
+                $outgoing.operationKey = "receive_recovery|operation_terminal|$($outgoing.authorityId)|$($outgoing.operationGeneration)|$($outgoing.operationKind)"
+            }
+            'entrant-authority' {
+                $entrant.authorityId += '-mutated'
+                $entrant.operationKey = "receive_recovery|operation_terminal|$($entrant.authorityId)|$($entrant.operationGeneration)|$($entrant.operationKind)"
+                if ($entrant.authorityId -ceq $current.authorityId) {
+                    throw 'Entrant mutation did not separate it from the current authority.'
+                }
+            }
+        }
+        Assert-Parity (New-Lines $values) $false
+    }
+}
 $values = Copy-Value $envelopes
 (Recovery-Subject $values[$issueIndex] 'operation_current').commandFingerprint+='-foreign'
 Assert-Parity (New-Lines $values) $false 'receive_recovery_route_terminal_carry_history_invalid'
@@ -316,7 +496,8 @@ function History-Entries($values) {
 function Resolve-History($entries, $invalid = @{}) {
     $candidates = @{}
     foreach ($entry in $entries) {
-        if ($entry.Boundary.decisionKind -in $carryKinds) {
+        if ($script:RouteCarryTransitionIds.ContainsKey(
+                [string]$entry.Boundary.boundaryId)) {
             $candidates[$entry.Boundary.boundaryId] = @{ Line=$entry.Boundary.evidenceLineIndex }
         }
     }

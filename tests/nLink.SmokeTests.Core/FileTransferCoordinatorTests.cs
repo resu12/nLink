@@ -5384,9 +5384,30 @@ public sealed class FileTransferCoordinatorTests
         FileTransferDirection direction)
         => CreateReceiveRecoveryRouteCarrySnapshotFixture(direction);
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound)]
+    [InlineData(FileTransferDirection.Outbound)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "ReceiveRecoveryOperation")]
+    [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    public void FileTransferReceiveRecovery_ProofRetiresPriorTerminalDuringRouteCarry(
+        FileTransferDirection direction)
+        => CreateReceiveRecoveryRouteCarrySnapshotFixture(
+            direction,
+            proveSuccessorWithTerminalRollover: true);
+
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
-        CreateReceiveRecoveryRouteCarrySnapshotFixture(FileTransferDirection direction, bool terminalizeUnprovenSuccessor = false)
+        CreateReceiveRecoveryRouteCarrySnapshotFixture(
+            FileTransferDirection direction,
+            bool terminalizeUnprovenSuccessor = false,
+            bool proveSuccessorWithTerminalRollover = false)
     {
+        if (proveSuccessorWithTerminalRollover)
+        {
+            return CreateReceiveRecoveryRouteCarryTerminalRolloverSnapshotFixture(
+                direction);
+        }
+
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
         {
@@ -5579,6 +5600,272 @@ public sealed class FileTransferCoordinatorTests
                 }
             }
         }
+    }
+
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CreateReceiveRecoveryRouteCarryTerminalRolloverSnapshotFixture(
+            FileTransferDirection direction)
+    {
+        var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
+        {
+            Assert.NotNull(envelope);
+            if (envelopes.Count > 0)
+            {
+                Assert.Equal(envelopes[^1].Aggregate.AfterStateGeneration,
+                    envelope.Aggregate.BeforeStateGeneration);
+                Assert.Equal(envelopes[^1].Aggregate.AfterStateFingerprint,
+                    envelope.Aggregate.BeforeStateFingerprint);
+            }
+            Assert.Equal(envelope.Aggregate.BeforeStateGeneration + 1,
+                envelope.Aggregate.AfterStateGeneration);
+            Assert.NotEqual(envelope.Aggregate.BeforeStateFingerprint,
+                envelope.Aggregate.AfterStateFingerprint);
+            envelopes.Add(envelope);
+        }
+
+        var regular = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular, direction).State with
+        {
+            CurrentDataSessionIdentity =
+                "initial-responder-fallback-fixture-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        var published = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "receive_recovery_route_carry_publication",
+                RuntimeOwner: owner,
+                Route: regular.Route,
+                ProtocolVersion: regular.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: regular.Route,
+                TargetProtocolVersion: regular.ProtocolVersion,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(published.Accepted, published.RejectionReason);
+        state = published.State with
+        {
+            PersistentState = published.State.PersistentState with
+            {
+                CoordinatorInstanceId =
+                    $"receive-recovery-route-rollover-{direction}",
+                SnapshotStateGeneration = 0,
+                SnapshotStateFingerprint = null,
+            },
+        };
+
+        var firstIssued = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            state,
+            CreateReceiveRecoveryObservationForTest(
+                state,
+                "session_liveness_timeout_pending"),
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            state.CurrentLeg!.CheckpointRequestId);
+        Assert.True(firstIssued.Accepted, firstIssued.Reason);
+        Capture(firstIssued.SnapshotEnvelope!);
+        var firstAuthority = firstIssued.Authority!.Value;
+        var firstReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            firstAuthority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft",
+            "bridge_recovery_completed");
+        var firstStarted = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            firstIssued.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                firstAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(firstReceipt)),
+            observedUtcMs: 100);
+        Assert.True(firstStarted.Accepted, firstStarted.Reason);
+        Capture(firstStarted.SnapshotEnvelope!);
+        var firstCompleted = FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+            firstStarted.State,
+            firstReceipt,
+            observedUtcMs: 200);
+        Assert.True(firstCompleted.Accepted, firstCompleted.Reason);
+        Capture(firstCompleted.SnapshotEnvelope!);
+        var firstProof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            firstCompleted.State,
+            new FileTransferReceiveRecoveryProof(
+                firstAuthority,
+                $"route-carry-predecessor-proof-{direction}",
+                "file_transfer_data_frame",
+                300));
+        Assert.True(firstProof.Accepted, firstProof.Reason);
+        Capture(firstProof.SnapshotEnvelope!);
+
+        FileTransferCoordinatorState tuna;
+        if (direction == FileTransferDirection.Inbound)
+        {
+            tuna = ActivateInitialResponderTunaForFallbackFixture(
+                firstProof.State,
+                Capture).State;
+        }
+        else
+        {
+            var setup = CreateRegularV4ToTunaRouteTransitionSetup(
+                firstProof.State,
+                Capture);
+            tuna = CommitEmptyFileTransferRouteTransitionForTest(
+                setup.State,
+                setup.Request,
+                setup.FinalProof,
+                capture: Capture).State;
+        }
+        var invalidatedFirst = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            FileTransferCoordinator.GetReceiveRecoverySubstate(tuna)
+                .LastTerminalOperation);
+        Assert.Null(FileTransferCoordinator.GetReceiveRecoverySubstate(tuna)
+            .CurrentOperation);
+        Assert.Equal(firstAuthority.AuthorityId,
+            invalidatedFirst.Authority.AuthorityId);
+        Assert.Equal(FileTransferReceiveRecoveryExecutionState.Invalidated,
+            invalidatedFirst.ExecutionState);
+
+        owner = tuna.CurrentRuntimeOwner!.Value;
+        var publication = tuna.CurrentRoutePublicationToken!.Value;
+        leg = tuna.CurrentLeg!;
+        var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(
+            owner,
+            publication,
+            tuna.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            tuna.CurrentDataSessionGeneration,
+            StateEpoch: 9,
+            ContiguousCommittedChunkIndex: 8,
+            DurableHighestChunkIndex: 7,
+            ChunkCount: 128,
+            CheckpointGeneration: 2);
+        var bootstrap = FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
+            tuna,
+            new FileTransferFallbackV6ProofBootstrapObservation(
+                tuna.SessionId,
+                tuna.TransferId,
+                direction,
+                ObservationGeneration: 1,
+                FallbackEpoch: 1,
+                Source: "header_switch_off",
+                ProofKind: "file_transfer_v4_state_frame_received",
+                ObservedUtcMilliseconds: 10_000,
+                checkpoint));
+        Assert.Equal(FileTransferFallbackV6ProofBootstrapDecisionStatus.Issued,
+            bootstrap.Status);
+        Capture(bootstrap.SnapshotEnvelope!);
+        var bootstrapCommand = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapCommand>(bootstrap.Command);
+        var delivered = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
+            bootstrap.State,
+            new FileTransferFallbackV6ProofBootstrapReceipt(
+                bootstrapCommand,
+                FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                new PostTunaFallbackPeerProofFrameIdentity(
+                    bootstrapCommand.FrameKind ==
+                        FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState
+                        ? FileTransferProtocol.ReceiverStateFrameTypeV6
+                        : FileTransferProtocol.FrontierRequestFrameTypeV6,
+                    bootstrapCommand.TargetTransportEpoch,
+                    new string('b', 64)),
+                "filetransfer_fallback_v6_proof_bootstrap_delivered"));
+        Assert.Equal(FileTransferFallbackV6ProofBootstrapDecisionStatus.Applied,
+            delivered.Status);
+        Capture(delivered.SnapshotEnvelope!);
+        var fallback = FallBack(
+            delivered.State,
+            FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6),
+            committedChunk: 8,
+            transportEpoch: bootstrapCommand.TargetTransportEpoch,
+            capture: Capture).State;
+
+        var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
+            fallback,
+            CreateReceiveRecoveryObservationForTest(
+                fallback,
+                "session_liveness_timeout_pending",
+                observationGeneration: 2),
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            fallback.CurrentLeg!.CheckpointRequestId);
+        Assert.True(successor.Accepted, successor.Reason);
+        Capture(successor.SnapshotEnvelope!);
+        var successorAuthority = successor.Authority!.Value;
+        var successorReceipt = new FileTransferBridgeRecoveryExecutionReceipt(
+            successorAuthority.ExecutionCommand,
+            FileTransferBridgeRecoveryExecutionOutcome.Completed,
+            "soft",
+            "bridge_recovery_completed");
+        var successorStarted = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
+            successor.State,
+            new FileTransferBridgeRecoveryExecutionStartResult(
+                successorAuthority.ExecutionCommand,
+                FileTransferBridgeRecoveryExecutionStartStatus.Started,
+                "bridge_recovery_execution_started",
+                Task.FromResult(successorReceipt)),
+            observedUtcMs: 400);
+        Assert.True(successorStarted.Accepted, successorStarted.Reason);
+        Capture(successorStarted.SnapshotEnvelope!);
+        var successorCompleted = FileTransferCoordinator.ObserveReceiveRecoveryExecutionReceipt(
+            successorStarted.State,
+            successorReceipt,
+            observedUtcMs: 500);
+        Assert.True(successorCompleted.Accepted, successorCompleted.Reason);
+        Capture(successorCompleted.SnapshotEnvelope!);
+        var successorProof = FileTransferCoordinator.ObserveReceiveRecoveryProof(
+            successorCompleted.State,
+            new FileTransferReceiveRecoveryProof(
+                successorAuthority,
+                $"route-carry-successor-proof-{direction}",
+                "file_transfer_data_frame",
+                600));
+        Assert.True(successorProof.Accepted, successorProof.Reason);
+        Capture(successorProof.SnapshotEnvelope!);
+
+        var roots = successorProof.SnapshotEnvelope!.Aggregate.Operations.Where(
+            operation => operation.Family == "receive_recovery" &&
+                operation.OperationRole is "operation_current" or
+                    "operation_terminal").ToArray();
+        Assert.Equal(3, roots.Length);
+        var currentRetirement = Assert.Single(roots, operation =>
+            operation.OperationRole == "operation_current");
+        Assert.Equal(successorAuthority.AuthorityId.ToString(),
+            currentRetirement.AuthorityId);
+        Assert.Equal("Completed:None", currentRetirement.BeforeState);
+        Assert.Equal("None", currentRetirement.AfterState);
+        var outgoingTerminal = Assert.Single(roots, operation =>
+            operation.OperationRole == "operation_terminal" &&
+            operation.AfterState == "None");
+        Assert.Equal(firstAuthority.AuthorityId.ToString(),
+            outgoingTerminal.AuthorityId);
+        Assert.Equal("Invalidated:None", outgoingTerminal.BeforeState);
+        Assert.Equal("Adopted", outgoingTerminal.ReceiptStatus);
+        Assert.True(outgoingTerminal.ReceiptValidated);
+        var outgoingReceipt = Assert.Single(
+            outgoingTerminal.ReceiveRecovery!.Receipts);
+        Assert.Equal("operation", outgoingReceipt.Stage);
+        Assert.True(outgoingReceipt.ReceiptValidated);
+        var enteringTerminal = Assert.Single(roots, operation =>
+            operation.OperationRole == "operation_terminal" &&
+            operation.BeforeState == "None");
+        Assert.Equal(successorAuthority.AuthorityId.ToString(),
+            enteringTerminal.AuthorityId);
+        Assert.Equal("Completed:None", enteringTerminal.AfterState);
+        Assert.True(outgoingTerminal.OperationGeneration <
+            enteringTerminal.OperationGeneration);
+        var effect = Assert.IsType<FileTransferCoordinatorAuthorityEffectBinding>(
+            successorProof.SnapshotAuthorityEffectBinding);
+        Assert.Equal("receive_proof_observed", effect.EffectKind);
+        Assert.Equal(enteringTerminal.OperationKey, effect.OperationKey);
+        Assert.Equal("operation", effect.ReceiptStage);
+        return envelopes;
     }
 
     [Fact]
@@ -6250,6 +6537,83 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(retired.ReceiptFingerprint, installed.ReceiptFingerprint);
         Assert.Equal(retired.RuntimeUnlockRetry!.SourceBoundary, installed.RuntimeUnlockRetry!.SourceBoundary);
         Assert.Equal("Staged", pending.AfterState); // Earlier immutable envelope remains pending.
+
+        var binding = Assert.IsType<FileTransferCoordinatorAuthorityEffectBinding>(
+            SessionFileTransferService
+                .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                    commit));
+        Assert.Equal("install_committed", binding.EffectKind);
+        Assert.Equal(installed.OperationKey, binding.OperationKey);
+        Assert.Equal(installed.AuthorityId, binding.AuthorityId);
+        Assert.Equal(installed.OperationGeneration, binding.OperationGeneration);
+        Assert.Equal(installed.ReceiptIdentity, binding.ReceiptIdentity);
+        Assert.Equal(installed.ReceiptGeneration, binding.ReceiptGeneration);
+        Assert.Equal("Installed", binding.ReceiptStatus);
+        Assert.Equal(installed.ReceiptFingerprint, binding.ReceiptFingerprint);
+        Assert.Null(SessionFileTransferService
+            .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                issuance));
+        Assert.Null(SessionFileTransferService
+            .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                envelopes[5]));
+
+        var reordered = commit with
+        {
+            Aggregate = commit.Aggregate with
+            {
+                Operations = System.Collections.Immutable.ImmutableArray
+                    .CreateRange(commit.Aggregate.Operations.Reverse()),
+            },
+        };
+        Assert.Equal(
+            binding,
+            SessionFileTransferService
+                .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                    reordered));
+        var ambiguous = commit with
+        {
+            Aggregate = commit.Aggregate with
+            {
+                Operations = commit.Aggregate.Operations.Add(installed),
+            },
+        };
+        Assert.Null(SessionFileTransferService
+            .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                ambiguous));
+        var mutatedInstalled = installed with
+        {
+            RuntimeUnlockRetry = installed.RuntimeUnlockRetry! with
+            {
+                SourceBoundary = installed.RuntimeUnlockRetry.SourceBoundary with
+                {
+                    DataSessionGeneration = installed.RuntimeUnlockRetry
+                        .SourceBoundary.DataSessionGeneration + 1,
+                },
+            },
+        };
+        var mutated = commit with
+        {
+            Aggregate = commit.Aggregate with
+            {
+                Operations = System.Collections.Immutable.ImmutableArray
+                    .CreateRange(commit.Aggregate.Operations.Select(operation =>
+                        operation.OperationRole == "attempt_installed"
+                            ? mutatedInstalled
+                            : operation)),
+            },
+        };
+        Assert.Null(SessionFileTransferService
+            .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                mutated));
+
+        var alias = envelopes[6];
+        var aliasOperation = Assert.Single(alias.Aggregate.Operations,
+            operation => operation.OperationRole == "attempt_installed");
+        Assert.Equal("Installed", aliasOperation.BeforeState);
+        Assert.Equal("AliasBound", aliasOperation.AfterState);
+        Assert.Null(SessionFileTransferService
+            .CreateRuntimeUnlockRetryInstallAuthorityEffectBindingForTesting(
+                alias));
     }
 
     internal static FileTransferCoordinatorTransitionEnvelope[] CreatePendingScopeInvalidationSnapshotFixture(bool fallback)
@@ -6384,8 +6748,18 @@ public sealed class FileTransferCoordinatorTests
         var duplicateInstall = FileTransferCoordinator.CommitRuntimeUnlockRetryDispatchInstall(installed.State,
             new RuntimeUnlockRetryDispatchInstallResult(RuntimeUnlockRetryDispatchInstallStatus.Idempotent,
                 "idempotent", receipt), 30_004);
+        var aliasBound = FileTransferCoordinator
+            .ObserveRuntimeUnlockRetryDispatchExecutionState(
+                installed.State,
+                receipt,
+                RuntimeUnlockRetryDispatchAttemptPhase.AliasBound,
+                71,
+                "staged-install-offer",
+                dispatchObserved: false);
+        Assert.True(aliasBound.Accepted, aliasBound.Reason);
         return new[] { granted.SnapshotEnvelope, staged.SnapshotEnvelope, issued.SnapshotEnvelope,
-                duplicate.SnapshotEnvelope, installed.SnapshotEnvelope, duplicateInstall.SnapshotEnvelope }
+                duplicate.SnapshotEnvelope, installed.SnapshotEnvelope, duplicateInstall.SnapshotEnvelope,
+                aliasBound.SnapshotEnvelope }
             .Select(envelope => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(envelope)).ToArray();
     }
 

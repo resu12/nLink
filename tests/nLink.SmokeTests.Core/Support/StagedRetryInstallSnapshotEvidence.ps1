@@ -150,7 +150,7 @@ if ($full.ArtifactEvidenceVerdict -cne 'pass' -or $parity.Verdict -cne 'pass' -o
     @($full.Boundaries | Where-Object {
         $_.taxonomyClass -ceq 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
     }).Count -ne 0 -or
-    $full.FirstUnresolvedBoundary.boundaryId -cne $envelopes[5].transitionId -or
+    $full.FirstUnresolvedBoundary.boundaryId -cne $envelopes[6].transitionId -or
     $full.FirstUnresolvedBoundary.taxonomyClass -cne 'runtime_unlock_retry_dispatch_contract_unsettled') {
     throw "Production issuance-to-install fixture failed: $($full | Select-Object * -ExcludeProperty Boundaries | ConvertTo-Json -Depth 16 -Compress)"
 }

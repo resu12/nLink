@@ -396,6 +396,9 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 checkpointGeneration=1L; checkpointRequestId='(none)'
                 dataSessionIdentity='data-session'; dataSessionGeneration=1L
             }
+            function Copy-Value($value) {
+                $value | ConvertTo-Json -Depth 64 -Compress | ConvertFrom-Json
+            }
             function New-Receipt([string]$stage,[string]$status,[string]$id) {
                 [pscustomobject]@{
                     stage=$stage; commandIdentity="$id-command"
@@ -548,6 +551,131 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             if (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
                     $entry $history @($forged)) {
                 throw 'A copied peer-proof effect on the new yield was accepted.'
+            }
+
+            $localReceipt=New-Receipt 'local_proof' 'Observed' 'local'
+            $pairReceipt=New-Receipt 'paired_release' 'Paired' 'pair'
+            $paired=Copy-Value $current
+            $paired.beforeState='PeerProofObserved'; $paired.afterState='Paired'
+            $paired.fallbackTailYield.pairingState='Paired'
+            $paired.fallbackTailYield.localProofIdentity=$localReceipt.receiptIdentity
+            $paired.fallbackTailYield.localProofFingerprint=$localReceipt.receiptFingerprint
+            $paired.fallbackTailYield.pairedReleaseAuthorityId=$paired.authorityId
+            $paired.fallbackTailYield.pairedReleaseGeneration=1L
+            $paired.fallbackTailYield.pairingGeneration=1L
+            $paired.fallbackTailYield.receipts=@($yieldReceipt,$localReceipt,$peerReceipt,$pairReceipt)
+            $pairedBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='paired'
+                afterStateGeneration=10L; decisionUtcMilliseconds=3L
+                decisionKind='ApplyFallbackTailLocalProofReceipt'; decisionStatus='Accepted'
+                operations=@($paired)
+            }
+            $pairedEntry=[pscustomobject]@{Boundary=$pairedBoundary;Operation=$paired}
+
+            $reserved=Copy-Value $paired
+            $reserved.beforeState='Paired'; $reserved.afterState='ReleaseReserved'
+            $reserved.fallbackTailYield.pairingState='ReleaseReserved'
+            $reservedBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='reserved'
+                afterStateGeneration=11L; decisionUtcMilliseconds=4L
+                decisionKind='AuthorizeRuntimeUnlockRetryDispatch'; decisionStatus='Granted'
+                operations=@($reserved)
+            }
+            $reservedEntry=[pscustomobject]@{Boundary=$reservedBoundary;Operation=$reserved}
+
+            $consumed=Copy-Value $reserved
+            $consumed.beforeState='ReleaseReserved'; $consumed.afterState='ReleaseConsumed'
+            $consumed.fallbackTailYield.pairingState='ReleaseConsumed'
+            $consumedBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='consumed'
+                afterStateGeneration=12L; decisionUtcMilliseconds=5L
+                decisionKind='CommitRuntimeUnlockRetryDispatchInstall'; decisionStatus='Accepted'
+                operations=@($consumed)
+            }
+            $consumedEntry=[pscustomobject]@{Boundary=$consumedBoundary;Operation=$consumed}
+
+            $retiredCurrent=Copy-Value $consumed
+            $retiredCurrent.beforeState='ReleaseConsumed'; $retiredCurrent.afterState='None'
+            $terminal=Copy-Value $consumed
+            $terminal.operationRole='yield_terminal'
+            $terminal.operationKey="fallback_tail_yield|yield_terminal|$($terminal.authorityId)|1|Quiescent"
+            $terminal.beforeState='None'; $terminal.afterState='Invalidated'
+            $terminal.fallbackTailYield.role='yield_terminal'
+            $terminal.fallbackTailYield.pairingState='Invalidated'
+            $terminalBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='terminal'
+                afterStateGeneration=13L; decisionUtcMilliseconds=6L
+                decisionKind='Terminalized'; decisionStatus='Accepted'
+                operations=@($retiredCurrent,$terminal)
+            }
+            $retiredEntry=[pscustomobject]@{Boundary=$terminalBoundary;Operation=$retiredCurrent}
+            $terminalEntry=[pscustomobject]@{Boundary=$terminalBoundary;Operation=$terminal}
+            $peerFirstYieldHistory=@(
+                $entry,$pairedEntry,$reservedEntry,$consumedEntry,$retiredEntry,$terminalEntry)
+            $peerFirstOperationHistory=@(
+                [pscustomobject]@{Boundary=$priorBoundary;Operation=$priorPending}) +
+                $peerFirstYieldHistory
+            $lifecycle=Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle `
+                $peerFirstYieldHistory $peerFirstOperationHistory @($effect)
+            foreach ($subject in $peerFirstYieldHistory) {
+                $key=Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey $subject
+                if (-not $lifecycle[$key].Valid) {
+                    throw "Exact peer-first successor was rejected: $key/$($lifecycle[$key].Variant)"
+                }
+            }
+
+            $mutatedPaired=Copy-Value $paired
+            $mutatedPaired.fallbackTailYield.peerProofFingerprint='mutated-peer-proof'
+            $mutatedBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='mutated'
+                afterStateGeneration=10L; decisionUtcMilliseconds=3L
+                decisionKind='ApplyFallbackTailLocalProofReceipt'; decisionStatus='Accepted'
+                operations=@($mutatedPaired)
+            }
+            $mutatedEntry=[pscustomobject]@{Boundary=$mutatedBoundary;Operation=$mutatedPaired}
+            $mutatedLifecycle=Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle `
+                @($entry,$mutatedEntry) `
+                @([pscustomobject]@{Boundary=$priorBoundary;Operation=$priorPending},$entry,$mutatedEntry) `
+                @($effect)
+            $mutatedKey=Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey $mutatedEntry
+            if ($mutatedLifecycle[$mutatedKey].Valid -or
+                $mutatedLifecycle[$mutatedKey].Variant -cne
+                    'peer_first_proof_effect_rechecked_against_later_paired_current_transition') {
+                throw 'A mutated peer-first successor did not fail with the exact variant.'
+            }
+
+            $direct=Copy-Value $paired
+            $direct.authorityId='direct-authority'
+            $direct.operationKey='fallback_tail_yield|yield_current|direct-authority|1|Quiescent'
+            $direct.beforeState='LocalProofObserved'; $direct.afterState='Paired'
+            $directBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='direct'
+                afterStateGeneration=20L; decisionUtcMilliseconds=20L
+                decisionKind='ApplyFallbackTailPeerProofReceipt'; decisionStatus='Accepted'
+                operations=@($direct)
+            }
+            $directEntry=[pscustomobject]@{Boundary=$directBoundary;Operation=$direct}
+            $directEffect=$effect.PSObject.Copy()
+            $directEffect.TransitionId='direct'; $directEffect.StateGeneration=20L
+            $directEffect.OperationKey=$direct.operationKey
+            $directEffect.AuthorityId=$direct.authorityId
+            $directLifecycle=Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle `
+                @($directEntry) @($directEntry) @($directEffect)
+            $directKey=Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey $directEntry
+            if (-not $directLifecycle[$directKey].Valid) {
+                throw 'A directly observed peer proof was rejected.'
+            }
+
+            $missingLifecycle=Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle `
+                $peerFirstYieldHistory $peerFirstOperationHistory @()
+            $missingKey=Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey $entry
+            if ($missingLifecycle[$missingKey].Valid) {
+                throw 'A missing peer-proof origin effect was accepted.'
+            }
+            $duplicateLifecycle=Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle `
+                $peerFirstYieldHistory $peerFirstOperationHistory @($effect,$forged)
+            if ($duplicateLifecycle[$missingKey].Valid) {
+                throw 'A copied peer-proof effect was accepted by the lifecycle reducer.'
             }
             $mutated=$peerEnvelope.PSObject.Copy()
             $mutated.aggregate=$peerEnvelope.aggregate.PSObject.Copy()
@@ -4631,6 +4759,36 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         try
         {
             var envelopes = FileTransferCoordinatorTests.CreateReceiveRecoveryRouteCarrySnapshotFixture(direction)
+                .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            await File.WriteAllTextAsync(fixturePath,
+                "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "ReceiveRecoveryRouteCarrySnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    public async Task FileTransferOps_ReceiveRecoveryRouteCarryTerminalRolloverUsesExactSharedHistory(
+        NLink.Core.FileTransfer.FileTransferDirection direction)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-receive-route-carry-rollover",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateReceiveRecoveryRouteCarrySnapshotFixture(
+                    direction,
+                    proveSuccessorWithTerminalRollover: true)
                 .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
             var fixturePath = Path.Combine(tempRoot, "envelopes.json");
             await File.WriteAllTextAsync(fixturePath,
