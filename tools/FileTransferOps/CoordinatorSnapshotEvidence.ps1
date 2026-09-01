@@ -3557,6 +3557,317 @@ function Get-FileTransferCoordinatorSnapshotFamily5PressureSettlementFailure {
     return $crossSourceFailure
 }
 
+function Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidation {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ([string]$Envelope.decisionKind -cne 'RepairReplay' -or
+        [string]$Envelope.decisionStatus -cne 'Accepted' -or
+        [string]$Envelope.decisionReason -cne 'accepted' -or
+        $null -eq $Envelope.aggregate) {
+        return $false
+    }
+
+    $aggregate = $Envelope.aggregate
+    if ([long]$aggregate.afterStateGeneration -ne
+            ([long]$aggregate.beforeStateGeneration + 1L) -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$aggregate.beforeStateFingerprint) -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$aggregate.afterStateFingerprint) -or
+        [string]$aggregate.beforeStateFingerprint -ceq
+            [string]$aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $aggregate.beforeBoundary `
+            -Right $aggregate.afterBoundary) -or
+        [int]$aggregate.afterBoundary.protocolVersion -ne 4 -or
+        [string]$aggregate.afterBoundary.route -notin @(
+            'regular_nkn_v4_fast', 'file_tuna_v4') -or
+        [long]$aggregate.afterBoundary.routePublicationGeneration -le 0 -or
+        ([string]$aggregate.afterBoundary.route -ceq 'file_tuna_v4' -and
+         [long]$aggregate.afterBoundary.routeCommitGeneration -le 0) -or
+        (@($aggregate.changedFamilies | Sort-Object) -join '|') -cne
+            'regular_v4_frontier_repair_pressure|responder_probe_handoff' -or
+        (Get-FileTransferCoordinatorSnapshotFamily5RepairReplayFailure `
+            -Envelope $Envelope) -cne '') {
+        return $false
+    }
+
+    $operations = @($aggregate.operations)
+    if (@($operations | Where-Object {
+                [string]$_.family -notin @(
+                    'regular_v4_frontier_repair_pressure',
+                    'responder_probe_handoff')
+            }).Count -ne 0) {
+        return $false
+    }
+    $family5Operations = @($operations | Where-Object {
+            [string]$_.family -ceq
+                'regular_v4_frontier_repair_pressure'
+        })
+    $family5Attempts = @($family5Operations | Where-Object {
+            [string]$_.operationRole -ceq 'attempted_decision' -and
+            [string]$_.operationKind -ceq 'RepairReplay' -and
+            -not [bool]$_.stateApplied
+        })
+    $family5Entrants = @($family5Operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_current' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Authorized' -and
+            [bool]$_.stateApplied
+        })
+    $family5Retirements = @($family5Operations | Where-Object {
+            [string]$_.operationRole -ceq 'repair_authority_current' -and
+            [string]$_.beforeState -ceq 'Authorized' -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    if ($family5Attempts.Count -ne 1 -or
+        $family5Entrants.Count -ne 1 -or
+        $family5Retirements.Count -gt 1 -or
+        $family5Operations.Count -ne
+            (2 + $family5Retirements.Count) -or
+        -not (Test-FileTransferCoordinatorSnapshotFamily5RepairReplayScope `
+            -Operation $family5Entrants[0])) {
+        return $false
+    }
+    foreach ($family5Subject in @(
+            $family5Entrants[0], $family5Attempts[0])) {
+        $family5Payload =
+            $family5Subject.regularV4FrontierRepairPressure
+        if ($null -eq $family5Payload -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $family5Payload.sourceBoundary `
+                -Right $aggregate.afterBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $family5Payload.effectiveBoundary `
+                -Right $aggregate.afterBoundary)) {
+            return $false
+        }
+    }
+    $responderOperations = @($operations | Where-Object {
+            [string]$_.family -ceq 'responder_probe_handoff'
+        })
+    $currentOperations = @($responderOperations | Where-Object {
+            [string]$_.operationRole -ceq 'handoff_current' -and
+            [string]$_.operationKind -ceq
+                'ResponderPeerProbeRouteTransitionHandoff' -and
+            [string]$_.beforeState -ceq 'Accepted' -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    $terminalOperations = @($responderOperations | Where-Object {
+            [string]$_.operationRole -ceq 'handoff_terminal' -and
+            [string]$_.operationKind -ceq
+                'ResponderPeerProbeRouteTransitionHandoff' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Invalidated' -and
+            [bool]$_.stateApplied
+        })
+    if ($responderOperations.Count -ne 2 -or
+        $currentOperations.Count -ne 1 -or
+        $terminalOperations.Count -ne 1) {
+        return $false
+    }
+
+    $current = $currentOperations[0]
+    $terminal = $terminalOperations[0]
+    if ([string]$current.authorityId -in @('', '(none)') -or
+        [string]$terminal.authorityId -cne [string]$current.authorityId -or
+        [long]$current.operationGeneration -le 0 -or
+        [long]$terminal.operationGeneration -ne
+            [long]$current.operationGeneration -or
+        [string]$current.predecessorAuthorityId -cne '(none)' -or
+        [string]$terminal.predecessorAuthorityId -cne '(none)' -or
+        [string]$current.operationKey -cne
+            "responder_probe_handoff|handoff_current|$($current.authorityId)|$($current.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff" -or
+        [string]$terminal.operationKey -cne
+            "responder_probe_handoff|handoff_terminal|$($terminal.authorityId)|$($terminal.operationGeneration)|ResponderPeerProbeRouteTransitionHandoff" -or
+        $null -eq $current.responderProbeHandoff -or
+        $null -eq $terminal.responderProbeHandoff) {
+        return $false
+    }
+
+    $currentPayload = $current.responderProbeHandoff
+    $terminalPayload = $terminal.responderProbeHandoff
+    if ([string]$currentPayload.role -cne 'handoff_current' -or
+        [string]$terminalPayload.role -cne 'handoff_terminal' -or
+        [string]$currentPayload.decisionStatus -cne 'Accepted' -or
+        [string]$currentPayload.decisionReason -cne
+            'runtime_unlock_responder_peer_probe_handoff_bound' -or
+        [string]$terminalPayload.decisionStatus -cne 'Invalidated' -or
+        [string]$terminalPayload.decisionReason -cne
+            'runtime_unlock_responder_peer_probe_handoff_scope_replaced' -or
+        [string]$currentPayload.transitionMode -cne
+            'post_fallback_v6_paired' -or
+        [string]$terminalPayload.transitionMode -cne
+            [string]$currentPayload.transitionMode -or
+        [string]$currentPayload.handoffAuthorityId -cne
+            [string]$current.authorityId -or
+        [string]$terminalPayload.handoffAuthorityId -cne
+            [string]$current.authorityId -or
+        [long]$currentPayload.handoffGeneration -ne
+            [long]$current.operationGeneration -or
+        [long]$terminalPayload.handoffGeneration -ne
+            [long]$current.operationGeneration) {
+        return $false
+    }
+
+    foreach ($field in @(
+            'transactionGeneration', 'offerGeneration',
+            'pendingAnswerAckGeneration', 'payerDecisionId',
+            'launchGeneration', 'tunaPathLeaseGeneration',
+            'tunaPathLeaseListenerRunId', 'ackMessageId',
+            'ackSourceFingerprint', 'peerProbeFrameFingerprint', 'probeId',
+            'probeState', 'probeTransport', 'probeAckedUtcMs',
+            'admissionGeneration', 'pendingPreCommitGeneration', 'ownerKey',
+            'pairKey', 'pairedReleaseAuthorityId',
+            'pairedReleaseGeneration', 'pairingGeneration',
+            'localProofIdentity', 'localProofFingerprint',
+            'peerProofIdentity', 'peerProofFingerprint', 'lanes',
+            'linkedTransitionAuthorityId', 'linkedTransitionGeneration')) {
+        if ([string]$currentPayload.$field -cne
+            [string]$terminalPayload.$field) {
+            return $false
+        }
+    }
+    foreach ($field in @(
+            'transactionGeneration', 'offerGeneration',
+            'pendingAnswerAckGeneration', 'payerDecisionId',
+            'launchGeneration', 'tunaPathLeaseGeneration',
+            'probeAckedUtcMs', 'admissionGeneration',
+            'pendingPreCommitGeneration')) {
+        if ([long]$currentPayload.$field -le 0) {
+            return $false
+        }
+    }
+    foreach ($field in @(
+            'tunaPathLeaseListenerRunId', 'ackMessageId',
+            'ackSourceFingerprint', 'peerProbeFrameFingerprint', 'probeId',
+            'ownerKey')) {
+        if ([string]$currentPayload.$field -in @('', '(none)')) {
+            return $false
+        }
+    }
+    if ([string]$currentPayload.lanes -cne 'file' -or
+        [string]$currentPayload.probeState -cne 'Acked' -or
+        [string]$currentPayload.probeTransport -cne 'Tuna') {
+        return $false
+    }
+    $linkedTransitionAuthorityId =
+        [string]$currentPayload.linkedTransitionAuthorityId
+    $linkedTransitionGeneration =
+        [long]$currentPayload.linkedTransitionGeneration
+    if (($linkedTransitionAuthorityId -ceq '(none)' -and
+            $linkedTransitionGeneration -ne 0) -or
+        ($linkedTransitionAuthorityId -cne '(none)' -and
+            ([string]::IsNullOrWhiteSpace($linkedTransitionAuthorityId) -or
+             $linkedTransitionGeneration -le 0))) {
+        return $false
+    }
+    foreach ($field in @('commandIdentity', 'commandGeneration',
+            'commandFingerprint', 'receiptIdentity', 'receiptGeneration')) {
+        if ([string]$current.$field -cne [string]$terminal.$field) {
+            return $false
+        }
+    }
+    foreach ($boundaryName in @(
+            'sourceBoundary', 'effectiveBoundary', 'targetBoundary')) {
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $currentPayload.$boundaryName `
+                -Right $terminalPayload.$boundaryName)) {
+            return $false
+        }
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $currentPayload.effectiveBoundary `
+            -Right $aggregate.afterBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $currentPayload.targetBoundary `
+            -Right $aggregate.afterBoundary) -or
+        [string]$currentPayload.sourceBoundary.dataSessionIdentity -cne
+            [string]$aggregate.afterBoundary.dataSessionIdentity -or
+        [long]$currentPayload.sourceBoundary.dataSessionGeneration -ne
+            [long]$aggregate.afterBoundary.dataSessionGeneration) {
+        return $false
+    }
+
+    if ([string]$currentPayload.sourceBoundary.route -cne
+            'post_tuna_fallback_v6' -or
+        [int]$currentPayload.sourceBoundary.protocolVersion -ne 6 -or
+        [string]$currentPayload.pairedReleaseAuthorityId -in @('', '(none)') -or
+        [long]$currentPayload.pairedReleaseGeneration -le 0 -or
+        [long]$currentPayload.pairingGeneration -le 0 -or
+        [string]$currentPayload.pairKey -in @('', '(none)') -or
+        [string]$currentPayload.localProofIdentity -in @('', '(none)') -or
+        [string]$currentPayload.localProofFingerprint -in @('', '(none)') -or
+        [string]$currentPayload.peerProofIdentity -in @('', '(none)') -or
+        [string]$currentPayload.peerProofFingerprint -in @('', '(none)')) {
+        return $false
+    }
+
+    $currentReceipts = @($currentPayload.receipts)
+    $terminalReceipts = @($terminalPayload.receipts)
+    if ($currentReceipts.Count -ne 1 -or $terminalReceipts.Count -ne 1) {
+        return $false
+    }
+    $currentReceipt = $currentReceipts[0]
+    $terminalReceipt = $terminalReceipts[0]
+    if ([string]$currentReceipt.stage -cne 'handoff_bind' -or
+        [string]$currentReceipt.receiptStatus -cne 'Accepted' -or
+        [string]$currentReceipt.receiptReason -cne
+            [string]$currentPayload.decisionReason -or
+        -not [bool]$currentReceipt.receiptValidated -or
+        [string]$terminalReceipt.stage -cne 'handoff_invalidation' -or
+        [string]$terminalReceipt.receiptStatus -cne 'Invalidated' -or
+        [string]$terminalReceipt.receiptReason -cne
+            [string]$terminalPayload.decisionReason -or
+        -not [bool]$terminalReceipt.receiptValidated) {
+        return $false
+    }
+    foreach ($pair in @(
+            @($current, $currentReceipt), @($terminal, $terminalReceipt))) {
+        $operation = $pair[0]
+        $receipt = $pair[1]
+        foreach ($field in @(
+                'commandIdentity', 'commandGeneration', 'commandFingerprint',
+                'receiptIdentity', 'receiptGeneration', 'receiptStatus',
+                'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$operation.$field -cne [string]$receipt.$field) {
+                return $false
+            }
+        }
+        foreach ($field in @(
+                'commandIdentity', 'commandFingerprint', 'receiptIdentity',
+                'receiptFingerprint')) {
+            if ([string]$receipt.$field -in @('', '(none)')) {
+                return $false
+            }
+        }
+        if ([long]$receipt.commandGeneration -ne
+                [long]$current.operationGeneration -or
+            [long]$receipt.receiptGeneration -ne
+                [long]$current.operationGeneration) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-FileTransferCoordinatorSnapshotFamily6CatalogVariant {
+    param(
+        [Parameter(Mandatory = $true)]$Envelope,
+        $Operation = $null
+    )
+
+    if ([string]$Envelope.decisionKind -ceq 'RepairReplay' -and
+        $null -ne $Operation -and
+        [string]$Operation.family -ceq 'responder_probe_handoff') {
+        return 'family6_catalog_omitted_atomic_repair_replay_scope_invalidation'
+    }
+    return Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant `
+        -Envelope $Envelope -Operation $Operation
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -3577,6 +3888,8 @@ function Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog {
     $knownAtomicDecision =
         [string]$Envelope.decisionKind -in
             $script:FileTransferCoordinatorSnapshotFamily6DecisionKinds -or
+        (Test-FileTransferCoordinatorSnapshotRepairReplayResponderScopeInvalidation `
+            -Envelope $Envelope) -or
         (Test-FileTransferCoordinatorSnapshotCheckpointResponderCarry $Envelope $Operation) -or
         [string]$Envelope.decisionKind -in
             $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -or
@@ -6115,7 +6428,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily6OperationCatalog `
                             -Envelope $envelope `
                             -Operation $operation)) {
-                        $variant = Get-FileTransferCoordinatorSnapshotCheckpointCatalogVariant $envelope $operation
+                        $variant = Get-FileTransferCoordinatorSnapshotFamily6CatalogVariant `
+                            -Envelope $envelope -Operation $operation
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') { $reason += "|$variant" }
                         $errors.Add("$reason`:$($record.LineIndex)")

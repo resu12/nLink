@@ -4690,6 +4690,42 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         finally { TryDeleteDirectory(tempRoot); }
     }
 
+    [Fact]
+    public async Task FileTransferOps_RepairReplayResponderScopeInvalidationUsesExactCrossFamilyCatalog()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-repair-replay-responder-scope",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelope = NLink.Core.FileTransfer.SessionFileTransferService
+                .CreateCoordinatorSnapshotEvidenceForTesting(
+                    FileTransferCoordinatorTests
+                        .CreateRepairReplayResponderScopeInvalidationSnapshotFixture());
+            var fixturePath = Path.Combine(tempRoot, "envelope.json");
+            await File.WriteAllTextAsync(
+                fixturePath,
+                envelope.ToCanonicalJson());
+            var script = File.ReadAllText(Path.Combine(
+                repoRoot,
+                "tests",
+                "nLink.SmokeTests.Core",
+                "Support",
+                "RepairReplayResponderScopeInvalidationSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(
+                script,
+                [repoRoot, fixturePath]);
+            Assert.True(
+                result.ExitCode == 0,
+                $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
     [Theory]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]

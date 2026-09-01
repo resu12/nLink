@@ -21931,6 +21931,106 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "ResponderProbeHandoff")]
+    [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
+    public void ResponderHandoff_RepairReplayAtomicallyInvalidatesCurrentScope()
+        => CreateRepairReplayResponderScopeInvalidationSnapshotFixture();
+
+    internal static FileTransferCoordinatorTransitionEnvelope
+        CreateRepairReplayResponderScopeInvalidationSnapshotFixture()
+    {
+        var state = CreatePairedResponderHandoffForCheckpoint();
+        var beforeGeneration = state.PersistentState.SnapshotStateGeneration;
+        var repair = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair));
+
+        Assert.True(repair.Accepted);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            repair.SnapshotEnvelope);
+        Assert.Equal("RepairReplay", envelope.DecisionKind);
+        Assert.Equal("Accepted", envelope.DecisionStatus);
+        Assert.Equal(beforeGeneration, envelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(beforeGeneration + 1, envelope.Aggregate.AfterStateGeneration);
+        Assert.Equal(
+            [
+                "regular_v4_frontier_repair_pressure",
+                "responder_probe_handoff",
+            ],
+            envelope.Aggregate.ChangedFamilies);
+
+        var current = Assert.Single(
+            envelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "responder_probe_handoff",
+                OperationRole: "handoff_current",
+                OperationKind:
+                    "ResponderPeerProbeRouteTransitionHandoff",
+                BeforeState: "Accepted",
+                AfterState: "None",
+                StateApplied: true,
+            });
+        var terminal = Assert.Single(
+            envelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "responder_probe_handoff",
+                OperationRole: "handoff_terminal",
+                OperationKind:
+                    "ResponderPeerProbeRouteTransitionHandoff",
+                BeforeState: "None",
+                AfterState: "Invalidated",
+                StateApplied: true,
+            });
+        Assert.Equal(current.AuthorityId, terminal.AuthorityId);
+        Assert.Equal(current.OperationGeneration, terminal.OperationGeneration);
+        Assert.Equal(current.CommandIdentity, terminal.CommandIdentity);
+        Assert.Equal(current.CommandGeneration, terminal.CommandGeneration);
+        Assert.Equal(current.CommandFingerprint, terminal.CommandFingerprint);
+        Assert.Equal(current.ReceiptIdentity, terminal.ReceiptIdentity);
+        Assert.Equal(current.ReceiptGeneration, terminal.ReceiptGeneration);
+        Assert.Equal(
+            "runtime_unlock_responder_peer_probe_handoff_scope_replaced",
+            terminal.ResponderProbeHandoff!.DecisionReason);
+        Assert.Equal(
+            "handoff_invalidation",
+            Assert.Single(terminal.ResponderProbeHandoff.Receipts).Stage);
+        Assert.Equal(
+            envelope.Aggregate.AfterBoundary,
+            terminal.ResponderProbeHandoff.EffectiveBoundary);
+        Assert.Equal(
+            envelope.Aggregate.AfterBoundary,
+            terminal.ResponderProbeHandoff.TargetBoundary);
+
+        Assert.Single(
+            envelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "repair_authority_current",
+                BeforeState: "None",
+                AfterState: "Authorized",
+                StateApplied: true,
+            });
+        Assert.Single(
+            envelope.Aggregate.Operations,
+            operation => operation is
+            {
+                Family: "regular_v4_frontier_repair_pressure",
+                OperationRole: "attempted_decision",
+                OperationKind: "RepairReplay",
+                StateApplied: false,
+            });
+        return envelope;
+    }
+
+    [Fact]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
     public void FileTransferRouteTransition_InstalledPressureRequiresExactApplyReceipt()
     {

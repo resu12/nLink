@@ -6,6 +6,8 @@ $fileTransferSoakRoot = Join-Path $fileTransferOpsRoot 'FileTransferSoak'
 . (Join-Path $fileTransferSoakRoot 'SoakSummaryExtraction.ps1')
 . (Join-Path $fileTransferSoakRoot 'StabilizationGates.ps1')
 . (Join-Path $fileTransferSoakRoot 'ArtifactWriters.ps1')
+. (Join-Path $fileTransferSoakRoot 'RouteProjectionCorrelationIndex.ps1')
+. (Join-Path $fileTransferSoakRoot 'FrontierGraceCorrelationIndex.ps1')
 . (Join-Path $fileTransferSoakRoot 'BaselineComparison.ps1')
 
 function Add-FileTransferLiveHarnessEvidence {
@@ -1964,13 +1966,22 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 Get-FileTransferFallbackFrontierCheckpointAcceptanceRecheckCorrelation `
                     -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
             }
+    $fileTransferFallbackFrontierGraceIndex =
+        Invoke-FileTransferCompactCorrelator `
+            -Name 'fallback_frontier_grace_index' `
+            -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
+            -Action {
+                New-FileTransferFallbackFrontierGraceCorrelationIndex `
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
+            }
     $fileTransferFallbackFrontierStallGraceRecheckProof =
         Invoke-FileTransferCompactCorrelator `
             -Name 'fallback_frontier_stall_grace_recheck' `
             -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
             -Action {
                 Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation `
-                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -Index $fileTransferFallbackFrontierGraceIndex
             }
     $fileTransferFallbackFrontierRecentProgressGraceRecheckProof =
         Invoke-FileTransferCompactCorrelator `
@@ -1978,7 +1989,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
             -Action {
                 Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation `
-                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -Index $fileTransferFallbackFrontierGraceIndex
             }
     $fileTransferFallbackFrontierRepairSuccessorDispatchMissingProof =
         Invoke-FileTransferCompactCorrelator `
@@ -3011,6 +3023,19 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                     -Events $fileTransferGuiLiveReactivationActionWindowEvents `
                     -LiveRouteProofMode $LiveRouteProofMode
             }
+    $fileTransferRouteTransitionLiveEpochProjectionIndex =
+        if ($snapshotRouteRuntimeAuthoritative) {
+            $null
+        }
+        else {
+            Invoke-FileTransferCompactCorrelator `
+                -Name 'filetransfer_route_transition_live_epoch_projection_index' `
+                -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
+                -Action {
+                    New-FileTransferRouteTransitionLiveEpochProjectionIndex `
+                        -Events $fileTunaV4DataPathDownstreamEvents
+                }
+        }
     $fileTransferRouteTransitionLiveEpochProjectionProof =
         if ($snapshotRouteRuntimeAuthoritative) {
             Get-FileTransferCoordinatorSnapshotCorrelationResult `
@@ -3025,7 +3050,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -InputCount $fileTunaV4DataPathDownstreamEvents.Count `
             -Action {
                 Get-FileTransferRouteTransitionLiveEpochProjectionCorrelation `
-                    -Events $fileTunaV4DataPathDownstreamEvents
+                    -Events $fileTunaV4DataPathDownstreamEvents `
+                    -CorrelationIndex $fileTransferRouteTransitionLiveEpochProjectionIndex
             }
         }
     $fileTransferRouteTransitionDrainingTransportGraceProof =
@@ -10248,6 +10274,7 @@ function Invoke-FileTransferRetainedAnalysis {
         }
     }
     finally {
+        Reset-FileTransferFallbackFrontierGraceCorrelationCache
         Reset-FileTransferRetainedEventIndex
     }
 }

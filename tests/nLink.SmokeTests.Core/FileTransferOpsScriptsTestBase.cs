@@ -84,6 +84,8 @@ public abstract class FileTransferOpsScriptsTestBase
         "tools/FileTransferSoak/SoakSummaryExtraction.ps1",
         "tools/FileTransferSoak/StabilizationGates.ps1",
         "tools/FileTransferSoak/ArtifactWriters.ps1",
+        "tools/FileTransferSoak/RouteProjectionCorrelationIndex.ps1",
+        "tools/FileTransferSoak/FrontierGraceCorrelationIndex.ps1",
         "tools/FileTransferSoak/BaselineComparison.ps1",
         "tools/PreRelease-Check.ps1",
         "tools/Run-FileTransferNknSoak.ps1",
