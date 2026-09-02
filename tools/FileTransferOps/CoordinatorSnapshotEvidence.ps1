@@ -6307,6 +6307,82 @@ function Test-FileTransferCoordinatorResponderPreparationFirstAcceptance {
         (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $payload.targetBoundary -Right $active.Operation.responderProbeHandoff.targetBoundary)
 }
 
+function Get-FileTransferCoordinatorResponderAcceptanceSubject {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Accepted,
+        [Parameter(Mandatory = $true)]$Prepared
+    )
+
+    if ($Accepted.Count -eq 1) {
+        return $Accepted[0]
+    }
+    if ($Accepted.Count -ne 2) {
+        return $null
+    }
+
+    $preparedBoundary = $Prepared.Boundary
+    $preparedPayload = $Prepared.Operation.responderProbeHandoff
+    $linkedAuthority = [string]$preparedPayload.linkedTransitionAuthorityId
+    $linkedGeneration = [long]$preparedPayload.linkedTransitionGeneration
+    $unlinked = @($Accepted | Where-Object {
+            [string]$_.Operation.responderProbeHandoff.linkedTransitionAuthorityId -ceq '(none)' -and
+            [long]$_.Operation.responderProbeHandoff.linkedTransitionGeneration -eq 0
+        })
+    $linked = @($Accepted | Where-Object {
+            [string]$_.Operation.responderProbeHandoff.linkedTransitionAuthorityId -ceq
+                $linkedAuthority -and
+            [long]$_.Operation.responderProbeHandoff.linkedTransitionGeneration -eq
+                $linkedGeneration
+        })
+    if ($unlinked.Count -ne 1 -or $linked.Count -ne 1) {
+        return $null
+    }
+
+    $start = $unlinked[0]
+    $end = $linked[0]
+    if ([string]$start.Boundary.decisionStatus -cne 'Idempotent' -or
+        [string]$end.Boundary.decisionStatus -cne 'Idempotent' -or
+        [long]$start.Boundary.beforeStateGeneration -ne
+            [long]$start.Boundary.afterStateGeneration -or
+        [string]$start.Boundary.beforeStateHash -cne
+            [string]$start.Boundary.afterStateHash -or
+        [long]$end.Boundary.beforeStateGeneration -ne
+            [long]$end.Boundary.afterStateGeneration -or
+        [string]$end.Boundary.beforeStateHash -cne
+            [string]$end.Boundary.afterStateHash -or
+        [long]$start.Boundary.afterStateGeneration -ne
+            [long]$preparedBoundary.beforeStateGeneration -or
+        [string]$start.Boundary.afterStateHash -cne
+            [string]$preparedBoundary.beforeStateHash -or
+        [long]$end.Boundary.afterStateGeneration -lt
+            [long]$preparedBoundary.afterStateGeneration -or
+        (Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
+            -Boundary $start.Boundary -Operation $start.Operation) -cne
+            (Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
+                -Boundary $end.Boundary -Operation $end.Operation)) {
+        return $null
+    }
+
+    $startOperation = ConvertTo-Json -InputObject (
+        $start.Operation | Select-Object * -ExcludeProperty responderProbeHandoff) `
+        -Depth 32 -Compress
+    $endOperation = ConvertTo-Json -InputObject (
+        $end.Operation | Select-Object * -ExcludeProperty responderProbeHandoff) `
+        -Depth 32 -Compress
+    $startPayload = ConvertTo-Json -InputObject (
+        $start.Operation.responderProbeHandoff |
+            Select-Object * -ExcludeProperty linkedTransitionAuthorityId,
+                linkedTransitionGeneration) -Depth 32 -Compress
+    $endPayload = ConvertTo-Json -InputObject (
+        $end.Operation.responderProbeHandoff |
+            Select-Object * -ExcludeProperty linkedTransitionAuthorityId,
+                linkedTransitionGeneration) -Depth 32 -Compress
+    if ($startOperation -cne $endOperation -or $startPayload -cne $endPayload) {
+        return $null
+    }
+    return $end
+}
+
 function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
     param(
         [Parameter(Mandatory = $true)][object[]]$History,
@@ -6359,11 +6435,6 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
                 -Left $_.Operation.responderProbeHandoff.sourceBoundary `
                 -Right $candidatePayload.sourceBoundary)
         })
-    if ($accepted.Count -ne 1) {
-        return $false
-    }
-
-    $acceptedGeneration = [long]$accepted[0].Boundary.afterStateGeneration
     $prepared = @($History | Where-Object {
             [string]$_.Boundary.decisionKind -ceq
                 'PrepareFileTransferRouteTransition' -and
@@ -6386,6 +6457,12 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
             -Right $candidatePayload.sourceBoundary)) {
         return $false
     }
+    $acceptance = Get-FileTransferCoordinatorResponderAcceptanceSubject `
+        -Accepted @($accepted) -Prepared $preparedEntry
+    if ($null -eq $acceptance) {
+        return $false
+    }
+    $acceptedGeneration = [long]$acceptance.Boundary.afterStateGeneration
 
     $preparedGeneration = [long]$preparedEntry.Boundary.afterStateGeneration
     $draining = @($History | Where-Object {
@@ -6512,7 +6589,7 @@ function Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed {
     if ($preparedGeneration -le $acceptedGeneration -and
         -not (Test-FileTransferCoordinatorResponderPreparationFirstAcceptance `
             -Prepared $preparedEntry -Draining $drainingEntry -Committed $committedEntry `
-            -Acceptance $accepted[0] -AggregateIndex $AggregateIndex)) {
+            -Acceptance $acceptance -AggregateIndex $AggregateIndex)) {
         return $false
     }
     return Test-FileTransferCoordinatorResponderHandoffConsumedInterval `

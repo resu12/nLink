@@ -1763,6 +1763,55 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     }
                 }
             }
+
+            $carriedAcceptance=$accepted | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $carriedAcceptance.Boundary.boundaryId='acceptance-linked-while-draining'
+            $carriedAcceptance.Boundary.beforeStateGeneration=2L
+            $carriedAcceptance.Boundary.afterStateGeneration=2L
+            $carriedAcceptance.Boundary.beforeStateHash='hash-2'
+            $carriedAcceptance.Boundary.afterStateHash='hash-2'
+            $carriedAcceptance.Operation.responderProbeHandoff.linkedTransitionAuthorityId='route-transition-1'
+            $carriedAcceptance.Operation.responderProbeHandoff.linkedTransitionGeneration=1L
+            $carriedHistory=@($accepted,$prepared,$draining,$carriedAcceptance,$committed,$disposition)
+            $carriedInterval=@($carriedHistory | ForEach-Object { New-PreparationIntervalEntry $_ })
+            $carriedIndex=New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries $carriedInterval
+            foreach ($copy in @(1..221 | ForEach-Object { $candidate })) {
+                if (-not (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                        -History ($carriedHistory+@($copy)) -Candidate $copy `
+                        -AggregateIndex $carriedIndex)) {
+                    throw 'An exact unlinked-to-linked acceptance carry reopened the completed lineage.'
+                }
+            }
+            $ambiguousCarry=$carriedAcceptance | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $ambiguousCarry.Boundary.boundaryId='acceptance-linked-competing'
+            if (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History ($carriedHistory+@($ambiguousCarry,$candidate)) `
+                    -Candidate $candidate -AggregateIndex $carriedIndex) {
+                throw 'Competing linked acceptance carries were coalesced.'
+            }
+            foreach ($mutation in @(
+                    { param($e) $e.Operation.receiptFingerprint='different-receipt' },
+                    { param($e) $e.Operation.responderProbeHandoff.pendingPreCommitGeneration=2L },
+                    { param($e) $e.Operation.responderProbeHandoff.probeId='different-probe' },
+                    { param($e) $e.Operation.responderProbeHandoff.targetBoundary.dataSessionGeneration=2L })) {
+                $wrongCarry=$carriedAcceptance | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                & $mutation $wrongCarry
+                if (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                        -History (@($accepted,$prepared,$draining,$wrongCarry,$committed,$disposition,$candidate)) `
+                        -Candidate $candidate -AggregateIndex $carriedIndex) {
+                    throw 'A mutated linked acceptance carry was consumed.'
+                }
+            }
+            $lateUnlinked=$accepted | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $lateUnlinked.Boundary.beforeStateGeneration=1L
+            $lateUnlinked.Boundary.afterStateGeneration=1L
+            $lateUnlinked.Boundary.beforeStateHash='hash-1'
+            $lateUnlinked.Boundary.afterStateHash='hash-1'
+            if (Test-FileTransferCoordinatorResponderProbeHandoffObservationConsumed `
+                    -History (@($lateUnlinked,$prepared,$draining,$carriedAcceptance,$committed,$disposition,$candidate)) `
+                    -Candidate $candidate -AggregateIndex $carriedIndex) {
+                throw 'An unlinked acceptance first recorded after preparation was consumed.'
+            }
             """;
 
         var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
