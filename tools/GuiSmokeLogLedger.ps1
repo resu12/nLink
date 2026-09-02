@@ -1297,6 +1297,22 @@ function Invoke-GuiSmokeLogLedgerRangeVisitor {
     return $null
 }
 
+function Select-GuiSmokeLogLedgerEventsFromFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][long]$LineCount,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$EventNames
+    )
+
+    return [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::SelectEvents(
+        [System.IO.Path]::GetFullPath($Path),
+        0L,
+        0L,
+        $LineCount,
+        $EventNames,
+        $false)
+}
+
 function Write-GuiSmokeAppendOnlyLogLedgerRangeCapture {
     param(
         [Parameter(Mandatory = $true)]$State,

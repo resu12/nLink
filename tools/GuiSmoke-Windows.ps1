@@ -5525,6 +5525,24 @@ function Get-TunaGuiExplicitFailureClassification {
                     Reason = 'fallback_reactivation_unlock_not_invoked_before_completed_transfer'
                 }
             }
+            'filetransfer_gui_live_route_epoch_sequence_incomplete' {
+                return [pscustomobject]@{
+                    Phase = 'live_route_proof'
+                    Reason = 'live_regular_activation_cycle_missing_successor_route_epochs'
+                    FailureClass = 'filetransfer_gui_live_route_epoch_sequence_incomplete'
+                    FailureVariant = 'route_sequence_stopped_after_epoch2_fallback'
+                    RequiresEvidenceEnrichment = $true
+                }
+            }
+            'filetransfer_gui_live_route_epoch_proof_invalid' {
+                return [pscustomobject]@{
+                    Phase = 'live_route_proof'
+                    Reason = 'live_regular_activation_cycle_route_epoch_proof_invalid'
+                    FailureClass = 'filetransfer_gui_live_route_epoch_proof_invalid'
+                    FailureVariant = 'route_epoch_proof_incomplete_or_inconsistent'
+                    RequiresEvidenceEnrichment = $true
+                }
+            }
             'file_tuna_data_path_mismatch' {
                 return [pscustomobject]@{
                     Phase = 'route_runtime'
@@ -5925,6 +5943,18 @@ function Get-TunaGuiExplicitFailureClassification {
         }
     }
 
+    if ($ErrorMessage.IndexOf(
+            'Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling.',
+            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return [pscustomobject]@{
+            Phase = 'live_route_proof'
+            Reason = 'live_regular_activation_cycle_missing_successor_route_epochs'
+            FailureClass = 'filetransfer_gui_live_route_epoch_sequence_incomplete'
+            FailureVariant = 'route_sequence_stopped_after_epoch2_fallback'
+            RequiresEvidenceEnrichment = $true
+        }
+    }
+
     if ([regex]::IsMatch(
             $ErrorMessage,
             '(?i)(?:^|[;\s])gui_smoke_scenario_deadline_exceeded(?=$|[;:\s])')) {
@@ -6020,7 +6050,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [Parameter(Mandatory = $true)][string]$ErrorMessage,
         [Parameter(Mandatory = $true)][string]$RouteMode,
         [AllowEmptyCollection()][string[]]$ImmutableEvidencePaths = @(),
-        [AllowNull()]$TestMetrics = $null
+        [AllowNull()]$TestMetrics = $null,
+        [switch]$RequireCompletedClassification
     )
 
     $classificationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -6033,6 +6064,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Reason ([string]$explicitClassification.Reason) `
             -RouteMode $RouteMode `
             -ClassificationSource 'explicit_error' `
+            -FailureClass $(if (
+                $explicitClassification.PSObject.Properties.Name -contains
+                    'FailureClass') {
+                [string]$explicitClassification.FailureClass
+            }
+            else { '(none)' }) `
+            -FailureVariant $(if (
+                $explicitClassification.PSObject.Properties.Name -contains
+                    'FailureVariant') {
+                [string]$explicitClassification.FailureVariant
+            }
+            else { '(none)' }) `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         if ($ErrorMessage.IndexOf(
                 'failure_class=runtime_unlock_retry_dispatch_current_listener_adoption_missing',
@@ -6138,33 +6181,106 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    $snapshotEvaluatorAvailable =
+        $null -ne (Get-Command Get-FileTransferCoordinatorSnapshotEvaluation `
+            -ErrorAction SilentlyContinue) -and
+        $null -ne (Get-Command Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
+            -ErrorAction SilentlyContinue)
+    $snapshotEventNames = if ($snapshotEvaluatorAvailable) {
+        $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+        @(
+            @($snapshotCatalog.SnapshotAuthorityV1) +
+            @($snapshotCatalog.GenerationStampedEffects) |
+                Sort-Object -Unique)
+    }
+    else {
+        @()
+    }
+    $harnessRouteEpochEventNames = @(
+        'filetransfer_live_route_epoch_started',
+        'filetransfer_live_route_epoch_recovered')
+    $evidenceSelectionEventNames = @(
+        @($snapshotEventNames) +
+        @($harnessRouteEpochEventNames) |
+            Sort-Object -Unique)
+    $snapshotRecords = [System.Collections.Generic.List[object]]::new()
+    $harnessRouteEpochRecords =
+        [System.Collections.Generic.List[object]]::new()
+    $snapshotSourceLineVisitCount = 0L
+    $snapshotIngestionStopwatch =
+        [System.Diagnostics.Stopwatch]::StartNew()
     $lines = @()
     $processLines = @()
     $classificationSource = 'live_evidence'
     if ($ImmutableEvidencePaths.Count -gt 0) {
         $classificationSource = 'immutable_evidence'
         $immutableLines = New-Object System.Collections.Generic.List[string]
+        $immutableLineBase = 0L
         foreach ($immutableEvidencePath in @($ImmutableEvidencePaths | Sort-Object -Unique)) {
             if ([string]::IsNullOrWhiteSpace($immutableEvidencePath) -or
                 -not (Test-Path -LiteralPath $immutableEvidencePath -PathType Leaf)) {
                 continue
             }
-            $reader = $null
-            try {
-                $reader = [System.IO.StreamReader]::new(
-                    [System.IO.Path]::GetFullPath($immutableEvidencePath),
-                    [System.Text.UTF8Encoding]::new($false, $true),
-                    $true,
-                    65536)
-                while (-not $reader.EndOfStream) {
-                    $immutableLines.Add([string]$reader.ReadLine()) | Out-Null
+            $fullEvidencePath = [System.IO.Path]::GetFullPath(
+                $immutableEvidencePath)
+            [string[]]$pathLines = [System.IO.File]::ReadAllLines(
+                $fullEvidencePath,
+                [System.Text.UTF8Encoding]::new($false, $true))
+            $immutableLines.AddRange($pathLines)
+            if ($evidenceSelectionEventNames.Count -gt 0 -and
+                $pathLines.Count -gt 0) {
+                if ($null -ne (Get-Command `
+                        Select-GuiSmokeLogLedgerEventsFromFile `
+                        -ErrorAction SilentlyContinue)) {
+                    $selected = Select-GuiSmokeLogLedgerEventsFromFile `
+                        -Path $fullEvidencePath `
+                        -LineCount ([long]$pathLines.Count) `
+                        -EventNames ([string[]]$evidenceSelectionEventNames)
+                    $snapshotSourceLineVisitCount +=
+                        [long]$selected.SourceLineVisitCount
+                    foreach ($record in @($selected.Lines)) {
+                        $line = [string]$record.Line
+                        $eventName =
+                            Get-FileTransferCoordinatorSnapshotEventName `
+                                -Line $line
+                        $projectedRecord = [pscustomobject]@{
+                                LineIndex =
+                                    $immutableLineBase + [long]$record.LineIndex
+                                Line = $line
+                            }
+                        if ($snapshotEventNames -contains $eventName) {
+                            $snapshotRecords.Add($projectedRecord) | Out-Null
+                        }
+                        if ($harnessRouteEpochEventNames -contains $eventName) {
+                            $harnessRouteEpochRecords.Add($projectedRecord) |
+                                Out-Null
+                        }
+                    }
+                }
+                else {
+                    $snapshotSourceLineVisitCount += [long]$pathLines.Count
+                    for ($localLineIndex = 0;
+                         $localLineIndex -lt $pathLines.Count;
+                         $localLineIndex++) {
+                        $line = [string]$pathLines[$localLineIndex]
+                        $eventName =
+                            Get-FileTransferCoordinatorSnapshotEventName `
+                                -Line $line
+                        $projectedRecord = [pscustomobject]@{
+                            LineIndex = $immutableLineBase + $localLineIndex
+                            Line = $line
+                        }
+                        if ($snapshotEventNames -contains $eventName) {
+                            $snapshotRecords.Add($projectedRecord) | Out-Null
+                        }
+                        if ($harnessRouteEpochEventNames -contains $eventName) {
+                            $harnessRouteEpochRecords.Add($projectedRecord) |
+                                Out-Null
+                        }
+                    }
                 }
             }
-            finally {
-                if ($reader) {
-                    $reader.Dispose()
-                }
-            }
+            $immutableLineBase += [long]$pathLines.Count
         }
         $lines = @($immutableLines.ToArray())
     }
@@ -6184,14 +6300,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
     }
     $evidenceLines = @($lines + $processLines)
-    $snapshotEvaluatorAvailable =
-        $null -ne (Get-Command Get-FileTransferCoordinatorSnapshotEvaluation `
-            -ErrorAction SilentlyContinue) -and
-        $null -ne (Get-Command Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
-            -ErrorAction SilentlyContinue)
+    $snapshotIngestionStopwatch.Stop()
+    $snapshotEvaluationStopwatch =
+        [System.Diagnostics.Stopwatch]::StartNew()
     $coordinatorSnapshotEvaluation = if ($snapshotEvaluatorAvailable) {
-        Get-FileTransferCoordinatorSnapshotEvaluation `
-            -Lines ([string[]]$evidenceLines)
+        if ($ImmutableEvidencePaths.Count -gt 0) {
+            Get-FileTransferCoordinatorSnapshotEvaluation `
+                -SnapshotRecords ([object[]]$snapshotRecords.ToArray())
+        }
+        else {
+            Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines ([string[]]$evidenceLines)
+        }
     }
     else {
         [pscustomobject]@{
@@ -6201,6 +6321,438 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             FirstUnresolvedBoundary = $null
         }
     }
+    $snapshotEvaluationStopwatch.Stop()
+    $snapshotEvaluationLineVisitCount = if (
+        $ImmutableEvidencePaths.Count -gt 0) {
+        $snapshotSourceLineVisitCount
+    }
+    else {
+        [long]$evidenceLines.Count
+    }
+    $snapshotEvaluationLookupCount = if (
+        $ImmutableEvidencePaths.Count -gt 0) {
+        [long]$snapshotRecords.Count
+    }
+    else {
+        0L
+    }
+    if ($ImmutableEvidencePaths.Count -gt 0 -and
+        $snapshotEvaluatorAvailable) {
+        Write-Host (
+            'event=gui_smoke_failure_classification_snapshot_evaluation_completed; ' +
+            "source_line_visit_count=$snapshotEvaluationLineVisitCount; " +
+            "snapshot_record_count=$snapshotEvaluationLookupCount; " +
+            "ingestion_elapsed_ms=$($snapshotIngestionStopwatch.ElapsedMilliseconds); " +
+            "evaluation_elapsed_ms=$($snapshotEvaluationStopwatch.ElapsedMilliseconds); " +
+            'authority_effect=none')
+    }
+
+    function Get-TunaGuiAuthoritativePassHarnessClassification {
+        param(
+            [Parameter(Mandatory = $true)][string]$FailureMessage,
+            [Parameter(Mandatory = $true)][string]$FailureRouteMode,
+            [Parameter(Mandatory = $true)]$SnapshotEvaluation,
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [System.Collections.Generic.List[object]]$RouteEpochRecords
+        )
+
+        $routeCycleFailurePrefix =
+            'Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling.'
+        $hasStructuredFailureClass = $FailureMessage.IndexOf(
+            'failure_class=filetransfer_gui_live_route_epoch_sequence_incomplete',
+            [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($FailureRouteMode -ne 'live-regular-activation-cycle') {
+            return $null
+        }
+
+        $structuredClaimMatchesEpochTwo =
+            $hasStructuredFailureClass -and
+            $FailureMessage.IndexOf(
+                'failure_variant=route_sequence_stopped_after_epoch2_fallback',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $FailureMessage.IndexOf(
+                'expected_sequence=file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $FailureMessage.IndexOf(
+                'observed_sequence=file_tuna_v4,post_tuna_fallback_v6',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $FailureMessage.IndexOf(
+                'missing_route_epochs=3:file_tuna_v4,4:post_tuna_fallback_v6',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $FailureMessage.IndexOf(
+                'metadata_missing=0',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        $historicalClaimMatchesEpochTwo =
+            -not $hasStructuredFailureClass -and
+            $FailureMessage.IndexOf(
+                $routeCycleFailurePrefix,
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            [regex]::IsMatch(
+                $FailureMessage,
+                '(?i)(?:^|[;\s])sequence=file_tuna_v4,post_tuna_fallback_v6(?=$|[;\s])') -and
+            $FailureMessage.IndexOf(
+                'missing_started route=file_tuna_v4; after_epoch=2',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $FailureMessage.IndexOf(
+                'missing_started route=post_tuna_fallback_v6; after_epoch=2',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $FailureMessage.IndexOf(
+                'metadata_missing=0',
+                [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        $claimMatchesEpochTwo =
+            $structuredClaimMatchesEpochTwo -or
+            $historicalClaimMatchesEpochTwo
+        if (-not $claimMatchesEpochTwo) {
+            return $null
+        }
+
+        $groups = @{}
+        $routeEvidenceMalformed = $false
+        foreach ($record in @($RouteEpochRecords)) {
+            $line = [string]$record.Line
+            $eventName = Get-FileTransferCoordinatorSnapshotEventName `
+                -Line $line
+            if ($harnessRouteEpochEventNames -notcontains $eventName) {
+                continue
+            }
+            $sessionId = Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'session_id'
+            $transferId = Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'transfer_id'
+            $direction = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'direction').ToLowerInvariant()
+            $route = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'route').ToLowerInvariant()
+            $protocolVersion = Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'protocol_version'
+            $epoch = Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'live_route_epoch'
+            $handoffKind = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'handoff_kind').ToLowerInvariant()
+            $targetTransport = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'target_transport').ToLowerInvariant()
+            $writerId = Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'log_writer_id'
+            $writerSequenceText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'log_writer_sequence'
+            $routePublicationGenerationText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'route_publication_generation'
+            $runtimeGenerationText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'runtime_generation'
+            $terminalGenerationText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'terminal_generation'
+            $legGenerationText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'leg_generation'
+            $routeCommitGenerationText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'route_commit_generation'
+            $transitionGenerationText =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'transition_generation'
+            $runtimeProfile = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'runtime_profile').ToLowerInvariant()
+            $frameFamily = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'frame_family').ToLowerInvariant()
+            $targetRoute = (Get-FileTransferCoordinatorSnapshotLineField `
+                -Line $line -Name 'target_route').ToLowerInvariant()
+            $targetProtocolVersion =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'target_protocol_version'
+            $routePublicationActionKind =
+                (Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line `
+                    -Name 'route_publication_action_kind').ToLowerInvariant()
+            $transitionAuthorityId =
+                Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'transition_authority_id'
+            $projectionSource =
+                (Get-FileTransferCoordinatorSnapshotLineField `
+                    -Line $line -Name 'projection_source').ToLowerInvariant()
+            $epochValue = 0
+            $protocolValue = 0
+            $targetProtocolValue = 0
+            $writerSequence = 0L
+            $routePublicationGeneration = 0L
+            $runtimeGeneration = 0L
+            $terminalGeneration = 0L
+            $legGeneration = 0L
+            $routeCommitGeneration = 0L
+            $transitionGeneration = 0L
+            if ([string]::IsNullOrWhiteSpace($sessionId) -or
+                [string]::IsNullOrWhiteSpace($transferId) -or
+                $direction -notin @('inbound', 'outbound') -or
+                [string]::IsNullOrWhiteSpace($route) -or
+                [string]::IsNullOrWhiteSpace($handoffKind) -or
+                [string]::IsNullOrWhiteSpace($targetTransport) -or
+                [string]::IsNullOrWhiteSpace($writerId) -or
+                [string]::IsNullOrWhiteSpace($runtimeProfile) -or
+                [string]::IsNullOrWhiteSpace($frameFamily) -or
+                [string]::IsNullOrWhiteSpace($targetRoute) -or
+                [string]::IsNullOrWhiteSpace($routePublicationActionKind) -or
+                [string]::IsNullOrWhiteSpace($transitionAuthorityId) -or
+                [string]::IsNullOrWhiteSpace($projectionSource) -or
+                -not [int]::TryParse($epoch, [ref]$epochValue) -or
+                -not [int]::TryParse(
+                    $protocolVersion,
+                    [ref]$protocolValue) -or
+                -not [int]::TryParse(
+                    $targetProtocolVersion,
+                    [ref]$targetProtocolValue) -or
+                -not [long]::TryParse(
+                    $writerSequenceText,
+                    [ref]$writerSequence) -or
+                -not [long]::TryParse(
+                    $routePublicationGenerationText,
+                    [ref]$routePublicationGeneration) -or
+                -not [long]::TryParse(
+                    $runtimeGenerationText,
+                    [ref]$runtimeGeneration) -or
+                -not [long]::TryParse(
+                    $terminalGenerationText,
+                    [ref]$terminalGeneration) -or
+                -not [long]::TryParse(
+                    $legGenerationText,
+                    [ref]$legGeneration) -or
+                -not [long]::TryParse(
+                    $routeCommitGenerationText,
+                    [ref]$routeCommitGeneration) -or
+                -not [long]::TryParse(
+                    $transitionGenerationText,
+                    [ref]$transitionGeneration) -or
+                $epochValue -le 0 -or
+                $protocolValue -le 0 -or
+                $targetProtocolValue -le 0 -or
+                $writerSequence -le 0 -or
+                $routePublicationGeneration -le 0 -or
+                $runtimeGeneration -le 0 -or
+                $terminalGeneration -lt 0 -or
+                $legGeneration -le 0 -or
+                $routeCommitGeneration -lt 0 -or
+                $transitionGeneration -le 0) {
+                $routeEvidenceMalformed = $true
+                continue
+            }
+            $scopeKey = "$sessionId|$transferId"
+            if (-not $groups.ContainsKey($scopeKey)) {
+                $groups[$scopeKey] =
+                    [System.Collections.Generic.List[object]]::new()
+            }
+            $groups[$scopeKey].Add([pscustomobject]@{
+                    Line = $line
+                    LineIndex = [long]$record.LineIndex
+                    EventName = $eventName
+                    Direction = $direction
+                    Epoch = $epochValue
+                    Route = $route
+                    Protocol = $protocolValue
+                    Handoff = $handoffKind
+                    Transport = $targetTransport
+                    WriterId = $writerId
+                    WriterSequence = $writerSequence
+                    RoutePublicationGeneration =
+                        $routePublicationGeneration
+                    RuntimeGeneration = $runtimeGeneration
+                    TerminalGeneration = $terminalGeneration
+                    LegGeneration = $legGeneration
+                    RouteCommitGeneration = $routeCommitGeneration
+                    TransitionGeneration = $transitionGeneration
+                    TransitionAuthorityId = $transitionAuthorityId
+                    RuntimeProfile = $runtimeProfile
+                    FrameFamily = $frameFamily
+                    TargetRoute = $targetRoute
+                    TargetProtocol = $targetProtocolValue
+                    PublicationAction = $routePublicationActionKind
+                    ProjectionSource = $projectionSource
+                    OperationKey = "$direction|$epochValue|$eventName"
+                    PairFingerprint =
+                        "$route|$protocolValue|$handoffKind|$targetTransport|$routePublicationGeneration|$runtimeGeneration|$terminalGeneration|$legGeneration|$routeCommitGeneration|$transitionGeneration|$transitionAuthorityId|$runtimeProfile|$frameFamily|$targetRoute|$targetProtocolValue|$routePublicationActionKind|$projectionSource"
+                    CrossDirectionFingerprint =
+                        "$route|$protocolValue|$handoffKind|$targetTransport|$routePublicationGeneration|$runtimeGeneration|$terminalGeneration|$legGeneration|$routeCommitGeneration|$transitionGeneration|$runtimeProfile|$frameFamily|$targetRoute|$targetProtocolValue|$routePublicationActionKind|$projectionSource"
+                }) | Out-Null
+        }
+
+        if ($routeEvidenceMalformed -or $groups.Count -ne 1) {
+            return $null
+        }
+
+        $soleScopeKey = [string]@($groups.Keys)[0]
+        $routeRecords = $groups[$soleScopeKey]
+        $deduplicatedRecords =
+            [System.Collections.Generic.List[object]]::new()
+        $recordsByOperationKey = @{}
+        foreach ($routeRecord in @($routeRecords | Sort-Object LineIndex)) {
+            $operationKey = [string]$routeRecord.OperationKey
+            if ($recordsByOperationKey.ContainsKey($operationKey)) {
+                if (-not [string]::Equals(
+                        [string]$recordsByOperationKey[$operationKey].Line,
+                        [string]$routeRecord.Line,
+                        [System.StringComparison]::Ordinal)) {
+                    return $null
+                }
+                continue
+            }
+            $recordsByOperationKey[$operationKey] = $routeRecord
+            $deduplicatedRecords.Add($routeRecord) | Out-Null
+        }
+
+        $routeEvidenceShape = if ($deduplicatedRecords.Count -eq 8) {
+            'epoch_two_prefix'
+        }
+        elseif ($deduplicatedRecords.Count -eq 16) {
+            'complete_cycle'
+        }
+        else {
+            '(invalid)'
+        }
+        if ($routeEvidenceShape -eq '(invalid)') {
+            return $null
+        }
+
+        $lastEpoch = if ($routeEvidenceShape -eq 'complete_cycle') { 4 } else { 2 }
+        $crossDirectionScopes = @{}
+        foreach ($directionName in @('inbound', 'outbound')) {
+            $directionRecords = @($deduplicatedRecords | Where-Object {
+                    $_.Direction -eq $directionName
+                } | Sort-Object LineIndex)
+            if ($directionRecords.Count -ne (2 * $lastEpoch)) {
+                return $null
+            }
+            $writerId = [string]$directionRecords[0].WriterId
+            $priorWriterSequence = 0L
+            $priorRoutePublicationGeneration = 0L
+            $priorRuntimeGeneration = 0L
+            $priorLegGeneration = 0L
+            $priorTransitionGeneration = 0L
+            for ($epochIndex = 1; $epochIndex -le $lastEpoch; $epochIndex++) {
+                $started = $directionRecords[(2 * ($epochIndex - 1))]
+                $recovered = $directionRecords[(2 * ($epochIndex - 1)) + 1]
+                $expectedRoute = if (($epochIndex % 2) -eq 1) {
+                    'file_tuna_v4'
+                }
+                else { 'post_tuna_fallback_v6' }
+                $expectedProtocol = if (($epochIndex % 2) -eq 1) { 4 } else { 6 }
+                $expectedHandoff = if (($epochIndex % 2) -eq 1) {
+                    'normal_to_tuna_activation'
+                }
+                else { 'tuna_to_normal_fallback' }
+                $expectedTransport = if (($epochIndex % 2) -eq 1) {
+                    'tuna'
+                }
+                else { 'regular_nkn' }
+                $expectedRuntimeProfile = if (($epochIndex % 2) -eq 1) {
+                    'file_tuna_v4_fast'
+                }
+                else { 'default_v6' }
+                $expectedFrameFamily = if (($epochIndex % 2) -eq 1) {
+                    'v4'
+                }
+                else { 'v6' }
+                $expectedPublicationAction = if (($epochIndex % 2) -eq 1) {
+                    'routecommitpublication'
+                }
+                else { 'routepublication' }
+                if ($started.EventName -ne 'filetransfer_live_route_epoch_started' -or
+                    $recovered.EventName -ne 'filetransfer_live_route_epoch_recovered' -or
+                    $started.Epoch -ne $epochIndex -or
+                    $recovered.Epoch -ne $epochIndex -or
+                    $started.Route -ne $expectedRoute -or
+                    $recovered.Route -ne $expectedRoute -or
+                    $started.Protocol -ne $expectedProtocol -or
+                    $recovered.Protocol -ne $expectedProtocol -or
+                    $started.Handoff -ne $expectedHandoff -or
+                    $recovered.Handoff -ne $expectedHandoff -or
+                    $started.Transport -ne $expectedTransport -or
+                    $recovered.Transport -ne $expectedTransport -or
+                    $started.RuntimeProfile -ne $expectedRuntimeProfile -or
+                    $recovered.RuntimeProfile -ne $expectedRuntimeProfile -or
+                    $started.FrameFamily -ne $expectedFrameFamily -or
+                    $recovered.FrameFamily -ne $expectedFrameFamily -or
+                    $started.TargetRoute -ne $expectedRoute -or
+                    $recovered.TargetRoute -ne $expectedRoute -or
+                    $started.TargetProtocol -ne $expectedProtocol -or
+                    $recovered.TargetProtocol -ne $expectedProtocol -or
+                    $started.PublicationAction -ne $expectedPublicationAction -or
+                    $recovered.PublicationAction -ne $expectedPublicationAction -or
+                    $started.ProjectionSource -ne 'coordinator_route_transition' -or
+                    $recovered.ProjectionSource -ne 'coordinator_route_transition' -or
+                    $started.WriterId -ne $writerId -or
+                    $recovered.WriterId -ne $writerId -or
+                    $started.WriterSequence -le $priorWriterSequence -or
+                    $recovered.WriterSequence -le $started.WriterSequence -or
+                    $started.LineIndex -ge $recovered.LineIndex -or
+                    $started.PairFingerprint -ne $recovered.PairFingerprint -or
+                    $started.RoutePublicationGeneration -le
+                        $priorRoutePublicationGeneration -or
+                    $started.RuntimeGeneration -le $priorRuntimeGeneration -or
+                    $started.LegGeneration -le $priorLegGeneration -or
+                    $started.TransitionGeneration -le
+                        $priorTransitionGeneration) {
+                    return $null
+                }
+                $priorWriterSequence = [long]$recovered.WriterSequence
+                $priorRoutePublicationGeneration =
+                    [long]$started.RoutePublicationGeneration
+                $priorRuntimeGeneration = [long]$started.RuntimeGeneration
+                $priorLegGeneration = [long]$started.LegGeneration
+                $priorTransitionGeneration =
+                    [long]$started.TransitionGeneration
+                $epochScopeKey = [string]$epochIndex
+                if ($crossDirectionScopes.ContainsKey($epochScopeKey)) {
+                    if ($crossDirectionScopes[$epochScopeKey] -ne
+                        $started.CrossDirectionFingerprint) {
+                        return $null
+                    }
+                }
+                else {
+                    $crossDirectionScopes[$epochScopeKey] =
+                        $started.CrossDirectionFingerprint
+                }
+            }
+        }
+
+        if ($routeEvidenceShape -eq 'epoch_two_prefix') {
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'live_route_proof' `
+                -Reason 'live_regular_activation_cycle_missing_successor_route_epochs' `
+                -RouteMode $FailureRouteMode `
+                -ClassificationSource 'coordinator_snapshot_authority_v1_harness_route_proof' `
+                -EvidenceLineVisitCount $snapshotEvaluationLineVisitCount `
+                -EvidenceParsedRecordCount ([long]$SnapshotEvaluation.TransitionCount) `
+                -EvidenceLookupCount ([long]$RouteEpochRecords.Count) `
+                -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+                -FailureClass 'filetransfer_gui_live_route_epoch_sequence_incomplete' `
+                -FailureVariant 'route_sequence_stopped_after_epoch2_fallback' `
+                -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount 0L
+        }
+
+        if ($routeEvidenceShape -eq 'complete_cycle') {
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'evidence_harness' `
+                -Reason 'live_regular_activation_cycle_failure_claim_contradicts_complete_route_epochs' `
+                -RouteMode $FailureRouteMode `
+                -ClassificationSource 'coordinator_snapshot_authority_v1_harness_fail_closed' `
+                -EvidenceLineVisitCount $snapshotEvaluationLineVisitCount `
+                -EvidenceParsedRecordCount ([long]$SnapshotEvaluation.TransitionCount) `
+                -EvidenceLookupCount ([long]$RouteEpochRecords.Count) `
+                -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+                -FailureClass 'filetransfer_gui_failure_evidence_inconsistent' `
+                -FailureVariant 'failure_claim_missing_successor_epochs_but_epochs3_4_present' `
+                -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount 0L
+        }
+
+        return $null
+    }
+
     $snapshotRouteRuntimeAuthoritative =
         $snapshotEvaluatorAvailable -and
         (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
@@ -6265,8 +6817,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [long]$invalidBoundary.writerSequence
         }
         if ($null -ne $TestMetrics) {
-            $TestMetrics.evidenceLineVisitCount = [long]$evidenceLines.Count
-            $TestMetrics.evidenceLookupCount = 0L
+            $TestMetrics.evidenceLineVisitCount =
+                $snapshotEvaluationLineVisitCount
+            $TestMetrics.evidenceLookupCount =
+                $snapshotEvaluationLookupCount
             $TestMetrics.classificationSource =
                 'coordinator_snapshot_evidence'
         }
@@ -6275,9 +6829,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Reason 'coordinator_snapshot_evidence_invalid' `
             -RouteMode $RouteMode `
             -ClassificationSource 'coordinator_snapshot_evidence' `
-            -EvidenceLineVisitCount ([long]$evidenceLines.Count) `
+            -EvidenceLineVisitCount $snapshotEvaluationLineVisitCount `
             -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
-            -EvidenceLookupCount 0L `
+            -EvidenceLookupCount $snapshotEvaluationLookupCount `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
             -FailureClass 'filetransfer_coordinator_snapshot_evidence_invalid' `
             -FailureVariant $invalidBoundaryVariant `
@@ -6333,9 +6887,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Reason ([string]$boundary.decisionReason) `
             -RouteMode $RouteMode `
             -ClassificationSource 'coordinator_snapshot_authority_v1' `
-            -EvidenceLineVisitCount ([long]$evidenceLines.Count) `
+            -EvidenceLineVisitCount $snapshotEvaluationLineVisitCount `
             -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
-            -EvidenceLookupCount 0L `
+            -EvidenceLookupCount $snapshotEvaluationLookupCount `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
             -FailureClass ([string]$boundary.taxonomyClass) `
             -FailureVariant ([string](Get-FileTransferCoordinatorSnapshotObjectProperty -InputObject $boundary -Name 'variant' -Default '(none)')) `
@@ -6364,6 +6918,57 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     -Default 1L))
     }
     if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative') {
+        $harnessClassification =
+            Get-TunaGuiAuthoritativePassHarnessClassification `
+                -FailureMessage $ErrorMessage `
+                -FailureRouteMode $RouteMode `
+                -SnapshotEvaluation $coordinatorSnapshotEvaluation `
+                -RouteEpochRecords $harnessRouteEpochRecords
+        if ($null -ne $harnessClassification) {
+            if ($null -ne $TestMetrics) {
+                $TestMetrics.evidenceLineVisitCount =
+                    $snapshotEvaluationLineVisitCount
+                $TestMetrics.evidenceLookupCount =
+                    [long]$harnessRouteEpochRecords.Count
+                $TestMetrics.classificationSource =
+                    [string]$harnessClassification.ClassificationSource
+            }
+            return $harnessClassification
+        }
+        if ($RequireCompletedClassification) {
+            if ($null -ne $explicitResult -and
+                $explicitResult.FailureClass -ne
+                    'filetransfer_gui_live_route_epoch_sequence_incomplete') {
+                $explicitResult.ClassificationSource =
+                    'coordinator_snapshot_authority_v1_explicit_harness'
+                $explicitResult.EvidenceLineVisitCount =
+                    $snapshotEvaluationLineVisitCount
+                $explicitResult.EvidenceParsedRecordCount =
+                    [long]$coordinatorSnapshotEvaluation.TransitionCount
+                $explicitResult.EvidenceLookupCount =
+                    [long]$harnessRouteEpochRecords.Count
+                $explicitResult.ClassificationElapsedMilliseconds =
+                    $classificationStopwatch.ElapsedMilliseconds
+                $explicitResult.CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = 0L
+                $explicitResult.CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = 0L
+                $explicitResult.CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = 0L
+                return $explicitResult
+            }
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'evidence_harness' `
+                -Reason 'authoritative_snapshot_pass_harness_failure_unclassified' `
+                -RouteMode $RouteMode `
+                -ClassificationSource 'coordinator_snapshot_authority_v1_harness_fail_closed' `
+                -EvidenceLineVisitCount $snapshotEvaluationLineVisitCount `
+                -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
+                -EvidenceLookupCount ([long]$harnessRouteEpochRecords.Count) `
+                -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+                -FailureClass 'filetransfer_gui_failure_classification_unresolved' `
+                -FailureVariant 'snapshot_v1_no_boundary_without_exact_harness_classifier' `
+                -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount 0L
+        }
         return $null
     }
     $guiFailureEvidenceIndexMetrics = [pscustomobject]@{
@@ -29953,7 +30558,8 @@ function Invoke-TunaGuiFailureClassificationRequest {
         -Bookmark 0 `
         -ErrorMessage ([string]$request.errorMessage) `
         -RouteMode ([string]$request.routeMode) `
-        -ImmutableEvidencePaths @($request.evidencePaths)
+        -ImmutableEvidencePaths @($request.evidencePaths) `
+        -RequireCompletedClassification
     Write-GuiSmokeAtomicJson `
         -Path ([string]$request.responsePath) `
         -Value ([ordered]@{
@@ -35819,7 +36425,27 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 -not $evidence.fallbackEpochRecovered -or
                 -not $liveRouteProof.Pass -or
                 $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') {
-                throw "Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+                $isExactEpochTwoPrefix =
+                    $joinedRouteSequence -eq
+                        'file_tuna_v4,post_tuna_fallback_v6' -and
+                    $liveRouteProof.MetadataMissingCount -eq 0 -and
+                    $liveRouteProof.Findings -contains
+                        'missing_started route=file_tuna_v4; after_epoch=2' -and
+                    $liveRouteProof.Findings -contains
+                        'missing_started route=post_tuna_fallback_v6; after_epoch=2'
+                $routeFailureClass = if ($isExactEpochTwoPrefix) {
+                    'filetransfer_gui_live_route_epoch_sequence_incomplete'
+                }
+                else { 'filetransfer_gui_live_route_epoch_proof_invalid' }
+                $routeFailureVariant = if ($isExactEpochTwoPrefix) {
+                    'route_sequence_stopped_after_epoch2_fallback'
+                }
+                else { 'route_epoch_proof_incomplete_or_inconsistent' }
+                $missingRouteEpochs = if ($isExactEpochTwoPrefix) {
+                    '3:file_tuna_v4,4:post_tuna_fallback_v6'
+                }
+                else { '(unresolved)' }
+                throw "Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling. failure_class=$routeFailureClass; failure_variant=$routeFailureVariant; expected_sequence=file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6; observed_sequence=$joinedRouteSequence; missing_route_epochs=$missingRouteEpochs; sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
             }
         }
     }

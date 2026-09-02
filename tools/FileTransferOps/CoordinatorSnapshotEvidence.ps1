@@ -6648,22 +6648,47 @@ function Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle {
 
 function Get-FileTransferCoordinatorSnapshotEvaluation {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Lines)
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Lines')]
+        [AllowEmptyCollection()][string[]]$Lines,
+        [Parameter(Mandatory = $true, ParameterSetName = 'SnapshotRecords')]
+        [AllowEmptyCollection()][object[]]$SnapshotRecords
+    )
 
     $catalog = Get-FileTransferCoordinatorEvidenceCatalog
     $records = [System.Collections.Generic.List[object]]::new()
-    for ($index = 0; $index -lt $Lines.Count; $index++) {
-        $eventName = Get-FileTransferCoordinatorSnapshotEventName -Line ([string]$Lines[$index])
-        if ($catalog.SnapshotAuthorityV1 -notcontains $eventName -and
-            $catalog.GenerationStampedEffects -notcontains $eventName) {
-            continue
+    if ($PSCmdlet.ParameterSetName -ceq 'SnapshotRecords') {
+        foreach ($candidate in @($SnapshotRecords)) {
+            $line = [string]$candidate.Line
+            $lineIndex = [long]$candidate.LineIndex
+            $eventName = Get-FileTransferCoordinatorSnapshotEventName -Line $line
+            if ($catalog.SnapshotAuthorityV1 -notcontains $eventName -and
+                $catalog.GenerationStampedEffects -notcontains $eventName) {
+                continue
+            }
+            $records.Add([pscustomobject]@{
+                    LineIndex = $lineIndex
+                    Line = $line
+                    EventName = $eventName
+                    CoordinatorInstanceId = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'coordinator_instance_id'
+                })
         }
-        $records.Add([pscustomobject]@{
-                LineIndex = $index
-                Line = [string]$Lines[$index]
-                EventName = $eventName
-                CoordinatorInstanceId = Get-FileTransferCoordinatorSnapshotLineField -Line ([string]$Lines[$index]) -Name 'coordinator_instance_id'
-            })
+    }
+    else {
+        for ($index = 0; $index -lt $Lines.Count; $index++) {
+            $line = [string]$Lines[$index]
+            $eventName = Get-FileTransferCoordinatorSnapshotEventName -Line $line
+            if ($catalog.SnapshotAuthorityV1 -notcontains $eventName -and
+                $catalog.GenerationStampedEffects -notcontains $eventName) {
+                continue
+            }
+            $records.Add([pscustomobject]@{
+                    LineIndex = $index
+                    Line = $line
+                    EventName = $eventName
+                    CoordinatorInstanceId = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'coordinator_instance_id'
+                })
+        }
     }
 
     if ($records.Count -eq 0) {

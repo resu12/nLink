@@ -534,7 +534,9 @@ public sealed partial class SessionFileTransferService
             terminalAuthority.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
             terminalAuthority.ProofBoundary is not
                 FileTransferFallbackTransitionProofBoundary fallbackBoundary ||
-            !Equals(fallbackBoundary.PeerProofEvidence, evidence) ||
+            !IsSameConsumedFallbackRouteTransitionPeerFrame(
+                fallbackBoundary.PeerProofEvidence,
+                evidence) ||
             dispositionCommand.Authority != terminalAuthority ||
             dispositionReceipt.Command != dispositionCommand)
         {
@@ -544,6 +546,24 @@ public sealed partial class SessionFileTransferService
         authority = terminalAuthority;
         return true;
     }
+
+    private static bool IsSameConsumedFallbackRouteTransitionPeerFrame(
+        PostTunaFallbackPeerProofEvidence consumed,
+        PostTunaFallbackPeerProofEvidence candidate)
+        => consumed.IsComplete &&
+           candidate.IsComplete &&
+           string.Equals(
+               consumed.SessionId,
+               candidate.SessionId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               consumed.TransferId,
+               candidate.TransferId,
+               StringComparison.Ordinal) &&
+           consumed.Direction == candidate.Direction &&
+           consumed.ProofGeneration == candidate.ProofGeneration &&
+           consumed.TransportEpoch == candidate.TransportEpoch &&
+           consumed.FrameIdentity == candidate.FrameIdentity;
 
     private static bool TryMergeFileTransferRouteTransitionEvidence(
         FileTransferRouteTransitionExecutionShadow? current,
@@ -5263,9 +5283,12 @@ public sealed partial class SessionFileTransferService
         FileTransferRouteTransitionAuthority? authority,
         string status,
         string reason)
-        => LocalOperationalLog.Info(
+    {
+        var effectiveFrameIdentity = frameIdentity ?? proof?.FrameIdentity;
+        LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_route_transition_peer_proof_observed; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; transition_generation={authority?.TransitionGeneration ?? 0}; transition_kind={FormatProtocolLogValue(authority?.Kind.ToString() ?? "(pending)")}; direction={direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; proof_generation={proof?.ProofGeneration ?? 0}; proof_transport_epoch={proof?.TransportEpoch ?? frameIdentity?.TransportEpoch ?? 0}; proof_kind={FormatProtocolLogValue(proof?.ProofKind ?? "(none)")}; frame_type={FormatProtocolLogValue(frameIdentity?.FrameType ?? "(none)")}; frame_transport_epoch={frameIdentity?.TransportEpoch ?? 0}; frame_fingerprint={FormatProtocolLogValue(frameIdentity?.Sha256 ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_route_transition_peer_proof_observed; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(authority?.AuthorityId.ToString() ?? "(none)")}; transition_generation={authority?.TransitionGeneration ?? 0}; transition_kind={FormatProtocolLogValue(authority?.Kind.ToString() ?? "(pending)")}; direction={direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; proof_generation={proof?.ProofGeneration ?? 0}; proof_transport_epoch={proof?.TransportEpoch ?? effectiveFrameIdentity?.TransportEpoch ?? 0}; proof_kind={FormatProtocolLogValue(proof?.ProofKind ?? "(none)")}; frame_type={FormatProtocolLogValue(effectiveFrameIdentity?.FrameType ?? "(none)")}; frame_transport_epoch={effectiveFrameIdentity?.TransportEpoch ?? 0}; frame_fingerprint={FormatProtocolLogValue(effectiveFrameIdentity?.Sha256 ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+    }
 
     private static void LogFileTransferRouteTransitionSupersessionDecision(
         string sessionId,

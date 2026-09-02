@@ -7747,6 +7747,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                             -Encoding UTF8
                         return New-FakeClassificationProcess -WaitResult $true -ExitCode 0
                     }
+                    'null-response' {
+                        [ordered]@{
+                            schemaVersion = 1
+                            event = 'filetransfer_tuna_gui_failure_classification_response'
+                            classification = $null
+                        } | ConvertTo-Json -Depth 32 | Set-Content `
+                            -LiteralPath (Join-Path $script:artifactRoot 'filetransfer-tuna-gui-failure-classification-response.json') `
+                            -Encoding UTF8
+                        return New-FakeClassificationProcess -WaitResult $true -ExitCode 0
+                    }
                     default { throw "unexpected fake process mode '$script:fakeProcessMode'" }
                 }
             }
@@ -7809,6 +7819,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $script:fakeProcessMode = 'invalid-response'
                 $invalidResponse = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
                 Assert-BaseClassificationPreserved $invalidResponse 'failed' 'evidence_enrichment_response_classification_invalid'
+
+                $script:fakeProcessMode = 'null-response'
+                $nullResponse = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
+                Assert-BaseClassificationPreserved $nullResponse 'failed' 'evidence_enrichment_response_classification_invalid'
 
                 $script:fakeProcessMode = 'completed'
                 $completed = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
@@ -11720,7 +11734,18 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     [Fact]
     public async Task GuiSmokeLogLedger_FilteredAppendOnlyRangeVisitsOnlyActionEvents()
     {
-        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+        var repoRoot = FindRepoRoot();
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        Assert.Contains("[System.IO.File]::ReadAllLines(", classifierBody, StringComparison.Ordinal);
+        Assert.Contains("[System.Text.UTF8Encoding]::new($false, $true)", classifierBody, StringComparison.Ordinal);
+        Assert.Contains("-SnapshotRecords", classifierBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("while (-not $reader.EndOfStream)", classifierBody, StringComparison.Ordinal);
+
+        var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
             .Replace("'", "''", StringComparison.Ordinal);
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
@@ -11735,6 +11760,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 for ($i = 0; $i -lt 100000; $i++) { $lines.Add("event=payload_noise; index=$i") }
                 $lines.Insert(50000, 'event=filetransfer_route_transition_committed; direction=outbound')
                 $lines.Add('event=transfer_terminal; direction=outbound')
+                for ($i = 0; $i -lt 2521; $i++) {
+                    $lines.Add("event=filetransfer_coordinator_authority_effect; index=$i")
+                }
                 [IO.File]::WriteAllLines($path, $lines, [Text.UTF8Encoding]::new($false))
                 Sync-GuiSmokeLogLedger -State $state -Paths @($path)
                 $visited = [Collections.Generic.List[string]]::new()
@@ -11757,6 +11785,48 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $native.Lines[0].LineIndex -ne 50000 -or $native.Lines[1].LineIndex -ne 100001) {
                     throw "native filtered diagnostics mismatch: scanned=$($native.SourceLineVisitCount) matched=$($native.Lines.Count)"
                 }
+                $snapshotStopwatch = [Diagnostics.Stopwatch]::StartNew()
+                $snapshotWidth = Select-GuiSmokeLogLedgerEventsFromFile `
+                    -Path $state.AppendOnlyPath `
+                    -LineCount ([long]$lines.Count) `
+                    -EventNames @('filetransfer_coordinator_authority_effect')
+                $snapshotStopwatch.Stop()
+                if ($snapshotWidth.SourceLineVisitCount -ne $lines.Count -or
+                    $snapshotWidth.Lines.Count -ne 2521 -or
+                    $snapshotStopwatch.ElapsedMilliseconds -ge 10000) {
+                    throw "production-width snapshot selection mismatch: scanned=$($snapshotWidth.SourceLineVisitCount) matched=$($snapshotWidth.Lines.Count)"
+                }
+
+                $bomPath = Join-Path $tempRoot 'bom.log'
+                [IO.File]::WriteAllText(
+                    $bomPath,
+                    'event=transfer_terminal; direction=outbound',
+                    [Text.UnicodeEncoding]::new($false, $true))
+                $bom = Select-GuiSmokeLogLedgerEventsFromFile `
+                    -Path $bomPath `
+                    -LineCount 1L `
+                    -EventNames @('transfer_terminal')
+                if ($bom.SourceLineVisitCount -ne 1 -or
+                    $bom.Lines.Count -ne 1 -or
+                    $bom.Lines[0].LineIndex -ne 0) {
+                    throw 'BOM-aware strict event selection failed.'
+                }
+
+                $invalidPath = Join-Path $tempRoot 'invalid-utf8.log'
+                [IO.File]::WriteAllBytes($invalidPath, [byte[]]@(0x80, 0x0A))
+                $invalidRejected = $false
+                try {
+                    [void](Select-GuiSmokeLogLedgerEventsFromFile `
+                        -Path $invalidPath `
+                        -LineCount 1L `
+                        -EventNames @('transfer_terminal'))
+                }
+                catch {
+                    $invalidRejected = $true
+                }
+                if (-not $invalidRejected) {
+                    throw 'Invalid UTF-8 evidence was not rejected.'
+                }
                 'filtered-range-ok'
             }
             finally {
@@ -11771,6 +11841,171 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_AuthoritativeSnapshotPassClassifiesIncompleteRegularActivationCycle()
+    {
+        var repoRoot = FindRepoRoot();
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var resultBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "New-TunaGuiFileTransferFailureClassificationResult",
+            "Get-TunaGuiExplicitFailureClassification");
+        var explicitBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiExplicitFailureClassification",
+            "Resolve-TunaGuiFailureClassification");
+        var classifierBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Get-TunaGuiFileTransferSetupFailureClassification",
+            "Get-TunaGuiFailureClassificationBudgetMilliseconds");
+        var scriptText = $$"""
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+            function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
+            $script:snapshotArtifactVerdict = 'pass'
+            function Get-FileTransferCoordinatorSnapshotEvaluation {
+                param($Lines, $SnapshotRecords)
+                return [pscustomobject]@{
+                    Mode = 'SnapshotV1Authoritative'
+                    ArtifactEvidenceVerdict = $script:snapshotArtifactVerdict
+                    TransitionCount = 12L
+                    FirstUnresolvedBoundary = $null
+                    FallbackTailYieldFamilyLegacySelectionCount = 0L
+                    RegularV4FrontierRepairPressureFamilyLegacySelectionCount = 0L
+                    ResponderProbeHandoffFamilyLegacySelectionCount = 0L
+                }
+            }
+            function Test-FileTransferCoordinatorSnapshotFamilyAuthoritative { return $true }
+            function Get-AppLogLinesAfterBookmark { throw 'live evidence was read' }
+            function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
+
+            function New-RouteLines {
+                param([int]$LastEpoch = 2, [switch]$MutateEpochTwoOutbound)
+                $expectations = @(
+                    [pscustomobject]@{ Epoch=1; Route='file_tuna_v4'; Protocol=4; Handoff='normal_to_tuna_activation'; Transport='tuna' },
+                    [pscustomobject]@{ Epoch=2; Route='post_tuna_fallback_v6'; Protocol=6; Handoff='tuna_to_normal_fallback'; Transport='regular_nkn' },
+                    [pscustomobject]@{ Epoch=3; Route='file_tuna_v4'; Protocol=4; Handoff='normal_to_tuna_activation'; Transport='tuna' },
+                    [pscustomobject]@{ Epoch=4; Route='post_tuna_fallback_v6'; Protocol=6; Handoff='tuna_to_normal_fallback'; Transport='regular_nkn' })
+                $result = [Collections.Generic.List[string]]::new()
+                $writerSequences = @{ inbound = 100L; outbound = 200L }
+                $result.Add('event=filetransfer_coordinator_snapshot_stream_started')
+                foreach ($expectation in @($expectations | Where-Object { $_.Epoch -le $LastEpoch })) {
+                    foreach ($eventName in @('filetransfer_live_route_epoch_started','filetransfer_live_route_epoch_recovered')) {
+                        foreach ($direction in @('inbound','outbound')) {
+                            $protocol = if ($MutateEpochTwoOutbound -and $expectation.Epoch -eq 2 -and $direction -eq 'outbound') { 4 } else { $expectation.Protocol }
+                            $writerSequences[$direction]++
+                            $runtimeProfile = if (($expectation.Epoch % 2) -eq 1) { 'file_tuna_v4_fast' } else { 'default_v6' }
+                            $frameFamily = if (($expectation.Epoch % 2) -eq 1) { 'v4' } else { 'v6' }
+                            $publicationAction = if (($expectation.Epoch % 2) -eq 1) { 'RouteCommitPublication' } else { 'RoutePublication' }
+                            $routeCommitGeneration = if (($expectation.Epoch % 2) -eq 1) { [int](($expectation.Epoch + 1) / 2) } else { 0 }
+                            $generation = $expectation.Epoch + 1
+                            $result.Add("event=$eventName; session_id=sess; transfer_id=transfer; direction=$direction; live_route_epoch=$($expectation.Epoch); route=$($expectation.Route); protocol_version=$protocol; runtime_profile=$runtimeProfile; frame_family=$frameFamily; handoff_kind=$($expectation.Handoff); target_transport=$($expectation.Transport); route_publication_generation=$generation; runtime_generation=$generation; terminal_generation=0; leg_generation=$generation; route_commit_generation=$routeCommitGeneration; target_route=$($expectation.Route); target_protocol_version=$protocol; route_publication_action_kind=$publicationAction; transition_authority_id=transition-$direction-$($expectation.Epoch); transition_generation=$($expectation.Epoch); projection_source=coordinator_route_transition; log_writer_id=writer-$direction; log_writer_sequence=$($writerSequences[$direction])")
+                        }
+                    }
+                }
+                return $result.ToArray()
+            }
+
+            $errorMessage = 'Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling. failure_class=filetransfer_gui_live_route_epoch_sequence_incomplete; failure_variant=route_sequence_stopped_after_epoch2_fallback; expected_sequence=file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6; observed_sequence=file_tuna_v4,post_tuna_fallback_v6; missing_route_epochs=3:file_tuna_v4,4:post_tuna_fallback_v6; sequence=file_tuna_v4,post_tuna_fallback_v6 findings=missing_started route=file_tuna_v4; after_epoch=2|missing_started route=post_tuna_fallback_v6; after_epoch=2 metadata_missing=0 Summary: {}'
+            $root = Join-Path ([IO.Path]::GetTempPath()) ('nlink-authoritative-harness-route-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            try {
+                $path = Join-Path $root 'evidence.log'
+                [IO.File]::WriteAllLines($path, (New-RouteLines -LastEpoch 2), [Text.UTF8Encoding]::new($false))
+                $missing = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($null -eq $missing -or
+                    -not $missing.ClassificationComplete -or
+                    $missing.Phase -cne 'live_route_proof' -or
+                    $missing.Reason -cne 'live_regular_activation_cycle_missing_successor_route_epochs' -or
+                    $missing.FailureClass -cne 'filetransfer_gui_live_route_epoch_sequence_incomplete' -or
+                    $missing.FailureVariant -cne 'route_sequence_stopped_after_epoch2_fallback' -or
+                    $missing.ClassificationSource -cne 'coordinator_snapshot_authority_v1_harness_route_proof' -or
+                    $missing.CoordinatorBoundaryId -cne '(none)' -or
+                    $missing.CoordinatorBoundaryHash -cne '(none)' -or
+                    $missing.CoordinatorWriterSequence -ne 0L) {
+                    throw "missing-cycle classification mismatch: $($missing | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $script:snapshotArtifactVerdict = 'fail'
+                $invalidSnapshot = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($invalidSnapshot.FailureClass -cne 'filetransfer_coordinator_snapshot_evidence_invalid') {
+                    throw "harness classification overrode invalid snapshot evidence: $($invalidSnapshot | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                $script:snapshotArtifactVerdict = 'pass'
+
+                [IO.File]::WriteAllLines($path, (New-RouteLines -LastEpoch 4), [Text.UTF8Encoding]::new($false))
+                $contradiction = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($contradiction.FailureClass -cne 'filetransfer_gui_failure_evidence_inconsistent' -or
+                    $contradiction.FailureVariant -cne 'failure_claim_missing_successor_epochs_but_epochs3_4_present') {
+                    throw "complete cycle did not contradict the missing-cycle claim: $($contradiction | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                [IO.File]::WriteAllLines($path, (New-RouteLines -LastEpoch 2 -MutateEpochTwoOutbound), [Text.UTF8Encoding]::new($false))
+                $mutated = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($mutated.FailureClass -cne 'filetransfer_gui_failure_classification_unresolved') {
+                    throw "mutated route evidence was accepted: $($mutated | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $ambiguousLines = [Collections.Generic.List[string]]::new()
+                $ambiguousLines.AddRange([string[]](New-RouteLines -LastEpoch 2))
+                $ambiguousLines.Add(($ambiguousLines[1] -replace 'session_id=sess; transfer_id=transfer;', 'session_id=other-session; transfer_id=other-transfer;'))
+                [IO.File]::WriteAllLines($path, $ambiguousLines.ToArray(), [Text.UTF8Encoding]::new($false))
+                $ambiguous = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($ambiguous.FailureClass -cne 'filetransfer_gui_failure_classification_unresolved') {
+                    throw "ambiguous route scope was accepted: $($ambiguous | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $outOfOrderLines = [string[]](New-RouteLines -LastEpoch 2)
+                $swap = $outOfOrderLines[2]
+                $outOfOrderLines[2] = $outOfOrderLines[4]
+                $outOfOrderLines[4] = $swap
+                [IO.File]::WriteAllLines($path, $outOfOrderLines, [Text.UTF8Encoding]::new($false))
+                $outOfOrder = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($outOfOrder.FailureClass -cne 'filetransfer_gui_failure_classification_unresolved') {
+                    throw "out-of-order route evidence was accepted: $($outOfOrder | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $missingScopeLines = [string[]](New-RouteLines -LastEpoch 2)
+                $missingScopeLines[1] = $missingScopeLines[1] -replace 'session_id=sess;', 'session_id=;'
+                [IO.File]::WriteAllLines($path, $missingScopeLines, [Text.UTF8Encoding]::new($false))
+                $missingScope = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($missingScope.FailureClass -cne 'filetransfer_gui_failure_classification_unresolved') {
+                    throw "scope-poor route evidence was accepted: $($missingScope | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $conflictingLines = [Collections.Generic.List[string]]::new()
+                $conflictingLines.AddRange([string[]](New-RouteLines -LastEpoch 2))
+                $conflictingLines.Add(($conflictingLines[1] -replace 'route_publication_generation=2;', 'route_publication_generation=9;'))
+                [IO.File]::WriteAllLines($path, $conflictingLines.ToArray(), [Text.UTF8Encoding]::new($false))
+                $conflicting = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($conflicting.FailureClass -cne 'filetransfer_gui_failure_classification_unresolved') {
+                    throw "conflicting duplicate route evidence was accepted: $($conflicting | ConvertTo-Json -Depth 8 -Compress)"
+                }
+
+                $unknown = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'unmapped harness failure' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($null -eq $unknown -or -not $unknown.ClassificationComplete -or
+                    $unknown.Reason -cne 'authoritative_snapshot_pass_harness_failure_unclassified') {
+                    throw "unknown authoritative-pass failure returned no complete classification: $($unknown | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                'authoritative-harness-route-classification-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, new[] { repoRoot });
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Authoritative-pass harness classification failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("authoritative-harness-route-classification-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GuiSmokeWindows_RegularActivationCycleRejectsTerminalBeforeReactivation()
     {
         var repoRoot = FindRepoRoot();
@@ -11778,6 +12013,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var soakText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferSoak", "SoakSummaryExtraction.ps1"));
 
         Assert.Contains("failure_class=filetransfer_gui_live_reactivation_action_window_missed", guiText, StringComparison.Ordinal);
+        Assert.Contains("missing_route_epochs=$missingRouteEpochs", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_gui_live_route_epoch_proof_invalid", guiText, StringComparison.Ordinal);
         Assert.Contains("Claim-TunaGuiLiveReactivationAction", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_tuna_gui_live_reactivation_action_decided", guiText, StringComparison.Ordinal);
         Assert.Contains("$fallbackProjectionBookmark = if ($RouteMode -eq 'live-regular-activation-cycle')", guiText, StringComparison.Ordinal);

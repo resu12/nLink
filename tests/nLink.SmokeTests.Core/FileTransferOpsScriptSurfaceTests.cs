@@ -1611,18 +1611,28 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
 
             $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @('event=unrelated', $start, 'event=other', $transition, $effect, $completed)
             $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @($start, $transition, $effect, $completed)
+            $indexed = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords @(
+                [pscustomobject]@{ LineIndex = 1L; Line = $start },
+                [pscustomobject]@{ LineIndex = 3L; Line = $transition },
+                [pscustomobject]@{ LineIndex = 4L; Line = $effect },
+                [pscustomobject]@{ LineIndex = 5L; Line = $completed })
             if ($full.ArtifactEvidenceVerdict -ne 'pass' -or
                 $compact.ArtifactEvidenceVerdict -ne 'pass' -or
+                $indexed.ArtifactEvidenceVerdict -ne 'pass' -or
                 $full.BoundaryHash -ne $compact.BoundaryHash -or
+                $full.BoundaryHash -ne $indexed.BoundaryHash -or
                 $full.BoundaryCount -ne 1 -or
                 $compact.BoundaryCount -ne 1 -or
+                $indexed.BoundaryCount -ne 1 -or
                 $full.EffectCount -ne 1 -or
                 $compact.EffectCount -ne 1 -or
+                $indexed.EffectCount -ne 1 -or
+                $indexed.Boundaries[0].evidenceLineIndex -ne 3L -or
                 -not (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative -Evaluation $full -Family 'route_runtime') -or
                 -not (Test-FileTransferCoordinatorSnapshotFamilyAuthoritative -Evaluation $compact -Family 'route_transition') -or
                 $full.LegacySelectionCount -ne 5 -or
                 $full.RouteFamilyLegacySelectionCount -ne 0) {
-                throw "Snapshot parity failed: $($full | ConvertTo-Json -Compress) / $($compact | ConvertTo-Json -Compress)"
+                throw "Snapshot parity failed: $($full | ConvertTo-Json -Compress) / $($compact | ConvertTo-Json -Compress) / $($indexed | ConvertTo-Json -Compress)"
             }
 
             $unboundEffect = $effect -replace 'receipt_fingerprint=receipt-fingerprint-1', 'receipt_fingerprint=wrong'

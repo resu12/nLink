@@ -745,9 +745,14 @@ public sealed partial class SessionFileTransferV4SenderTests
             direction,
             ProofGeneration: 1,
             TransportEpoch: targetTransportEpoch,
-            ProofKind: "fallback_peer_state",
-            Reason: "transport_recovered",
+            ProofKind: "fallback_v6_proof_bootstrap_peer_frame",
+            Reason: "coordinator_fallback_v6_proof_bootstrap_peer_frame",
             FrameIdentity: frameIdentity);
+        var transportAliasProof = peerProof with
+        {
+            ProofKind = "file_transfer_v6_state_frame_received",
+            Reason = "transport_recovered",
+        };
         var proofBoundary = new FileTransferFallbackTransitionProofBoundary(
             sourceCommit,
             peerProof,
@@ -828,7 +833,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             BindingFlags.Instance | BindingFlags.NonPublic)!;
         var logStart = GetOperationalLogLength();
         object?[] arguments =
-            [context, dataSession, peerProof, "transport_recovered", null];
+            [context, dataSession, transportAliasProof, "transport_recovered", null];
 
         Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
         Assert.Null(arguments[4]);
@@ -844,13 +849,29 @@ public sealed partial class SessionFileTransferV4SenderTests
             $"authority_id={authority.AuthorityId}",
             log,
             StringComparison.Ordinal);
+        Assert.Contains(
+            $"frame_type={frameIdentity.FrameType}",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"frame_transport_epoch={frameIdentity.TransportEpoch}",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "frame_fingerprint=",
+            log,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "frame_fingerprint=(none)",
+            log,
+            StringComparison.Ordinal);
 
         SetPrivateProperty(
             context,
             "DataSessionGeneration",
             state.CurrentDataSessionGeneration + 1);
         arguments =
-            [context, dataSession, peerProof, "transport_recovered", null];
+            [context, dataSession, transportAliasProof, "transport_recovered", null];
         Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
         Assert.Null(GetPrivatePropertyValue(
             context,
@@ -870,7 +891,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         };
         var successorIdentity =
             PostTunaFallbackPeerProofFrameIdentity.Create(successorFrame);
-        var successorProof = peerProof with
+        var successorProof = transportAliasProof with
         {
             ProofGeneration = peerProof.ProofGeneration + 1,
             TransportEpoch = peerProof.TransportEpoch + 1,
@@ -887,7 +908,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Null(GetPrivatePropertyValue(successorShadow, "Authority"));
 
         arguments =
-            [context, dataSession, peerProof, "transport_recovered", null];
+            [context, dataSession, transportAliasProof, "transport_recovered", null];
         Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
         Assert.Same(
             successorShadow,
