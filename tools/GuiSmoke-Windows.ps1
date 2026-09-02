@@ -7,6 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'FileTransferAuthorityMatching.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
 . (Join-Path $PSScriptRoot 'GuiSmokeLogLedger.ps1')
 
 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
@@ -10960,6 +10961,35 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
+        $bootstrapDirection = if ($null -ne (Get-Command `
+                Get-FileTransferFallbackV6BootstrapDirectionCorrelation `
+                -ErrorAction SilentlyContinue)) {
+            Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $Lines
+        }
+        else {
+            $null
+        }
+        if ($null -ne $bootstrapDirection -and
+            $bootstrapDirection.UnresolvedCount -gt 0) {
+            $first = $bootstrapDirection.UnresolvedCandidateRecords[0]
+            return [pscustomobject]@{
+                Unresolved = $true
+                Reason = [string]$first.Reason
+                Variant = [string]$first.Variant
+                FirstSequence = [long]$first.WriterSequence
+                RawCount = [long]$bootstrapDirection.RawCount
+                DistinctCount = [long]$bootstrapDirection.DistinctCount
+                RecoveredCount = [long]$bootstrapDirection.RecoveredCount
+                UnresolvedCount = [long]$bootstrapDirection.UnresolvedCount
+                LineVisits = [long]$Lines.Count
+                CommandCount = 0
+                ExecutionRejectedCount = 0
+                ReceiptAppliedCount = 0
+                LegacyRejectedCount = 0
+                PeerBoundaryMissingCount = 0
+            }
+        }
+
         $committedTunaScopes = @{}
         $observations = @{}
         $commands = @{}
@@ -11304,6 +11334,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             else {
                 'outbound_proof_only_frontier_request_rejected_by_ordinary_repair_codec'
             }
+            Variant = '(none)'
+            FirstSequence = [long]::MaxValue
+            RawCount = 0L
+            DistinctCount = 0L
+            RecoveredCount = 0L
+            UnresolvedCount = 0L
             LineVisits = $visits
             CommandCount = $commands.Count
             ExecutionRejectedCount = @($commands.Values | Where-Object { $_.ExecutionRejected }).Count
@@ -22566,6 +22602,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase 'route_transition' `
             -Reason $fallbackV6InvalidFrontierFastPath.Reason `
+            -FailureClass 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing' `
+            -FailureVariant $fallbackV6InvalidFrontierFastPath.Variant `
             -RouteMode $RouteMode `
             -ClassificationSource "${classificationSource}_fallback_v6_bootstrap_index" `
             -EvidenceLineVisitCount ([long]$fallbackV6InvalidFrontierFastPath.LineVisits) `

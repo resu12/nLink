@@ -7602,6 +7602,63 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_FallbackBootstrapDirectionUsesSharedCorrelation()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = guiText
+            .Replace("\r\n    ", "\r\n", StringComparison.Ordinal)
+            .Replace("\n    ", "\n", StringComparison.Ordinal);
+        var fieldBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
+        var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*function\s+Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure");
+        Assert.True(
+            fastPathMatch.Success,
+            "Could not extract the fallback-V6 bootstrap GUI fast path.");
+        var fastPathBody = fastPathMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferAuthorityMatching.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+            function Get-TunaGuiLogLineFieldValue { {{fieldBody}} }
+            function Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure { {{fastPathBody}} }
+
+            $scope = 'session_id=sess_a; log_writer_id=writer_a'
+            $lines = @(
+                "event=tuna_fallback_started; $scope; fallback_epoch=2; log_writer_sequence=100",
+                "event=filetransfer_fallback_nkn_proof_pending; $scope; log_writer_sequence=101",
+                "event=tuna_fallback_nkn_frame_received; $scope; fallback_epoch=2; message_type=file_transfer_data_frame; channel=bulk; log_writer_sequence=102",
+                "event=filetransfer_fallback_nkn_proof_unconfirmed; $scope; proof=file_transfer_bulk_frame_received; requires_control_proof=1; requires_v6_epoch_recovery=0; bulk_seen=1; control_seen=0; log_writer_sequence=103",
+                "event=filetransfer_fallback_nkn_proof_unconfirmed; $scope; proof=nkn_control_ack_received; requires_control_proof=0; requires_v6_epoch_recovery=1; bulk_seen=1; control_seen=1; log_writer_sequence=104",
+                "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; $scope; proof=nkn_control_ack_received; log_writer_sequence=105",
+                "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; $scope; proof=nkn_control_ack_received; log_writer_sequence=106"
+            )
+            $result = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines $lines
+            if (-not $result.Unresolved -or $result.RawCount -ne 2 -or
+                $result.DistinctCount -ne 1 -or $result.UnresolvedCount -ne 1 -or
+                $result.FirstSequence -ne 105 -or
+                $result.Reason -ne 'combined_v6_bulk_and_control_proof_lost_bootstrap_direction' -or
+                $result.Variant -ne 'unbound_second_cycle_pending_proof_received_v6_bulk_before_control_ack') {
+                throw "shared GUI bootstrap direction mismatch: $($result | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'gui-bootstrap-direction-shared-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Fallback-bootstrap direction GUI correlation failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-bootstrap-direction-shared-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_BudgetLeavesHardDeadlineGrace()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

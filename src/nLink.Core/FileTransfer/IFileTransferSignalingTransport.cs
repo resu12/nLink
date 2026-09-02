@@ -528,7 +528,12 @@ internal sealed record FileTransferFallbackV6ProofBootstrapEvaluation(
     long FallbackEpoch,
     string Source,
     string ProofKind,
-    long ObservedUtcMilliseconds);
+    long ObservedUtcMilliseconds,
+    string? TriggerTransferId = null,
+    long TriggerTransportEpoch = 0,
+    string? TriggerFrameFingerprint = null,
+    IFileTransferDataSession? TriggerDataSession = null,
+    long TriggerDataSessionGeneration = 0);
 
 internal sealed class FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs(
     FileTransferFallbackV6ProofBootstrapEvaluation evaluation) : EventArgs
@@ -2890,6 +2895,11 @@ public interface IFileTransferDataSession : IDisposable
     ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct);
 
     Task SendAsync(FileTransferDataFrame frame, CancellationToken ct);
+}
+
+internal interface IFileTransferDataSessionGenerationProvider
+{
+    long Generation { get; }
 }
 
 public interface IFileTransferDataPathAuthoritySession

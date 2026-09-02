@@ -55,6 +55,17 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         DateTimeOffset RecordedUtc,
         RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot = null);
 
+    private sealed record FileTransferFallbackV6BootstrapTrigger(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction,
+        long PendingProofGeneration,
+        long FallbackEpoch,
+        long TransportEpoch,
+        string FrameFingerprint,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration);
+
     private readonly record struct FileTransferRouteHintKey(
         string SessionId,
         string TransferId,
@@ -270,6 +281,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool fileTransferFallbackProofProbeScheduled;
     private bool fileTransferFallbackBulkProofObserved;
     private bool fileTransferFallbackControlProofObserved;
+    private FileTransferFallbackV6BootstrapTrigger?
+        fileTransferFallbackV6BootstrapTrigger;
+    private bool fileTransferFallbackV6BootstrapTriggerReadyLogged;
     private readonly HashSet<string> fileTransferFallbackV6ProofBootstrapObservationKeys =
         new(StringComparer.Ordinal);
     private string? fileTransferFallbackProofTransferId;

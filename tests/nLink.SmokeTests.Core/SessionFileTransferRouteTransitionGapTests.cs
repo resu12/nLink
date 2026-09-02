@@ -8,6 +8,77 @@ public sealed partial class SessionFileTransferV4SenderTests
 {
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public void FallbackV6ProofBootstrap_ExactTriggerUsesDataSessionIdentityNotCrossLayerGeneration()
+    {
+        const string transferId = "transfer_fallback_v6_bootstrap_exact_trigger";
+        using var service = new SessionFileTransferService();
+        var exactDataSession = new GenerationBoundDataSession(
+            $"session_{transferId}",
+            transferId,
+            generation: 7);
+        var context = CreateFileTunaV4InboundContext(
+            transferId,
+            dataSession: exactDataSession);
+        SetPrivateProperty(context, "V4StateEpoch", 1);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(
+            exactDataSession.SessionId,
+            FileTransferDirection.Inbound,
+            ObservationGeneration: 11,
+            FallbackEpoch: 2,
+            Source: "unit_test_v6_bulk_then_control",
+            ProofKind: "file_transfer_bulk_frame_received",
+            ObservedUtcMilliseconds: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            TriggerTransferId: transferId,
+            TriggerTransportEpoch: 0,
+            TriggerFrameFingerprint: new string('a', 64),
+            TriggerDataSession: exactDataSession,
+            TriggerDataSessionGeneration: exactDataSession.Generation);
+        var issue = typeof(SessionFileTransferService).GetMethod(
+            "TryIssueFallbackV6ProofBootstrapLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var replacementDataSession = new GenerationBoundDataSession(
+            exactDataSession.SessionId,
+            transferId,
+            generation: 8);
+        object?[] staleArgs =
+        [
+            evaluation with
+            {
+                TriggerDataSession = replacementDataSession,
+                TriggerDataSessionGeneration = replacementDataSession.Generation,
+            },
+            null,
+            null,
+            null,
+            null,
+            null,
+        ];
+        Assert.False(Assert.IsType<bool>(issue.Invoke(service, staleArgs)));
+
+        var triggerMatcher = typeof(SessionFileTransferService).GetMethod(
+            "MatchesFallbackV6ProofBootstrapTrigger",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.True(Assert.IsType<bool>(triggerMatcher.Invoke(
+            null,
+            [evaluation, transferId, exactDataSession, 1L])));
+
+        object?[] exactArgs = [evaluation, null, null, null, null, null];
+        Assert.True(Assert.IsType<bool>(issue.Invoke(service, exactArgs)));
+        var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(
+            exactArgs[1]);
+        Assert.Equal(FileTransferDirection.Inbound, command.Observation.Direction);
+        Assert.Equal(2, command.Observation.FallbackEpoch);
+        Assert.Same(exactDataSession, exactArgs[4]);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
     public async Task InboundFallbackRetainedFrame_CommittedDuringPromotion_IsNotDispatchedToSuccessorRuntime()
     {
         const string transferId =
@@ -2075,6 +2146,39 @@ public sealed partial class SessionFileTransferV4SenderTests
             sentFrames.Add(frame);
             return Task.CompletedTask;
         }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class GenerationBoundDataSession(
+        string sessionId,
+        string transferId,
+        long generation) :
+        IFileTransferDataSession,
+        IFileTransferDataSessionGenerationProvider
+    {
+        public string SessionId { get; } = sessionId;
+        public string TransferId { get; } = transferId;
+        public long Generation { get; } = generation;
+        public bool IsAvailable => true;
+
+        public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(
+            CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
+            => Task.CompletedTask;
 
         public void Dispose()
         {

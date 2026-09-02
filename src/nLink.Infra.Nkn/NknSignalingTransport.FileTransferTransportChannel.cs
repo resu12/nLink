@@ -7611,6 +7611,7 @@ public sealed partial class NknSignalingTransport
 
     private sealed class TransportFileTransferDataSession :
         IFileTransferDataSession,
+        IFileTransferDataSessionGenerationProvider,
         IFileTransferDataPathAuthoritySession,
         IFileTransferPhysicalSendSubmissionSession,
         IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer,

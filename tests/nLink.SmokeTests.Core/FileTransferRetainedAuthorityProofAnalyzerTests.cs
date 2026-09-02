@@ -2678,6 +2678,131 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData(false)]
     [InlineData(true)]
     [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task AnalyzeRetained_FallbackV6ProofBootstrapDirectionMissing_HasFullCompactParity(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_v6_bootstrap_direction_missing";
+        const string scope =
+            "session_id=sess_a; log_writer_id=writer_bootstrap_direction";
+        var messages = new List<string>
+        {
+            $"event=tuna_fallback_started; {scope}; fallback_epoch=2; reason=remote_header_switch_off; lanes=file; log_writer_sequence=100",
+            $"event=filetransfer_fallback_nkn_proof_pending; {scope}; reason=remote_header_switch_off; lanes=file; log_writer_sequence=101",
+            $"event=tuna_fallback_nkn_frame_received; {scope}; fallback_epoch=2; message_type=file_transfer_data_frame; channel=bulk; reason=remote_header_switch_off; log_writer_sequence=102",
+            $"event=filetransfer_fallback_nkn_proof_unconfirmed; {scope}; proof=file_transfer_bulk_frame_received; requires_control_proof=1; requires_v6_epoch_recovery=0; bulk_seen=1; control_seen=0; log_writer_sequence=103",
+            $"event=filetransfer_fallback_nkn_proof_unconfirmed; {scope}; proof=nkn_control_ack_received; requires_control_proof=0; requires_v6_epoch_recovery=1; bulk_seen=1; control_seen=1; log_writer_sequence=104"
+        };
+        for (var sequence = 105; sequence < 152; sequence++)
+        {
+            messages.Add(
+                $"event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; {scope}; proof=nkn_control_ack_received; reason=remote_header_switch_off; log_writer_sequence={sequence}");
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildFileTunaV4DataPathProofFixture(transferId, messages.ToArray()),
+            environment: compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("47", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_raw_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_distinct_count"]);
+        Assert.Equal("0", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_recovered_count"]);
+        Assert.Equal("1", verdict["filetransfer_fallback_v6_proof_bootstrap_missing_unresolved_count"]);
+        Assert.Equal(
+            "filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal(
+            "combined_v6_bulk_and_control_proof_lost_bootstrap_direction",
+            verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal(
+            "unbound_second_cycle_pending_proof_received_v6_bulk_before_control_ack",
+            verdict["failure_variant"]);
+        Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
+    public async Task FallbackV6ProofBootstrapDirectionCorrelation_RequiresExactBoundTriggerRecovery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptText = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferAuthorityMatching.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+
+            $scope = 'session_id=sess_a; log_writer_id=writer_a'
+            $base = @(
+                "event=tuna_fallback_started; $scope; fallback_epoch=2; log_writer_sequence=100",
+                "event=filetransfer_fallback_nkn_proof_pending; $scope; log_writer_sequence=101",
+                "event=tuna_fallback_nkn_frame_received; $scope; fallback_epoch=2; message_type=file_transfer_data_frame; channel=bulk; log_writer_sequence=102",
+                "event=filetransfer_fallback_nkn_proof_unconfirmed; $scope; proof=file_transfer_bulk_frame_received; requires_control_proof=1; requires_v6_epoch_recovery=0; bulk_seen=1; control_seen=0; log_writer_sequence=103",
+                "event=filetransfer_fallback_nkn_proof_unconfirmed; $scope; proof=nkn_control_ack_received; requires_control_proof=0; requires_v6_epoch_recovery=1; bulk_seen=1; control_seen=1; log_writer_sequence=104",
+                "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; $scope; proof=nkn_control_ack_received; log_writer_sequence=110",
+                "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; $scope; proof=nkn_control_ack_received; log_writer_sequence=111"
+            )
+            $unresolved = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $base
+            if ($unresolved.RawCount -ne 2 -or $unresolved.DistinctCount -ne 1 -or
+                $unresolved.RecoveredCount -ne 0 -or $unresolved.UnresolvedCount -ne 1 -or
+                $unresolved.UnresolvedCandidateRecords[0].WriterSequence -ne 110) {
+                throw "unexpected unresolved result: $($unresolved | ConvertTo-Json -Compress)"
+            }
+
+            $exact = @($base + @(
+                "event=filetransfer_fallback_v6_proof_bootstrap_trigger_bound; $scope; fallback_epoch=2; status=Ready; transfer_id=transfer_a; direction=inbound; pending_generation=2; transport_epoch=0; frame_fingerprint=ABC123; data_session_generation=3; bulk_seen=1; control_seen=1; authority_effect=none; log_writer_sequence=105",
+                "event=filetransfer_fallback_v6_proof_bootstrap_observed; $scope; fallback_epoch=2; transfer_id=transfer_a; direction=inbound; observation_generation=2; proof_kind=file_transfer_bulk_frame_received; trigger_transport_epoch=0; trigger_frame_fingerprint=ABC123; trigger_data_session_generation=3; authority_effect=coordinator_evaluation_only; log_writer_sequence=112",
+                "event=filetransfer_fallback_v6_proof_bootstrap_decided; $scope; fallback_epoch=2; transfer_id=transfer_a; direction=inbound; observation_generation=2; trigger_transfer_id=transfer_a; trigger_transport_epoch=0; trigger_frame_fingerprint=ABC123; trigger_data_session_generation=3; source_data_session_generation=1; authority_id=bootstrap-authority; bootstrap_generation=1; decision_status=Issued; log_writer_sequence=113"
+            ))
+            $recovered = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $exact
+            if ($recovered.RawCount -ne 2 -or $recovered.DistinctCount -ne 1 -or
+                $recovered.RecoveredCount -ne 1 -or $recovered.UnresolvedCount -ne 0) {
+                throw "unexpected recovered result: $($recovered | ConvertTo-Json -Compress)"
+            }
+
+            $wrong = @($exact +
+                "event=filetransfer_fallback_v6_proof_bootstrap_trigger_bound; $scope; fallback_epoch=2; status=Ready; transfer_id=transfer_a; direction=inbound; pending_generation=2; transport_epoch=0; frame_fingerprint=DEF456; data_session_generation=3; bulk_seen=1; control_seen=1; authority_effect=none; log_writer_sequence=106")
+            $ambiguous = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $wrong
+            if ($ambiguous.UnresolvedCount -ne 1) {
+                throw "conflicting trigger did not fail closed: $($ambiguous | ConvertTo-Json -Compress)"
+            }
+
+            $firstCycle = @($base | ForEach-Object { $_ -replace 'fallback_epoch=2', 'fallback_epoch=1' })
+            $ignored = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $firstCycle
+            if ($ignored.RawCount -ne 0 -or $ignored.DistinctCount -ne 0) {
+                throw "first fallback cycle was not excluded: $($ignored | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'fallback-v6-bootstrap-direction-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Fallback-V6 bootstrap direction correlation failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "fallback-v6-bootstrap-direction-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("RetainedAuthorityProofSuite", "FileTransferRouteTransition")]
     public async Task AnalyzeRetained_FallbackV6ProofBootstrapPrecommandSkip_IsRecoveredByDeliveredCommand(
         bool compact)
     {

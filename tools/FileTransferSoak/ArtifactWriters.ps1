@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferOps\CoordinatorSnapshotEvidence.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
 
 $script:FileTransferRegularNknTargetGoodputBytesPerSecond = 1500000D
 $script:FileTransferExpectedBridgeControlSubClients = 4
@@ -9083,6 +9084,8 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_fallback_nkn_proof_pending',
         'filetransfer_fallback_nkn_proof_unconfirmed',
         'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch',
+        'tuna_fallback_nkn_frame_received',
+        'filetransfer_fallback_v6_proof_bootstrap_trigger_bound',
         'filetransfer_fallback_nkn_probe_started',
         'nkn_bridge_post_tuna_fallback_proof_send_window_skipped',
         'filetransfer_fallback_v6_proof_bootstrap_observed',
@@ -10714,6 +10717,7 @@ function Get-FileTransferRouteTransitionCorrelation {
     $fallbackTailPairingEventList = New-Object System.Collections.Generic.List[object]
     $fallbackTailPairedGrantEventList = New-Object System.Collections.Generic.List[object]
     $responderRouteTransitionHandoffEventList = New-Object System.Collections.Generic.List[object]
+    $fallbackV6BootstrapDirectionEvidenceEventList = New-Object System.Collections.Generic.List[object]
     $routeTransitionIndexBuildVisitCount = 0L
     $routeTransitionLeaseIndexBuildVisitCount = 0L
     $routeTransitionRegisteredLeaseIndexBuildVisitCount = 0L
@@ -10726,6 +10730,9 @@ function Get-FileTransferRouteTransitionCorrelation {
             continue
         }
         $routeTransitionIndexBuildVisitCount++
+        if ($event.EventName -in @('tuna_fallback_started', 'filetransfer_fallback_nkn_proof_pending', 'tuna_fallback_nkn_frame_received', 'filetransfer_fallback_nkn_proof_unconfirmed', 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch', 'filetransfer_fallback_v6_proof_bootstrap_trigger_bound', 'filetransfer_fallback_v6_proof_bootstrap_observed', 'filetransfer_fallback_v6_proof_bootstrap_decided')) {
+            $fallbackV6BootstrapDirectionEvidenceEventList.Add($event) | Out-Null
+        }
         switch ($event.EventName) {
             'filetransfer_route_transition_prepared' {
                 $preparedEventList.Add($event) | Out-Null
@@ -10948,6 +10955,8 @@ function Get-FileTransferRouteTransitionCorrelation {
     [object[]]$fallbackTailPairedGrantEvents = @($fallbackTailPairedGrantEventList.ToArray())
     [object[]]$responderRouteTransitionHandoffEvents = @(
         $responderRouteTransitionHandoffEventList.ToArray())
+    [object[]]$fallbackV6BootstrapDirectionEvidenceEvents = @($fallbackV6BootstrapDirectionEvidenceEventList.ToArray())
+    $fallbackV6BootstrapDirectionCorrelation = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines @($fallbackV6BootstrapDirectionEvidenceEvents | ForEach-Object { [string]$_.RawLine })
 
     function Test-PostFallbackResponderPairedHandoffEvidence {
         param([Parameter(Mandatory = $true)]$Prepared)
@@ -11112,6 +11121,7 @@ function Get-FileTransferRouteTransitionCorrelation {
             [Parameter(Mandatory = $true)][string]$Key,
             [Parameter(Mandatory = $true)][string]$Reason,
             [string]$Class = 'filetransfer_route_transition_incomplete',
+            [string]$Variant = '(none)',
             [switch]$Recovered
         )
 
@@ -11119,6 +11129,7 @@ function Get-FileTransferRouteTransitionCorrelation {
             Class = $Class
             Event = $Event
             Reason = $Reason
+            Variant = $Variant
             DistinctKey = $Key
         }
         if ($Class -eq 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing') {
@@ -11137,6 +11148,21 @@ function Get-FileTransferRouteTransitionCorrelation {
         }
         if ($Class -eq 'filetransfer_route_transition_incomplete' -and $Recovered) {
             $genericRecoveredKeys.Add($Key) | Out-Null
+        }
+    }
+
+    $bootstrapDirectionEventsByWriterSequence = @{}
+    foreach ($event in $fallbackV6BootstrapDirectionEvidenceEvents) {
+        $writer = Get-RouteTransitionField -Event $event -Name 'log_writer_id'
+        $writerSequence = Get-RouteTransitionField -Event $event -Name 'log_writer_sequence'
+        if (-not [string]::IsNullOrWhiteSpace($writer) -and -not [string]::IsNullOrWhiteSpace($writerSequence)) {
+            $bootstrapDirectionEventsByWriterSequence["$writer|$writerSequence".ToLowerInvariant()] = $event
+        }
+    }
+    foreach ($candidate in $fallbackV6BootstrapDirectionCorrelation.RawCandidateRecords) {
+        $eventKey = "$($candidate.Writer)|$($candidate.WriterSequence)".ToLowerInvariant()
+        if ($bootstrapDirectionEventsByWriterSequence.ContainsKey($eventKey)) {
+            Add-RouteTransitionCandidate -Event $bootstrapDirectionEventsByWriterSequence[$eventKey] -Key ([string]$candidate.DistinctKey) -Reason ([string]$candidate.Reason) -Class ([string]$candidate.Class) -Variant ([string]$candidate.Variant) -Recovered:([bool]$candidate.Recovered)
         }
     }
 
@@ -19606,6 +19632,7 @@ function Add-FileTransferProofChainFailureCandidates {
         [Parameter(Mandatory = $true)][string]$Class,
         [AllowEmptyCollection()][object[]]$Events = @(),
         [string]$DefaultReason = '',
+        [string]$Variant = '(none)',
         [switch]$UseDefaultReason
     )
 
@@ -19646,6 +19673,7 @@ function Add-FileTransferProofChainFailureCandidates {
             Sequence = $sequence
             SourcePath = [string]$event.FilePath
             LineNumber = [int]$event.LineNumber
+            Variant = $Variant
             WriterSequence = Get-FileTransferEventInt64Field `
                 -Event $event `
                 -Name 'log_writer_sequence' `
@@ -64805,11 +64833,14 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     $fileTransferFallbackV6ProofBootstrapProof =
         if ($snapshotRouteTransitionAuthoritative) {
-            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            $snapshotBootstrapProof = Get-FileTransferCoordinatorSnapshotCorrelationResult `
                 -Evaluation $coordinatorSnapshotEvaluation `
                 -Family 'route_transition' `
                 -TaxonomyClasses @(
                     'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+            Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof `
+                -Events $allEvents `
+                -SnapshotProof $snapshotBootstrapProof
         }
         else {
             $fallbackBootstrapUnresolvedRecords = @(
@@ -68391,11 +68422,20 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     foreach ($candidateRecord in @(
             $fileTransferFallbackV6ProofBootstrapProof.UnresolvedCandidateRecords)) {
+        $candidateVariant = '(none)'
+        if ($null -ne $candidateRecord.PSObject.Properties['Variant']) {
+            $candidateVariant = [string]$candidateRecord.Variant
+        }
+        elseif ($null -ne $candidateRecord.PSObject.Properties['Boundary'] -and
+            $null -ne $candidateRecord.Boundary.PSObject.Properties['variant']) {
+            $candidateVariant = [string]$candidateRecord.Boundary.variant
+        }
         Add-FileTransferProofChainFailureCandidates `
             -Candidates $proofChainFailureCandidates `
             -Class 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing' `
             -Events @($candidateRecord.Event) `
             -DefaultReason ([string]$candidateRecord.Reason) `
+            -Variant $candidateVariant `
             -UseDefaultReason
     }
     foreach ($candidateRecord in @(
@@ -69323,6 +69363,20 @@ function Get-FileTransferRecoveryFailureClassification {
             $null -ne $matchingVariantRecord[0].PSObject.Properties['Variant'] -and
             -not [string]::IsNullOrWhiteSpace([string]$matchingVariantRecord[0].Variant)) {
             $failureVariant = [string]$matchingVariantRecord[0].Variant
+        }
+    }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq
+            'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing') {
+        if ([string]$firstProofChainFailure.Reason -eq
+            'combined_v6_bulk_and_control_proof_lost_bootstrap_direction') {
+            $failureVariant =
+                'unbound_second_cycle_pending_proof_received_v6_bulk_before_control_ack'
+        }
+        elseif ($null -ne $firstProofChainFailure.PSObject.Properties['Variant'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$firstProofChainFailure.Variant) -and
+            [string]$firstProofChainFailure.Variant -ne '(none)') {
+            $failureVariant = [string]$firstProofChainFailure.Variant
         }
     }
     elseif ($null -ne $firstProofChainFailure -and

@@ -2904,6 +2904,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_nkn_proof_pending') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_nkn_proof_unconfirmed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_fallback_nkn_frame_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_trigger_bound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_nkn_probe_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'nkn_bridge_post_tuna_fallback_proof_send_window_skipped') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_observed') +
@@ -3993,6 +3995,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
             Event = $candidateRecord.Event
             Reason = $candidateRecord.Reason
+            Variant = $candidateRecord.Variant
         }) | Out-Null
     }
     foreach ($candidateRecord in @($fileTransferReceiveRecoveryFallbackCheckpointScopeHandoffProof.UnresolvedCandidateRecords)) {
@@ -4359,6 +4362,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'paired_fallback_tail_yield_missing',
             'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback',
+            'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
             'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing',
             'filetransfer_fallback_frontier_stall_grace_recheck_missing',
             'filetransfer_fallback_frontier_repair_successor_dispatch_missing',

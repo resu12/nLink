@@ -323,7 +323,7 @@ public sealed class FileTransferRouteTransitionDevLocalAvailabilityTests
         Assert.NotNull(method);
         var decision = Assert.IsType<
             FileTransferFallbackV6ProofBootstrapDecision>(
-            method!.Invoke(null, [FileTransferDirection.Outbound]));
+            method!.Invoke(null, [FileTransferDirection.Outbound, null]));
         var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(
             decision.Command);
         Assert.Equal(

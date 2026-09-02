@@ -135,6 +135,11 @@ public sealed partial class SessionFileTransferService
         {
             if (outboundTransfer is not { IsTerminal: false } context ||
                 !string.Equals(context.SessionId, evaluation.SessionId, StringComparison.Ordinal) ||
+                !MatchesFallbackV6ProofBootstrapTrigger(
+                    evaluation,
+                    context.TransferId,
+                    context.DataSession,
+                    context.DataSessionGeneration) ||
                 !context.RouteRuntime.UsesFileTunaV4Runtime ||
                 context.DataSession is not { } currentDataSession ||
                 context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
@@ -203,6 +208,11 @@ public sealed partial class SessionFileTransferService
 
         if (inboundTransfer is not { IsTerminal: false } inbound ||
             !string.Equals(inbound.SessionId, evaluation.SessionId, StringComparison.Ordinal) ||
+            !MatchesFallbackV6ProofBootstrapTrigger(
+                evaluation,
+                inbound.TransferId,
+                inbound.DataSession,
+                inbound.DataSessionGeneration) ||
             !inbound.RouteRuntime.UsesFileTunaV4Runtime ||
             inbound.DataSession is not { } inboundDataSession ||
             inbound.CurrentRuntimeOwner is not { IsDefault: false } inboundOwner ||
@@ -633,6 +643,35 @@ public sealed partial class SessionFileTransferService
             evaluation.ObservedUtcMilliseconds,
             checkpoint);
 
+    private static bool MatchesFallbackV6ProofBootstrapTrigger(
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        string transferId,
+        IFileTransferDataSession? dataSession,
+        long dataSessionGeneration)
+    {
+        if (string.IsNullOrWhiteSpace(evaluation.TriggerTransferId))
+        {
+            return evaluation.TriggerTransportEpoch == 0 &&
+                   string.IsNullOrWhiteSpace(evaluation.TriggerFrameFingerprint) &&
+                   evaluation.TriggerDataSession is null &&
+                   evaluation.TriggerDataSessionGeneration == 0;
+        }
+
+        return evaluation.Direction == FileTransferDirection.Inbound &&
+               string.Equals(
+                   evaluation.TriggerTransferId,
+                   transferId,
+               StringComparison.Ordinal) &&
+               evaluation.TriggerTransportEpoch >= 0 &&
+               !string.IsNullOrWhiteSpace(evaluation.TriggerFrameFingerprint) &&
+               dataSession is not null &&
+               ReferenceEquals(evaluation.TriggerDataSession, dataSession) &&
+               dataSession is IFileTransferDataSessionGenerationProvider generationProvider &&
+               evaluation.TriggerDataSessionGeneration > 0 &&
+               evaluation.TriggerDataSessionGeneration == generationProvider.Generation &&
+               dataSessionGeneration > 0;
+    }
+
     private static FileTransferTransportEpochFrameV6
         CreateFallbackV6ProofBootstrapEpochFrame(
             FileTransferFallbackV6ProofBootstrapCommand command)
@@ -653,7 +692,7 @@ public sealed partial class SessionFileTransferService
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
 
     private static void LogFallbackV6ProofBootstrapReceipt(
         FileTransferFallbackV6ProofBootstrapCommand command,

@@ -6371,7 +6371,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         string transferId,
         int chunkCount = 256,
         int nextChunkIndex = 100,
-        int durableHighestChunkIndex = 99)
+        int durableHighestChunkIndex = 99,
+        IFileTransferDataSession? dataSession = null)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType(
@@ -6417,7 +6418,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(
             context,
             "DataSession",
-            new RecordingDataSession($"session_{transferId}", transferId));
+            dataSession ??
+                new RecordingDataSession($"session_{transferId}", transferId));
         SetPrivateProperty(context, "DataSessionGeneration", 1L);
         var leg = SeedCurrentRuntimeOwnerForTest(
             context,
