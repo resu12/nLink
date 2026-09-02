@@ -298,6 +298,44 @@ if ($hasTerminalRollover) {
         $rolloverCurrent.receiveRecovery.sourceBoundary.route -cne 'post_tuna_fallback_v6') {
         throw 'Generated proof rollover lost its exact current, outgoing, or historical-source identity.'
     }
+
+    $completedUnproven = Copy-Value $rolloverOutgoing
+    $completedUnproven.beforeState = 'None'
+    $completedUnproven.afterState = 'Invalidated:None'
+    $completedUnproven.receiptStatus = 'Completed'
+    $completedUnproven.receiveRecovery.proofIdentity = '(none)'
+    $completedUnproven.receiveRecovery.proofObservedUtcMs = 0
+    $completedUnproven.receiveRecovery.receipts[0].receiptStatus = 'Completed'
+    $completedUnproven.receiveRecovery.receipts[0].receiptReason =
+        'completed_unproven_receive_recovery_superseded_by_newer_health_observation'
+    $issueBoundary = [pscustomobject]@{
+        decisionKind = 'IssueReceiveRecoveryOperation'
+        decisionStatus = 'Accepted'
+        decisionReason = 'filetransfer_receive_recovery_operation_successor_issued'
+    }
+    if (-not (Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotEntrant `
+            $completedUnproven $issueBoundary)) {
+        throw 'Exact completed-unproven successor invalidation terminal rejected.'
+    }
+    foreach ($mutation in @('decision','status','decision-reason','receipt-reason','proof','receipt-status')) {
+        $invalid = Copy-Value $completedUnproven
+        $invalidBoundary = Copy-Value $issueBoundary
+        switch ($mutation) {
+            'decision' { $invalidBoundary.decisionKind = 'ObserveReceiveRecoveryProof' }
+            'status' { $invalidBoundary.decisionStatus = 'Rejected' }
+            'decision-reason' { $invalidBoundary.decisionReason = 'unrelated' }
+            'receipt-reason' { $invalid.receiveRecovery.receipts[0].receiptReason = 'unrelated' }
+            'proof' { $invalid.receiveRecovery.proofIdentity = 'forged-proof' }
+            'receipt-status' {
+                $invalid.receiptStatus = 'Pending'
+                $invalid.receiveRecovery.receipts[0].receiptStatus = 'Pending'
+            }
+        }
+        if (Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotEntrant `
+                $invalid $invalidBoundary) {
+            throw "Malformed completed-unproven terminal admitted: $mutation"
+        }
+    }
 }
 $issueIndex = 0
 while ($envelopes[$issueIndex].transitionId -cne $routeCarryIssue.transitionId) {

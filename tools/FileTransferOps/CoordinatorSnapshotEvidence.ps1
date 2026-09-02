@@ -5200,7 +5200,7 @@ function Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotCarry {
 }
 
 function Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotEntrant {
-    param($Operation)
+    param($Operation, $Boundary)
 
     if ($null -eq $Operation -or $null -eq $Operation.receiveRecovery -or
         [string]$Operation.family -cne 'receive_recovery' -or
@@ -5216,7 +5216,6 @@ function Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotEntrant {
         [string]$Operation.commandIdentity -cne [string]$Operation.authorityId -or
         [long]$Operation.commandGeneration -ne [long]$Operation.operationGeneration -or
         [long]$Operation.receiptGeneration -ne [long]$Operation.operationGeneration -or
-        [string]$Operation.receiptStatus -cne 'Adopted' -or
         $Operation.receiptValidated -isnot [bool] -or -not $Operation.receiptValidated -or
         [string]$Operation.receiveRecovery.role -cne 'operation_terminal' -or
         [string]$Operation.receiveRecovery.recoveryKind -cne 'BridgeReceiveStallRecovery' -or
@@ -5233,9 +5232,28 @@ function Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotEntrant {
          [long]$Operation.receiveRecovery.proofObservedUtcMs -le 0)) {
         return $false
     }
+    $adoptedTerminal = [string]$Operation.receiptStatus -ceq 'Adopted'
+    $completedUnprovenInvalidation =
+        [string]$Operation.afterState -ceq 'Invalidated:None' -and
+        [string]$Operation.receiptStatus -ceq 'Completed' -and
+        [string]$Operation.receiveRecovery.proofIdentity -ceq '(none)' -and
+        [long]$Operation.receiveRecovery.proofObservedUtcMs -eq 0 -and
+        $null -ne $Boundary -and
+        [string]$Boundary.decisionKind -ceq 'IssueReceiveRecoveryOperation' -and
+        [string]$Boundary.decisionStatus -ceq 'Accepted' -and
+        [string]$Boundary.decisionReason -ceq
+            'filetransfer_receive_recovery_operation_successor_issued'
+    if (-not $adoptedTerminal -and -not $completedUnprovenInvalidation) {
+        return $false
+    }
     $receipts = @($Operation.receiveRecovery.receipts)
     if ($receipts.Count -ne 1 -or [string]$receipts[0].stage -cne 'operation' -or
         $receipts[0].receiptValidated -isnot [bool] -or -not $receipts[0].receiptValidated) {
+        return $false
+    }
+    if ($completedUnprovenInvalidation -and
+        [string]$receipts[0].receiptReason -cne
+            'completed_unproven_receive_recovery_superseded_by_newer_health_observation') {
         return $false
     }
     foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity',
@@ -5434,7 +5452,7 @@ function Resolve-FileTransferCoordinatorReceiveRecoveryRouteCarries {
                         if ($nextTerminal.beforeState -ceq 'None') {
                             $terminalValid = $terminalValid -and
                                 (Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotEntrant `
-                                    $nextTerminal) -and
+                                    $nextTerminal $boundary) -and
                                 ($null -eq $terminalRecovery -or $retiringTerminal.Count -eq 1) -and
                                 -not $seenTerminalRecovery.ContainsKey([string]$nextTerminal.operationKey)
                             $seenTerminalRecovery[[string]$nextTerminal.operationKey] = $true
