@@ -399,11 +399,13 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function Copy-Value($value) {
                 $value | ConvertTo-Json -Depth 64 -Compress | ConvertFrom-Json
             }
-            function New-Receipt([string]$stage,[string]$status,[string]$id) {
+            function New-Receipt(
+                [string]$stage,[string]$status,[string]$id,
+                [long]$generation=1L) {
                 [pscustomobject]@{
                     stage=$stage; commandIdentity="$id-command"
-                    commandGeneration=1L; commandFingerprint="$id-command-fingerprint"
-                    receiptIdentity="$id-receipt"; receiptGeneration=1L
+                    commandGeneration=$generation; commandFingerprint="$id-command-fingerprint"
+                    receiptIdentity="$id-receipt"; receiptGeneration=$generation
                     receiptStatus=$status; receiptReason='accepted'
                     receiptFingerprint="$id-receipt-fingerprint"
                     receiptValidated=$true
@@ -437,12 +439,12 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function New-Operation(
                 [string]$role,[string]$kind,[string]$authority,
                 [string]$before,[string]$after,[object]$payload,
-                [object]$primaryReceipt) {
+                [object]$primaryReceipt,[long]$generation=1L) {
                 [pscustomobject]@{
                     family='fallback_tail_yield'; operationRole=$role
-                    operationKey="fallback_tail_yield|$role|$authority|1|$kind"
+                    operationKey="fallback_tail_yield|$role|$authority|$generation|$kind"
                     operationKind=$kind; authorityId=$authority
-                    predecessorAuthorityId='(none)'; operationGeneration=1L
+                    predecessorAuthorityId='(none)'; operationGeneration=$generation
                     beforeState=$before; afterState=$after
                     commandIdentity=$primaryReceipt.commandIdentity
                     commandGeneration=$primaryReceipt.commandGeneration
@@ -498,6 +500,52 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 throw 'Exact peer-first FallbackTailQuiescent issuance was rejected.'
             }
 
+            $failedPayload=New-Payload 'yield_current' 'Failed' `
+                'PeerProofObserved' @($yieldReceipt,$peerReceipt)
+            $failedCurrent=New-Operation 'yield_current' 'Failed' `
+                'failed-authority' 'PeerProofObserved' 'None' `
+                $failedPayload $peerReceipt
+            $successorYieldReceipt=New-Receipt 'yield' 'Accepted' `
+                'successor-yield' 2L
+            $supersessionReceipt=New-Receipt 'failed_supersession' `
+                'Superseded' 'failed-supersession' 2L
+            $supersessionReceipt.commandGeneration=1L
+            $successorPayload=New-Payload 'yield_current' 'Quiescent' `
+                'PeerProofObserved' `
+                @($successorYieldReceipt,$peerReceipt,$supersessionReceipt)
+            $successorPayload.failedPredecessorAuthorityId='failed-authority'
+            $successorPayload.failedSupersessionCarriedPeerProof=$true
+            $successor=New-Operation 'yield_current' 'Quiescent' `
+                'successor-authority' 'None' 'PeerProofObserved' `
+                $successorPayload $supersessionReceipt 2L
+            $invalidationReceipt=New-Receipt 'invalidation' 'Invalidated' `
+                'failed-invalidation'
+            $terminalPayload=New-Payload 'yield_terminal' 'Failed' `
+                'Invalidated' @($yieldReceipt,$peerReceipt,$invalidationReceipt)
+            $terminalPayload.invalidationReason=
+                'failed_fallback_tail_yield_superseded_by_quiescence'
+            $failedTerminal=New-Operation 'yield_terminal' 'Failed' `
+                'failed-authority' 'None' 'Invalidated' `
+                $terminalPayload $invalidationReceipt
+            $failedSupersessionEnvelope=New-Envelope `
+                @($failedCurrent,$successor,$failedTerminal) 12L 13L
+            if (-not (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope `
+                    $failedSupersessionEnvelope) -or
+                -not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog `
+                    $failedSupersessionEnvelope $failedCurrent) -or
+                -not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog `
+                    $failedSupersessionEnvelope $successor) -or
+                -not (Test-FileTransferCoordinatorSnapshotFamily4OperationCatalog `
+                    $failedSupersessionEnvelope $failedTerminal)) {
+                throw 'Exact Failed-to-Quiescent carried-proof supersession was rejected.'
+            }
+            $mutatedSupersession=Copy-Value $failedSupersessionEnvelope
+            $mutatedSupersession.aggregate.operations[1].fallbackTailYield.failedSupersessionCarriedPeerProof=$false
+            if (Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope `
+                    $mutatedSupersession) {
+                throw 'A Failed-to-Quiescent supersession without its carried-proof flag was accepted.'
+            }
+
             $priorPending=New-Operation 'peer_proof_pending_initial' 'PeerProof' `
                 'pending-authority' 'None' 'Pending' `
                 (New-Payload 'peer_proof_pending_initial' 'PeerProof' 'Pending' @($peerReceipt)) `
@@ -551,6 +599,210 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             if (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
                     $entry $history @($forged)) {
                 throw 'A copied peer-proof effect on the new yield was accepted.'
+            }
+
+            $failedPrior=Copy-Value $failedCurrent
+            $failedPrior.beforeState='YieldIssued'
+            $failedPrior.afterState='PeerProofObserved'
+            $failedPriorBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='failed-prior'
+                afterStateGeneration=12L; decisionUtcMilliseconds=10L
+                operations=@($failedPrior)
+            }
+            $failedBoundary=[pscustomobject]@{
+                coordinatorInstanceId='coordinator'; boundaryId='failed-current'
+                afterStateGeneration=13L; decisionUtcMilliseconds=11L
+                decisionKind='FallbackTailQuiescent'; decisionStatus='Accepted'
+                operations=@($failedCurrent,$successor,$failedTerminal)
+            }
+            $failedEffect=$effect.PSObject.Copy()
+            $failedEffect.TransitionId='failed-prior'
+            $failedEffect.StateGeneration=12L
+            $failedEffect.OperationKey=$failedPrior.operationKey
+            $failedEffect.AuthorityId=$failedPrior.authorityId
+            $failedEntry=[pscustomobject]@{
+                Boundary=$failedBoundary; Operation=$successor
+            }
+            $failedHistory=@(
+                [pscustomobject]@{Boundary=$failedPriorBoundary;Operation=$failedPrior},
+                [pscustomobject]@{Boundary=$failedBoundary;Operation=$failedCurrent},
+                $failedEntry,
+                [pscustomobject]@{Boundary=$failedBoundary;Operation=$failedTerminal})
+            if (-not (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
+                    $failedEntry $failedHistory @($failedEffect))) {
+                throw 'The predecessor-bound peer proof was not carried through Failed supersession.'
+            }
+            $copiedFailedEffect=$failedEffect.PSObject.Copy()
+            $copiedFailedEffect.TransitionId='failed-current'
+            $copiedFailedEffect.StateGeneration=13L
+            $copiedFailedEffect.OperationKey=$successor.operationKey
+            $copiedFailedEffect.AuthorityId=$successor.authorityId
+            $copiedFailedEffect.OperationGeneration=2L
+            if (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
+                    $failedEntry $failedHistory @($copiedFailedEffect)) {
+                throw 'A copied predecessor peer-proof effect on the Quiescent successor was accepted.'
+            }
+
+            function New-SnapshotEnvelope(
+                [string]$transition,[string]$decision,[string]$reason,
+                [long]$before,[long]$after,[string]$beforeHash,
+                [string]$afterHash,[object[]]$operations) {
+                [ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Authoritative'
+                    coordinatorInstanceId='coordinator'; sessionId='session'
+                    transferId='transfer'; direction='outbound'
+                    decisionUtcMilliseconds=$after
+                    transitionId=$transition; decisionKind=$decision
+                    decisionStatus='Accepted'; decisionReason=$reason
+                    aggregate=[ordered]@{
+                        beforeStateGeneration=$before
+                        afterStateGeneration=$after
+                        beforeStateFingerprint=$beforeHash
+                        afterStateFingerprint=$afterHash
+                        beforeBoundary=$scope; afterBoundary=$scope
+                        changedFamilies=@('fallback_tail_yield')
+                        operations=$operations
+                    }
+                }
+            }
+            function ConvertTo-SnapshotLine([object]$envelope,[long]$sequence) {
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes(
+                    ($envelope|ConvertTo-Json -Depth 64 -Compress))
+                $hash=Get-FileTransferCoordinatorSnapshotSha256 $bytes
+                $payload=[Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator; session_id=session; transfer_id=transfer; direction=outbound; transition_id=$($envelope.transitionId); before_state_generation=$($envelope.aggregate.beforeStateGeneration); after_state_generation=$($envelope.aggregate.afterStateGeneration); snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none; log_writer_id=writer; log_writer_sequence=$sequence"
+            }
+            function New-AuthorityEffectLine(
+                [string]$transition,[long]$stateGeneration,
+                [object]$operation,[object]$receipt,[string]$kind,
+                [string]$identity,[long]$sequence) {
+                "event=filetransfer_coordinator_authority_effect; snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator; session_id=session; transfer_id=transfer; direction=outbound; transition_id=$transition; coordinator_state_generation=$stateGeneration; operation_family=fallback_tail_yield; operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=$kind; effect_identity=$identity; effect_generation=1; receipt_identity=$($receipt.receiptIdentity); receipt_generation=$($receipt.receiptGeneration); receipt_status=$($receipt.receiptStatus); receipt_fingerprint=$($receipt.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=writer; log_writer_sequence=$sequence"
+            }
+
+            $initialFailedPayload=New-Payload 'yield_current' 'Failed' `
+                'YieldIssued' @($yieldReceipt)
+            $initialFailedPayload.peerProofAuthorityId='(none)'
+            $initialFailedPayload.peerProofIdentity='(none)'
+            $initialFailedPayload.peerProofFingerprint='(none)'
+            $initialFailedPayload.peerProofYieldGeneration=0L
+            $initialFailed=New-Operation 'yield_current' 'Failed' `
+                'failed-authority' 'None' 'YieldIssued' `
+                $initialFailedPayload $yieldReceipt
+            $initialEnvelope=New-SnapshotEnvelope 'initial-failed' `
+                'FallbackTailFailed' 'receiver_state_sparse_runtime' `
+                0L 1L 'state-0' 'state-1' @($initialFailed)
+            $peerEnvelopeForEvaluation=New-SnapshotEnvelope 'failed-peer' `
+                'ApplyFallbackTailPeerProofReceipt' `
+                'fallback_tail_peer_proof_observed' `
+                1L 2L 'state-1' 'state-2' @($failedPrior)
+            $supersessionEnvelope=New-SnapshotEnvelope 'failed-current' `
+                'FallbackTailQuiescent' 'receiver_state_sparse_runtime' `
+                2L 3L 'state-2' 'state-3' `
+                @($failedCurrent,$successor,$failedTerminal)
+            $catalog=Get-FileTransferCoordinatorEvidenceCatalog
+            $coverage=@($catalog.RequiredFamilies)-join ','
+            $prefix="snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=coordinator; session_id=session; transfer_id=transfer; direction=outbound"
+            $start="event=filetransfer_coordinator_snapshot_stream_started; $prefix; initial_state_generation=0; initial_state_hash=state-0; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none; log_writer_id=writer; log_writer_sequence=1"
+            $end="event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=3; final_state_hash=state-3; transition_count=3; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none; log_writer_id=writer; log_writer_sequence=7"
+            $initialLine=ConvertTo-SnapshotLine $initialEnvelope 2L
+            $peerLine=ConvertTo-SnapshotLine $peerEnvelopeForEvaluation 3L
+            $peerEffectLine=New-AuthorityEffectLine 'failed-peer' 2L `
+                $failedPrior $peerReceipt 'peer_proof_observed' 'peer-effect' 4L
+            $supersessionLine=ConvertTo-SnapshotLine $supersessionEnvelope 5L
+            $retirementEffectLine=New-AuthorityEffectLine 'failed-current' 3L `
+                $successor $successorYieldReceipt `
+                'recovery_owner_retired_after_yield' 'retirement-effect' 6L
+            $validEvaluation=Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines @($start,$initialLine,$peerLine,$peerEffectLine,
+                    $supersessionLine,$retirementEffectLine,$end)
+            if ($validEvaluation.ArtifactEvidenceVerdict -cne 'pass' -or
+                $null -ne $validEvaluation.FirstUnresolvedBoundary) {
+                throw "The exact Failed-to-Quiescent stream failed evaluation: $($validEvaluation | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $unrelatedLine='event=filetransfer_bridge_liveness_probe; detail=unrelated'
+            $missingRetirementFullLines=@(
+                $start,$unrelatedLine,$initialLine,$peerLine,$peerEffectLine,
+                $supersessionLine,$end)
+            $compactEventNames=@(
+                $catalog.SnapshotAuthorityV1 +
+                $catalog.GenerationStampedEffects)
+            $missingRetirementCompactLines=@(
+                $missingRetirementFullLines | Where-Object {
+                    $compactEventNames -ccontains
+                        (Get-FileTransferCoordinatorSnapshotEventName -Line $_)
+                })
+            $missingRetirementFull=Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines $missingRetirementFullLines
+            $missingRetirementCompact=Get-FileTransferCoordinatorSnapshotEvaluation `
+                -Lines $missingRetirementCompactLines
+            $missingRetirementParity=Compare-FileTransferCoordinatorSnapshotEvaluations `
+                -Full $missingRetirementFull -Compact $missingRetirementCompact
+            $fullBoundary=$missingRetirementFull.FirstUnresolvedBoundary
+            $compactBoundary=$missingRetirementCompact.FirstUnresolvedBoundary
+            if ($missingRetirementFull.ArtifactEvidenceVerdict -cne 'fail' -or
+                $missingRetirementCompact.ArtifactEvidenceVerdict -cne 'fail' -or
+                $missingRetirementParity.Verdict -cne 'pass' -or
+                $missingRetirementFull.BoundaryHash -cne
+                    $missingRetirementCompact.BoundaryHash -or
+                $fullBoundary.boundaryHash -cne $compactBoundary.boundaryHash -or
+                $fullBoundary.boundaryId -cne $compactBoundary.boundaryId -or
+                $fullBoundary.writer -cne $compactBoundary.writer -or
+                $fullBoundary.writerSequence -ne $compactBoundary.writerSequence -or
+                $fullBoundary.variant -cne $compactBoundary.variant -or
+                $fullBoundary.rawCount -ne $compactBoundary.rawCount -or
+                $fullBoundary.distinctCount -ne $compactBoundary.distinctCount -or
+                $fullBoundary.recoveredCount -ne $compactBoundary.recoveredCount -or
+                $fullBoundary.unresolvedCount -ne $compactBoundary.unresolvedCount -or
+                $fullBoundary.decisionReason -cne
+                    'snapshot_fallback_tail_recovery_owner_retirement_effect_missing' -or
+                $fullBoundary.variant -cne
+                    'failed_to_quiescent_supersession_ambiguous_yield_receipts_suppressed_exact_successor_effect' -or
+                $fullBoundary.referencedTransitionId -cne
+                    'failed-current') {
+                throw "The missing successor retirement effect did not retain full/compact parity: $($missingRetirementFull | ConvertTo-Json -Depth 8 -Compress)"
+            }
+            $guiAst=[Management.Automation.Language.Parser]::ParseFile(
+                (Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),
+                [ref]$null,[ref]$null)
+            foreach ($name in @(
+                    'New-TunaGuiFileTransferFailureClassificationResult',
+                    'Get-TunaGuiExplicitFailureClassification',
+                    'Get-TunaGuiFileTransferSetupFailureClassification')) {
+                $definitions=@($guiAst.FindAll({ param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq $name
+                },$true))
+                if ($definitions.Count -ne 1) {
+                    throw "GUI function not unique: $name"
+                }
+                . ([scriptblock]::Create($definitions[0].Extent.Text))
+            }
+            $guiInput=Join-Path ([IO.Path]::GetTempPath()) (
+                "failed-supersession-$([guid]::NewGuid().ToString('N')).log")
+            try {
+                [IO.File]::WriteAllLines(
+                    $guiInput,[string[]]$missingRetirementFullLines)
+                $gui=Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 -ErrorMessage 'test evidence' `
+                    -RouteMode 'regular-v4-live-activation-off-on-off-256mb' `
+                    -ImmutableEvidencePaths @($guiInput)
+                if ($gui.CoordinatorBoundaryHash -cne $fullBoundary.boundaryHash -or
+                    $gui.CoordinatorBoundaryId -cne $fullBoundary.boundaryId -or
+                    $gui.CoordinatorWriter -cne $fullBoundary.writer -or
+                    $gui.CoordinatorWriterSequence -ne $fullBoundary.writerSequence -or
+                    $gui.FailureVariant -cne $fullBoundary.variant -or
+                    $gui.CoordinatorRawCount -ne $fullBoundary.rawCount -or
+                    $gui.CoordinatorDistinctCount -ne $fullBoundary.distinctCount -or
+                    $gui.CoordinatorRecoveredCount -ne $fullBoundary.recoveredCount -or
+                    $gui.CoordinatorUnresolvedCount -ne $fullBoundary.unresolvedCount) {
+                    throw "GUI did not preserve the shared missing-retirement boundary: $($gui | ConvertTo-Json -Depth 8 -Compress)"
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $guiInput) {
+                    Remove-Item -LiteralPath $guiInput -Force
+                }
             }
 
             $localReceipt=New-Receipt 'local_proof' 'Observed' 'local'

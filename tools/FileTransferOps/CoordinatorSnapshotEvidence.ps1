@@ -2469,6 +2469,245 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope {
             -Right $payload.targetBoundary)
 }
 
+function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Operations
+    )
+
+    $family4Operations = @($Operations | Where-Object {
+            [string]$_.family -ceq 'fallback_tail_yield'
+        })
+    if ($Operations.Count -ne 3 -or $family4Operations.Count -ne 3) {
+        return $null
+    }
+
+    $failedCurrent = @($family4Operations | Where-Object {
+            [string]$_.operationRole -ceq 'yield_current' -and
+            [string]$_.operationKind -ceq 'Failed' -and
+            [string]$_.beforeState -ceq 'PeerProofObserved' -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    $quiescentCurrent = @($family4Operations | Where-Object {
+            [string]$_.operationRole -ceq 'yield_current' -and
+            [string]$_.operationKind -ceq 'Quiescent' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'PeerProofObserved' -and
+            [bool]$_.stateApplied
+        })
+    $failedTerminal = @($family4Operations | Where-Object {
+            [string]$_.operationRole -ceq 'yield_terminal' -and
+            [string]$_.operationKind -ceq 'Failed' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -ceq 'Invalidated' -and
+            [bool]$_.stateApplied
+        })
+    if ($failedCurrent.Count -ne 1 -or $quiescentCurrent.Count -ne 1 -or
+        $failedTerminal.Count -ne 1) {
+        return $null
+    }
+
+    $prior = $failedCurrent[0]
+    $successor = $quiescentCurrent[0]
+    $terminal = $failedTerminal[0]
+    foreach ($operation in @($prior, $successor, $terminal)) {
+        $typed = $operation.fallbackTailYield
+        $expectedKey = @(
+            'fallback_tail_yield',
+            [string]$operation.operationRole,
+            [string]$operation.authorityId,
+            ([long]$operation.operationGeneration).ToString(
+                [System.Globalization.CultureInfo]::InvariantCulture),
+            [string]$operation.operationKind) -join '|'
+        if ($null -eq $typed -or
+            [string]$operation.operationKey -cne $expectedKey -or
+            [string]$operation.authorityId -in @('', '(none)') -or
+            [long]$operation.operationGeneration -le 0 -or
+            [string]$operation.predecessorAuthorityId -cne '(none)' -or
+            [string]$typed.role -cne [string]$operation.operationRole -or
+            [string]$typed.ownerKey -in @('', '(none)') -or
+            [string]$typed.pairKey -in @('', '(none)') -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete `
+                -Boundary $typed.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $typed.sourceBoundary -Right $typed.effectiveBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $typed.sourceBoundary -Right $typed.targetBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+                -Operation $operation)) {
+            return $null
+        }
+    }
+
+    if ([string]$prior.authorityId -ceq [string]$successor.authorityId -or
+        [string]$terminal.authorityId -cne [string]$prior.authorityId -or
+        [long]$terminal.operationGeneration -ne
+            [long]$prior.operationGeneration -or
+        [long]$successor.operationGeneration -le
+            [long]$prior.operationGeneration -or
+        [string]$prior.fallbackTailYield.yieldKind -cne 'Failed' -or
+        [string]$prior.fallbackTailYield.pairingState -cne
+            'PeerProofObserved' -or
+        [string]$successor.fallbackTailYield.yieldKind -cne 'Quiescent' -or
+        [string]$successor.fallbackTailYield.pairingState -cne
+            'PeerProofObserved' -or
+        [string]$terminal.fallbackTailYield.yieldKind -cne 'Failed' -or
+        [string]$terminal.fallbackTailYield.pairingState -cne 'Invalidated' -or
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $successor.fallbackTailYield `
+            -Name 'failedPredecessorAuthorityId' -Default '(none)') -cne
+            [string]$prior.authorityId -or
+        -not [bool](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $successor.fallbackTailYield `
+            -Name 'failedSupersessionCarriedPeerProof' -Default $false) -or
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $prior.fallbackTailYield `
+            -Name 'failedPredecessorAuthorityId' -Default '(none)') -cne
+            '(none)' -or
+        [bool](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $prior.fallbackTailYield `
+            -Name 'failedSupersessionCarriedPeerProof' -Default $false) -or
+        [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $terminal.fallbackTailYield `
+            -Name 'failedPredecessorAuthorityId' -Default '(none)') -cne
+            '(none)' -or
+        [bool](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $terminal.fallbackTailYield `
+            -Name 'failedSupersessionCarriedPeerProof' -Default $false) -or
+        [string]$terminal.fallbackTailYield.invalidationReason -cne
+            'failed_fallback_tail_yield_superseded_by_quiescence') {
+        return $null
+    }
+
+    foreach ($field in @('ownerKey', 'pairKey', 'peerProofAuthorityId',
+            'peerProofIdentity', 'peerProofFingerprint',
+            'peerProofYieldGeneration')) {
+        $expected = [string]$prior.fallbackTailYield.$field
+        if ($expected -in @('', '(none)', '0') -or
+            [string]$successor.fallbackTailYield.$field -cne $expected -or
+            [string]$terminal.fallbackTailYield.$field -cne $expected) {
+            return $null
+        }
+    }
+    foreach ($operation in @($prior, $successor, $terminal)) {
+        foreach ($field in @('localProofIdentity', 'localProofFingerprint',
+                'pairedReleaseAuthorityId', 'pairedReleaseOutcome',
+                'reservedRetryAuthorityId')) {
+            if ([string]$operation.fallbackTailYield.$field -cne '(none)') {
+                return $null
+            }
+        }
+        foreach ($field in @('pairingGeneration', 'pairedReleaseGeneration',
+                'reservationGeneration', 'consumingInstallGeneration')) {
+            if ([long]$operation.fallbackTailYield.$field -ne 0L) {
+                return $null
+            }
+        }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $prior.fallbackTailYield.sourceBoundary `
+                -Right $operation.fallbackTailYield.sourceBoundary)) {
+            return $null
+        }
+    }
+
+    $priorYield = @($prior.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'yield' -and
+            [string]$_.receiptStatus -ceq 'Accepted' -and
+            [bool]$_.receiptValidated
+        })
+    $priorPeer = @($prior.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    $successorYield = @($successor.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'yield' -and
+            [string]$_.receiptStatus -ceq 'Accepted' -and
+            [bool]$_.receiptValidated
+        })
+    $successorPeer = @($successor.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    $supersession = @($successor.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'failed_supersession' -and
+            [string]$_.receiptStatus -ceq 'Superseded' -and
+            [bool]$_.receiptValidated
+        })
+    $terminalYield = @($terminal.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'yield' -and
+            [string]$_.receiptStatus -ceq 'Accepted' -and
+            [bool]$_.receiptValidated
+        })
+    $terminalPeer = @($terminal.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    $invalidation = @($terminal.fallbackTailYield.receipts | Where-Object {
+            [string]$_.stage -ceq 'invalidation' -and
+            [string]$_.receiptStatus -ceq 'Invalidated' -and
+            [bool]$_.receiptValidated
+        })
+    if (@($prior.fallbackTailYield.receipts).Count -ne 2 -or
+        @($successor.fallbackTailYield.receipts).Count -ne 3 -or
+        @($terminal.fallbackTailYield.receipts).Count -ne 3 -or
+        $priorYield.Count -ne 1 -or $priorPeer.Count -ne 1 -or
+        $successorYield.Count -ne 1 -or $successorPeer.Count -ne 1 -or
+        $supersession.Count -ne 1 -or $terminalYield.Count -ne 1 -or
+        $terminalPeer.Count -ne 1 -or $invalidation.Count -ne 1 -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+            -Left $priorYield[0] -Right $terminalYield[0]) -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+            -Left $priorPeer[0] -Right $successorPeer[0]) -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+            -Left $priorPeer[0] -Right $terminalPeer[0]) -or
+        [long]$priorYield[0].commandGeneration -ne
+            [long]$prior.operationGeneration -or
+        [long]$priorYield[0].receiptGeneration -ne
+            [long]$prior.operationGeneration -or
+        [long]$successorYield[0].commandGeneration -ne
+            [long]$successor.operationGeneration -or
+        [long]$successorYield[0].receiptGeneration -ne
+            [long]$successor.operationGeneration -or
+        [long]$supersession[0].commandGeneration -ne
+            [long]$prior.operationGeneration -or
+        [long]$supersession[0].receiptGeneration -ne
+            [long]$successor.operationGeneration -or
+        [long]$invalidation[0].commandGeneration -ne
+            [long]$prior.operationGeneration -or
+        [long]$invalidation[0].receiptGeneration -ne
+            [long]$prior.operationGeneration) {
+        return $null
+    }
+
+    foreach ($pair in @(
+            @($prior, $priorPeer[0]),
+            @($successor, $supersession[0]),
+            @($terminal, $invalidation[0]))) {
+        foreach ($field in @('commandIdentity', 'commandGeneration',
+                'commandFingerprint', 'receiptIdentity', 'receiptGeneration',
+                'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$pair[0].$field -cne [string]$pair[1].$field) {
+                return $null
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        FailedCurrent = $prior
+        QuiescentCurrent = $successor
+        FailedTerminal = $terminal
+        PeerReceipt = $priorPeer[0]
+        YieldReceipt = $successorYield[0]
+        SupersessionReceipt = $supersession[0]
+        InvalidationReceipt = $invalidation[0]
+    }
+}
+
 function Test-FileTransferCoordinatorSnapshotCheckpointStalePeerProofRetirement {
     param([Parameter(Mandatory = $true)]$Envelope)
 
@@ -2584,6 +2823,20 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope {
         [string]$yield.fallbackTailYield.ownerKey -in @('', '(none)') -or
         [string]$yield.fallbackTailYield.pairKey -in @('', '(none)')) {
         return $false
+    }
+
+    $failedSupersession =
+        Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+            -Operations $operations
+    if ($null -ne $failedSupersession) {
+        return [string]$yield.operationKey -ceq
+                [string]$failedSupersession.QuiescentCurrent.operationKey -and
+            [string]$yieldReceipts[0].receiptIdentity -ceq
+                [string]$failedSupersession.YieldReceipt.receiptIdentity -and
+            [long]$yieldReceipts[0].receiptGeneration -eq
+                [long]$failedSupersession.YieldReceipt.receiptGeneration -and
+            [string]$yieldReceipts[0].receiptFingerprint -ceq
+                [string]$failedSupersession.YieldReceipt.receiptFingerprint
     }
 
     if ([string]$yield.afterState -ceq 'YieldIssued') {
@@ -2723,6 +2976,22 @@ function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
         return 'family4_pending_retry_command_validated_as_completed_receipt'
     }
     if ([string]$Envelope.decisionKind -ceq 'FallbackTailQuiescent') {
+        $failedSupersession =
+            Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+                -Operations @($Envelope.aggregate.operations)
+        if ($null -ne $failedSupersession -or
+            @($Envelope.aggregate.operations | Where-Object {
+                    [string]$_.operationRole -ceq 'yield_terminal' -and
+                    [string]$_.operationKind -ceq 'Failed'
+                }).Count -gt 0 -or
+            @($Envelope.aggregate.operations | Where-Object {
+                    [bool](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $_.fallbackTailYield `
+                        -Name 'failedSupersessionCarriedPeerProof' `
+                        -Default $false)
+                }).Count -gt 0) {
+            return 'failed_to_quiescent_carried_peer_proof_supersession_omitted_from_fallback_tail_quiescent_catalog'
+        }
         if (@($Envelope.aggregate.operations | Where-Object { $_.operationRole -ceq 'peer_proof_pending_initial' }).Count -gt 0 -and
             @($Envelope.aggregate.operations | Where-Object { $_.operationRole -ceq 'yield_current' -and $_.afterState -ceq 'YieldIssued' }).Count -gt 0) {
             return 'checkpoint_stale_pending_peer_proof_retirement_rejected_by_quiescent_shape_catalog'
@@ -2780,6 +3049,60 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
             -Boundary $Entry.Boundary `
             -Operation $operation `
             -Effect $matchingEffects[0]
+    }
+
+    $failedSupersession =
+        Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+            -Operations @($Entry.Boundary.operations)
+    if ($null -ne $failedSupersession -and
+        [string]$operation.operationKey -ceq
+            [string]$failedSupersession.QuiescentCurrent.operationKey) {
+        $prior = $failedSupersession.FailedCurrent
+        if ([string]$matchingEffects[0].OperationKey -cne
+                [string]$prior.operationKey -or
+            [string]$matchingEffects[0].AuthorityId -cne
+                [string]$prior.authorityId -or
+            [long]$matchingEffects[0].OperationGeneration -ne
+                [long]$prior.operationGeneration -or
+            [string]$prior.fallbackTailYield.ownerKey -cne
+                [string]$typed.ownerKey -or
+            [string]$prior.fallbackTailYield.pairKey -cne
+                [string]$typed.pairKey -or
+            [string]$prior.fallbackTailYield.peerProofAuthorityId -cne
+                [string]$typed.peerProofAuthorityId -or
+            [string]$prior.fallbackTailYield.peerProofIdentity -cne
+                [string]$typed.peerProofIdentity -or
+            [string]$prior.fallbackTailYield.peerProofFingerprint -cne
+                [string]$typed.peerProofFingerprint -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                -Left $prior.fallbackTailYield.sourceBoundary `
+                -Right $typed.sourceBoundary)) {
+            return $false
+        }
+
+        $priorSignature =
+            Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature `
+                -Operation $prior
+        $effectSubjects = @($OperationHistory | Where-Object {
+                [string]$_.Boundary.coordinatorInstanceId -ceq
+                    [string]$Entry.Boundary.coordinatorInstanceId -and
+                [string]$_.Boundary.boundaryId -ceq
+                    [string]$matchingEffects[0].TransitionId -and
+                [long]$_.Boundary.afterStateGeneration -eq
+                    [long]$matchingEffects[0].StateGeneration -and
+                [string]$_.Operation.operationKey -ceq
+                    [string]$prior.operationKey -and
+                [string]$_.Operation.operationRole -ceq 'yield_current' -and
+                [string]$_.Operation.operationKind -ceq 'Failed' -and
+                [string]$_.Operation.afterState -ceq 'PeerProofObserved' -and
+                (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature `
+                    -Operation $_.Operation) -ceq $priorSignature -and
+                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                    -Boundary $_.Boundary `
+                    -Operation $_.Operation `
+                    -Effect $matchingEffects[0])
+            })
+        return $effectSubjects.Count -eq 1
     }
 
     $pending = @($Entry.Boundary.operations | Where-Object {
@@ -3071,7 +3394,15 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
                 }
                 if ($valid) {
                     $originSignature = $signature
-                    $originKind = if (
+                    $failedSupersession =
+                        Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+                            -Operations @($entry.Boundary.operations)
+                    $originKind = if ($null -ne $failedSupersession -and
+                        [string]$operation.operationKey -ceq
+                            [string]$failedSupersession.QuiescentCurrent.operationKey) {
+                        'FailedSupersession'
+                    }
+                    elseif (
                         [string]$entry.Boundary.decisionKind -ceq
                             'FallbackTailQuiescent' -and
                         [string]$operation.beforeState -ceq 'None' -and
@@ -3084,8 +3415,14 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
                     }
                 }
                 else {
-                    $variant =
+                    $variant = if ($null -ne (
+                        Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+                            -Operations @($entry.Boundary.operations))) {
+                        'failed_to_quiescent_carried_peer_proof_provenance_invalid'
+                    }
+                    else {
                         'fallback_tail_quiescent_peer_proof_carry_invalid'
+                    }
                 }
             }
         }
@@ -7548,6 +7885,33 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
              $matches[0].Boundary.decisionKind -cne 'CommitRuntimeUnlockRetryLifecycleScopeInvalidation' -or
              $matches[0].Boundary.decisionStatus -cne 'Accepted')) {
             $errors.Add("snapshot_authority_effect_scope_invalidation_without_application:$($effect.LineIndex)")
+        }
+    }
+
+    foreach ($boundary in @($boundaries | Where-Object {
+                [string]$_.decisionKind -ceq 'FallbackTailQuiescent' -and
+                [string]$_.decisionStatus -ceq 'Accepted'
+            })) {
+        $failedSupersession =
+            Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+                -Operations @($boundary.operations)
+        if ($null -eq $failedSupersession) {
+            continue
+        }
+        $successor = $failedSupersession.QuiescentCurrent
+        $retirementEffects = @($effects | Where-Object {
+                [string]$_.EffectKind -ceq
+                    'recovery_owner_retired_after_yield' -and
+                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                    -Boundary $boundary `
+                    -Operation $successor `
+                    -Effect $_)
+            })
+        if ($retirementEffects.Count -ne 1) {
+            $errors.Add(
+                'snapshot_fallback_tail_recovery_owner_retirement_effect_missing|' +
+                'failed_to_quiescent_supersession_ambiguous_yield_receipts_suppressed_exact_successor_effect:' +
+                [string]$boundary.evidenceLineIndex)
         }
     }
 

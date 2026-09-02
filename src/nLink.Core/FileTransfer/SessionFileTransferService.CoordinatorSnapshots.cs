@@ -2247,14 +2247,72 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        var matches = envelope.Aggregate.Operations
+        var operations = envelope.Aggregate.Operations
             .Where(operation =>
                 operation.Family == "fallback_tail_yield" &&
-                operation.FallbackTailYield is not null)
+                operation.FallbackTailYield is not null);
+        var isRecoveryOwnerRetirement = string.Equals(
+            kind,
+            "recovery_owner_retired_after_yield",
+            StringComparison.Ordinal);
+        if (isRecoveryOwnerRetirement)
+        {
+            if (!string.Equals(
+                    envelope.DecisionKind,
+                    nameof(FileTransferCoordinatorEventKind.FallbackTailQuiescent),
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    envelope.DecisionStatus,
+                    "Accepted",
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            operations = operations.Where(operation =>
+                operation.StateApplied &&
+                string.Equals(
+                    operation.OperationRole,
+                    "yield_current",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.OperationKind,
+                    FallbackTailYieldKind.Quiescent.ToString(),
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.FallbackTailYield!.Role,
+                    "yield_current",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.FallbackTailYield.YieldKind,
+                    FallbackTailYieldKind.Quiescent.ToString(),
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.BeforeState,
+                    FileTransferFallbackTailYieldPairingState.None.ToString(),
+                    StringComparison.Ordinal) &&
+                (string.Equals(
+                     operation.AfterState,
+                     FileTransferFallbackTailYieldPairingState.YieldIssued
+                         .ToString(),
+                     StringComparison.Ordinal) ||
+                 string.Equals(
+                     operation.AfterState,
+                     FileTransferFallbackTailYieldPairingState.PeerProofObserved
+                         .ToString(),
+                     StringComparison.Ordinal)));
+        }
+
+        var matches = operations
             .SelectMany(operation => operation.FallbackTailYield!.Receipts
                 .Where(receipt =>
                     receipt.ReceiptValidated &&
-                    receipt.Stage == stage)
+                    receipt.Stage == stage &&
+                    (!isRecoveryOwnerRetirement ||
+                     string.Equals(
+                         receipt.ReceiptStatus,
+                         "Accepted",
+                         StringComparison.Ordinal)))
                 .Select(receipt => (Operation: operation, Receipt: receipt)))
             .ToArray();
         if (matches.Length != 1)
@@ -2268,7 +2326,9 @@ public sealed partial class SessionFileTransferService
             sessionId,
             transferId,
             direction,
-            stateGeneration,
+            isRecoveryOwnerRetirement
+                ? envelope.Aggregate.AfterStateGeneration
+                : stateGeneration,
             match.Operation.Family,
             match.Operation.AuthorityId,
             match.Operation.OperationGeneration,
@@ -2278,7 +2338,10 @@ public sealed partial class SessionFileTransferService
             match.Receipt.ReceiptFingerprint,
             kind,
             $"{match.Operation.OperationKey}:{kind}",
-            match.Receipt.ReceiptGeneration);
+            match.Receipt.ReceiptGeneration,
+            isRecoveryOwnerRetirement
+                ? match.Operation.OperationKey
+                : null);
     }
 
     private static void EnqueueRoutePublicationAuthorityEffect(
