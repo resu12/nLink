@@ -8,6 +8,174 @@ public sealed partial class SessionFileTransferV4SenderTests
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void FallbackTailPeerProofAuthorityEffect_CheckpointSuccessorBindsOnlyEnteringProof()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId =
+            "transfer_fallback_tail_checkpoint_successor_effect";
+        var context = CreatePostTunaFallbackV6InboundContext(transferId);
+        serviceType
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var leg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        leg.State = FileTransferLegState.Active;
+        leg.CanSendData = true;
+        leg.CheckpointRequestId = null;
+        leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
+        var state = CreateFallbackTailCoordinatorStateForTest(context);
+
+        state = AcceptInboundFallbackCheckpointForSnapshotEffectTest(
+            context,
+            state,
+            leg,
+            leg.TransportEpochId,
+            5,
+            5,
+            "checkpoint:initial",
+            "unit_test_checkpoint_successor_effect");
+        leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var sessionId = GetPrivateProperty<string>(context, "SessionId");
+        var peerDirection = FileTransferDirection.Outbound;
+        var peerOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            leg.RouteSelection.TelemetryToken,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.Generation,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)");
+        var peerPairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+            sessionId,
+            transferId,
+            leg.RouteSelection.TelemetryToken,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.TransportEpochId,
+            "(none)");
+        var initialProof = new FileTransferFallbackTailPeerProof(
+            sessionId,
+            transferId,
+            peerDirection,
+            new FileTransferAuthorityId(
+                "fta2-fallback_tail_yield-aaaaaaaaaaaaaaaaaaaaaaaa"),
+            PredecessorAuthorityId: null,
+            YieldGeneration: 1,
+            peerOwnerKey,
+            peerPairKey,
+            leg.LiveRouteEpochId,
+            leg.Generation,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)",
+            5,
+            5,
+            "checkpoint-initial-peer-frame");
+        var initialReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                state,
+                initialProof,
+                "checkpoint-initial-peer-observation",
+                3_000);
+        var initial = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            state,
+            initialReceipt);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            initial.Status);
+
+        _ = AdoptFallbackTailYieldDecisionForTest(context, initial);
+        state = AcceptInboundFallbackCheckpointForSnapshotEffectTest(
+            context,
+            initial.State,
+            leg,
+            leg.TransportEpochId,
+            6,
+            6,
+            "checkpoint:successor",
+            "unit_test_checkpoint_successor_effect");
+        leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var successorProof = initialProof with
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                "fta2-fallback_tail_yield-bbbbbbbbbbbbbbbbbbbbbbbb"),
+            YieldGeneration = 2,
+            CommittedChunkIndex = 6,
+            HighestObservedChunkIndex = 6,
+            FrameFingerprint = "checkpoint-successor-peer-frame",
+        };
+        var successorReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                state,
+                successorProof,
+                "checkpoint-successor-peer-observation",
+                4_000);
+        Assert.Equal(
+            initialReceipt.ObservationScope with
+            {
+                CheckpointGeneration =
+                    successorReceipt.ObservationScope.CheckpointGeneration,
+            },
+            successorReceipt.ObservationScope);
+        Assert.False(initialReceipt.IsDefault);
+        Assert.False(successorReceipt.IsDefault);
+        Assert.True(
+            successorReceipt.ObservationScope.CheckpointGeneration >
+                initialReceipt.ObservationScope.CheckpointGeneration);
+        Assert.Equal(initialReceipt.Proof.OwnerKey, successorReceipt.Proof.OwnerKey);
+        Assert.Equal(initialReceipt.Proof.PairKey, successorReceipt.Proof.PairKey);
+        Assert.NotEqual(
+            initialReceipt.Proof.AuthorityId,
+            successorReceipt.Proof.AuthorityId);
+        Assert.True(
+            successorReceipt.Proof.YieldGeneration >
+                initialReceipt.Proof.YieldGeneration);
+        Assert.NotEqual(
+            initialReceipt.ObservationIdentity,
+            successorReceipt.ObservationIdentity);
+        Assert.True(successorReceipt.ObservedUtcMs > initialReceipt.ObservedUtcMs);
+        var successor =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                state,
+                successorReceipt);
+        Assert.True(
+            successor.Status ==
+                FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            successor.Reason);
+        var successorEnvelope = Assert.IsType<
+            FileTransferCoordinatorTransitionEnvelope>(
+                successor.SnapshotEnvelope);
+        var enteringOperation = Assert.Single(
+            successorEnvelope.Aggregate.Operations,
+            operation =>
+                operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "peer_proof_pending_initial" &&
+                operation.BeforeState == "None" &&
+                operation.AfterState == "Pending");
+        var binding = Assert.IsType<
+            FileTransferCoordinatorAuthorityEffectBinding>(
+                SessionFileTransferService
+                    .CreateFallbackTailYieldAuthorityEffectBindingForTesting(
+                        successorEnvelope,
+                        "peer_proof",
+                        "peer_proof_observed"));
+        Assert.Equal(enteringOperation.OperationKey, binding.OperationKey);
+        Assert.Equal(successorProof.AuthorityId.ToString(), binding.AuthorityId);
+        Assert.Equal(
+            successorReceipt.ObservationIdentity,
+            binding.ReceiptIdentity);
+        Assert.NotEqual(initialProof.AuthorityId.ToString(), binding.AuthorityId);
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public async Task FallbackTailRecoveryOwnerAuthorityEffect_FailedSuccessorUsesEnteringQuiescentReceipt()
     {
         using var service = new SessionFileTransferService();
@@ -438,4 +606,71 @@ public sealed partial class SessionFileTransferV4SenderTests
                 method.GetParameters()[1].ParameterType ==
                     typeof(FileTransferCoordinatorDecision))
             .Invoke(null, [context, decision]);
+
+    private static FileTransferCoordinatorState
+        AcceptInboundFallbackCheckpointForSnapshotEffectTest(
+        object context,
+        FileTransferCoordinatorState state,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string checkpointRequestId,
+        string reason)
+    {
+        var requested = FileTransferCoordinator.Apply(
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                leg.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.CheckpointPending,
+                CanSendData: false,
+                committed,
+                highestObserved,
+                transportEpoch,
+                leg.BridgeRecoveryGeneration,
+                checkpointRequestId,
+                "state_refresh_tail_reconciliation"),
+            state);
+        Assert.Null(requested.MutationRejectedReason);
+        AdoptFallbackTailCoordinatorDecisionForEffectTest(context, requested);
+        SetPrivateProperty(
+            context,
+            "CurrentTransferLeg",
+            requested.State.CurrentLeg);
+        SetPrivateProperty(
+            context,
+            "CurrentFallbackCheckpointLease",
+            requested.State.CurrentFallbackCheckpointLease);
+        state = requested.State;
+        leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var accepted = FileTransferCoordinator.Apply(
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
+                leg.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.RecoveryActive,
+                CanSendData: true,
+                committed,
+                highestObserved,
+                transportEpoch,
+                leg.BridgeRecoveryGeneration,
+                checkpointRequestId),
+            state);
+        Assert.Null(accepted.MutationRejectedReason);
+        AdoptFallbackTailCoordinatorDecisionForEffectTest(context, accepted);
+        SetPrivateProperty(
+            context,
+            "CurrentTransferLeg",
+            accepted.State.CurrentLeg);
+        SetPrivateProperty(
+            context,
+            "CurrentFallbackCheckpointLease",
+            accepted.State.CurrentFallbackCheckpointLease);
+        return accepted.State;
+    }
 }

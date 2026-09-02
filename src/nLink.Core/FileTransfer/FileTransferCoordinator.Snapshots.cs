@@ -983,6 +983,26 @@ internal static partial class FileTransferCoordinator
         var descriptor = descriptors
             .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
             .FirstOrDefault();
+        if (descriptor is null &&
+            string.Equals(
+                decisionKind,
+                nameof(ApplyFallbackTailPeerProofReceipt),
+                StringComparison.Ordinal) &&
+            string.Equals(
+                decisionStatus,
+                FileTransferFallbackTailYieldTransitionStatus.Accepted.ToString(),
+                StringComparison.Ordinal) &&
+            string.Equals(
+                decisionReason,
+                "fallback_tail_initial_peer_proof_receipt_superseded_after_checkpoint_advance",
+                StringComparison.Ordinal) &&
+            command is FileTransferFallbackTailPeerProofReceipt peerReceipt)
+        {
+            descriptor = CreateFallbackTailYieldPeerProofDescriptor(
+                state,
+                "peer_proof_pending_initial",
+                peerReceipt);
+        }
         var commandFingerprint = CalculateSnapshotFingerprint(command);
         if (descriptor is not null)
         {

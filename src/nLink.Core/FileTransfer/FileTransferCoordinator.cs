@@ -11577,16 +11577,34 @@ internal static partial class FileTransferCoordinator
 
         if (substate.PendingPeerProofBeforeLocalYield is { } existing)
         {
-            return IsSameFallbackTailPeerProofReceiptIdentity(
+            if (IsSameFallbackTailPeerProofReceiptIdentity(
                     existing,
-                    receipt)
-                ? FallbackTailYieldTransition(
+                    receipt))
+            {
+                return FallbackTailYieldTransition(
                     state,
                     FileTransferFallbackTailYieldTransitionStatus.Idempotent,
-                    "fallback_tail_initial_peer_proof_receipt_idempotent")
-                : FallbackTailYieldTransitionRejected(
-                    state,
-                    "fallback_tail_initial_peer_proof_receipt_conflict");
+                    "fallback_tail_initial_peer_proof_receipt_idempotent");
+            }
+
+            if (IsFallbackTailInitialPeerProofCheckpointSuccessor(
+                    existing,
+                    receipt))
+            {
+                return FallbackTailYieldTransition(
+                    ApplyFallbackTailYieldSubstate(
+                        state,
+                        substate with
+                        {
+                            PendingPeerProofBeforeLocalYield = receipt,
+                        }),
+                    FileTransferFallbackTailYieldTransitionStatus.Accepted,
+                    "fallback_tail_initial_peer_proof_receipt_superseded_after_checkpoint_advance");
+            }
+
+            return FallbackTailYieldTransitionRejected(
+                state,
+                "fallback_tail_initial_peer_proof_receipt_conflict");
         }
 
         return FallbackTailYieldTransition(
@@ -11609,6 +11627,55 @@ internal static partial class FileTransferCoordinator
                left.ObservationIdentity,
                right.ObservationIdentity,
                StringComparison.Ordinal);
+
+    private static bool IsFallbackTailInitialPeerProofCheckpointSuccessor(
+        FileTransferFallbackTailPeerProofReceipt existing,
+        FileTransferFallbackTailPeerProofReceipt candidate)
+    {
+        var existingScope = existing.ObservationScope;
+        var candidateScope = candidate.ObservationScope;
+        if (existing.IsDefault ||
+            candidate.IsDefault ||
+            existingScope.CheckpointGeneration <= 0 ||
+            candidateScope.CheckpointGeneration <=
+                existingScope.CheckpointGeneration ||
+            !string.Equals(
+                existingScope.CheckpointRequestIdSnapshot,
+                "(none)",
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                candidateScope.CheckpointRequestIdSnapshot,
+                "(none)",
+                StringComparison.Ordinal) ||
+            (existingScope with
+             {
+                 CheckpointGeneration = candidateScope.CheckpointGeneration,
+             }) != candidateScope ||
+            !IsInitialFallbackTailPeerProofExactForScope(
+                existingScope,
+                existing.Proof,
+                out _) ||
+            !string.Equals(
+                existing.Proof.OwnerKey,
+                candidate.Proof.OwnerKey,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                existing.Proof.PairKey,
+                candidate.Proof.PairKey,
+                StringComparison.Ordinal) ||
+            existing.Proof.AuthorityId == candidate.Proof.AuthorityId ||
+            candidate.Proof.YieldGeneration <=
+                existing.Proof.YieldGeneration ||
+            string.Equals(
+                existing.ObservationIdentity,
+                candidate.ObservationIdentity,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     private static bool IsFallbackTailRetryCycleSuccessorPeerProofExact(
         FileTransferFallbackTailYieldOperation current,

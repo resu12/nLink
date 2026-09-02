@@ -2247,6 +2247,48 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        var binding = CreateFallbackTailYieldAuthorityEffectBinding(
+            envelope,
+            stage,
+            kind);
+        if (binding is null)
+        {
+            return;
+        }
+        var exactBinding = binding;
+        var isRecoveryOwnerRetirement = string.Equals(
+            kind,
+            "recovery_owner_retired_after_yield",
+            StringComparison.Ordinal);
+        emitter.EnqueueAuthorityEffect(
+            coordinatorInstanceId,
+            sessionId,
+            transferId,
+            direction,
+            isRecoveryOwnerRetirement
+                ? envelope.Aggregate.AfterStateGeneration
+                : stateGeneration,
+            exactBinding.Family,
+            exactBinding.AuthorityId,
+            exactBinding.OperationGeneration,
+            exactBinding.ReceiptIdentity,
+            exactBinding.ReceiptGeneration,
+            exactBinding.ReceiptStatus,
+            exactBinding.ReceiptFingerprint,
+            kind,
+            $"{exactBinding.OperationKey}:{kind}",
+            exactBinding.ReceiptGeneration,
+            isRecoveryOwnerRetirement
+                ? exactBinding.OperationKey
+                : null);
+    }
+
+    private static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateFallbackTailYieldAuthorityEffectBinding(
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            string stage,
+            string kind)
+    {
         var operations = envelope.Aggregate.Operations
             .Where(operation =>
                 operation.Family == "fallback_tail_yield" &&
@@ -2255,6 +2297,48 @@ public sealed partial class SessionFileTransferService
             kind,
             "recovery_owner_retired_after_yield",
             StringComparison.Ordinal);
+        var isCheckpointSuccessorPeerProof =
+            string.Equals(
+                kind,
+                "peer_proof_observed",
+                StringComparison.Ordinal) &&
+            string.Equals(
+                envelope.DecisionKind,
+                nameof(FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt),
+                StringComparison.Ordinal) &&
+            string.Equals(
+                envelope.DecisionStatus,
+                "Accepted",
+                StringComparison.Ordinal) &&
+            string.Equals(
+                envelope.DecisionReason,
+                "fallback_tail_initial_peer_proof_receipt_superseded_after_checkpoint_advance",
+                StringComparison.Ordinal);
+        if (isCheckpointSuccessorPeerProof)
+        {
+            operations = operations.Where(operation =>
+                operation.StateApplied &&
+                string.Equals(
+                    operation.OperationRole,
+                    "peer_proof_pending_initial",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.OperationKind,
+                    "PeerProof",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.BeforeState,
+                    "None",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.AfterState,
+                    "Pending",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    operation.FallbackTailYield!.Role,
+                    "peer_proof_pending_initial",
+                    StringComparison.Ordinal));
+        }
         if (isRecoveryOwnerRetirement)
         {
             if (!string.Equals(
@@ -2266,7 +2350,7 @@ public sealed partial class SessionFileTransferService
                     "Accepted",
                     StringComparison.Ordinal))
             {
-                return;
+                return null;
             }
 
             operations = operations.Where(operation =>
@@ -2317,32 +2401,25 @@ public sealed partial class SessionFileTransferService
             .ToArray();
         if (matches.Length != 1)
         {
-            return;
+            return null;
         }
 
         var match = matches[0];
-        emitter.EnqueueAuthorityEffect(
-            coordinatorInstanceId,
-            sessionId,
-            transferId,
-            direction,
-            isRecoveryOwnerRetirement
-                ? envelope.Aggregate.AfterStateGeneration
-                : stateGeneration,
-            match.Operation.Family,
-            match.Operation.AuthorityId,
-            match.Operation.OperationGeneration,
-            match.Receipt.ReceiptIdentity,
-            match.Receipt.ReceiptGeneration,
-            match.Receipt.ReceiptStatus,
-            match.Receipt.ReceiptFingerprint,
+        return CreateAuthorityEffectBinding(
             kind,
-            $"{match.Operation.OperationKey}:{kind}",
-            match.Receipt.ReceiptGeneration,
-            isRecoveryOwnerRetirement
-                ? match.Operation.OperationKey
-                : null);
+            match.Operation,
+            match.Receipt);
     }
+
+    internal static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateFallbackTailYieldAuthorityEffectBindingForTesting(
+            FileTransferCoordinatorTransitionEnvelope envelope,
+            string stage,
+            string kind)
+        => CreateFallbackTailYieldAuthorityEffectBinding(
+            envelope,
+            stage,
+            kind);
 
     private static void EnqueueRoutePublicationAuthorityEffect(
         OutboundTransferContext context,

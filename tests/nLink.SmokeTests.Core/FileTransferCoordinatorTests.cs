@@ -19645,6 +19645,211 @@ public sealed class FileTransferCoordinatorTests
             Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(accepted.SnapshotEnvelope), envelope];
     }
 
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound)]
+    [InlineData(FileTransferDirection.Outbound)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [Trait("FileTransferCoordinatorSuite", "FallbackTailYield")]
+    public void FallbackTailYield_CurrentCheckpointPeerProofSupersedesStalePendingProof(
+        FileTransferDirection direction)
+        => CreateCheckpointPeerProofSuccessorSnapshotFixture(direction);
+
+    internal static FileTransferCoordinatorTransitionEnvelope[]
+        CreateCheckpointPeerProofSuccessorSnapshotFixture(
+            FileTransferDirection direction)
+    {
+        var fallback = FileTransferRouteResolver.Resolve(
+            FileTransferRoute.PostTunaFallbackV6);
+        var source = ActiveFallbackStateWithoutCheckpoint(direction) with
+        {
+            CurrentDataSessionIdentity = "checkpoint-successor-session",
+            CurrentDataSessionGeneration = 1,
+        };
+        var epoch = source.CurrentLeg!.TransportEpochId;
+        var initialRequest = RequestFallbackCheckpoint(
+            source,
+            fallback,
+            "checkpoint:initial",
+            epoch);
+        var initialAcceptance = AcceptFallbackCheckpoint(
+            initialRequest.State,
+            fallback,
+            "checkpoint:initial",
+            epoch,
+            5,
+            5);
+        source = initialAcceptance.State with
+        {
+            PersistentState = initialAcceptance.State.PersistentState with
+            {
+                CoordinatorInstanceId = $"checkpoint-successor-{direction}",
+                SnapshotStateGeneration = 0,
+                FileTransferRouteTransition = default,
+            },
+        };
+
+        var initialPreview = MarkFallbackTailQuiescent(
+            source,
+            fallback,
+            epoch,
+            5,
+            5);
+        var initialProof = CreateCoordinatorFallbackTailPeerProof(
+            initialPreview.State,
+            Assert.IsType<FallbackTailYieldDecision>(
+                initialPreview.FallbackTailYieldDecision));
+        var initialReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                source,
+                initialProof,
+                "checkpoint-initial-peer-proof",
+                3_000);
+        var pending = FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+            source,
+            initialReceipt);
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            pending.Status);
+
+        var successorRequest = RequestFallbackCheckpoint(
+            pending.State,
+            fallback,
+            "checkpoint:successor",
+            epoch);
+        var successorAcceptance = AcceptFallbackCheckpoint(
+            successorRequest.State,
+            fallback,
+            "checkpoint:successor",
+            epoch,
+            6,
+            6);
+        var successorProof = initialProof with
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                "fta2-fallback_tail_yield-bbbbbbbbbbbbbbbbbbbbbbbb"),
+            YieldGeneration = initialProof.YieldGeneration + 1,
+            CommittedChunkIndex = 6,
+            HighestObservedChunkIndex = 6,
+            FrameFingerprint = "checkpoint-successor-frame",
+        };
+        var successorReceipt =
+            FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
+                successorAcceptance.State,
+                successorProof,
+                "checkpoint-successor-peer-proof",
+                4_000);
+
+        var superseded =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                successorAcceptance.State,
+                successorReceipt);
+
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Accepted,
+            superseded.Status);
+        Assert.Equal(
+            "fallback_tail_initial_peer_proof_receipt_superseded_after_checkpoint_advance",
+            superseded.Reason);
+        Assert.Equal(
+            successorReceipt,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    superseded.State)
+                .PendingPeerProofBeforeLocalYield);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            superseded.SnapshotEnvelope);
+        Assert.Equal(
+            envelope.Aggregate.BeforeStateGeneration + 1,
+            envelope.Aggregate.AfterStateGeneration);
+        var pendingOperations = envelope.Aggregate.Operations
+            .Where(operation =>
+                operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "peer_proof_pending_initial")
+            .ToArray();
+        Assert.Equal(2, pendingOperations.Length);
+        var retired = Assert.Single(
+            pendingOperations,
+            operation => operation.AuthorityId ==
+                initialProof.AuthorityId.ToString());
+        var entered = Assert.Single(
+            pendingOperations,
+            operation => operation.AuthorityId ==
+                successorProof.AuthorityId.ToString());
+        Assert.Equal("Pending", retired.BeforeState);
+        Assert.Equal("None", retired.AfterState);
+        Assert.Equal("None", entered.BeforeState);
+        Assert.Equal("Pending", entered.AfterState);
+        var attempted = Assert.Single(
+            envelope.Aggregate.Operations,
+            operation =>
+                operation.Family == "fallback_tail_yield" &&
+                operation.OperationRole == "attempted_decision");
+        Assert.Equal(successorProof.AuthorityId.ToString(), attempted.AuthorityId);
+        Assert.Equal(successorProof.YieldGeneration, attempted.OperationGeneration);
+        Assert.Equal(
+            successorReceipt.ObservationIdentity,
+            attempted.FallbackTailYield!.PeerProofIdentity);
+
+        var stalePredecessor =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                superseded.State,
+                initialReceipt with { ObservedUtcMs = 4_050 });
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Rejected,
+            stalePredecessor.Status);
+        Assert.Equal(
+            successorReceipt,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(
+                    stalePredecessor.State)
+                .PendingPeerProofBeforeLocalYield);
+
+        var duplicate =
+            FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
+                superseded.State,
+                successorReceipt with { ObservedUtcMs = 4_100 });
+        Assert.Equal(
+            FileTransferFallbackTailYieldTransitionStatus.Idempotent,
+            duplicate.Status);
+
+        var yielded = MarkFallbackTailQuiescent(
+            duplicate.State,
+            fallback,
+            epoch,
+            6,
+            6);
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(yielded.State)
+                .CurrentOperation);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.PeerProofObserved,
+            operation.PairingState);
+        Assert.Equal(successorReceipt, operation.PeerProof);
+        var localProof = FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+            yielded.State,
+            operation.Decision,
+            "checkpoint-successor-local-proof",
+            "checkpoint-successor-local-frame",
+            4_200);
+        var paired = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
+            yielded.State,
+            localProof);
+        Assert.Equal(
+            FileTransferFallbackTailYieldPairingState.Paired,
+            FileTransferCoordinator.GetFallbackTailYieldSubstate(paired.State)
+                .CurrentOperation!.Value.PairingState);
+        Assert.NotNull(paired.PairedRelease);
+
+        return
+        [
+            Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                pending.SnapshotEnvelope),
+            Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                successorRequest.SnapshotEnvelope),
+            Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                successorAcceptance.SnapshotEnvelope),
+            envelope,
+        ];
+    }
+
     [Fact]
     public void FallbackTailYield_InitialPeerProofBeforeLocalYieldIsRetainedAndPairsExactlyOnce()
     {
