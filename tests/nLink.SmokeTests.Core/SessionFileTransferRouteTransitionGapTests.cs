@@ -691,6 +691,211 @@ public sealed partial class SessionFileTransferV4SenderTests
             "route_transition_fallback_checkpoint_stale_target",
             verifyStaleBindings: true);
 
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public void FileTransferRouteTransitionLatePeerProof_AfterCommittedDisposition_DoesNotRecreateShadow(
+        FileTransferDirection direction)
+    {
+        var transferId =
+            $"route_transition_late_peer_proof_{direction.ToString().ToLowerInvariant()}";
+        using var service = new SessionFileTransferService();
+        object context = direction == FileTransferDirection.Outbound
+            ? CreateFileTunaV4OutboundContext(transferId)
+            : CreateFileTunaV4InboundContext(transferId);
+        var contextField = typeof(SessionFileTransferService).GetField(
+            direction == FileTransferDirection.Outbound
+                ? "outboundTransfer"
+                : "inboundTransfer",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        contextField.SetValue(service, context);
+
+        var state = CreateCoordinatorStateForTest(context);
+        var sourceOwner = Assert.IsType<RuntimeOwnerToken>(
+            state.CurrentRuntimeOwner);
+        var sourcePublication = Assert.IsType<RoutePublicationToken>(
+            state.CurrentRoutePublicationToken);
+        var sourceCommit = Assert.IsType<RouteCommitToken>(
+            state.CurrentRouteCommit);
+        var sourceLeg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var dataSession = Assert.IsAssignableFrom<IFileTransferDataSession>(
+            GetPrivatePropertyValue(context, "DataSession"));
+        var targetTransportEpoch = Math.Max(1, sourceLeg.TransportEpochId + 1);
+        var targetBridgeRecoveryGeneration =
+            Math.Max(1, sourceLeg.BridgeRecoveryGeneration + 1);
+
+        FileTransferDataFrame proofFrame = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            Epoch = 1,
+            ContiguousCommittedChunkIndex = 0,
+            DurableReceivedHighestChunkIndex = -1,
+            CreditUntilChunkIndexExclusive = 1,
+            MissingRanges = [],
+            BytesCommitted = 0,
+            TransportEpoch = targetTransportEpoch,
+        };
+        var frameIdentity =
+            PostTunaFallbackPeerProofFrameIdentity.Create(proofFrame);
+        var peerProof = new PostTunaFallbackPeerProofEvidence(
+            state.SessionId,
+            state.TransferId,
+            direction,
+            ProofGeneration: 1,
+            TransportEpoch: targetTransportEpoch,
+            ProofKind: "fallback_peer_state",
+            Reason: "transport_recovered",
+            FrameIdentity: frameIdentity);
+        var proofBoundary = new FileTransferFallbackTransitionProofBoundary(
+            sourceCommit,
+            peerProof,
+            frameIdentity,
+            targetTransportEpoch,
+            targetBridgeRecoveryGeneration);
+        var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(
+            sourceOwner,
+            sourcePublication,
+            state.TerminalGeneration,
+            sourceLeg.Generation,
+            sourceLeg.TransportEpochId,
+            sourceLeg.BridgeRecoveryGeneration,
+            state.CurrentDataSessionGeneration,
+            StateEpoch: 0,
+            ContiguousCommittedChunkIndex: 0,
+            DurableHighestChunkIndex: -1,
+            ChunkCount: 256,
+            CheckpointGeneration: 1);
+        var authority = new FileTransferRouteTransitionAuthority(
+            FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6,
+            state.SessionId,
+            state.TransferId,
+            direction,
+            sourceOwner,
+            sourcePublication,
+            sourceCommit,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            state.TerminalGeneration,
+            sourceOwner.LiveRouteEpoch,
+            sourceLeg.Generation,
+            sourceLeg.TransportEpochId,
+            sourceLeg.BridgeRecoveryGeneration,
+            state.CurrentDataSessionGeneration,
+            proofBoundary,
+            checkpoint,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            FileTransferTransportKind.RegularNkn,
+            FileTransferTransportHandoffKind.TunaToNormalFallback,
+            TransitionGeneration: 1,
+            new FileTransferAuthorityId($"fta3-{transferId}"),
+            PredecessorTransitionAuthorityId: null,
+            "test_committed_fallback_disposition");
+        var dispositionCommand =
+            new FileTransferRouteTransitionDispositionCommand(
+                authority,
+                FileTransferRouteTransitionDispositionKind.Committed,
+                RouteCommitToken: null,
+                RoutePublicationToken: null,
+                "test_committed_fallback_disposition");
+        var terminalOperation = new FileTransferRouteTransitionOperation(
+            authority,
+            FileTransferRouteTransitionState.Committed,
+            DispositionCommand: dispositionCommand,
+            DispositionReceipt:
+                new FileTransferRouteTransitionDispositionReceipt(
+                    dispositionCommand,
+                    FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                    "test_committed_fallback_disposition"));
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            state.PersistentState with
+            {
+                FileTransferRouteTransition =
+                    new FileTransferRouteTransitionSubstate(
+                        LastTerminalOperation: terminalOperation,
+                        LastTransitionGeneration: 1),
+            });
+
+        var retainMethod = typeof(SessionFileTransferService).GetMethod(
+            direction == FileTransferDirection.Outbound
+                ? "TryRetainOutboundFileTransferRouteTransitionPeerProofLocked"
+                : "TryRetainInboundFileTransferRouteTransitionPeerProofLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var logStart = GetOperationalLogLength();
+        object?[] arguments =
+            [context, dataSession, peerProof, "transport_recovered", null];
+
+        Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
+        Assert.Null(arguments[4]);
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains(
+            "decision_status=Rejected; decision_reason=filetransfer_route_transition_peer_proof_operation_terminal",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"authority_id={authority.AuthorityId}",
+            log,
+            StringComparison.Ordinal);
+
+        SetPrivateProperty(
+            context,
+            "DataSessionGeneration",
+            state.CurrentDataSessionGeneration + 1);
+        arguments =
+            [context, dataSession, peerProof, "transport_recovered", null];
+        Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution"));
+
+        var successorFrame = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = state.SessionId,
+            TransferId = state.TransferId,
+            Epoch = 2,
+            ContiguousCommittedChunkIndex = 0,
+            DurableReceivedHighestChunkIndex = -1,
+            CreditUntilChunkIndexExclusive = 1,
+            MissingRanges = [],
+            BytesCommitted = 0,
+            TransportEpoch = targetTransportEpoch + 1,
+        };
+        var successorIdentity =
+            PostTunaFallbackPeerProofFrameIdentity.Create(successorFrame);
+        var successorProof = peerProof with
+        {
+            ProofGeneration = peerProof.ProofGeneration + 1,
+            TransportEpoch = peerProof.TransportEpoch + 1,
+            FrameIdentity = successorIdentity,
+        };
+        arguments =
+            [context, dataSession, successorProof, "transport_recovered", null];
+
+        Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
+        var successorShadow = Assert.IsAssignableFrom<object>(
+            GetPrivatePropertyValue(
+                context,
+                "FileTransferRouteTransitionExecution"));
+        Assert.Null(GetPrivatePropertyValue(successorShadow, "Authority"));
+
+        arguments =
+            [context, dataSession, peerProof, "transport_recovered", null];
+        Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
+        Assert.Same(
+            successorShadow,
+            GetPrivatePropertyValue(
+                context,
+                "FileTransferRouteTransitionExecution"));
+    }
+
     private async Task
         VerifyFileTransferRouteTransitionFallbackCheckpointDispatchAsync(
         string transferId,
@@ -806,6 +1011,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(
             expectedTransitionGeneration,
             authority.TransitionGeneration);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(
+            context,
+            prepared);
         var pauseReceipt =
             ((IFileTransferRouteTransitionBridge)transport)
                 .BindFileTransferRouteTransitionPause(
@@ -831,6 +1039,9 @@ public sealed partial class SessionFileTransferV4SenderTests
         var drainCommand =
             Assert.IsType<FileTransferRouteTransitionPhysicalDrainCommand>(
                 draining.DrainCommand);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(
+            context,
+            draining);
         var dataSession = Assert.IsAssignableFrom<IFileTransferDataSession>(
             GetPrivatePropertyValue(context, "DataSession"));
         var executionType = typeof(SessionFileTransferService).GetNestedType(
@@ -863,10 +1074,6 @@ public sealed partial class SessionFileTransferV4SenderTests
 
         if (!verifyStaleBindings)
         {
-            SetPrivateProperty(
-                context,
-                "CoordinatorPersistentState",
-                draining.State.PersistentState);
             var serviceExecution = CreateExecution();
             SetPrivateProperty(
                 context,
@@ -1239,25 +1446,9 @@ public sealed partial class SessionFileTransferV4SenderTests
                 out var checkpointLeaseReason),
             checkpointLeaseReason);
 
-        typeof(SessionFileTransferService)
-            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-            .Single(candidate =>
-            {
-                if (!string.Equals(
-                        candidate.Name,
-                        "AdoptCoordinatorStateLocked",
-                        StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                var parameters = candidate.GetParameters();
-                return parameters.Length == 2 &&
-                       parameters[0].ParameterType == context.GetType() &&
-                       parameters[1].ParameterType ==
-                           typeof(FileTransferRouteTransitionDecision);
-            })
-            .Invoke(null, [context, committed]);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(
+            context,
+            committed);
 
         typeof(SessionFileTransferService)
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
@@ -1657,6 +1848,29 @@ public sealed partial class SessionFileTransferV4SenderTests
                 "FileTransferRouteTransitionTransportPauseEvidenceKey"),
             StringComparison.Ordinal);
     }
+
+    private static void AdoptFileTransferRouteTransitionDecisionForGapTest(
+        object context,
+        FileTransferRouteTransitionDecision decision)
+        => typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+            {
+                if (!string.Equals(
+                        candidate.Name,
+                        "AdoptCoordinatorStateLocked",
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 2 &&
+                       parameters[0].ParameterType == context.GetType() &&
+                       parameters[1].ParameterType ==
+                           typeof(FileTransferRouteTransitionDecision);
+            })
+            .Invoke(null, [context, decision]);
 
     private static (
         bool Accepted,

@@ -91,6 +91,23 @@ public sealed partial class SessionFileTransferService
         }
 
         var current = context.FileTransferRouteTransitionExecution;
+        if (TryGetConsumedFallbackRouteTransitionPeerProofAuthority(
+                CreateCoordinatorStateLocked(context),
+                evidence,
+                out var consumedAuthority))
+        {
+            LogFileTransferRouteTransitionEvidence(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                evidence,
+                frameIdentity: null,
+                consumedAuthority,
+                "Rejected",
+                "filetransfer_route_transition_peer_proof_operation_terminal");
+            return true;
+        }
+
         if (TryInvalidateOutboundFileTransferRouteTransitionForPeerBoundaryReplacementLocked(
                 context,
                 current,
@@ -243,6 +260,23 @@ public sealed partial class SessionFileTransferService
         }
 
         var current = context.FileTransferRouteTransitionExecution;
+        if (TryGetConsumedFallbackRouteTransitionPeerProofAuthority(
+                CreateCoordinatorStateLocked(context),
+                evidence,
+                out var consumedAuthority))
+        {
+            LogFileTransferRouteTransitionEvidence(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Inbound,
+                evidence,
+                frameIdentity: null,
+                consumedAuthority,
+                "Rejected",
+                "filetransfer_route_transition_peer_proof_operation_terminal");
+            return true;
+        }
+
         if (TryInvalidateInboundFileTransferRouteTransitionForPeerBoundaryReplacementLocked(
                 context,
                 current,
@@ -469,6 +503,46 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_route_transition_retained_frame_receive_dispatch_decided{authorityFields}; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; frame_type={FormatProtocolLogValue(identity?.FrameType ?? frame.Type)}; frame_transport_epoch={identity?.TransportEpoch ?? 0}; frame_fingerprint={FormatProtocolLogValue(identity?.Sha256 ?? "(none)")}; data_session_generation={dataSessionGeneration}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}; authority_effect=none");
+    }
+
+    private static bool TryGetConsumedFallbackRouteTransitionPeerProofAuthority(
+        FileTransferCoordinatorState state,
+        PostTunaFallbackPeerProofEvidence evidence,
+        out FileTransferRouteTransitionAuthority authority)
+    {
+        authority = default;
+        var routeTransition =
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(state);
+        if (routeTransition.LastTerminalOperation is not
+            {
+                State: FileTransferRouteTransitionState.Committed,
+                Authority: var terminalAuthority,
+                DispositionCommand:
+                {
+                    Kind: FileTransferRouteTransitionDispositionKind.Committed,
+                } dispositionCommand,
+                DispositionReceipt:
+                {
+                    Status:
+                        FileTransferRouteTransitionDispositionApplyStatus.Applied or
+                        FileTransferRouteTransitionDispositionApplyStatus.Idempotent,
+                } dispositionReceipt,
+            } ||
+            terminalAuthority.Kind is not
+                (FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 or
+                 FileTransferRouteTransitionKind.UncommittedTunaToPostTunaFallbackV6) ||
+            terminalAuthority.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            terminalAuthority.ProofBoundary is not
+                FileTransferFallbackTransitionProofBoundary fallbackBoundary ||
+            !Equals(fallbackBoundary.PeerProofEvidence, evidence) ||
+            dispositionCommand.Authority != terminalAuthority ||
+            dispositionReceipt.Command != dispositionCommand)
+        {
+            return false;
+        }
+
+        authority = terminalAuthority;
+        return true;
     }
 
     private static bool TryMergeFileTransferRouteTransitionEvidence(

@@ -5322,7 +5322,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     private static FileTransferLeg SeedCurrentRuntimeOwnerForTest(
         object context,
         FileTransferDirection direction,
-        string reason)
+        string reason,
+        bool startCoordinatorSnapshotStream = true)
     {
         var routeSelection = GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection");
         var sessionId = GetPrivateProperty<string>(context, "SessionId");
@@ -5402,7 +5403,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 FileTransferCoordinatorActionKind.RoutePublication,
                 reason));
         SetPrivateProperty(context, "LastRoutePublicationGeneration", publicationGeneration);
-        StartCoordinatorSnapshotStreamForTest(context);
+        if (startCoordinatorSnapshotStream)
+        {
+            StartCoordinatorSnapshotStreamForTest(context);
+        }
         return leg;
     }
 
@@ -6234,7 +6238,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var leg = SeedCurrentRuntimeOwnerForTest(
             context,
             FileTransferDirection.Outbound,
-            "unit_test_file_tuna_v4");
+            "unit_test_file_tuna_v4",
+            startCoordinatorSnapshotStream: false);
         var owner = Assert.IsType<RuntimeOwnerToken>(GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
         var admission = SeedRuntimeUnlockAdmissionForTest(
             context,
@@ -6265,6 +6270,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Reason: "unit_test_file_tuna_v4");
         SetPrivateProperty(context, "RuntimeUnlockRouteCommitToken", routeCommit);
         SetPrivateProperty(context, "LastRuntimeUnlockRouteCommitGeneration", 1);
+        StartCoordinatorSnapshotStreamForTest(context);
         return context;
     }
 
@@ -6416,7 +6422,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var leg = SeedCurrentRuntimeOwnerForTest(
             context,
             FileTransferDirection.Inbound,
-            "unit_test_file_tuna_v4");
+            "unit_test_file_tuna_v4",
+            startCoordinatorSnapshotStream: false);
         var owner = Assert.IsType<RuntimeOwnerToken>(
             GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
         var admission = SeedRuntimeUnlockAdmissionForTest(
@@ -6451,6 +6458,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             "LastRuntimeUnlockRouteCommitGeneration",
             1);
+        StartCoordinatorSnapshotStreamForTest(context);
         return context;
     }
 
