@@ -34601,6 +34601,7 @@ public sealed partial class NknSignalingTransport
             envelope,
             bytes,
             purpose,
+            usesInstalledRetryOfferAuthority,
             physicalCt,
             physicalSendScope is null
                 ? null
@@ -34631,6 +34632,7 @@ public sealed partial class NknSignalingTransport
                 envelope,
                 bytes,
                 purpose,
+                usesInstalledRetryOfferAuthority,
                 physicalCt,
                 bulkQueueFallbackSkipReason,
                 bulkQueueFallbackAfterDirectSuccessReason,
@@ -34946,7 +34948,8 @@ public sealed partial class NknSignalingTransport
             envelope,
             bytes,
             purpose,
-            sendCt,
+            prioritizeInstalledRetrySubmission: true,
+            ct: sendCt,
             physicalSendScope is null
                 ? null
                 : physicalSendScope.Register);
@@ -34969,7 +34972,8 @@ public sealed partial class NknSignalingTransport
             envelope,
             bytes,
             purpose,
-            sendCt,
+            prioritizeInstalledRetrySubmission: true,
+            ct: sendCt,
             registerPhysicalChild: physicalSendScope is null
                 ? null
                 : physicalSendScope.Register);
@@ -36088,6 +36092,7 @@ public sealed partial class NknSignalingTransport
         Envelope envelope,
         byte[] bytes,
         string purpose,
+        bool prioritizeInstalledRetrySubmission,
         CancellationToken ct,
         Action<Task>? registerPhysicalChild = null)
     {
@@ -36104,6 +36109,7 @@ public sealed partial class NknSignalingTransport
                 "control_priority",
                 "tuna_acceleration_control_priority_sent",
                 "tuna_acceleration_control_priority_failed",
+                prioritizeInstalledRetrySubmission,
                 ct,
                 registerPhysicalChild).ConfigureAwait(false);
         }
@@ -36121,6 +36127,7 @@ public sealed partial class NknSignalingTransport
         Envelope envelope,
         byte[] bytes,
         string purpose,
+        bool prioritizeInstalledRetrySubmission,
         CancellationToken ct,
         Func<string?>? skipBulkQueueFallbackObservedProofReason = null,
         Func<string?>? continueToBulkQueueFallbackAfterDirectSuccessReason = null,
@@ -36150,6 +36157,7 @@ public sealed partial class NknSignalingTransport
                     "control_to_bulk_endpoint",
                     "tuna_acceleration_control_bulk_bypass_sent",
                     "tuna_acceleration_control_bulk_bypass_priority_failed",
+                    prioritizeInstalledRetrySubmission,
                     ct,
                     registerPhysicalChild).ConfigureAwait(false))
             {
@@ -36193,7 +36201,21 @@ public sealed partial class NknSignalingTransport
                 return AccelerationControlSendResult.Failed;
             }
 
-            await SendBulkEnvelopeAsync(destination, envelope, bytes, ct, allowAcceleration: false).ConfigureAwait(false);
+            if (prioritizeInstalledRetrySubmission &&
+                client is IRuntimeUnlockRetryPriorityNknClient priorityClient)
+            {
+                NknRuntimeDiagnostics.IncrementMessagesSent();
+                await priorityClient.SendRuntimeUnlockRetryControlAsync(
+                        destination,
+                        bytes,
+                        NknBridgeChannel.Bulk,
+                        ct)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await SendBulkEnvelopeAsync(destination, envelope, bytes, ct, allowAcceleration: false).ConfigureAwait(false);
+            }
             var failureReason = bulkQueueFallbackObservedProofFailureReason?.Invoke();
             if (!string.IsNullOrWhiteSpace(failureReason))
             {
@@ -36225,6 +36247,7 @@ public sealed partial class NknSignalingTransport
         string lane,
         string sentEvent,
         string failedEvent,
+        bool prioritizeInstalledRetrySubmission,
         CancellationToken ct,
         Action<Task>? registerPhysicalChild)
     {
@@ -36239,13 +36262,21 @@ public sealed partial class NknSignalingTransport
         }
 
         Task sendTask;
+        using var directSendCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
             NknRuntimeDiagnostics.IncrementMessagesSent();
-            sendTask = client.SendAsync(
-                destination,
-                bytes,
-                ct);
+            sendTask = prioritizeInstalledRetrySubmission &&
+                client is IRuntimeUnlockRetryPriorityNknClient priorityClient
+                ? priorityClient.SendRuntimeUnlockRetryControlAsync(
+                    destination,
+                    bytes,
+                    NknBridgeChannel.Control,
+                    directSendCts.Token)
+                : client.SendAsync(
+                    destination,
+                    bytes,
+                    directSendCts.Token);
             registerPhysicalChild?.Invoke(sendTask);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -36262,6 +36293,7 @@ public sealed partial class NknSignalingTransport
         if (!ReferenceEquals(completed, sendTask))
         {
             ct.ThrowIfCancellationRequested();
+            directSendCts.Cancel();
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event={failedEvent}; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; lane={SanitizeLogToken(lane)}; error=Timeout; wait_ms={(long)waitTimeout.TotalMilliseconds}");

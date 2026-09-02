@@ -30,7 +30,7 @@ internal readonly record struct BridgeBootstrapHealthSnapshot(
     string FailureReason,
     string LastError);
 
-internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource, IBridgeScreenShareQueueCapability
+internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource, IBridgeScreenShareQueueCapability, IRuntimeUnlockRetryPriorityNknClient
 {
     private const int MaxPayloadBytes = BridgeBinaryProtocol.MaxPayloadBytes;
     private const int BridgeProtocolVersion = BridgeBinaryProtocol.ProtocolVersion;
@@ -118,6 +118,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private readonly BridgeProtocolEventRouter protocolEventRouter;
     private readonly ConnectAttemptCoordinator connectAttempts = new();
     private readonly SemaphoreSlim bridgeSubmissionSemaphore = new(1, 1);
+    private readonly BridgeSubmissionPriorityGate bridgeSubmissionPriorityGate = new();
     private BridgeSubmissionReadySnapshot bridgeSubmissionReadySnapshot;
     private long bridgeSubmissionEpoch;
     private bool bridgeRecoverySubmissionBarrierActive;
@@ -3549,6 +3550,25 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         return SendBulkCoreAsync(destination, payload, ct);
     }
 
+    public Task SendRuntimeUnlockRetryControlAsync(
+        string destination,
+        byte[] payload,
+        NknBridgeChannel channel,
+        CancellationToken ct)
+    {
+        if (channel is not (NknBridgeChannel.Control or NknBridgeChannel.Bulk))
+        {
+            throw new ArgumentOutOfRangeException(nameof(channel));
+        }
+
+        return SendCoreAsync(
+            destination,
+            payload,
+            channel,
+            ct,
+            prioritizeRuntimeUnlockRetry: true);
+    }
+
     private async Task SendBulkCoreAsync(string destination, byte[] payload, CancellationToken ct)
     {
         await WaitWhileBulkQueueSeverelyCongestedAsync(ct).ConfigureAwait(false);
@@ -3814,7 +3834,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 NknBridgeChannel.Control));
     }
 
-    private async Task SendCoreAsync(string destination, byte[] payload, NknBridgeChannel channel, CancellationToken ct)
+    private async Task SendCoreAsync(
+        string destination,
+        byte[] payload,
+        NknBridgeChannel channel,
+        CancellationToken ct,
+        bool prioritizeRuntimeUnlockRetry = false)
     {
         ThrowIfDisposed();
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
@@ -3829,6 +3854,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             "pre_wait",
             channel);
         BridgeSubmissionAfterAdmissionCapturedForTests?.Invoke(channel);
+        var priorityWaitStarted = prioritizeRuntimeUnlockRetry
+            ? Stopwatch.GetTimestamp()
+            : 0;
+        if (prioritizeRuntimeUnlockRetry)
+        {
+            Log(
+                "event=runtime_unlock_retry_priority_submission_decided; " +
+                $"decision_status=Held; channel={channel.ToString().ToLowerInvariant()}; authority_effect=none");
+        }
+        using var priorityLease = await bridgeSubmissionPriorityGate
+            .EnterAsync(prioritizeRuntimeUnlockRetry, ct)
+            .ConfigureAwait(false);
+        if (prioritizeRuntimeUnlockRetry)
+        {
+            Log(
+                "event=runtime_unlock_retry_priority_submission_decided; " +
+                $"decision_status=Granted; channel={channel.ToString().ToLowerInvariant()}; elapsed_ms={(long)Stopwatch.GetElapsedTime(priorityWaitStarted).TotalMilliseconds}; authority_effect=none");
+        }
         await bridgeSubmissionSemaphore.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -3863,6 +3906,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             else if (channel == NknBridgeChannel.Bulk)
             {
                 NknRuntimeDiagnostics.AddOutboundLaneSent("file_transfer", payload.Length);
+            }
+
+            if (prioritizeRuntimeUnlockRetry)
+            {
+                Log(
+                    "event=runtime_unlock_retry_priority_submission_decided; " +
+                    $"decision_status=Completed; channel={channel.ToString().ToLowerInvariant()}; elapsed_ms={(long)Stopwatch.GetElapsedTime(priorityWaitStarted).TotalMilliseconds}; authority_effect=none");
             }
         }
         finally

@@ -34,6 +34,107 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task InstalledRetryBulkFallback_CancelsTimedOutDirectCopyBeforePhysicalFallback()
+    {
+        var previousDirectSendWait =
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+            TimeSpan.FromMilliseconds(40);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var hostClient = new FakeNknClient(
+                "host.installed-retry-priority-fallback.address");
+            var helperClient = new FakeNknClient(
+                "helper.installed-retry-priority-fallback.address");
+            await hostClient.ConnectAsync(cts.Token);
+            await helperClient.ConnectAsync(cts.Token);
+            var canceledDirectCopies = 0;
+            var completedBulkFallbacks = 0;
+            hostClient.BeforeSendCoreAsync = async (_, payload, channel, ct) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var sent) ||
+                    sent.Type != MsgType.TransportAccelerationOffer)
+                {
+                    return;
+                }
+
+                if (channel == NknBridgeChannel.Control)
+                {
+                    try
+                    {
+                        await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                    }
+                    finally
+                    {
+                        Interlocked.Increment(ref canceledDirectCopies);
+                    }
+                }
+                else if (channel == NknBridgeChannel.Bulk)
+                {
+                    Interlocked.Increment(ref completedBulkFallbacks);
+                }
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                NknTransportOptions.Load(),
+                new NknIdentity(
+                    "host-installed-retry-priority-fallback-id",
+                    hostClient.Address));
+            var envelope = new Envelope(
+                Version: 1,
+                Code: "000000",
+                MessageId: "installed-retry-priority-fallback-offer",
+                Type: MsgType.TransportAccelerationOffer,
+                Payload: [],
+                UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ReplyTo: null);
+            var bytes = EnvelopeCodec.Serialize(envelope);
+            var method = typeof(NknSignalingTransport).GetMethod(
+                "SendAccelerationControlBulkCopyAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            var logStart = GetOperationalLogLength();
+
+            var send = Assert.IsAssignableFrom<Task>(method!.Invoke(
+                host,
+                [
+                    helperClient.BulkAddress,
+                    envelope,
+                    bytes,
+                    "offer",
+                    true,
+                    cts.Token,
+                    null,
+                    null,
+                    null,
+                    null,
+                ]));
+            await send.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref canceledDirectCopies));
+            Assert.Equal(1, Volatile.Read(ref completedBulkFallbacks));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=tuna_acceleration_control_bulk_bypass_priority_failed; purpose=offer; message_type=transport_acceleration_offer; lane=control_to_bulk_endpoint; error=Timeout",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer; message_type=transport_acceleration_offer; lane=bulk_queue_fallback",
+                tail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests =
+                previousDirectSendWait;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswer_UsesExactValidatedInboundSourceInsteadOfCachedEndpoint()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -16063,6 +16164,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var firstOfferEntered = new TaskCompletionSource<object?>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var blockPredecessorSends = true;
+            var successorPriorityOfferSendCount = 0;
+            hostClient.BeforeRuntimeUnlockRetryPrioritySendAsync =
+                (_, payload, _, _) =>
+                {
+                    if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
+                        sent.Type == MsgType.TransportAccelerationOffer &&
+                        !Volatile.Read(ref blockPredecessorSends))
+                    {
+                        Interlocked.Increment(
+                            ref successorPriorityOfferSendCount);
+                    }
+
+                    return Task.CompletedTask;
+                };
             hostClient.BeforeSendCoreAsync = async (_, payload, _, ct) =>
             {
                 if (EnvelopeCodec.TryDeserialize(payload, out var sent) &&
@@ -16191,6 +16306,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     "event=runtime_unlock_retry_dispatch_observed;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
+            Assert.True(
+                Volatile.Read(ref successorPriorityOfferSendCount) > 0,
+                ReadOperationalLogTail(logStart));
 
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains(

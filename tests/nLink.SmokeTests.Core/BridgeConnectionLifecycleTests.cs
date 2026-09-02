@@ -52,6 +52,78 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, previousUnsafeDeveloperMode);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task BridgeSubmissionPriorityGate_InstalledRetryAdvancesAheadOfQueuedBulk()
+    {
+        var gate = new BridgeSubmissionPriorityGate();
+        using var holder = await gate.EnterAsync(
+            priority: false,
+            CancellationToken.None);
+        var order = new ConcurrentQueue<string>();
+
+        var normal = Task.Run(async () =>
+        {
+            using var lease = await gate.EnterAsync(
+                priority: false,
+                CancellationToken.None);
+            order.Enqueue("normal");
+        });
+        await WaitUntilAsync(
+            () => gate.GetStateForTests().NormalWaiters == 1,
+            TimeSpan.FromSeconds(2));
+
+        var priority = Task.Run(async () =>
+        {
+            using var lease = await gate.EnterAsync(
+                priority: true,
+                CancellationToken.None);
+            order.Enqueue("priority");
+        });
+        await WaitUntilAsync(
+            () => gate.GetStateForTests().PriorityWaiters == 1,
+            TimeSpan.FromSeconds(2));
+
+        holder.Dispose();
+        await Task.WhenAll(priority, normal).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(["priority", "normal"], order.ToArray());
+        Assert.Equal(
+            (Held: false, PriorityWaiters: 0, NormalWaiters: 0),
+            gate.GetStateForTests());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryDispatch")]
+    public async Task BridgeSubmissionPriorityGate_CanceledPriorityDoesNotBlockNormalSubmission()
+    {
+        var gate = new BridgeSubmissionPriorityGate();
+        using var holder = await gate.EnterAsync(
+            priority: false,
+            CancellationToken.None);
+        using var canceled = new CancellationTokenSource();
+        var priority = gate.EnterAsync(priority: true, canceled.Token);
+        var normal = gate.EnterAsync(
+            priority: false,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () =>
+            {
+                var state = gate.GetStateForTests();
+                return state.PriorityWaiters == 1 &&
+                       state.NormalWaiters == 1;
+            },
+            TimeSpan.FromSeconds(2));
+
+        canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await priority);
+        holder.Dispose();
+        using var normalLease = await normal.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Startup_HealthCheck()
