@@ -14,13 +14,18 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
     public async Task AnalyzeRetained_PairedAdmissionNotRecheckedAfterPairing_ClassifiesInFullAndCompact(
         bool compact,
-        bool recovered)
+        bool recovered,
+        bool priorDenial)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -62,6 +67,10 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=tuna_acceleration_offer_queued; session_id={sessionId}; reason=fallback_paired_tail_yield; payer_decision_id=5; generation=2; queue_local_only=0; log_writer_id={sender}; log_writer_sequence=6", 11),
             LogLine($"event=runtime_unlock_post_fallback_paired_retry_offer_binding_decided; decision_status=Rejected; session_id={sessionId}; transfer_id={transferId}; direction=inbound; payer_decision_id=5; inbound_msg_id=offer-message-1; source_fingerprint=offer-fingerprint-1; admission_generation=0; previous_transaction_generation=1; previous_offer_generation=6; previous_tuna_path_lease_generation=1; current_transaction_generation=1; current_offer_generation=6; current_tuna_path_lease_generation=1; authority_effect=none; decision_reason=runtime_unlock_peer_precommit_answer_acceptance_scope_not_current; {scope}; log_writer_id={responder}; log_writer_sequence=7", 12)
         };
+        if (!priorDenial)
+        {
+            lines.RemoveAt(1);
+        }
         if (recovered)
         {
             lines.AddRange(

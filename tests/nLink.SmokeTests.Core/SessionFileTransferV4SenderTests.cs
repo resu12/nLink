@@ -21071,6 +21071,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "fallback_tail_paired_yield");
         Assert.NotNull(paired.PairedRelease);
         Assert.True(HasPairedFallbackTailYieldInAggregate(context));
+        serviceType
+            .GetMethod(
+                "HandleInboundFallbackTailPairedReleaseLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "fallback_tail_yield_proof_delivered"]);
         Assert.Equal(currentPairKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldPairKey"));
         Assert.Equal(currentPairKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldPairKey"));
 
@@ -21083,7 +21088,20 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Equal(currentOwnerKey, pairedOperation.PeerProof?.Proof.OwnerKey);
         Assert.NotNull(pairedOperation.LocalProof);
         Assert.NotNull(pairedOperation.PairedRelease);
-        Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.True(admission.AdmissionGeneration > 0);
+        Assert.Equal("fallback_quiescent", admission.Reason);
+        serviceType
+            .GetMethod(
+                "HandleInboundFallbackTailPairedReleaseLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "fallback_tail_yield_proof_delivered"]);
+        var duplicateAdmission = Assert.IsType<RuntimeUnlockAdmissionToken>(
+            GetPrivatePropertyValue(context, "RuntimeUnlockAdmissionToken"));
+        Assert.Equal(
+            admission.AdmissionGeneration,
+            duplicateAdmission.AdmissionGeneration);
         Assert.Null(
             GetPrivatePropertyValue(
                 context,
@@ -21094,6 +21112,14 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             log,
             StringComparison.Ordinal);
         Assert.Contains("decision_status=Accepted;", log, StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_post_fallback_paired_admission_recheck_decided; decision_status=Granted;",
+            log,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_runtime_unlock_admission_granted; direction=inbound;",
+            log,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_tail_paired_yield_rejected; direction=inbound;", log, StringComparison.Ordinal);
     }
 

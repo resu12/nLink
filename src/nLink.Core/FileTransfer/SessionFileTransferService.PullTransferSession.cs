@@ -2310,6 +2310,54 @@ public sealed partial class SessionFileTransferService
         ClearInboundPostFallbackPairedAdmissionRecheckLocked(context, pending);
     }
 
+    private static void EnsureInboundPostFallbackPairedAdmissionRecheckLocked(
+        InboundTransferContext context,
+        FileTransferFallbackTailYieldOperation operation,
+        FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
+        FileTransferFallbackTailYieldScope scope)
+    {
+        if (context.RuntimeUnlockPostFallbackPairedAdmissionRecheck is not null ||
+            HasCurrentRuntimeUnlockAdmissionLocked(context) ||
+            context.DataSession is null)
+        {
+            return;
+        }
+
+        var pending = new RuntimeUnlockPostFallbackPairedAdmissionRecheck
+        {
+            RecheckGeneration = Math.Max(
+                1,
+                context.LastRuntimeUnlockPostFallbackPairedAdmissionRecheckGeneration + 1),
+            RequestSource = "fallback_tail_pairing_committed",
+            RequestReason = "fallback_quiescent",
+            YieldDecision = operation.Decision,
+            SourceScope = scope,
+            DataSession = context.DataSession,
+            PairedRelease = pairedRelease,
+            LastEvaluatedSurvivalState =
+                BuildRuntimeUnlockFallbackSurvivalStateLocked(context) with
+                {
+                    PairedFallbackYieldGranted = true,
+                },
+            LastDecisionReason = "paired_fallback_tail_yield_missing",
+        };
+        if (!TryGetCurrentInboundPostFallbackPairedAdmissionScopeLocked(
+                context,
+                pending,
+                out var currentOperation,
+                out var currentPairedRelease,
+                out _) ||
+            currentOperation != operation ||
+            currentPairedRelease != pairedRelease)
+        {
+            return;
+        }
+
+        context.LastRuntimeUnlockPostFallbackPairedAdmissionRecheckGeneration =
+            pending.RecheckGeneration;
+        context.RuntimeUnlockPostFallbackPairedAdmissionRecheck = pending;
+    }
+
     private static void ClearInboundPostFallbackPairedAdmissionRecheckLocked(
         InboundTransferContext context,
         RuntimeUnlockPostFallbackPairedAdmissionRecheck? pending)
@@ -2472,7 +2520,8 @@ public sealed partial class SessionFileTransferService
                 PairedRelease: { IsDefault: false } currentPairedRelease,
             } currentOperation ||
             currentOperation.Decision != pending.YieldDecision ||
-            currentOperation.Scope != pending.SourceScope)
+            FileTransferCoordinator.GetEffectiveFallbackTailYieldScope(
+                currentOperation) != pending.SourceScope)
         {
             reason = "paired_admission_pairing_not_current";
             return false;

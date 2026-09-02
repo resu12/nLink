@@ -17432,16 +17432,6 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in @('Accepted', 'Idempotent')
                 } | Select-Object -First 2)
             if ($peerPairings.Count -ne 1) { continue }
-            [object[]]$denials = @(@($records.ToArray()) | Where-Object {
-                    $_.Event -eq 'filetransfer_runtime_unlock_admission_denied' -and
-                    $_.Index -lt $pairing.Index -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq $writer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $session -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'direction') -eq 'inbound' -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'admission_reason') -eq
-                        'paired_fallback_tail_yield_missing'
-                } | Select-Object -Last 1)
             [object[]]$dispatches = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'runtime_unlock_retry_dispatch_observed' -and
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -ne $writer -and
@@ -17454,7 +17444,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'release_generation') -eq
                         (Get-TunaGuiLogLineFieldValue -Line $peerPairings[0].Line -Name 'yield_generation')
                 })
-            if ($denials.Count -ne 1 -or $dispatches.Count -ne 1) { continue }
+            if ($dispatches.Count -ne 1) { continue }
             $dispatchWriter = Get-TunaGuiLogLineFieldValue -Line $dispatches[0].Line -Name 'log_writer_id'
             [object[]]$offers = @(@($records.ToArray()) | Where-Object {
                     $_.Event -eq 'tuna_acceleration_offer_queued' -and

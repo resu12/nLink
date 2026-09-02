@@ -62544,23 +62544,6 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
             } | Sort-Object Sequence, LineNumber | Select-Object -First 2)
         if ($pairedGrants.Count -ne 1) { continue }
 
-        [object[]]$denials = @($admissionDeniedEvents | Where-Object {
-                [int64]$_.Sequence -lt [int64]$pairing.Sequence -and
-                (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -eq $writer -and
-                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $session -and
-                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transfer -and
-                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' -and
-                (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq
-                    (Get-FileTransferEventField -Event $pairing -Name 'live_route_epoch' -Default '') -and
-                (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq
-                    (Get-FileTransferEventField -Event $pairing -Name 'runtime_generation' -Default '') -and
-                (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq
-                    (Get-FileTransferEventField -Event $pairing -Name 'terminal_generation' -Default '') -and
-                (Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '') -eq
-                    (Get-FileTransferEventField -Event $pairing -Name 'leg_generation' -Default '')
-            } | Sort-Object Sequence, LineNumber -Descending | Select-Object -First 1)
-        if ($denials.Count -ne 1) { continue }
-
         $pairKey = Get-FileTransferEventField -Event $pairing -Name 'pair_key' -Default ''
         [object[]]$peerPairings = @($pairingEvents | Where-Object {
                 (Get-FileTransferEventField -Event $_ -Name 'log_writer_id' -Default '') -ne $writer -and
@@ -62624,7 +62607,6 @@ function Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation {
             $recordsByKey[$key] = [pscustomobject]@{
                 Event = $bindingRejection
                 LastEvent = $bindingRejection
-                AdmissionDeniedEvent = $denials[0]
                 PairingEvent = $pairing
                 PeerPairingEvent = $peerPairing
                 RetryDispatchEvent = $dispatch

@@ -17109,6 +17109,11 @@ public sealed partial class SessionFileTransferService :
                 operation.Decision.YieldGeneration,
                 reason);
         }
+        EnsureInboundPostFallbackPairedAdmissionRecheckLocked(
+            context,
+            operation,
+            pairedRelease,
+            scope);
         TryRecheckInboundPostFallbackPairedAdmissionLocked(
             context,
             "fallback_tail_pairing_committed");

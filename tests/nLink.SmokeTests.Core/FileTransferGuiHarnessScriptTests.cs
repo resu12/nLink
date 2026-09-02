@@ -4596,12 +4596,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
                 return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
             }
+            function Get-FileTransferCoordinatorSnapshotEventName {
+                param([string]$Line)
+                if ($Line -match '(?:^|;\s*)event=([^;]+)') { return $Matches[1].Trim() }
+                return ''
+            }
             $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-paired-admission-' + [guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($tempRoot)
             try {
                 $path = Join-Path $tempRoot 'evidence.log'
                 @(
-                    '[2026-08-23T19:15:21.0000000Z] [INFO] [FileTransferService] event=filetransfer_runtime_unlock_admission_denied; session_id=sess; transfer_id=transfer; direction=inbound; admission_generation=0; admission_reason=paired_fallback_tail_yield_missing; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; log_writer_id=responder',
                     '[2026-08-23T19:15:22.0000000Z] [INFO] [FileTransferService] event=filetransfer_fallback_tail_pairing_committed; session_id=sess; transfer_id=transfer; direction=inbound; authority_id=helper-yield; yield_generation=1; pair_key=pair-1; pairing_state=Paired; pairing_generation=1; decision_status=Accepted; route_publication_generation=3; runtime_generation=3; terminal_generation=0; leg_generation=3; data_session_identity=data-session-1; data_session_generation=1; log_writer_id=responder',
                     '[2026-08-23T19:15:22.0100000Z] [INFO] [FileTransferService] event=filetransfer_fallback_tail_paired_yield_granted; session_id=sess; transfer_id=transfer; direction=inbound; authority_id=helper-yield; yield_generation=1; pair_key=pair-1; log_writer_id=responder',
                     '[2026-08-23T19:15:22.0200000Z] [INFO] [FileTransferService] event=filetransfer_fallback_tail_pairing_committed; session_id=sess; transfer_id=transfer; direction=outbound; peer_direction=inbound; authority_id=sender-yield; yield_generation=1; pair_key=pair-1; pairing_state=Paired; pairing_generation=1; decision_status=Accepted; log_writer_id=sender',
