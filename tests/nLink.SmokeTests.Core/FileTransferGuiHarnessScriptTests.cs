@@ -3604,6 +3604,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 param($ErrorMessage, $HistoricalPhase, $HistoricalReason)
                 return [pscustomobject]@{ Phase = $HistoricalPhase; Reason = $HistoricalReason }
             }
+            function Get-FileTransferCoordinatorSnapshotEventName {
+                param([string]$Line)
+                if ($Line -match '(?:^|;\s*)event=([^;]+)') { return $Matches[1].Trim() }
+                return ''
+            }
             $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-retired-refresh-' + [guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($tempRoot)
             try {
@@ -3631,6 +3636,30 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($result.Phase -ne 'runtime_unlock_initial_activation' -or
                     $result.Reason -ne 'released_hold_refresh_predecessor_boundary_not_current') {
                     throw "retired refresh predecessor classification mismatch: $($result | ConvertTo-Json -Compress)"
+                }
+                $offer = 'session_id=sess; transfer_id=transfer; direction=outbound; transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; tuna_path_lease_listener_run_id=listener-1; log_writer_id=writer'
+                $source = 'source_route=regular_nkn_v4_fast; source_protocol_version=4; source_runtime_generation=1; source_terminal_generation=0; source_leg_generation=1; source_route_publication_generation=1; data_session_generation=1'
+                $transition = "authority_id=transition-1; transition_generation=1; launch_generation=1; $offer; $source; source_data_session_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna"
+                @(
+                    "event=runtime_unlock_initial_activation_receive_recovery_hold_decided; $offer; hold_boundary=AnswerTimeout; hold_generation=1; receive_recovery_operation_generation=1; decision_status=Held; peer_visible_dispatch_observed=1",
+                    'event=filetransfer_receive_recovery_operation_closure_adopted; session_id=sess; transfer_id=transfer; direction=outbound; recovery_operation_generation=1; closure_state=Adopted; log_writer_id=writer',
+                    "event=runtime_unlock_precommit_probe_launch_requested; $offer; launch_generation=1",
+                    "event=filetransfer_route_transition_prepared; $transition; decision_status=Prepared",
+                    "event=filetransfer_route_transition_draining; $transition; decision_status=Draining",
+                    "event=runtime_unlock_precommit_probe_launch_started; $offer; launch_generation=1; path_probe_id=probe-1",
+                    "event=runtime_unlock_precommit_probe_sent; $offer; launch_generation=1; probe_id=probe-1",
+                    "event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; $offer; $source; boundary=AnswerTimeout; refresh_generation=1; peer_visible_dispatch_observed=1; decision_reason=predecessor_boundary_not_current",
+                    "event=runtime_unlock_initial_activation_receive_recovery_hold_decided; $offer; hold_boundary=AnswerTimeout; hold_generation=1; receive_recovery_operation_generation=1; refresh_generation=1; decision_status=Released; decision_reason=hold_directive_delivery_rejected",
+                    "event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; $offer; hold_generation=1; receive_recovery_operation_generation=1; refresh_generation=1; decision_status=Released; decision_reason=hold_directive_delivery_rejected",
+                    "event=runtime_unlock_tuna_probe_ack_received; $offer; probe_id=probe-1; accepted=1",
+                    "event=runtime_unlock_precommit_probe_acked; $offer; launch_generation=1; probe_id=probe-1",
+                    "event=runtime_unlock_paired_commit_started; $offer; probe_id=probe-1",
+                    "event=filetransfer_route_transition_committed; $transition; decision_status=Committed",
+                    "event=filetransfer_route_transition_disposition_applied; $transition; disposition=committed; apply_status=applied"
+                ) | Set-Content -LiteralPath $path
+                $completed = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($completed.Reason -eq 'released_hold_refresh_predecessor_boundary_not_current') {
+                    throw "completed original offer was misclassified: $($completed | ConvertTo-Json -Compress)"
                 }
                 Write-Output 'gui-retired-refresh-predecessor-fast-path-ok'
             }

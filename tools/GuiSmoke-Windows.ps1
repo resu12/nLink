@@ -19202,7 +19202,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'tuna_acceleration_offer_received_raw',
             'runtime_unlock_transaction_answer_received',
             'tuna_acceleration_answer_ack_sent',
+            'runtime_unlock_precommit_probe_launch_requested',
             'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_draining',
+            'runtime_unlock_precommit_probe_launch_started',
+            'runtime_unlock_precommit_probe_sent',
+            'runtime_unlock_tuna_probe_ack_received',
+            'runtime_unlock_precommit_probe_acked',
+            'runtime_unlock_paired_commit_started',
+            'filetransfer_route_transition_committed',
+            'filetransfer_route_transition_disposition_applied',
+            'filetransfer_route_transition_invalidated',
             'runtime_unlock_initial_activation_receive_recovery_hold_expired',
             'file_transfer_inbound_terminal',
             'file_transfer_outbound_terminal',
@@ -20693,6 +20703,166 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
 
+    function Test-TunaGuiRetiredRefreshOriginalOfferCompleted {
+        param(
+            [Parameter(Mandatory = $true)][object[]]$Records,
+            [Parameter(Mandatory = $true)]$Candidate,
+            [Parameter(Mandatory = $true)]$Held
+        )
+
+        if ((Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'peer_visible_dispatch_observed') -ne '1' -or
+            (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'source_route') -ne 'regular_nkn_v4_fast' -or
+            (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'source_protocol_version') -ne '4') {
+            return $false
+        }
+
+        $sameOffer = {
+            param([string]$Line)
+            foreach ($field in @(
+                    'log_writer_id', 'session_id', 'transfer_id',
+                    'transaction_generation', 'offer_generation',
+                    'tuna_path_lease_generation')) {
+                $anchorValue = Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name $field
+                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                    [string]::IsNullOrWhiteSpace($value) -or
+                    $anchorValue -ne $value) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $launch = @($Records | Where-Object {
+            $_.Index -gt $Held.Index -and $_.Index -lt $Candidate.Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'runtime_unlock_precommit_probe_launch_requested')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_listener_run_id') -eq
+                (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'tuna_path_lease_listener_run_id') -and
+            [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -gt 0
+        } | Select-Object -Last 1)
+        if ($launch.Count -ne 1) { return $false }
+        $launchGeneration = Get-TunaGuiLogLineFieldValue -Line $launch[0].Line -Name 'launch_generation'
+
+        $prepared = @($Records | Where-Object {
+            $_.Index -gt $launch[0].Index -and $_.Index -lt $Candidate.Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'filetransfer_route_transition_prepared')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Prepared' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_route') -eq 'regular_nkn_v4_fast' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_protocol_version') -eq '4' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_route') -eq 'file_tuna_v4' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_protocol_version') -eq '4' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_transport') -eq 'tuna' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_runtime_generation') -eq
+                (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'source_runtime_generation') -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_leg_generation') -eq
+                (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'source_leg_generation') -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_route_publication_generation') -eq
+                (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'source_route_publication_generation') -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_data_session_generation') -eq
+                (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'data_session_generation')
+        } | Select-Object -First 1)
+        if ($prepared.Count -ne 1) { return $false }
+        $authority = Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'authority_id'
+        $transitionGeneration = Get-TunaGuiLogLineFieldValue -Line $prepared[0].Line -Name 'transition_generation'
+        if ([string]::IsNullOrWhiteSpace($authority) -or
+            [string]::IsNullOrWhiteSpace($transitionGeneration)) {
+            return $false
+        }
+
+        $draining = @($Records | Where-Object {
+            $_.Index -gt $prepared[0].Index -and $_.Index -lt $Candidate.Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'filetransfer_route_transition_draining')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration
+        } | Select-Object -First 1)
+        $started = @($Records | Where-Object {
+            $draining.Count -eq 1 -and $_.Index -gt $draining[0].Index -and $_.Index -lt $Candidate.Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'runtime_unlock_precommit_probe_launch_started')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'tuna_path_lease_listener_run_id') -eq
+                (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'tuna_path_lease_listener_run_id')
+        } | Select-Object -First 1)
+        if ($draining.Count -ne 1 -or $started.Count -ne 1) { return $false }
+        $probeId = Get-TunaGuiLogLineFieldValue -Line $started[0].Line -Name 'path_probe_id'
+        if ([string]::IsNullOrWhiteSpace($probeId)) { return $false }
+
+        $sent = @($Records | Where-Object {
+            $_.Index -gt $started[0].Index -and $_.Index -lt $Candidate.Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_precommit_probe_sent')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId
+        } | Select-Object -First 1)
+        $ackReceipt = @($Records | Where-Object {
+            $sent.Count -eq 1 -and $_.Index -gt $sent[0].Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_tuna_probe_ack_received')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'accepted') -eq '1' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId
+        } | Select-Object -First 1)
+        $acked = @($Records | Where-Object {
+            $ackReceipt.Count -eq 1 -and $_.Index -gt $ackReceipt[0].Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_precommit_probe_acked')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId
+        } | Select-Object -First 1)
+        $paired = @($Records | Where-Object {
+            $acked.Count -eq 1 -and $_.Index -gt $acked[0].Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_paired_commit_started')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'probe_id') -eq $probeId
+        } | Select-Object -First 1)
+        if ($sent.Count -ne 1 -or $ackReceipt.Count -ne 1 -or
+            $acked.Count -ne 1 -or $paired.Count -ne 1) { return $false }
+
+        $committed = @($Records | Where-Object {
+            $_.Index -gt $paired[0].Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_route_transition_committed')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq 'Committed'
+        } | Select-Object -First 1)
+        $disposition = @($Records | Where-Object {
+            $committed.Count -eq 1 -and $_.Index -gt $committed[0].Index -and
+            (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_route_transition_disposition_applied')) -and
+            (& $sameOffer $_.Line) -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'launch_generation') -eq $launchGeneration -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_route') -eq 'file_tuna_v4' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'target_transport') -eq 'tuna' -and
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'disposition') -eq 'committed'
+        } | Select-Object -First 1)
+        if ($committed.Count -ne 1 -or $disposition.Count -ne 1) { return $false }
+
+        return @($Records | Where-Object {
+            $_.Index -gt $Held.Index -and $_.Index -lt $disposition[0].Index -and
+            ((Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_route_transition_invalidated')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_generation') -eq $transitionGeneration -or
+             (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'file_transfer_outbound_terminal', 'file_transfer_inbound_terminal', 'transfer_terminal')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'log_writer_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'session_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $Candidate.Line -Name 'transfer_id'))
+        }).Count -eq 0
+    }
+
     function Get-TunaGuiInitialActivationRetiredRefreshPredecessorFailure {
         param(
             [Parameter(Mandatory = $true)]
@@ -20806,6 +20976,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transfer -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'refresh_generation') -eq $refreshGeneration
             })
+            if ($held.Count -eq 1 -and
+                $adopted.Count -eq 1 -and
+                $delivery.Count -eq 1 -and
+                (Test-TunaGuiRetiredRefreshOriginalOfferCompleted `
+                    -Records $records `
+                    -Candidate $candidate `
+                    -Held $held[0])) {
+                continue
+            }
             if ($held.Count -eq 1 -and
                 $adopted.Count -eq 1 -and
                 $delivery.Count -eq 1 -and
@@ -24125,6 +24304,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'receive_recovery_operation_generation') -eq
                     $operationGeneration
             } | Select-Object -First 1)
+            if ($held.Count -eq 1 -and
+                $adopted.Count -eq 1 -and
+                $delivery.Count -eq 1 -and
+                (Test-TunaGuiRetiredRefreshOriginalOfferCompleted `
+                    -Records $indexedLines `
+                    -Candidate $candidate `
+                    -Held $held[0])) {
+                continue
+            }
             if ($held.Count -eq 1 -and
                 $adopted.Count -eq 1 -and
                 $delivery.Count -eq 1) {

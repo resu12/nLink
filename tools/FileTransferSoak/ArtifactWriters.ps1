@@ -28504,6 +28504,39 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
         return $true
     }
 
+    function Test-HoldReleaseOfferLifecycleTuple {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate,
+            [switch]$RequireListener
+        )
+
+        [string[]]$fields = @(
+            'log_writer_id',
+            'session_id',
+            'transfer_id',
+            'transaction_generation',
+            'offer_generation',
+            'tuna_path_lease_generation')
+        if ($RequireListener) {
+            $fields += 'tuna_path_lease_listener_run_id'
+        }
+        foreach ($field in $fields) {
+            $anchorValue = Get-HoldReleaseField -Event $Anchor -Names @($field)
+            $candidateValue = Get-HoldReleaseField -Event $Candidate -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                -not [string]::Equals(
+                    $anchorValue,
+                    $candidateValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
     [object[]]$rejections = @($events | Where-Object {
         $_.EventName -eq
             'runtime_unlock_initial_activation_receive_recovery_hold_invalidation_rejected' -and
@@ -28639,6 +28672,223 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
             (Get-HoldReleaseField -Event $_ -Names @('decision_reason', 'reason')) -eq
                 'runtime_scope_replaced')
     })
+    [object[]]$probeLaunchRequests = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_launch_requested'
+    })
+    [object[]]$preparedTransitions = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_prepared' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq 'Prepared'
+    })
+    [object[]]$drainingTransitions = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_draining' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq 'Draining'
+    })
+    [object[]]$probeLaunchStarts = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_launch_started'
+    })
+    [object[]]$probeSends = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_sent'
+    })
+    [object[]]$probeAckReceipts = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_ack_received' -and
+        (Get-HoldReleaseField -Event $_ -Names @('accepted')) -eq '1'
+    })
+    [object[]]$probeAcks = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_acked' -and
+        (Get-HoldReleaseField -Event $_ -Names @('probe_state')) -eq 'Acked'
+    })
+    [object[]]$pairedCommits = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_paired_commit_started'
+    })
+    [object[]]$committedTransitions = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_committed' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status')) -eq 'Committed'
+    })
+    [object[]]$appliedDispositions = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_disposition_applied' -and
+        (Get-HoldReleaseField -Event $_ -Names @('decision_status', 'apply_status')) -in
+            @('Applied', 'applied')
+    })
+    [object[]]$invalidatedTransitions = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_transition_invalidated'
+    })
+
+    function Test-RetiredRefreshOriginalOfferCompleted {
+        param(
+            [Parameter(Mandatory = $true)]$RefreshRejection,
+            [Parameter(Mandatory = $true)]$Held
+        )
+
+        if ((Get-HoldReleaseField `
+                -Event $RefreshRejection `
+                -Names @('peer_visible_dispatch_observed')) -ne '1' -or
+            (Get-HoldReleaseField `
+                -Event $RefreshRejection `
+                -Names @('source_route')) -ne 'regular_nkn_v4_fast' -or
+            (Get-HoldReleaseField `
+                -Event $RefreshRejection `
+                -Names @('source_protocol_version')) -ne '4') {
+            return $false
+        }
+
+        $rejectionSequence = [int64]$RefreshRejection.Sequence
+        [object[]]$launchRequests = @($probeLaunchRequests | Where-Object {
+            [int64]$_.Sequence -gt [int64]$Held.Sequence -and
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Test-HoldReleaseOfferLifecycleTuple `
+                -Anchor $RefreshRejection `
+                -Candidate $_ `
+                -RequireListener) -and
+            [int64](Get-HoldReleaseField -Event $_ -Names @('launch_generation') -Default '0') -gt 0
+        } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
+        if ($launchRequests.Count -ne 1) {
+            return $false
+        }
+        $launch = $launchRequests[0]
+        $launchGeneration = Get-HoldReleaseField -Event $launch -Names @('launch_generation')
+
+        [object[]]$prepared = @($preparedTransitions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$launch.Sequence -and
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Test-HoldReleaseOfferLifecycleTuple `
+                -Anchor $RefreshRejection `
+                -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('transition_kind')) -eq 'RegularV4ToTunaV4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_route')) -eq 'file_tuna_v4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_transport')) -eq 'tuna' -and
+            (Get-HoldReleaseField -Event $_ -Names @('source_route')) -eq
+                (Get-HoldReleaseField -Event $RefreshRejection -Names @('source_route')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('source_runtime_generation')) -eq
+                (Get-HoldReleaseField -Event $RefreshRejection -Names @('source_runtime_generation')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('source_terminal_generation')) -eq
+                (Get-HoldReleaseField -Event $RefreshRejection -Names @('source_terminal_generation')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('source_leg_generation')) -eq
+                (Get-HoldReleaseField -Event $RefreshRejection -Names @('source_leg_generation')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('source_route_publication_generation')) -eq
+                (Get-HoldReleaseField -Event $RefreshRejection -Names @('source_route_publication_generation')) -and
+            (Get-HoldReleaseField -Event $_ -Names @('source_data_session_generation')) -eq
+                (Get-HoldReleaseField -Event $RefreshRejection -Names @('data_session_generation'))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($prepared.Count -ne 1) {
+            return $false
+        }
+        $transitionAuthority = Get-HoldReleaseField -Event $prepared[0] -Names @('authority_id')
+        $transitionGeneration = Get-HoldReleaseField -Event $prepared[0] -Names @('transition_generation')
+        if ([string]::IsNullOrWhiteSpace($transitionAuthority) -or
+            [string]::IsNullOrWhiteSpace($transitionGeneration)) {
+            return $false
+        }
+
+        [object[]]$draining = @($drainingTransitions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$prepared[0].Sequence -and
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Get-HoldReleaseField -Event $_ -Names @('authority_id')) -eq $transitionAuthority -and
+            (Get-HoldReleaseField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($draining.Count -ne 1) {
+            return $false
+        }
+
+        [object[]]$launchStarts = @($probeLaunchStarts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$draining[0].Sequence -and
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Test-HoldReleaseOfferLifecycleTuple `
+                -Anchor $RefreshRejection `
+                -Candidate $_ `
+                -RequireListener) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration -and
+            -not [string]::IsNullOrWhiteSpace(
+                (Get-HoldReleaseField -Event $_ -Names @('path_probe_id', 'probe_id')))
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($launchStarts.Count -ne 1) {
+            return $false
+        }
+        $probeId = Get-HoldReleaseField -Event $launchStarts[0] -Names @('path_probe_id', 'probe_id')
+        [object[]]$sent = @($probeSends | Where-Object {
+            [int64]$_.Sequence -gt [int64]$launchStarts[0].Sequence -and
+            [int64]$_.Sequence -lt $rejectionSequence -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $probeId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($sent.Count -ne 1) {
+            return $false
+        }
+
+        [object[]]$ackReceipt = @($probeAckReceipts | Where-Object {
+            [int64]$_.Sequence -gt [int64]$sent[0].Sequence -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $probeId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$acked = @($probeAcks | Where-Object {
+            $ackReceipt.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$ackReceipt[0].Sequence -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $probeId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$paired = @($pairedCommits | Where-Object {
+            $acked.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$acked[0].Sequence -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('probe_id', 'path_probe_id')) -eq $probeId
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($ackReceipt.Count -ne 1 -or $acked.Count -ne 1 -or $paired.Count -ne 1) {
+            return $false
+        }
+
+        [object[]]$committed = @($committedTransitions | Where-Object {
+            [int64]$_.Sequence -gt [int64]$paired[0].Sequence -and
+            (Get-HoldReleaseField -Event $_ -Names @('authority_id')) -eq $transitionAuthority -and
+            (Get-HoldReleaseField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_route')) -eq 'file_tuna_v4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_transport')) -eq 'tuna'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        [object[]]$disposition = @($appliedDispositions | Where-Object {
+            $committed.Count -eq 1 -and
+            [int64]$_.Sequence -gt [int64]$committed[0].Sequence -and
+            (Get-HoldReleaseField -Event $_ -Names @('authority_id')) -eq $transitionAuthority -and
+            (Get-HoldReleaseField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration -and
+            (Test-HoldReleaseOfferLifecycleTuple -Anchor $RefreshRejection -Candidate $_) -and
+            (Get-HoldReleaseField -Event $_ -Names @('launch_generation')) -eq $launchGeneration -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_route')) -eq 'file_tuna_v4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_protocol_version')) -eq '4' -and
+            (Get-HoldReleaseField -Event $_ -Names @('target_transport')) -eq 'tuna' -and
+            (Get-HoldReleaseField -Event $_ -Names @('disposition')) -eq 'committed'
+        } | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+        if ($committed.Count -ne 1 -or $disposition.Count -ne 1) {
+            return $false
+        }
+
+        $completionSequence = [int64]$disposition[0].Sequence
+        if (@($invalidatedTransitions | Where-Object {
+                [int64]$_.Sequence -gt [int64]$prepared[0].Sequence -and
+                [int64]$_.Sequence -lt $completionSequence -and
+                (Get-HoldReleaseField -Event $_ -Names @('authority_id')) -eq $transitionAuthority -and
+                (Get-HoldReleaseField -Event $_ -Names @('transition_generation')) -eq $transitionGeneration
+            }).Count -gt 0) {
+            return $false
+        }
+        if (@($terminalEvents + $scopeReplacementEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$Held.Sequence -and
+                [int64]$_.Sequence -lt $completionSequence -and
+                (Test-HoldReleaseScope `
+                    -Left $RefreshRejection `
+                    -Right $_ `
+                    -AllowMissingRightDirection)
+            }).Count -gt 0) {
+            return $false
+        }
+
+        return $true
+    }
 
     $raw = New-Object System.Collections.Generic.List[object]
     $distinct = [ordered]@{}
@@ -28717,6 +28967,12 @@ function Get-FileTransferRuntimeUnlockInitialActivationReceiveRecoveryHoldReleas
             }).Count -gt 0
         }
         if ($candidatePoisoned) {
+            continue
+        }
+
+        if (Test-RetiredRefreshOriginalOfferCompleted `
+                -RefreshRejection $refreshRejection `
+                -Held $matchingHolds[0]) {
             continue
         }
 

@@ -17804,6 +17804,115 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task
+        AnalyzeRetained_RetiredInitialActivationRefreshAfterOriginalOfferCommit_IsNotAnIncident(
+            bool compact,
+            bool mutateCommittedTransition)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_original_offer_completed";
+        const string transferId = "transfer_original_offer_completed";
+        const string writerId = "writer_original_offer_completed";
+        const string transitionAuthority = "transition-original-offer";
+        const string probeId = "probe-original-offer";
+        const string offer =
+            $"session_id={sessionId}; transfer_id={transferId}; direction=outbound; " +
+            "transaction_generation=1; offer_generation=1; tuna_path_lease_generation=1; " +
+            "tuna_path_lease_listener_run_id=listener-start-1; payer_decision_id=4; " +
+            "offer_nonce=offer-1; semantic_offer_fingerprint=semantic-1; " +
+            $"log_writer_id={writerId}";
+        const string source =
+            "source_route=regular_nkn_v4_fast; source_protocol_version=4; " +
+            "source_live_route_epoch=0; source_runtime_generation=1; " +
+            "source_terminal_generation=0; source_leg_generation=1; " +
+            "source_route_publication_generation=1; source_transport_epoch=0; " +
+            "source_bridge_recovery_generation=0; data_session_identity=data-1; " +
+            "data_session_generation=1";
+        const string expected =
+            "expected_route=regular_nkn_v4_fast; expected_protocol_version=4; " +
+            "expected_live_route_epoch=0; expected_runtime_generation=1; " +
+            "expected_terminal_generation=0; expected_leg_generation=1; " +
+            "expected_route_publication_generation=1; expected_transport_epoch=0; " +
+            "expected_bridge_recovery_generation=0; expected_data_session_identity=data-1; " +
+            "expected_data_session_generation=1";
+        var hold =
+            $"{offer}; envelope_generation=1; control_envelope_fingerprint=envelope-1; " +
+            $"peer_visible_dispatch_observed=1; {source}; hold_generation=1; " +
+            "refresh_generation=0; successor_envelope_generation=0; " +
+            "receive_recovery_operation_authority_id=recovery-1; " +
+            "receive_recovery_operation_generation=1; closure_generation=0; " +
+            "recovery_liveness_lease_generation=1";
+        var release =
+            $"{offer}; envelope_generation=1; control_envelope_fingerprint=envelope-1; " +
+            $"peer_visible_dispatch_observed=1; {expected}; hold_generation=1; " +
+            "refresh_generation=1; successor_envelope_generation=2; " +
+            "receive_recovery_operation_authority_id=recovery-1; " +
+            "receive_recovery_operation_generation=1; closure_generation=1; " +
+            "recovery_liveness_lease_generation=1";
+        var transition =
+            $"authority_id={transitionAuthority}; transition_generation=1; " +
+            $"{offer}; launch_generation=1; source_route=regular_nkn_v4_fast; " +
+            "source_protocol_version=4; source_runtime_generation=1; " +
+            "source_terminal_generation=0; source_leg_generation=1; " +
+            "source_route_publication_generation=1; source_transport_epoch=0; " +
+            "source_bridge_recovery_generation=0; source_data_session_generation=1; " +
+            "transition_kind=RegularV4ToTunaV4; target_route=file_tuna_v4; " +
+            "target_protocol_version=4; target_transport=tuna";
+        var committedTransition = mutateCommittedTransition
+            ? transition.Replace(transitionAuthority, "transition-mutated", StringComparison.Ordinal)
+            : transition;
+
+        var lines = new[]
+        {
+            LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {hold}; hold_boundary=AnswerTimeout; decision_status=Held; log_writer_sequence=8300", 0),
+            LogLine($"event=filetransfer_receive_recovery_operation_closure_adopted; session_id={sessionId}; transfer_id={transferId}; direction=outbound; recovery_operation_generation=1; closure_generation=1; recovery_liveness_lease_generation=1; closure_state=Adopted; log_writer_id={writerId}; log_writer_sequence=8301", 1),
+            LogLine($"event=runtime_unlock_precommit_probe_launch_requested; {offer}; launch_generation=1; log_writer_sequence=8356", 2),
+            LogLine($"event=filetransfer_route_transition_prepared; {transition}; decision_status=Prepared; log_writer_sequence=8367", 3),
+            LogLine($"event=filetransfer_route_transition_draining; {transition}; decision_status=Draining; log_writer_sequence=8372", 4),
+            LogLine($"event=runtime_unlock_precommit_probe_launch_started; {offer}; launch_generation=1; path_probe_id={probeId}; log_writer_sequence=8380", 5),
+            LogLine($"event=runtime_unlock_precommit_probe_sent; {offer}; launch_generation=1; probe_id={probeId}; log_writer_sequence=8391", 6),
+            LogLine($"event=runtime_unlock_initial_activation_offer_envelope_refresh_rejected; {offer}; {source}; envelope_generation=1; control_envelope_fingerprint=envelope-1; peer_visible_dispatch_observed=1; boundary=AnswerTimeout; refresh_generation=1; decision_reason=predecessor_boundary_not_current; log_writer_sequence=8411", 7),
+            LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_decided; {release}; hold_boundary=AnswerTimeout; closure_state=Adopted; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=8412", 8),
+            LogLine($"event=runtime_unlock_initial_activation_receive_recovery_hold_directive_delivery_decided; {release}; hold_boundary=AnswerTimeout; closure_state=Adopted; decision_status=Released; decision_reason=hold_directive_delivery_rejected; log_writer_sequence=8413", 9),
+            LogLine($"event=runtime_unlock_tuna_probe_ack_received; {offer}; probe_id={probeId}; accepted=1; log_writer_sequence=8414", 10),
+            LogLine($"event=runtime_unlock_precommit_probe_acked; {offer}; launch_generation=1; probe_id={probeId}; probe_state=Acked; log_writer_sequence=8417", 11),
+            LogLine($"event=runtime_unlock_paired_commit_started; {offer}; probe_id={probeId}; log_writer_sequence=8418", 12),
+            LogLine($"event=filetransfer_route_transition_committed; {committedTransition}; decision_status=Committed; log_writer_sequence=8451", 13),
+            LogLine($"event=filetransfer_route_transition_disposition_applied; {committedTransition}; disposition=committed; apply_status=applied; log_writer_sequence=8460", 14)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            mutateCommittedTransition ? "1" : "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_raw_count"]);
+        Assert.Equal(
+            mutateCommittedTransition ? "1" : "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_distinct_count"]);
+        Assert.Equal(
+            mutateCommittedTransition ? "1" : "0",
+            verdict["runtime_unlock_initial_activation_receive_recovery_hold_release_delivery_missing_unresolved_count"]);
+    }
+
     private static string InitialActivationDirectHoldTuple(
         string sessionId,
         string transferId,
