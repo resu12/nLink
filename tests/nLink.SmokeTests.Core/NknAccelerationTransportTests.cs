@@ -30935,7 +30935,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 transferId,
                 cts.Token);
             var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(helper);
-            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+            var currentTunaRouteHint = CreateAuthorizedRouteHintNotification(
                 sessionId,
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
@@ -30945,7 +30945,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 runtimeGeneration: 3,
                 legGeneration: 3,
                 routeCommitGeneration: 1,
-                direction: FileTransferDirection.Inbound));
+                direction: FileTransferDirection.Inbound);
+            routeHints.ObserveFileTransferRouteHint(currentTunaRouteHint);
             Assert.Equal(
                 FileTransferRouteResolver.FileTunaV4Token,
                 GetFileTransferRouteHintTokenForTests(helper, transferId));
@@ -30996,6 +30997,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             {
                 ObserveBulk();
                 Assert.Empty(evaluations);
+                await Task.Delay(10, cts.Token);
+                routeHints.ObserveFileTransferRouteHint(currentTunaRouteHint);
                 ObserveControl();
             }
             else
@@ -31023,9 +31026,378 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 GetPrivatePropertyValue<long>(dataSession, "Generation"),
                 evaluation.TriggerDataSessionGeneration);
 
+            var peerFirstRequest = new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = 1,
+                RequestCorrelationId =
+                    FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(1),
+                MissingRanges = Array.Empty<FileTransferRangeV4>(),
+                Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+                RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+            };
+            var peerFirstLogStart = GetOperationalLogLength();
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                "file_transfer_v6_frontier_request_frame_received",
+                sessionId,
+                peerFirstRequest);
+            Assert.Single(evaluations);
+            var peerFirstLogTail = ReadOperationalLogTail(peerFirstLogStart);
+            Assert.Contains(
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided;",
+                peerFirstLogTail,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_status=Coalesced", peerFirstLogTail, StringComparison.Ordinal);
+
             ObserveBulk();
             ObserveControl();
             Assert.Single(evaluations);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Category", "Smoke")]
+    [Trait("FileTransferInfraSuite", "FileTransferRouteTransition")]
+    public async Task FileTransferFallbackV6Bootstrap_PeerFirstExactFramePublishesOneReciprocalEvaluation(
+        bool outbound)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient(
+                $"host.fallback-v6-bootstrap-peer-first-{outbound}.address");
+            var helperClient = new FakeNknClient(
+                $"helper.fallback-v6-bootstrap-peer-first-{outbound}.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity(
+                    $"host-fallback-v6-bootstrap-peer-first-{outbound}-id",
+                    hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity(
+                    $"helper-fallback-v6-bootstrap-peer-first-{outbound}-id",
+                    helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var transferId = $"transfer_fallback_v6_bootstrap_peer_first_{outbound}";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            var direction = outbound
+                ? FileTransferDirection.Outbound
+                : FileTransferDirection.Inbound;
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(helper);
+            var currentTunaRouteHint = CreateAuthorizedRouteHintNotification(
+                    sessionId,
+                    transferId,
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    "unit_test_peer_first_second_fallback",
+                    publicationGeneration: 3,
+                    runtimeGeneration: 3,
+                    legGeneration: 3,
+                    routeCommitGeneration: 1,
+                    direction: direction);
+            routeHints.ObserveFileTransferRouteHint(currentTunaRouteHint);
+
+            var evaluations =
+                new ConcurrentQueue<FileTransferFallbackV6ProofBootstrapEvaluation>();
+            Assert.IsAssignableFrom<IFileTransferRouteTransitionBridge>(helper)
+                .FallbackV6ProofBootstrapEvaluationRequested +=
+                (_, args) => evaluations.Enqueue(args.Evaluation);
+            InvokePrivateMethod(
+                helper,
+                "StartTunaFallbackProofAndRebindIfNeeded",
+                "unit_test_peer_first_first_fallback",
+                sessionId,
+                NknAccelerationLaneKind.File);
+            var firstPendingGeneration = Assert.IsType<long>(
+                GetPrivateField(helper, "fileTransferFallbackProofGeneration"));
+            var firstFallbackState = GetPrivateField(helper, "tunaFallbackProofState");
+            Assert.NotNull(firstFallbackState);
+            var firstFallbackEpoch = GetPrivatePropertyValue<long>(
+                firstFallbackState!,
+                "Epoch");
+            InvokePrivateMethod(helper, "CompleteFileTransferFallbackProofUnsafe");
+            var fallbackLaneStateType = typeof(NknSignalingTransport).GetNestedType(
+                "TunaFallbackLaneState",
+                BindingFlags.NonPublic);
+            Assert.NotNull(fallbackLaneStateType);
+            InvokePrivateMethod(
+                helper,
+                "MarkTunaFallbackLaneState",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                Enum.Parse(fallbackLaneStateType!, "Recovered"),
+                "unit_test_peer_first_first_fallback_completed");
+            InvokePrivateMethod(
+                helper,
+                "CompleteTunaFallbackProof",
+                "tuna_activation_started");
+            Assert.False(Assert.IsType<bool>(
+                GetPrivateField(helper, "fileTransferFallbackProofPending")));
+            Assert.Null(GetPrivateField(helper, "tunaFallbackProofState"));
+
+            InvokePrivateMethod(
+                helper,
+                "StartTunaFallbackProofAndRebindIfNeeded",
+                "unit_test_peer_first_second_fallback",
+                sessionId,
+                NknAccelerationLaneKind.File);
+            var pendingGeneration = Assert.IsType<long>(
+                GetPrivateField(helper, "fileTransferFallbackProofGeneration"));
+            var fallbackState = GetPrivateField(helper, "tunaFallbackProofState");
+            Assert.NotNull(fallbackState);
+            var fallbackEpoch = GetPrivatePropertyValue<long>(fallbackState!, "Epoch");
+            Assert.True(pendingGeneration > firstPendingGeneration);
+            Assert.True(pendingGeneration > 1);
+            Assert.True(fallbackEpoch > firstFallbackEpoch);
+            Assert.True(fallbackEpoch > 1);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofTransferId",
+                transferId);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofDirection",
+                (FileTransferDirection?)direction);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofTransportEpoch",
+                4L);
+
+            FileTransferDataFrame frame = outbound
+                ? new FileTransferReceiverStateFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Epoch = 1,
+                    ContiguousCommittedChunkIndex = 9,
+                    DurableReceivedHighestChunkIndex = 9,
+                    CreditUntilChunkIndexExclusive = 9,
+                    MissingRanges = Array.Empty<FileTransferRangeV4>(),
+                    BytesCommitted = 0,
+                    ReceiverMemoryPressure = false,
+                    ReceiverDiskPressure = false,
+                    TerminalReady = false,
+                    TransferPaused = true,
+                    TransferPauseReason =
+                        FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+                    TransportEpoch = 4,
+                    Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+                    RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+                }
+                : new FileTransferFrontierRequestFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 4,
+                    RequestCorrelationId =
+                        FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(1),
+                    MissingRanges = Array.Empty<FileTransferRangeV4>(),
+                    Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+                    RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+                };
+            var proofKind = outbound
+                ? "file_transfer_v6_state_frame_received"
+                : "file_transfer_v6_frontier_request_frame_received";
+            var expectedFingerprint = Convert.ToHexString(
+                    SHA256.HashData(FileTransferDataFrameCodec.Serialize(frame)))
+                .ToLowerInvariant();
+            var logStart = GetOperationalLogLength();
+
+            object CaptureCurrentTrigger()
+            {
+                var capture = typeof(NknSignalingTransport).GetMethod(
+                    "TryCreateFileTransferFallbackV6BootstrapTrigger",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.NotNull(capture);
+                object?[] arguments =
+                [
+                    frame,
+                    sessionId,
+                    sessionId,
+                    pendingGeneration,
+                    null,
+                ];
+                Assert.True(Assert.IsType<bool>(capture!.Invoke(helper, arguments)));
+                Assert.NotNull(arguments[4]);
+                return arguments[4]!;
+            }
+
+            bool IsTriggerCurrent(object trigger)
+                => Assert.IsType<bool>(InvokePrivateMethod(
+                    helper,
+                    "IsFileTransferFallbackV6BootstrapTriggerCurrent",
+                    trigger));
+
+            var timestampOnlyReplacementTrigger = CaptureCurrentTrigger();
+            await Task.Delay(10, cts.Token);
+            routeHints.ObserveFileTransferRouteHint(currentTunaRouteHint);
+            Assert.True(IsTriggerCurrent(timestampOnlyReplacementTrigger));
+
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofDirection",
+                (FileTransferDirection?)(outbound
+                    ? FileTransferDirection.Inbound
+                    : FileTransferDirection.Outbound));
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                frame);
+            Assert.Empty(evaluations);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofDirection",
+                (FileTransferDirection?)direction);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofTransferId",
+                $"{transferId}_stale");
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                frame);
+            Assert.Empty(evaluations);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofTransferId",
+                transferId);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofTransportEpoch",
+                3L);
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                frame);
+            Assert.Empty(evaluations);
+            SetPrivateField(
+                helper,
+                "fileTransferFallbackProofTransportEpoch",
+                4L);
+
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                frame);
+
+            var evaluation = Assert.Single(evaluations);
+            Assert.Equal(sessionId, evaluation.SessionId);
+            Assert.Equal(direction, evaluation.Direction);
+            Assert.Equal(pendingGeneration, evaluation.ObservationGeneration);
+            Assert.Equal(fallbackEpoch, evaluation.FallbackEpoch);
+            Assert.Equal(proofKind, evaluation.ProofKind);
+            Assert.Equal(transferId, evaluation.TriggerTransferId);
+            Assert.Equal(4, evaluation.TriggerTransportEpoch);
+            Assert.Equal(expectedFingerprint, evaluation.TriggerFrameFingerprint);
+            Assert.Same(dataSession, evaluation.TriggerDataSession);
+            Assert.Equal(
+                GetPrivatePropertyValue<long>(dataSession, "Generation"),
+                evaluation.TriggerDataSessionGeneration);
+
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                frame);
+            Assert.Single(evaluations);
+
+            FileTransferDataFrame conflictingFrame = outbound
+                ? ((FileTransferReceiverStateFrameV6)frame) with { BytesCommitted = 1 }
+                : ((FileTransferFrontierRequestFrameV6)frame) with
+                {
+                    RequestCorrelationId =
+                        FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(2),
+                };
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                conflictingFrame);
+            Assert.Single(evaluations);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_status=Published", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_status=Coalesced", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_status=Conflict", logTail, StringComparison.Ordinal);
+            Assert.Contains("authority_effect=none", logTail, StringComparison.Ordinal);
+
+            var routeMutationTrigger = CaptureCurrentTrigger();
+            var changedTunaRouteHint = CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_peer_first_route_replaced",
+                publicationGeneration: 4,
+                runtimeGeneration: 4,
+                legGeneration: 4,
+                routeCommitGeneration: 2,
+                direction: direction);
+            routeHints.ObserveFileTransferRouteHint(changedTunaRouteHint);
+            Assert.False(IsTriggerCurrent(routeMutationTrigger));
+            var routeMutationLogStart = GetOperationalLogLength();
+            _ = InvokePrivateMethod(
+                helper,
+                "CompleteFileTransferFallbackNknProofIfPending",
+                proofKind,
+                sessionId,
+                frame);
+            Assert.Single(evaluations);
+            var routeMutationLogTail = ReadOperationalLogTail(routeMutationLogStart);
+            Assert.Contains(
+                "decision_status=Conflict",
+                routeMutationLogTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "decision_status=Coalesced",
+                routeMutationLogTail,
+                StringComparison.Ordinal);
+
+            var dataSessionMutationTrigger = CaptureCurrentTrigger();
+            dataSession.Dispose();
+            var replacementDataSession = await helper.OpenFileTransferDataSessionAsync(
+                sessionId,
+                transferId,
+                cts.Token);
+            routeHints.ObserveFileTransferRouteHint(changedTunaRouteHint);
+            Assert.NotSame(dataSession, replacementDataSession);
+            Assert.False(IsTriggerCurrent(dataSessionMutationTrigger));
         }
         finally
         {

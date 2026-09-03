@@ -7659,6 +7659,60 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFailureClassification_PeerFirstFallbackBootstrapUsesSharedCorrelation()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var nestedFunctionText = guiText
+            .Replace("\r\n    ", "\r\n", StringComparison.Ordinal)
+            .Replace("\n    ", "\n", StringComparison.Ordinal);
+        var fieldBody = ExtractPowerShellFunctionBody(
+            nestedFunctionText,
+            "Get-TunaGuiLogLineFieldValue",
+            "Get-TunaGuiRetiredPendingAnswerHandoffFailure");
+        var fastPathMatch = System.Text.RegularExpressions.Regex.Match(
+            nestedFunctionText,
+            @"(?s)function\s+Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure\s*\{(?<body>.*?)\r?\n\}\s*\r?\n\s*function\s+Get-TunaGuiFallbackTailFailedYieldQuiescentSuccessorFailure");
+        Assert.True(
+            fastPathMatch.Success,
+            "Could not extract the fallback-V6 bootstrap GUI fast path.");
+        var fastPathBody = fastPathMatch.Groups["body"].Value;
+        var scriptText = $$"""
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferAuthorityMatching.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+            function Get-TunaGuiLogLineFieldValue { {{fieldBody}} }
+            function Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure { {{fastPathBody}} }
+
+            $scope = 'session_id=sess; transfer_id=transfer; direction=outbound; log_writer_id=writer'
+            $lines = @(
+                "event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; live_route_epoch=3; runtime_generation=4; route_publication_generation=4; route_commit_generation=2; terminal_generation=0; leg_generation=4; fallback_transport_epoch=0; fallback_bridge_recovery_generation=0; log_writer_sequence=100",
+                'event=tuna_fallback_started; session_id=sess; fallback_epoch=2; log_writer_id=writer; log_writer_sequence=101',
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=peer-frame; decision_status=staged; reason_code=precommand_peer_frame_staged; authority_effect=evidence_only; log_writer_sequence=102",
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=peer-frame; decision_status=staged; reason_code=precommand_peer_frame_duplicate; authority_effect=evidence_only; log_writer_sequence=103"
+            )
+            $result = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines $lines
+            if (-not $result.Unresolved -or $result.RawCount -ne 2 -or
+                $result.DistinctCount -ne 1 -or $result.RecoveredCount -ne 0 -or
+                $result.UnresolvedCount -ne 1 -or $result.FirstSequence -ne 102 -or
+                $result.Reason -ne 'peer_first_bootstrap_frame_staged_without_exact_coordinator_evaluation_wake' -or
+                $result.Variant -ne 'second_cycle_receiver_state_completed_transport_proof_before_outbound_bootstrap_observation') {
+                throw "shared GUI peer-first bootstrap mismatch: $($result | ConvertTo-Json -Compress)"
+            }
+            Write-Output 'gui-bootstrap-peer-first-shared-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Peer-first fallback-bootstrap GUI correlation failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "gui-bootstrap-peer-first-shared-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_BudgetLeavesHardDeadlineGrace()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

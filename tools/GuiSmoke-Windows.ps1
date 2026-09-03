@@ -10961,6 +10961,35 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
+        $peerFirstBootstrap = if ($null -ne (Get-Command `
+                Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation `
+                -ErrorAction SilentlyContinue)) {
+            Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $Lines
+        }
+        else {
+            $null
+        }
+        if ($null -ne $peerFirstBootstrap -and
+            $peerFirstBootstrap.UnresolvedCount -gt 0) {
+            $first = $peerFirstBootstrap.UnresolvedCandidateRecords[0]
+            return [pscustomobject]@{
+                Unresolved = $true
+                Reason = [string]$first.Reason
+                Variant = [string]$first.Variant
+                FirstSequence = [long]$first.WriterSequence
+                RawCount = [long]$peerFirstBootstrap.RawCount
+                DistinctCount = [long]$peerFirstBootstrap.DistinctCount
+                RecoveredCount = [long]$peerFirstBootstrap.RecoveredCount
+                UnresolvedCount = [long]$peerFirstBootstrap.UnresolvedCount
+                LineVisits = [long]$Lines.Count
+                CommandCount = 0
+                ExecutionRejectedCount = 0
+                ReceiptAppliedCount = 0
+                LegacyRejectedCount = 0
+                PeerBoundaryMissingCount = 0
+            }
+        }
+
         $bootstrapDirection = if ($null -ne (Get-Command `
                 Get-FileTransferFallbackV6BootstrapDirectionCorrelation `
                 -ErrorAction SilentlyContinue)) {

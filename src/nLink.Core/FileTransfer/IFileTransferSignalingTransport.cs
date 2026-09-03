@@ -533,7 +533,23 @@ internal sealed record FileTransferFallbackV6ProofBootstrapEvaluation(
     long TriggerTransportEpoch = 0,
     string? TriggerFrameFingerprint = null,
     IFileTransferDataSession? TriggerDataSession = null,
-    long TriggerDataSessionGeneration = 0);
+    long TriggerDataSessionGeneration = 0,
+    FileTransferFallbackV6ProofBootstrapTriggerSourceScope?
+        TriggerSourceScope = null);
+
+internal sealed record FileTransferFallbackV6ProofBootstrapTriggerSourceScope(
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int RoutePublicationGeneration,
+    int RouteCommitGeneration,
+    int TerminalGeneration,
+    long LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    string CheckpointRequestId,
+    int CheckpointGeneration);
 
 internal sealed class FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs(
     FileTransferFallbackV6ProofBootstrapEvaluation evaluation) : EventArgs
@@ -672,7 +688,10 @@ public sealed record FileTransferRouteHintNotification(
     string? FallbackCheckpointRequestId = null,
     FileTransferRoutePublicationAuthority? PublicationAuthority = null,
     long FallbackTransportEpoch = 0,
-    int FallbackBridgeRecoveryGeneration = 0);
+    int FallbackBridgeRecoveryGeneration = 0)
+{
+    internal int FallbackCheckpointGeneration { get; init; }
+}
 
 public interface IFileTransferRouteHintObserver
 {

@@ -4825,6 +4825,267 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_FallbackBootstrapPeerFirstCorrelationDeduplicatesAndRequiresExactRecovery()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferAuthorityMatching.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+
+            function New-PeerFirstLines(
+                    [switch]$Recovered,
+                    [switch]$WrongTuple,
+                    [switch]$MalformedBinding,
+                    [switch]$WrongPreparedCheckpoint,
+                    [switch]$WrongPreparedDataSession,
+                    [switch]$WrongPreparedTarget,
+                    [switch]$WrongInboundCorrelation,
+                    [switch]$AddConflictingBinding,
+                    [ValidateSet('outbound', 'inbound')][string]$Direction = 'outbound') {
+                $scope = "session_id=sess; transfer_id=transfer; direction=$Direction; log_writer_id=writer"
+                $route = 'live_route_epoch=3; runtime_generation=4; route_publication_generation=4; route_commit_generation=2; terminal_generation=0; leg_generation=4; fallback_transport_epoch=0; fallback_bridge_recovery_generation=0; fallback_checkpoint_request_id=(none)'
+                $source = 'source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=7'
+                $checkpoint = 'source_checkpoint_request_id=(none); source_checkpoint_generation=1; source_durable_checkpoint_generation=1; source_state_epoch=1; source_contiguous_frontier=100; source_durable_highest=99; source_chunk_count=256'
+                $binding = if ($MalformedBinding) {
+                    'peer_binding_present=1; peer_data_session_reference_generation=1'
+                }
+                else {
+                    "peer_binding_present=1; peer_data_session_reference_generation=1; peer_data_session_generation=7; $source; $checkpoint"
+                }
+                $frameType = if ($Direction -eq 'outbound') { 'filetransfer.receiver_state.v6' } else { 'filetransfer.frontier_request.v6' }
+                $proofKind = if ($Direction -eq 'outbound') { 'file_transfer_v6_state_frame_received' } else { 'file_transfer_v6_frontier_request_frame_received' }
+                $commandFrameKind = if ($Direction -eq 'outbound') { 'FrontierRequest' } else { 'ReceiverState' }
+                $requestCorrelationId = if ($Direction -eq 'inbound') {
+                    if ($WrongInboundCorrelation) { 'fallback-v6-proof-bootstrap:99' }
+                    else { 'fallback-v6-proof-bootstrap:2' }
+                }
+                else { '(none)' }
+                $command = "authority_id=bootstrap; bootstrap_generation=2; fallback_epoch=2; target_transport_epoch=1; frame_kind=$commandFrameKind"
+                $preparedSource = if ($WrongPreparedDataSession) {
+                    $source.Replace('source_data_session_generation=7', 'source_data_session_generation=8')
+                }
+                else { $source }
+                $preparedCheckpoint = if ($WrongPreparedCheckpoint) {
+                    $checkpoint.Replace('source_checkpoint_generation=1', 'source_checkpoint_generation=2')
+                }
+                else { $checkpoint }
+                $preparedTarget = if ($WrongPreparedTarget) {
+                    'target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna'
+                }
+                else {
+                    'target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn'
+                }
+                $lines = @(
+                    "event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; $route; log_writer_sequence=100",
+                    'event=tuna_fallback_started; session_id=sess; fallback_epoch=2; log_writer_id=writer; log_writer_sequence=101',
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $binding; decision_status=staged; reason_code=precommand_peer_frame_staged; authority_effect=evidence_only; log_writer_sequence=102",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $binding; decision_status=staged; reason_code=precommand_peer_frame_duplicate; authority_effect=evidence_only; log_writer_sequence=103"
+                )
+                if ($AddConflictingBinding) {
+                    $conflictingBindingText = "peer_binding_present=1; peer_data_session_reference_generation=1; peer_data_session_generation=7; $source; $($checkpoint.Replace('source_checkpoint_generation=1', 'source_checkpoint_generation=2'))"
+                    $lines += "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $conflictingBindingText; decision_status=staged; reason_code=precommand_peer_frame_duplicate; authority_effect=evidence_only; log_writer_sequence=104"
+                }
+                if (-not $Recovered) { return $lines }
+
+                $wakeFingerprint = if ($WrongTuple) { 'other-frame' } else { 'peer-frame' }
+                return $lines + @(
+                    "event=filetransfer_fallback_v6_proof_bootstrap_observed; $scope; observation_generation=3; fallback_epoch=2; proof_kind=$proofKind; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; authority_effect=coordinator_evaluation_only; log_writer_sequence=109",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; $scope; pending_generation=3; fallback_epoch=2; proof_kind=$proofKind; transport_epoch=1; frame_fingerprint=$wakeFingerprint; trigger_data_session_generation=1; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_checkpoint_request_id=(none); source_checkpoint_generation=1; decision_status=Published; decision_result=local_bootstrap_evaluation_published; authority_effect=none; log_writer_sequence=110",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; $command; frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $binding; decision_status=accepted; reason_code=precommand_peer_frame_admitted; authority_effect=peer_frame_retention_only; log_writer_sequence=111",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_decided; $scope; observation_generation=3; trigger_transfer_id=transfer; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; $source; $checkpoint; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; $command; decision_status=Issued; log_writer_sequence=112",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $scope; $command; frame_fingerprint=local-frame; receipt_status=Delivered; log_writer_sequence=113",
+                    "event=filetransfer_route_transition_prepared; $scope; authority_id=transition; transition_generation=2; $preparedSource; $preparedCheckpoint; $preparedTarget; retained_frame_fingerprint=peer-frame; peer_proof_generation=1; log_writer_sequence=114",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; $scope; $source; $checkpoint; authority_id=bootstrap; bootstrap_generation=2; fallback_epoch=2; target_transport_epoch=1; peer_frame_type=$frameType; peer_frame_fingerprint=peer-frame; proof_generation=1; proof_kind=$proofKind; pairing_status=Bound; log_writer_sequence=115",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $scope; $command; frame_fingerprint=local-frame; receipt_status=Delivered; application_status=Applied; log_writer_sequence=116"
+                )
+            }
+
+            $open = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines)
+            $closed = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered)
+            $inboundClosed = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -Direction inbound)
+            $wrong = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongTuple)
+            $malformed = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -MalformedBinding)
+            $wrongPreparedCheckpoint = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongPreparedCheckpoint)
+            $wrongPreparedDataSession = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongPreparedDataSession)
+            $wrongPreparedTarget = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongPreparedTarget)
+            $wrongInboundCorrelation = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongInboundCorrelation -Direction inbound)
+            $conflictingBinding = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -AddConflictingBinding)
+            if ($open.RawCount -ne 2 -or $open.DistinctCount -ne 1 -or
+                $open.RecoveredCount -ne 0 -or $open.UnresolvedCount -ne 1 -or
+                $open.UnresolvedCandidateRecords[0].WriterSequence -ne 102 -or
+                $open.UnresolvedCandidateRecords[0].Reason -ne 'peer_first_bootstrap_frame_staged_without_exact_coordinator_evaluation_wake' -or
+                $open.UnresolvedCandidateRecords[0].Variant -ne 'second_cycle_receiver_state_completed_transport_proof_before_outbound_bootstrap_observation') {
+                throw "open peer-first bootstrap mismatch: $($open | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($closed.RawCount -ne 2 -or $closed.DistinctCount -ne 1 -or
+                $closed.RecoveredCount -ne 1 -or $closed.UnresolvedCount -ne 0) {
+                throw "recovered peer-first bootstrap mismatch: $($closed | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($inboundClosed.RawCount -ne 2 -or $inboundClosed.DistinctCount -ne 1 -or
+                $inboundClosed.RecoveredCount -ne 1 -or $inboundClosed.UnresolvedCount -ne 0) {
+                throw "inbound recovered peer-first bootstrap mismatch: $($inboundClosed | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($wrong.RawCount -ne 2 -or $wrong.DistinctCount -ne 1 -or
+                $wrong.RecoveredCount -ne 0 -or $wrong.UnresolvedCount -ne 1) {
+                throw "wrong-tuple peer-first bootstrap mismatch: $($wrong | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            foreach ($negative in @(
+                    @{ Name = 'malformed-binding'; Result = $malformed },
+                    @{ Name = 'wrong-prepared-checkpoint'; Result = $wrongPreparedCheckpoint },
+                    @{ Name = 'wrong-prepared-data-session'; Result = $wrongPreparedDataSession },
+                    @{ Name = 'wrong-prepared-target'; Result = $wrongPreparedTarget },
+                    @{ Name = 'wrong-inbound-correlation'; Result = $wrongInboundCorrelation })) {
+                if ($negative.Result.RecoveredCount -ne 0 -or
+                    $negative.Result.UnresolvedCount -lt 1) {
+                    throw "$($negative.Name) peer-first bootstrap unexpectedly recovered: $($negative.Result | ConvertTo-Json -Depth 6 -Compress)"
+                }
+            }
+            if ($conflictingBinding.RawCount -ne 3 -or
+                $conflictingBinding.DistinctCount -ne 2 -or
+                $conflictingBinding.RecoveredCount -ne 1 -or
+                $conflictingBinding.UnresolvedCount -ne 1) {
+                throw "conflicting-binding peer-first bootstrap mismatch: $($conflictingBinding | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            Write-Output 'peer-first-bootstrap-shared-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Peer-first fallback bootstrap correlation failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "peer-first-bootstrap-shared-correlation-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FileTransferOps_FallbackBootstrapRecoveredDirectionDoesNotHideUnresolvedPeerFirstBoundary()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferAuthorityMatching.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+
+            $genericScope = 'session_id=generic-session; transfer_id=generic-transfer; direction=inbound; log_writer_id=generic-writer'
+            $lines = @(
+                'event=tuna_fallback_started; session_id=generic-session; fallback_epoch=2; log_writer_id=generic-writer; log_writer_sequence=100',
+                'event=filetransfer_fallback_nkn_proof_pending; session_id=generic-session; log_writer_id=generic-writer; log_writer_sequence=101',
+                'event=tuna_fallback_nkn_frame_received; session_id=generic-session; fallback_epoch=2; message_type=file_transfer_data_frame; channel=bulk; log_writer_id=generic-writer; log_writer_sequence=102',
+                'event=filetransfer_fallback_nkn_proof_unconfirmed; session_id=generic-session; proof=file_transfer_bulk_frame_received; bulk_seen=1; control_seen=0; requires_control_proof=1; requires_v6_epoch_recovery=0; log_writer_id=generic-writer; log_writer_sequence=103',
+                'event=filetransfer_fallback_nkn_proof_unconfirmed; session_id=generic-session; proof=nkn_control_ack_received; bulk_seen=1; control_seen=1; requires_control_proof=0; requires_v6_epoch_recovery=1; log_writer_id=generic-writer; log_writer_sequence=104',
+                'event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; session_id=generic-session; log_writer_id=generic-writer; log_writer_sequence=105',
+                'event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch; session_id=generic-session; log_writer_id=generic-writer; log_writer_sequence=106',
+                "event=filetransfer_fallback_v6_proof_bootstrap_trigger_bound; $genericScope; fallback_epoch=2; pending_generation=3; transport_epoch=1; data_session_generation=7; frame_fingerprint=generic-frame; bulk_seen=1; control_seen=1; status=Ready; authority_effect=none; log_writer_sequence=107",
+                "event=filetransfer_fallback_v6_proof_bootstrap_observed; $genericScope; fallback_epoch=2; observation_generation=3; proof_kind=file_transfer_bulk_frame_received; trigger_transport_epoch=1; trigger_frame_fingerprint=generic-frame; trigger_data_session_generation=7; authority_effect=coordinator_evaluation_only; log_writer_sequence=108",
+                "event=filetransfer_fallback_v6_proof_bootstrap_decided; $genericScope; fallback_epoch=2; trigger_transfer_id=generic-transfer; observation_generation=3; trigger_transport_epoch=1; trigger_frame_fingerprint=generic-frame; trigger_data_session_generation=7; source_data_session_generation=7; authority_id=generic-bootstrap; bootstrap_generation=2; decision_status=Issued; log_writer_sequence=109"
+            )
+
+            $peerScope = 'session_id=peer-session; transfer_id=peer-transfer; direction=outbound; log_writer_id=peer-writer'
+            $peerSource = 'source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=7'
+            $peerCheckpoint = 'source_checkpoint_request_id=(none); source_checkpoint_generation=1; source_durable_checkpoint_generation=1; source_state_epoch=1; source_contiguous_frontier=100; source_durable_highest=99; source_chunk_count=256'
+            $peerBinding = "peer_binding_present=1; peer_data_session_reference_generation=1; peer_data_session_generation=7; $peerSource; $peerCheckpoint"
+            $lines += @(
+                "event=filetransfer_route_hint_authorized_publication_accepted; $peerScope; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; live_route_epoch=3; runtime_generation=4; route_publication_generation=4; route_commit_generation=2; terminal_generation=0; leg_generation=4; fallback_transport_epoch=0; fallback_bridge_recovery_generation=0; fallback_checkpoint_request_id=(none); log_writer_sequence=200",
+                'event=tuna_fallback_started; session_id=peer-session; fallback_epoch=2; log_writer_id=peer-writer; log_writer_sequence=201',
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $peerScope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=(none); $peerBinding; decision_status=staged; reason_code=precommand_peer_frame_staged; authority_effect=evidence_only; log_writer_sequence=202",
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $peerScope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=filetransfer.receiver_state.v6; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=(none); $peerBinding; decision_status=staged; reason_code=precommand_peer_frame_duplicate; authority_effect=evidence_only; log_writer_sequence=203"
+            )
+
+            $direction = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $lines
+            $peerFirst = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $lines
+            $events = @($lines | ForEach-Object { [pscustomobject]@{ RawLine = $_ } })
+            $emptySnapshot = [pscustomobject]@{
+                RawCount = 0
+                DistinctCount = 0
+                RecoveredCount = 0
+                UnresolvedCount = 0
+                CandidateRecords = @()
+                RecoveredCandidateRecords = @()
+                UnresolvedCandidateRecords = @()
+                AuthoritativeRecords = @()
+            }
+            $combined = Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof `
+                -Events $events `
+                -SnapshotProof $emptySnapshot
+
+            if ($direction.RawCount -ne 2 -or $direction.DistinctCount -ne 1 -or
+                $direction.RecoveredCount -ne 1 -or $direction.UnresolvedCount -ne 0) {
+                throw "generic direction was not exactly recovered: $($direction | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($peerFirst.RawCount -ne 2 -or $peerFirst.DistinctCount -ne 1 -or
+                $peerFirst.RecoveredCount -ne 0 -or $peerFirst.UnresolvedCount -ne 1 -or
+                $peerFirst.UnresolvedCandidateRecords[0].WriterSequence -ne 202) {
+                throw "peer-first sibling was not the sole direct unresolved result: $($peerFirst | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($combined.RawCount -ne 4 -or $combined.DistinctCount -ne 2 -or
+                $combined.RecoveredCount -ne 1 -or $combined.UnresolvedCount -ne 1 -or
+                $combined.UnresolvedCandidateRecords.Count -ne 1) {
+                throw "combined bootstrap proof did not preserve exact episode outcomes: $($combined | ConvertTo-Json -Depth 7 -Compress)"
+            }
+            $selected = $combined.UnresolvedCandidateRecords[0]
+            if ($selected.Reason -ne 'peer_first_bootstrap_frame_staged_without_exact_coordinator_evaluation_wake' -or
+                (Get-FileTransferAuthorityLogField -Line $selected.Event.RawLine -Name 'log_writer_id') -ne 'peer-writer' -or
+                (Get-FileTransferAuthorityLogField -Line $selected.Event.RawLine -Name 'log_writer_sequence') -ne '202') {
+                throw "generic recovery hid or displaced the peer-first boundary: $($selected | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            Write-Output 'bootstrap-overlap-arbitration-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Fallback bootstrap overlap arbitration failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains(
+            "bootstrap-overlap-arbitration-ok",
+            result.Stdout,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FileTransferOps_CompactCatalogCarriesPeerFirstBootstrapWake()
+    {
+        var repoRoot = FindRepoRoot();
+        var artifactWriter = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "FileTransferSoak",
+            "ArtifactWriters.ps1"));
+        var orchestration = File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "FileTransferOps",
+            "AnalyzerOrchestration.ps1"));
+
+        Assert.Contains(
+            "'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided'",
+            artifactWriter,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided'",
+            orchestration,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof",
+            orchestration,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FileTransferOps_ReceiveRecoverySnapshotCorrelationPreservesCleanAndOpenV1Results()
     {
         if (!OperatingSystem.IsWindows())

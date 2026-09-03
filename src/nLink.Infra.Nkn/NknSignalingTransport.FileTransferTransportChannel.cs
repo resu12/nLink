@@ -2661,6 +2661,7 @@ public sealed partial class NknSignalingTransport
                     notification.FallbackLegCanSendData,
                     notification.FallbackLegGeneration,
                     sanitizedCheckpointRequestId,
+                    notification.FallbackCheckpointGeneration,
                     notification.FallbackTransportEpoch,
                     notification.FallbackBridgeRecoveryGeneration,
                     authority.RoutePublicationGeneration,

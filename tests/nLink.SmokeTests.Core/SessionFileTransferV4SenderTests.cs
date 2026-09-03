@@ -6203,7 +6203,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         int remoteNextExpectedChunkIndex = 100,
         int chunksAcceptedForTransport = 256,
         int remoteGrantedUntilExclusive = 256,
-        int chunkCount = 256)
+        int chunkCount = 256,
+        bool startCoordinatorSnapshotStream = true)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType("OutboundTransferContext", BindingFlags.NonPublic)!;
@@ -6270,7 +6271,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Reason: "unit_test_file_tuna_v4");
         SetPrivateProperty(context, "RuntimeUnlockRouteCommitToken", routeCommit);
         SetPrivateProperty(context, "LastRuntimeUnlockRouteCommitGeneration", 1);
-        StartCoordinatorSnapshotStreamForTest(context);
+        if (startCoordinatorSnapshotStream)
+        {
+            StartCoordinatorSnapshotStreamForTest(context);
+        }
         return context;
     }
 
@@ -6372,7 +6376,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         int chunkCount = 256,
         int nextChunkIndex = 100,
         int durableHighestChunkIndex = 99,
-        IFileTransferDataSession? dataSession = null)
+        IFileTransferDataSession? dataSession = null,
+        bool startCoordinatorSnapshotStream = true)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType(
@@ -6460,8 +6465,80 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             "LastRuntimeUnlockRouteCommitGeneration",
             1);
-        StartCoordinatorSnapshotStreamForTest(context);
+        if (startCoordinatorSnapshotStream)
+        {
+            StartCoordinatorSnapshotStreamForTest(context);
+        }
         return context;
+    }
+
+    private static void SeedRecoveredFileTunaV4SecondCycleScopeForTest(
+        object context)
+    {
+        var priorEpoch = Assert.IsType<LiveRouteEpoch>(
+            GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch"));
+        var priorEpochId = priorEpoch.EpochId;
+        Assert.True(priorEpochId > 0);
+        var currentEpochId = checked(priorEpochId + 1);
+        var owner = GetPrivateProperty<RuntimeOwnerToken>(
+            context,
+            "CurrentRuntimeOwner") with
+        {
+            LiveRouteEpoch = currentEpochId,
+        };
+        var admission = GetPrivateProperty<RuntimeUnlockAdmissionToken>(
+            context,
+            "RuntimeUnlockAdmissionToken") with
+        {
+            RuntimeOwner = owner,
+            LiveRouteEpoch = currentEpochId,
+        };
+        var publication = GetPrivateProperty<RoutePublicationToken>(
+            context,
+            "CurrentRoutePublicationToken") with
+        {
+            RuntimeOwner = owner,
+            LiveRouteEpoch = currentEpochId,
+        };
+        var routeCommit = GetPrivateProperty<RouteCommitToken>(
+            context,
+            "RuntimeUnlockRouteCommitToken") with
+        {
+            RuntimeOwner = owner,
+            RuntimeUnlockAdmission = admission,
+            LiveRouteEpoch = currentEpochId,
+        };
+        var leg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        SetPrivateProperty(leg, "LiveRouteEpochId", currentEpochId);
+        var recoveredEpoch = new LiveRouteEpoch
+        {
+            RoutePublicationToken = publication,
+            EpochId = currentEpochId,
+            RouteSelection = priorEpoch.RouteSelection,
+            HandoffKind =
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+            TargetTransport = FileTransferTransportKind.Tuna,
+            Reason = "unit_test_second_cycle_tuna_recovered",
+            State = "recovered",
+        };
+
+        SetPrivateProperty(context, "CurrentRuntimeOwner", owner);
+        SetPrivateProperty(context, "RuntimeUnlockAdmissionToken", admission);
+        SetPrivateProperty(
+            context,
+            "CurrentRoutePublicationToken",
+            publication);
+        SetPrivateProperty(
+            context,
+            "RuntimeUnlockRouteCommitToken",
+            routeCommit);
+        SetPrivateProperty(context, "CurrentLiveRouteEpoch", recoveredEpoch);
+        SetPrivateProperty(context, "LastLiveRouteEpochId", currentEpochId);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportLiveRouteEpochId",
+            priorEpochId);
     }
 
     private static object CreateRegularNknV4InboundContext(
@@ -6527,6 +6604,29 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         Assert.NotNull(property);
         return property!.GetValue(target);
+    }
+
+    private static FileTransferFallbackV6ProofBootstrapTriggerSourceScope
+        CreateFallbackV6ProofBootstrapTriggerSourceScope(
+            FileTransferCoordinatorState state)
+    {
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var publication = state.CurrentRoutePublicationToken!.Value;
+        var commit = state.CurrentRouteCommit!.Value;
+        var leg = state.CurrentLeg!;
+        return new FileTransferFallbackV6ProofBootstrapTriggerSourceScope(
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch!.EpochId,
+            owner.RuntimeGeneration,
+            publication.PublicationGeneration,
+            commit.CommitGeneration,
+            state.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            leg.CheckpointRequestId ?? "(none)",
+            leg.CheckpointGeneration);
     }
 
     private static FileTransferLeg GetCurrentContextLeg(object context)
@@ -8876,7 +8976,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "transfer_file_tuna_v4_bootstrap_peer_request_before_command";
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
-        var context = CreateFileTunaV4InboundContext(transferId);
+        var dataSession = new GenerationBoundDataSession(
+            $"session_{transferId}",
+            transferId,
+            generation: 7);
+        var context = CreateFileTunaV4InboundContext(
+            transferId,
+            dataSession: dataSession);
         SetPrivateProperty(context, "V4StateEpoch", 1);
         SetPrivateProperty(
             context,
@@ -8916,7 +9022,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                     ObservationGeneration: 1,
                     FallbackEpoch: 1,
                     Source: "test_precommand_peer_frame",
-                    ProofKind: "file_transfer_v4_frontier_request_received",
+                    ProofKind:
+                        "file_transfer_v6_frontier_request_frame_received",
                     ObservedUtcMilliseconds:
                         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     checkpoint));
@@ -8979,10 +9086,33 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         Assert.Equal(peerRequest.TransportEpoch, command.TargetTransportEpoch);
         AdoptCoordinatorDecisionForTest(context, issued);
+        var currentDataSession = Assert.IsAssignableFrom<IFileTransferDataSession>(
+            GetPrivatePropertyValue(context, "DataSession"));
+        var dataSessionGenerationProvider =
+            Assert.IsAssignableFrom<IFileTransferDataSessionGenerationProvider>(
+                currentDataSession);
+        var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(
+            state.SessionId,
+            FileTransferDirection.Inbound,
+            ObservationGeneration: 1,
+            FallbackEpoch: 1,
+            Source: "test_precommand_peer_frame",
+            ProofKind: "file_transfer_v6_frontier_request_frame_received",
+            ObservedUtcMilliseconds:
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            TriggerTransferId: state.TransferId,
+            TriggerTransportEpoch: peerRequest.TransportEpoch,
+            TriggerFrameFingerprint:
+                PostTunaFallbackPeerProofFrameIdentity.Create(peerRequest).Sha256,
+            TriggerDataSession: currentDataSession,
+            TriggerDataSessionGeneration:
+                dataSessionGenerationProvider.Generation,
+            TriggerSourceScope:
+                CreateFallbackV6ProofBootstrapTriggerSourceScope(state));
         serviceType.GetMethod(
                 "TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked",
                 BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, command]);
+            .Invoke(service, [context, command, evaluation]);
 
         Assert.Null(
             GetPrivatePropertyValue(

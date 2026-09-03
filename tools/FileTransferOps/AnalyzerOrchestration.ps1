@@ -142,6 +142,7 @@ function Write-FileTransferIndexedRawEvidenceArtifact {
         'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
         'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
         'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
+        'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
         'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
         'filetransfer_route_selected',
         'filetransfer_live_route_epoch_started',
@@ -2913,6 +2914,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_execution_completed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_v6_route_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +
@@ -2968,11 +2970,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     $fileTransferFallbackV6ProofBootstrapProof =
         if ($snapshotRouteTransitionAuthoritative) {
-            Get-FileTransferCoordinatorSnapshotCorrelationResult `
+            $snapshotBootstrapProof = Get-FileTransferCoordinatorSnapshotCorrelationResult `
                 -Evaluation $snapshotEvaluation `
                 -Family 'route_transition' `
                 -TaxonomyClasses @(
                     'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
+            Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof `
+                -Events $fileTunaV4DataPathEvents `
+                -SnapshotProof $snapshotBootstrapProof
         }
         else {
             $fallbackBootstrapUnresolvedRecords = @(

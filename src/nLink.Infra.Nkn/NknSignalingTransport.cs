@@ -64,7 +64,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         long TransportEpoch,
         string FrameFingerprint,
         IFileTransferDataSession DataSession,
-        long DataSessionGeneration);
+        long DataSessionGeneration,
+        FileTransferRouteHint RouteHint);
 
     private readonly record struct FileTransferRouteHintKey(
         string SessionId,
@@ -90,6 +91,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         bool FallbackLegCanSendData,
         long FallbackLegGeneration,
         string? FallbackCheckpointRequestId,
+        int FallbackCheckpointGeneration,
         long FallbackTransportEpoch,
         int FallbackBridgeRecoveryGeneration,
         int RoutePublicationGeneration,

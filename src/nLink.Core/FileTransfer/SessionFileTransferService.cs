@@ -22365,25 +22365,30 @@ public sealed partial class SessionFileTransferService :
 
         try
         {
-            observer.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
-                sessionId,
-                transferId,
-                routeSelection.TelemetryToken,
-                routeSelection.ProtocolVersion,
-                source,
-                runtimeUnlockAdmission?.Granted ?? false,
-                runtimeUnlockAdmission?.Reason ?? "unknown",
-                currentLeg is null
-                    ? "unknown"
-                    : FileTransferCoordinator.FormatLegState(currentLeg.State),
-                currentLeg?.CanSendData ?? false,
-                currentLeg?.Generation ?? 0,
-                currentLeg?.CheckpointRequestId,
-                FileTransferCoordinator.CreateRoutePublicationAuthority(
-                    routePublicationToken,
-                    coordinatorDecisionReason),
-                currentLeg?.TransportEpochId ?? 0,
-                currentLeg?.BridgeRecoveryGeneration ?? 0));
+            observer.ObserveFileTransferRouteHint(
+                new FileTransferRouteHintNotification(
+                    sessionId,
+                    transferId,
+                    routeSelection.TelemetryToken,
+                    routeSelection.ProtocolVersion,
+                    source,
+                    runtimeUnlockAdmission?.Granted ?? false,
+                    runtimeUnlockAdmission?.Reason ?? "unknown",
+                    currentLeg is null
+                        ? "unknown"
+                        : FileTransferCoordinator.FormatLegState(currentLeg.State),
+                    currentLeg?.CanSendData ?? false,
+                    currentLeg?.Generation ?? 0,
+                    currentLeg?.CheckpointRequestId,
+                    FileTransferCoordinator.CreateRoutePublicationAuthority(
+                        routePublicationToken,
+                        coordinatorDecisionReason),
+                    currentLeg?.TransportEpochId ?? 0,
+                    currentLeg?.BridgeRecoveryGeneration ?? 0)
+                {
+                    FallbackCheckpointGeneration =
+                        currentLeg?.CheckpointGeneration ?? 0,
+                });
         }
         catch (Exception ex)
         {
@@ -23778,6 +23783,9 @@ public sealed partial class SessionFileTransferService :
         public FileTransferDataFrame?
             PendingFallbackV6ProofBootstrapPeerFrameEvidence { get; set; }
 
+        public FileTransferFallbackV6ProofBootstrapPeerFrameBinding?
+            PendingFallbackV6ProofBootstrapPeerFrameBinding { get; set; }
+
         public HashSet<string>
             FileTransferRouteTransitionCompatibilityProjectionKeys { get; } =
                 new(StringComparer.Ordinal);
@@ -25096,6 +25104,9 @@ public sealed partial class SessionFileTransferService :
 
         public FileTransferDataFrame?
             PendingFallbackV6ProofBootstrapPeerFrameEvidence { get; set; }
+
+        public FileTransferFallbackV6ProofBootstrapPeerFrameBinding?
+            PendingFallbackV6ProofBootstrapPeerFrameBinding { get; set; }
 
         public HashSet<string>
             FileTransferRouteTransitionCompatibilityProjectionKeys { get; } =

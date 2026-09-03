@@ -9093,6 +9093,7 @@ function Get-FileTransferFileTunaV4DataPathEventNames {
         'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
         'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
         'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
+        'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
         'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
         'filetransfer_receive_recovery_operation_issued',
         'filetransfer_receive_recovery_execution_started',
@@ -10730,7 +10731,28 @@ function Get-FileTransferRouteTransitionCorrelation {
             continue
         }
         $routeTransitionIndexBuildVisitCount++
-        if ($event.EventName -in @('tuna_fallback_started', 'filetransfer_fallback_nkn_proof_pending', 'tuna_fallback_nkn_frame_received', 'filetransfer_fallback_nkn_proof_unconfirmed', 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch', 'filetransfer_fallback_v6_proof_bootstrap_trigger_bound', 'filetransfer_fallback_v6_proof_bootstrap_observed', 'filetransfer_fallback_v6_proof_bootstrap_decided')) {
+        if ($event.EventName -in @(
+                'filetransfer_route_hint_authorized_publication_accepted',
+                'tuna_fallback_started',
+                'filetransfer_fallback_nkn_proof_pending',
+                'tuna_fallback_nkn_frame_received',
+                'filetransfer_fallback_nkn_proof_unconfirmed',
+                'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch',
+                'filetransfer_fallback_v6_proof_bootstrap_trigger_bound',
+                'filetransfer_fallback_v6_proof_bootstrap_observed',
+                'filetransfer_fallback_v6_proof_bootstrap_decided',
+                'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
+                'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
+                'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
+                'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
+                'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
+                'filetransfer_route_transition_prepared',
+                'filetransfer_route_transition_invalidated',
+                'filetransfer_data_session_availability_changed',
+                'file_transfer_outbound_terminal',
+                'file_transfer_inbound_terminal',
+                'transfer_terminal',
+                'filetransfer_runtime_terminalized')) {
             $fallbackV6BootstrapDirectionEvidenceEventList.Add($event) | Out-Null
         }
         switch ($event.EventName) {
@@ -10957,6 +10979,7 @@ function Get-FileTransferRouteTransitionCorrelation {
         $responderRouteTransitionHandoffEventList.ToArray())
     [object[]]$fallbackV6BootstrapDirectionEvidenceEvents = @($fallbackV6BootstrapDirectionEvidenceEventList.ToArray())
     $fallbackV6BootstrapDirectionCorrelation = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines @($fallbackV6BootstrapDirectionEvidenceEvents | ForEach-Object { [string]$_.RawLine })
+    $fallbackV6BootstrapPeerFirstCorrelation = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines @($fallbackV6BootstrapDirectionEvidenceEvents | ForEach-Object { [string]$_.RawLine })
 
     function Test-PostFallbackResponderPairedHandoffEvidence {
         param([Parameter(Mandatory = $true)]$Prepared)
@@ -11160,6 +11183,12 @@ function Get-FileTransferRouteTransitionCorrelation {
         }
     }
     foreach ($candidate in $fallbackV6BootstrapDirectionCorrelation.RawCandidateRecords) {
+        $eventKey = "$($candidate.Writer)|$($candidate.WriterSequence)".ToLowerInvariant()
+        if ($bootstrapDirectionEventsByWriterSequence.ContainsKey($eventKey)) {
+            Add-RouteTransitionCandidate -Event $bootstrapDirectionEventsByWriterSequence[$eventKey] -Key ([string]$candidate.DistinctKey) -Reason ([string]$candidate.Reason) -Class ([string]$candidate.Class) -Variant ([string]$candidate.Variant) -Recovered:([bool]$candidate.Recovered)
+        }
+    }
+    foreach ($candidate in $fallbackV6BootstrapPeerFirstCorrelation.RawCandidateRecords) {
         $eventKey = "$($candidate.Writer)|$($candidate.WriterSequence)".ToLowerInvariant()
         if ($bootstrapDirectionEventsByWriterSequence.ContainsKey($eventKey)) {
             Add-RouteTransitionCandidate -Event $bootstrapDirectionEventsByWriterSequence[$eventKey] -Key ([string]$candidate.DistinctKey) -Reason ([string]$candidate.Reason) -Class ([string]$candidate.Class) -Variant ([string]$candidate.Variant) -Recovered:([bool]$candidate.Recovered)

@@ -11445,6 +11445,7 @@ public sealed partial class NknSignalingTransport
         FileTransferFallbackV6BootstrapTrigger? observedBootstrapTrigger = null;
         FileTransferFallbackV6BootstrapTrigger? bootstrapTriggerToLog = null;
         FileTransferFallbackV6BootstrapTrigger? bootstrapTriggerForEvaluation = null;
+        FileTransferFallbackV6BootstrapTrigger? peerFirstBootstrapTriggerForEvaluation = null;
         var bootstrapTriggerLogStatus = string.Empty;
         long capturedPendingProofGeneration = 0;
         string? capturedPendingProofSessionId = null;
@@ -11500,6 +11501,16 @@ public sealed partial class NknSignalingTransport
                  !IsExactPendingPostTunaFallbackProofFrameUnsafe(proofFrame, normalizedSessionId)))
             {
                 return false;
+            }
+
+            if (observedBootstrapTrigger is not null &&
+                IsFileTransferFallbackV6BootstrapPeerTrigger(proofFrame) &&
+                IsCurrentFileTransferFallbackV6BootstrapTriggerUnsafe(
+                    observedBootstrapTrigger,
+                    fileTransferFallbackProofSessionId ?? normalizedSessionId,
+                    fileTransferFallbackProofGeneration))
+            {
+                peerFirstBootstrapTriggerForEvaluation = observedBootstrapTrigger;
             }
 
             if (!authoritativeProof)
@@ -11638,6 +11649,25 @@ public sealed partial class NknSignalingTransport
                 bootstrapTriggerLogStatus,
                 bulkProofObserved,
                 controlProofObserved);
+        }
+
+        if (peerFirstBootstrapTriggerForEvaluation is { } peerFirstTrigger)
+        {
+            var publishStatus = IsFileTransferFallbackV6BootstrapTriggerCurrent(
+                    peerFirstTrigger)
+                ? PublishFileTransferFallbackV6ProofBootstrapEvaluation(
+                    peerFirstTrigger.SessionId,
+                    peerFirstTrigger.Direction,
+                    peerFirstTrigger.PendingProofGeneration,
+                    normalizedProofKind,
+                    reason,
+                    peerFirstTrigger,
+                    peerFirst: true)
+                : FileTransferFallbackV6BootstrapEvaluationPublishStatus.Stale;
+            LogFileTransferFallbackV6BootstrapPeerFirstWakeDecision(
+                peerFirstTrigger,
+                normalizedProofKind,
+                publishStatus);
         }
 
         if (needsUncommittedBoundaryBinding)
@@ -13548,6 +13578,17 @@ public sealed partial class NknSignalingTransport
             _ => null,
         };
 
+    private enum FileTransferFallbackV6BootstrapEvaluationPublishStatus
+    {
+        Invalid,
+        Unavailable,
+        Published,
+        Coalesced,
+        Conflict,
+        Stale,
+        Failed,
+    }
+
     private bool TryCreateFileTransferFallbackV6BootstrapTrigger(
         FileTransferDataFrame? frame,
         string? observedSessionId,
@@ -13556,19 +13597,23 @@ public sealed partial class NknSignalingTransport
         out FileTransferFallbackV6BootstrapTrigger? trigger)
     {
         trigger = null;
-        if (frame is not FileTransferChunkBatchFrameV6 batch ||
-            string.IsNullOrWhiteSpace(batch.SessionId) ||
-            string.IsNullOrWhiteSpace(batch.TransferId) ||
-            batch.TransportEpoch < 0 ||
+        if (frame is null ||
+            !TryGetFileTransferFallbackV6BootstrapTriggerScope(
+                frame,
+                out var direction,
+                out var transportEpoch) ||
+            string.IsNullOrWhiteSpace(frame.SessionId) ||
+            string.IsNullOrWhiteSpace(frame.TransferId) ||
+            transportEpoch < 0 ||
             pendingProofGeneration <= 0 ||
             string.IsNullOrWhiteSpace(pendingProofSessionId) ||
             !string.Equals(
-                batch.SessionId,
+                frame.SessionId,
                 pendingProofSessionId.Trim(),
                 StringComparison.Ordinal) ||
             (!string.IsNullOrWhiteSpace(observedSessionId) &&
              !string.Equals(
-                 batch.SessionId,
+                 frame.SessionId,
                  observedSessionId.Trim(),
                  StringComparison.Ordinal)))
         {
@@ -13576,17 +13621,18 @@ public sealed partial class NknSignalingTransport
         }
 
         TransportFileTransferDataSession? dataSession;
+        FileTransferRouteHint routeHint;
         lock (gate)
         {
-            if (!fileTransferDataSessions.TryGetValue(batch.TransferId, out dataSession) ||
+            if (!fileTransferDataSessions.TryGetValue(frame.TransferId, out dataSession) ||
                 dataSession is null ||
                 dataSession.IsDisposed ||
-                !string.Equals(dataSession.SessionId, batch.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(dataSession.SessionId, frame.SessionId, StringComparison.Ordinal) ||
                 !TryGetFileTransferRouteHintUnsafe(
-                    batch.SessionId,
-                    batch.TransferId,
-                    FileTransferDirection.Inbound,
-                    out var routeHint) ||
+                    frame.SessionId,
+                    frame.TransferId,
+                    direction,
+                    out routeHint) ||
                 routeHint.Route != FileTransferRoute.FileTunaV4 ||
                 routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
             {
@@ -13597,7 +13643,7 @@ public sealed partial class NknSignalingTransport
         long fallbackEpoch;
         lock (accelerationGate)
         {
-            if (!TryGetCurrentTunaFallbackProofStateUnsafe(batch.SessionId, out var fallbackState) ||
+            if (!TryGetCurrentTunaFallbackProofStateUnsafe(frame.SessionId, out var fallbackState) ||
                 (fallbackState.Lanes & NknAccelerationLaneKind.File) !=
                     NknAccelerationLaneKind.File ||
                 fallbackState.FileState != TunaFallbackLaneState.Pending ||
@@ -13610,22 +13656,140 @@ public sealed partial class NknSignalingTransport
         }
 
         var fingerprint = Convert.ToHexString(
-                SHA256.HashData(FileTransferDataFrameCodec.Serialize(batch)))
+                SHA256.HashData(FileTransferDataFrameCodec.Serialize(frame)))
             .ToLowerInvariant();
         trigger = new FileTransferFallbackV6BootstrapTrigger(
-            batch.SessionId.Trim(),
-            batch.TransferId.Trim(),
-            FileTransferDirection.Inbound,
+            frame.SessionId.Trim(),
+            frame.TransferId.Trim(),
+            direction,
             pendingProofGeneration,
             fallbackEpoch,
-            batch.TransportEpoch,
+            transportEpoch,
             fingerprint,
             dataSession,
-            dataSession.Generation);
+            dataSession.Generation,
+            routeHint);
         return true;
     }
 
-    private static bool IsCurrentFileTransferFallbackV6BootstrapTriggerUnsafe(
+    private static bool TryGetFileTransferFallbackV6BootstrapTriggerScope(
+        FileTransferDataFrame frame,
+        out FileTransferDirection direction,
+        out long transportEpoch)
+    {
+        switch (frame)
+        {
+            case FileTransferChunkBatchFrameV6 batch:
+                direction = FileTransferDirection.Inbound;
+                transportEpoch = batch.TransportEpoch;
+                return true;
+            case FileTransferReceiverStateFrameV6 receiverState
+                when FileTransferProtocol.IsFallbackV6ProofBootstrapReceiverState(
+                    receiverState):
+                direction = FileTransferDirection.Outbound;
+                transportEpoch = receiverState.TransportEpoch;
+                return true;
+            case FileTransferFrontierRequestFrameV6 frontierRequest
+                when FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                    frontierRequest,
+                    out _):
+                direction = FileTransferDirection.Inbound;
+                transportEpoch = frontierRequest.TransportEpoch;
+                return true;
+            default:
+                direction = default;
+                transportEpoch = 0;
+                return false;
+        }
+    }
+
+    private static bool IsFileTransferFallbackV6BootstrapPeerTrigger(
+        FileTransferDataFrame? frame)
+        => frame is FileTransferReceiverStateFrameV6 receiverState &&
+               FileTransferProtocol.IsFallbackV6ProofBootstrapReceiverState(
+                   receiverState) ||
+           frame is FileTransferFrontierRequestFrameV6 frontierRequest &&
+               FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                   frontierRequest,
+                   out _);
+
+    private bool IsFileTransferFallbackV6BootstrapTriggerCurrent(
+        FileTransferFallbackV6BootstrapTrigger trigger)
+    {
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(
+                    trigger.TransferId,
+                    out var dataSession) ||
+                dataSession is null ||
+                dataSession.IsDisposed ||
+                !ReferenceEquals(dataSession, trigger.DataSession) ||
+                dataSession.Generation != trigger.DataSessionGeneration ||
+                !string.Equals(
+                    dataSession.SessionId,
+                    trigger.SessionId,
+                    StringComparison.Ordinal) ||
+                !TryGetFileTransferRouteHintUnsafe(
+                    trigger.SessionId,
+                    trigger.TransferId,
+                    trigger.Direction,
+                    out var routeHint) ||
+                routeHint.Route != FileTransferRoute.FileTunaV4 ||
+                routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+                !FileTransferFallbackV6BootstrapRouteHintEquals(
+                    routeHint,
+                    trigger.RouteHint))
+            {
+                return false;
+            }
+        }
+
+        lock (accelerationGate)
+        {
+            if (!TryGetCurrentTunaFallbackProofStateUnsafe(
+                    trigger.SessionId,
+                    out var fallbackState) ||
+                (fallbackState.Lanes & NknAccelerationLaneKind.File) !=
+                    NknAccelerationLaneKind.File ||
+                fallbackState.FileState != TunaFallbackLaneState.Pending ||
+                fallbackState.Epoch != trigger.FallbackEpoch)
+            {
+                return false;
+            }
+        }
+
+        lock (fileTransferFallbackProofGate)
+        {
+            return fileTransferFallbackProofPending &&
+                   fileTransferFallbackProofGeneration ==
+                       trigger.PendingProofGeneration &&
+                   string.Equals(
+                       fileTransferFallbackProofSessionId,
+                       trigger.SessionId,
+                       StringComparison.Ordinal) &&
+                   (string.IsNullOrWhiteSpace(fileTransferFallbackProofTransferId) ||
+                    string.Equals(
+                        fileTransferFallbackProofTransferId,
+                        trigger.TransferId,
+                        StringComparison.Ordinal)) &&
+                   (fileTransferFallbackProofDirection is null ||
+                    fileTransferFallbackProofDirection == trigger.Direction) &&
+                   (fileTransferFallbackProofTransportEpoch <= 0 ||
+                    fileTransferFallbackProofTransportEpoch == trigger.TransportEpoch);
+        }
+    }
+
+    private static bool FileTransferFallbackV6BootstrapRouteHintEquals(
+        FileTransferRouteHint left,
+        FileTransferRouteHint right)
+        => left with { RecordedUtc = default } ==
+           right with { RecordedUtc = default };
+
+    private static string GetFileTransferFallbackV6BootstrapRouteHintScope(
+        FileTransferRouteHint routeHint)
+        => JsonSerializer.Serialize(routeHint with { RecordedUtc = default });
+
+    private bool IsCurrentFileTransferFallbackV6BootstrapTriggerUnsafe(
         FileTransferFallbackV6BootstrapTrigger? trigger,
         string? sessionId,
         long pendingProofGeneration)
@@ -13633,7 +13797,16 @@ public sealed partial class NknSignalingTransport
            pendingProofGeneration > 0 &&
            trigger.PendingProofGeneration == pendingProofGeneration &&
            !string.IsNullOrWhiteSpace(sessionId) &&
-           string.Equals(trigger.SessionId, sessionId, StringComparison.Ordinal);
+           string.Equals(trigger.SessionId, sessionId, StringComparison.Ordinal) &&
+           (string.IsNullOrWhiteSpace(fileTransferFallbackProofTransferId) ||
+            string.Equals(
+                fileTransferFallbackProofTransferId,
+                trigger.TransferId,
+                StringComparison.Ordinal)) &&
+           (fileTransferFallbackProofDirection is null ||
+            fileTransferFallbackProofDirection == trigger.Direction) &&
+           (fileTransferFallbackProofTransportEpoch <= 0 ||
+            fileTransferFallbackProofTransportEpoch == trigger.TransportEpoch);
 
     private static void LogFileTransferFallbackV6BootstrapTrigger(
         FileTransferFallbackV6BootstrapTrigger trigger,
@@ -13642,35 +13815,81 @@ public sealed partial class NknSignalingTransport
         bool controlObserved)
         => LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_trigger_bound; status={SanitizeLogToken(status)}; session_id={SanitizeLogToken(trigger.SessionId)}; transfer_id={SanitizeLogToken(trigger.TransferId)}; direction={FormatFileTransferDirection(trigger.Direction)}; pending_generation={trigger.PendingProofGeneration}; fallback_epoch={trigger.FallbackEpoch}; transport_epoch={trigger.TransportEpoch}; frame_fingerprint={SanitizeLogToken(trigger.FrameFingerprint)}; data_session_generation={trigger.DataSessionGeneration}; bulk_seen={(bulkObserved ? 1 : 0)}; control_seen={(controlObserved ? 1 : 0)}; authority_effect=none");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_trigger_bound; status={SanitizeLogToken(status)}; session_id={SanitizeLogToken(trigger.SessionId)}; transfer_id={SanitizeLogToken(trigger.TransferId)}; direction={FormatFileTransferDirection(trigger.Direction)}; pending_generation={trigger.PendingProofGeneration}; fallback_epoch={trigger.FallbackEpoch}; transport_epoch={trigger.TransportEpoch}; frame_fingerprint={SanitizeLogToken(trigger.FrameFingerprint)}; data_session_generation={trigger.DataSessionGeneration}; trigger_data_session_generation={trigger.DataSessionGeneration}; source_route={SanitizeLogToken(trigger.RouteHint.Token)}; source_protocol_version={trigger.RouteHint.ProtocolVersion}; source_live_route_epoch={trigger.RouteHint.LiveRouteEpoch}; source_runtime_generation={trigger.RouteHint.RuntimeGeneration}; source_route_publication_generation={trigger.RouteHint.RoutePublicationGeneration}; source_route_commit_generation={trigger.RouteHint.RouteCommitGeneration ?? 0}; source_terminal_generation={trigger.RouteHint.TerminalGeneration}; source_leg_generation={trigger.RouteHint.PublicationLegGeneration}; source_transport_epoch={trigger.RouteHint.FallbackTransportEpoch}; source_bridge_recovery_generation={trigger.RouteHint.FallbackBridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(trigger.RouteHint.FallbackCheckpointRequestId ?? "(none)")}; source_checkpoint_generation={trigger.RouteHint.FallbackCheckpointGeneration}; bulk_seen={(bulkObserved ? 1 : 0)}; control_seen={(controlObserved ? 1 : 0)}; authority_effect=none");
 
-    private void PublishFileTransferFallbackV6ProofBootstrapEvaluation(
+    private FileTransferFallbackV6BootstrapEvaluationPublishStatus
+        PublishFileTransferFallbackV6ProofBootstrapEvaluation(
         string? sessionId,
         FileTransferDirection? direction,
         long observationGeneration,
         string proofKind,
         string source,
-        FileTransferFallbackV6BootstrapTrigger? trigger = null)
+        FileTransferFallbackV6BootstrapTrigger? trigger = null,
+        bool peerFirst = false)
     {
         var subscriber = fallbackV6ProofBootstrapEvaluationRequested;
-        if (subscriber is null ||
-            string.IsNullOrWhiteSpace(sessionId) ||
+        if (string.IsNullOrWhiteSpace(sessionId) ||
             direction is not (FileTransferDirection.Outbound or FileTransferDirection.Inbound) ||
             observationGeneration <= 0)
         {
-            return;
+            return FileTransferFallbackV6BootstrapEvaluationPublishStatus.Invalid;
+        }
+
+        if (subscriber is null)
+        {
+            return FileTransferFallbackV6BootstrapEvaluationPublishStatus.Unavailable;
         }
 
         var fallbackEpoch = trigger?.FallbackEpoch ?? observationGeneration;
-        var key = trigger is null
-            ? $"{sessionId}|{direction}|{fallbackEpoch}"
-            : $"{sessionId}|{direction}|{fallbackEpoch}|{observationGeneration}|" +
-              $"{trigger.TransferId}|{trigger.DataSessionGeneration}";
+        if (trigger is null)
+        {
+            lock (accelerationGate)
+            {
+                if (TryGetCurrentTunaFallbackProofStateUnsafe(
+                        sessionId,
+                        out var fallbackState) &&
+                    fallbackState.Epoch > 0)
+                {
+                    fallbackEpoch = fallbackState.Epoch;
+                }
+            }
+        }
+
+        var cycleKey =
+            $"{sessionId.Trim()}|{direction}|{observationGeneration}|{fallbackEpoch}";
+        var observationKey = $"evaluation|{cycleKey}";
         lock (fileTransferFallbackProofGate)
         {
-            if (!fileTransferFallbackV6ProofBootstrapObservationKeys.Add(key))
+            if (peerFirst && trigger is not null)
             {
-                return;
+                var peerTriggerPrefix = $"peer_trigger|{cycleKey}|";
+                var peerTriggerKey = peerTriggerPrefix +
+                    $"{proofKind}|{trigger.TransferId}|{trigger.TransportEpoch}|" +
+                    $"{trigger.FrameFingerprint}|{trigger.DataSessionGeneration}|" +
+                    GetFileTransferFallbackV6BootstrapRouteHintScope(
+                        trigger.RouteHint);
+                var existingPeerTrigger =
+                    fileTransferFallbackV6ProofBootstrapObservationKeys.FirstOrDefault(
+                        key => key.StartsWith(
+                            peerTriggerPrefix,
+                            StringComparison.Ordinal));
+                if (existingPeerTrigger is not null &&
+                    !string.Equals(
+                        existingPeerTrigger,
+                        peerTriggerKey,
+                        StringComparison.Ordinal))
+                {
+                    return FileTransferFallbackV6BootstrapEvaluationPublishStatus.Conflict;
+                }
+
+                _ = fileTransferFallbackV6ProofBootstrapObservationKeys.Add(
+                    peerTriggerKey);
+            }
+
+            if (!fileTransferFallbackV6ProofBootstrapObservationKeys.Add(
+                    observationKey))
+            {
+                return FileTransferFallbackV6BootstrapEvaluationPublishStatus.Coalesced;
             }
         }
 
@@ -13686,23 +13905,66 @@ public sealed partial class NknSignalingTransport
             trigger?.TransportEpoch ?? 0,
             trigger?.FrameFingerprint,
             trigger?.DataSession,
-            trigger?.DataSessionGeneration ?? 0);
+            trigger?.DataSessionGeneration ?? 0,
+            trigger is null
+                ? null
+                : new FileTransferFallbackV6ProofBootstrapTriggerSourceScope(
+                    trigger.RouteHint.Token,
+                    trigger.RouteHint.ProtocolVersion,
+                    trigger.RouteHint.LiveRouteEpoch,
+                    trigger.RouteHint.RuntimeGeneration,
+                    trigger.RouteHint.RoutePublicationGeneration,
+                    trigger.RouteHint.RouteCommitGeneration ?? 0,
+                    trigger.RouteHint.TerminalGeneration,
+                    trigger.RouteHint.PublicationLegGeneration,
+                    trigger.RouteHint.FallbackTransportEpoch,
+                    trigger.RouteHint.FallbackBridgeRecoveryGeneration,
+                    trigger.RouteHint.FallbackCheckpointRequestId ?? "(none)",
+                    trigger.RouteHint.FallbackCheckpointGeneration));
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_observed; session_id={SanitizeLogToken(evaluation.SessionId)}; transfer_id={SanitizeLogToken(evaluation.TriggerTransferId ?? "(none)")}; direction={FormatFileTransferDirection(evaluation.Direction)}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; proof_kind={SanitizeLogToken(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={SanitizeLogToken(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source={SanitizeLogToken(evaluation.Source)}; authority_effect=coordinator_evaluation_only");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_observed; session_id={SanitizeLogToken(evaluation.SessionId)}; transfer_id={SanitizeLogToken(evaluation.TriggerTransferId ?? "(none)")}; direction={FormatFileTransferDirection(evaluation.Direction)}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; proof_kind={SanitizeLogToken(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={SanitizeLogToken(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={SanitizeLogToken(evaluation.TriggerSourceScope?.RouteToken ?? "(none)")}; source_protocol_version={evaluation.TriggerSourceScope?.ProtocolVersion ?? 0}; source_live_route_epoch={evaluation.TriggerSourceScope?.LiveRouteEpoch ?? 0}; source_runtime_generation={evaluation.TriggerSourceScope?.RuntimeGeneration ?? 0}; source_route_publication_generation={evaluation.TriggerSourceScope?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={evaluation.TriggerSourceScope?.RouteCommitGeneration ?? 0}; source_terminal_generation={evaluation.TriggerSourceScope?.TerminalGeneration ?? 0}; source_leg_generation={evaluation.TriggerSourceScope?.LegGeneration ?? 0}; source_transport_epoch={evaluation.TriggerSourceScope?.TransportEpoch ?? 0}; source_bridge_recovery_generation={evaluation.TriggerSourceScope?.BridgeRecoveryGeneration ?? 0}; source_checkpoint_request_id={SanitizeLogToken(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source={SanitizeLogToken(evaluation.Source)}; authority_effect=coordinator_evaluation_only");
         try
         {
             subscriber.Invoke(
                 this,
                 new FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs(
                     evaluation));
+            return FileTransferFallbackV6BootstrapEvaluationPublishStatus.Published;
         }
         catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=filetransfer_fallback_v6_proof_bootstrap_observation_failed; session_id={SanitizeLogToken(evaluation.SessionId)}; direction={FormatFileTransferDirection(evaluation.Direction)}; fallback_epoch={evaluation.FallbackEpoch}; error={SanitizeLogToken(ex.GetType().Name)}");
+            return FileTransferFallbackV6BootstrapEvaluationPublishStatus.Failed;
         }
+    }
+
+    private static void LogFileTransferFallbackV6BootstrapPeerFirstWakeDecision(
+        FileTransferFallbackV6BootstrapTrigger trigger,
+        string proofKind,
+        FileTransferFallbackV6BootstrapEvaluationPublishStatus status)
+    {
+        var result = status switch
+        {
+            FileTransferFallbackV6BootstrapEvaluationPublishStatus.Published =>
+                "local_bootstrap_evaluation_published",
+            FileTransferFallbackV6BootstrapEvaluationPublishStatus.Coalesced =>
+                "existing_bootstrap_evaluation_current",
+            FileTransferFallbackV6BootstrapEvaluationPublishStatus.Conflict =>
+                "peer_trigger_conflict",
+            FileTransferFallbackV6BootstrapEvaluationPublishStatus.Stale =>
+                "source_changed",
+            FileTransferFallbackV6BootstrapEvaluationPublishStatus.Unavailable =>
+                "evaluation_subscriber_unavailable",
+            FileTransferFallbackV6BootstrapEvaluationPublishStatus.Failed =>
+                "evaluation_callback_failed",
+            _ => "evaluation_invalid",
+        };
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; session_id={SanitizeLogToken(trigger.SessionId)}; transfer_id={SanitizeLogToken(trigger.TransferId)}; direction={FormatFileTransferDirection(trigger.Direction)}; pending_generation={trigger.PendingProofGeneration}; fallback_epoch={trigger.FallbackEpoch}; proof_kind={SanitizeLogToken(proofKind)}; transport_epoch={trigger.TransportEpoch}; frame_fingerprint={SanitizeLogToken(trigger.FrameFingerprint)}; trigger_data_session_generation={trigger.DataSessionGeneration}; source_route={SanitizeLogToken(trigger.RouteHint.Token)}; source_protocol_version={trigger.RouteHint.ProtocolVersion}; source_live_route_epoch={trigger.RouteHint.LiveRouteEpoch}; source_runtime_generation={trigger.RouteHint.RuntimeGeneration}; source_route_publication_generation={trigger.RouteHint.RoutePublicationGeneration}; source_route_commit_generation={trigger.RouteHint.RouteCommitGeneration ?? 0}; source_terminal_generation={trigger.RouteHint.TerminalGeneration}; source_leg_generation={trigger.RouteHint.PublicationLegGeneration}; source_transport_epoch={trigger.RouteHint.FallbackTransportEpoch}; source_bridge_recovery_generation={trigger.RouteHint.FallbackBridgeRecoveryGeneration}; source_checkpoint_request_id={SanitizeLogToken(trigger.RouteHint.FallbackCheckpointRequestId ?? "(none)")}; source_checkpoint_generation={trigger.RouteHint.FallbackCheckpointGeneration}; decision_status={SanitizeLogToken(status.ToString())}; decision_result={result}; authority_effect=none");
     }
 
     private bool TryBindPendingRuntimeUnlockAccelerationNegotiationUnsafe(

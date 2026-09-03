@@ -178,6 +178,13 @@ public sealed partial class SessionFileTransferService
             State: "recovered",
         };
 
+    private static bool IsPostRecoveryFileTunaV4LiveActivationEpoch(
+        LiveRouteEpoch? epoch,
+        int lastRecoveredLiveRouteEpochId)
+        => lastRecoveredLiveRouteEpochId > 0 &&
+           IsRecoveredFileTunaV4LiveActivationEpoch(epoch) &&
+           epoch!.EpochId > lastRecoveredLiveRouteEpochId;
+
     private static long ResolveV6RuntimeProofTransportEpoch(FileTransferDataFrame frame)
         => frame switch
         {
@@ -190,8 +197,14 @@ public sealed partial class SessionFileTransferService
     private static bool IsFreshPostReactivationFallbackV6Proof(
         OutboundTransferContext context,
         FileTransferDataFrame frame)
+        => IsFreshPostReactivationFallbackV6Proof(
+            context,
+            ResolveV6RuntimeProofTransportEpoch(frame));
+
+    private static bool IsFreshPostReactivationFallbackV6Proof(
+        OutboundTransferContext context,
+        long frameTransportEpoch)
     {
-        var frameTransportEpoch = ResolveV6RuntimeProofTransportEpoch(frame);
         return frameTransportEpoch > 0 &&
                context.LastRecoveredV6TransportEpoch > 0 &&
                frameTransportEpoch >= context.LastRecoveredV6TransportEpoch &&
@@ -202,14 +215,42 @@ public sealed partial class SessionFileTransferService
     private static bool IsFreshPostReactivationFallbackV6Proof(
         InboundTransferContext context,
         FileTransferDataFrame frame)
+        => IsFreshPostReactivationFallbackV6Proof(
+            context,
+            ResolveV6RuntimeProofTransportEpoch(frame));
+
+    private static bool IsFreshPostReactivationFallbackV6Proof(
+        InboundTransferContext context,
+        long frameTransportEpoch)
     {
-        var frameTransportEpoch = ResolveV6RuntimeProofTransportEpoch(frame);
         return frameTransportEpoch > 0 &&
                context.LastRecoveredV6TransportEpoch > 0 &&
                frameTransportEpoch >= context.LastRecoveredV6TransportEpoch &&
                context.LastRecoveredV6TransportEpochKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                context.LastRecoveredV6TransportTargetTransport == FileTransferTransportKind.Tuna;
     }
+
+    private static bool IsStalePostReactivationFallbackV6Proof(
+        OutboundTransferContext context,
+        long frameTransportEpoch)
+        => frameTransportEpoch > 0 &&
+           context.LastRecoveredV6TransportEpoch > 0 &&
+           frameTransportEpoch < context.LastRecoveredV6TransportEpoch &&
+           context.LastRecoveredV6TransportEpochKind ==
+               FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           context.LastRecoveredV6TransportTargetTransport ==
+               FileTransferTransportKind.Tuna;
+
+    private static bool IsStalePostReactivationFallbackV6Proof(
+        InboundTransferContext context,
+        long frameTransportEpoch)
+        => frameTransportEpoch > 0 &&
+           context.LastRecoveredV6TransportEpoch > 0 &&
+           frameTransportEpoch < context.LastRecoveredV6TransportEpoch &&
+           context.LastRecoveredV6TransportEpochKind ==
+               FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           context.LastRecoveredV6TransportTargetTransport ==
+               FileTransferTransportKind.Tuna;
 
     private static void LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
         FileTransferDirection direction,
@@ -290,6 +331,8 @@ public sealed partial class SessionFileTransferService
                         out var bootstrapCommand,
                         out var bootstrapReasonCode);
             FileTransferFallbackV6ProofBootstrapPeerBoundary? proofBoundary = null;
+            FileTransferFallbackV6ProofBootstrapPeerFrameBinding?
+                bootstrapPeerBinding = null;
             if (bootstrapPeerBoundary &&
                 FileTransferCoordinator
                     .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
@@ -299,6 +342,15 @@ public sealed partial class SessionFileTransferService
                         out _))
             {
                 proofBoundary = exactProofBoundary;
+            }
+            if (bootstrapPeerBoundary &&
+                TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                    context,
+                    frame,
+                    FileTransferDirection.Outbound,
+                    out var exactBootstrapPeerBinding))
+            {
+                bootstrapPeerBinding = exactBootstrapPeerBinding;
             }
             if (IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch) &&
                 !IsFreshPostReactivationFallbackV6Proof(context, frame) &&
@@ -321,7 +373,8 @@ public sealed partial class SessionFileTransferService
                         bootstrapCommand,
                         "staged",
                         stagingReason,
-                        "evidence_only");
+                        "evidence_only",
+                        context.PendingFallbackV6ProofBootstrapPeerFrameBinding);
                     return true;
                 }
 
@@ -384,13 +437,15 @@ public sealed partial class SessionFileTransferService
                         : "peer_frame_retention_rejected",
                     peerFrameRetained && proofBoundary is not null
                         ? "peer_proof_binding_only"
-                        : "peer_frame_retention_only");
+                        : "peer_frame_retention_only",
+                    bootstrapPeerBinding);
                 if (peerFrameRetained && proofBoundary is not null)
                 {
                     LogFallbackV6ProofBootstrapPeerBoundaryBound(
                         proofBoundary,
                         "Bound",
-                        "bootstrap_peer_frame_bound");
+                        "bootstrap_peer_frame_bound",
+                        bootstrapPeerBinding);
                 }
             }
             return true;
@@ -437,6 +492,8 @@ public sealed partial class SessionFileTransferService
                         out bootstrapCommand,
                         out bootstrapReasonCode);
             FileTransferFallbackV6ProofBootstrapPeerBoundary? proofBoundary = null;
+            FileTransferFallbackV6ProofBootstrapPeerFrameBinding?
+                bootstrapPeerBinding = null;
             if (bootstrapPeerBoundary &&
                 FileTransferCoordinator
                     .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
@@ -446,6 +503,15 @@ public sealed partial class SessionFileTransferService
                         out _))
             {
                 proofBoundary = exactProofBoundary;
+            }
+            if (bootstrapPeerBoundary &&
+                TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                    context,
+                    frame,
+                    FileTransferDirection.Inbound,
+                    out var exactBootstrapPeerBinding))
+            {
+                bootstrapPeerBinding = exactBootstrapPeerBinding;
             }
             if (canPromoteFromFileTuna &&
                 IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch) &&
@@ -469,7 +535,8 @@ public sealed partial class SessionFileTransferService
                         bootstrapCommand,
                         "staged",
                         stagingReason,
-                        "evidence_only");
+                        "evidence_only",
+                        context.PendingFallbackV6ProofBootstrapPeerFrameBinding);
                     return true;
                 }
 
@@ -532,13 +599,15 @@ public sealed partial class SessionFileTransferService
                         : "peer_frame_retention_rejected",
                     peerFrameRetained && proofBoundary is not null
                         ? "peer_proof_binding_only"
-                        : "peer_frame_retention_only");
+                        : "peer_frame_retention_only",
+                    bootstrapPeerBinding);
                 if (peerFrameRetained && proofBoundary is not null)
                 {
                     LogFallbackV6ProofBootstrapPeerBoundaryBound(
                         proofBoundary,
                         "Bound",
-                        "bootstrap_peer_frame_bound");
+                        "bootstrap_peer_frame_bound",
+                        bootstrapPeerBinding);
                 }
             }
             return true;
@@ -553,7 +622,8 @@ public sealed partial class SessionFileTransferService
         FileTransferFallbackV6ProofBootstrapCommand? command,
         string decisionStatus,
         string reasonCode,
-        string authorityEffect)
+        string authorityEffect,
+        FileTransferFallbackV6ProofBootstrapPeerFrameBinding? binding = null)
     {
         var requestCorrelationId = frame is FileTransferFrontierRequestFrameV6 request
             ? request.RequestCorrelationId
@@ -564,18 +634,24 @@ public sealed partial class SessionFileTransferService
                 out var frameIdentity)
                 ? frameIdentity.Sha256
                 : "(none)";
+        var checkpoint = binding?.DurableCheckpoint;
+        var sourceCommit = binding?.SourceRouteCommit;
+        var bindingFields = binding is null
+            ? "; peer_binding_present=0; peer_data_session_reference_generation=0; peer_data_session_generation=0; source_route=(none); source_protocol_version=0; source_live_route_epoch=0; source_runtime_generation=0; source_route_publication_generation=0; source_route_commit_generation=0; source_terminal_generation=0; source_leg_generation=0; source_transport_epoch=0; source_bridge_recovery_generation=0; source_checkpoint_request_id=(none); source_checkpoint_generation=0; source_durable_checkpoint_generation=0; source_state_epoch=0; source_contiguous_frontier=0; source_durable_highest=-1; source_chunk_count=0"
+            : $"; peer_binding_present=1; peer_data_session_reference_generation={binding.DataSessionReferenceGeneration}; peer_data_session_generation={binding.DataSessionGeneration}; source_route={FormatProtocolLogValue(sourceCommit?.RouteToken ?? "(none)")}; source_protocol_version={sourceCommit?.ProtocolVersion ?? 0}; source_live_route_epoch={sourceCommit?.LiveRouteEpoch ?? 0}; source_runtime_generation={checkpoint?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={checkpoint?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={sourceCommit?.CommitGeneration ?? 0}; source_terminal_generation={checkpoint?.SourceTerminalGeneration ?? 0}; source_leg_generation={checkpoint?.SourceLegGeneration ?? 0}; source_transport_epoch={checkpoint?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={checkpoint?.SourceBridgeRecoveryGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(binding.CheckpointRequestId)}; source_checkpoint_generation={binding.CheckpointGeneration}; source_durable_checkpoint_generation={checkpoint?.CheckpointGeneration ?? 0}; source_state_epoch={checkpoint?.StateEpoch ?? 0}; source_contiguous_frontier={checkpoint?.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={checkpoint?.DurableHighestChunkIndex ?? -1}; source_chunk_count={checkpoint?.ChunkCount ?? 0}";
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; fallback_epoch={command?.Observation.FallbackEpoch ?? 0}; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; frame_type={FormatProtocolLogValue(frame.Type)}; frame_transport_epoch={ResolveV6RuntimeProofTransportEpoch(frame)}; frame_fingerprint={FormatProtocolLogValue(frameFingerprint)}; request_correlation_id={FormatProtocolLogValue(requestCorrelationId ?? "(none)")}; decision_status={FormatProtocolLogValue(decisionStatus)}; reason_code={FormatProtocolLogValue(reasonCode)}; authority_effect={FormatProtocolLogValue(authorityEffect)}; decision_reason={FormatProtocolLogValue(reasonCode)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; fallback_epoch={command?.Observation.FallbackEpoch ?? 0}; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; frame_type={FormatProtocolLogValue(frame.Type)}; frame_transport_epoch={ResolveV6RuntimeProofTransportEpoch(frame)}; frame_fingerprint={FormatProtocolLogValue(frameFingerprint)}; request_correlation_id={FormatProtocolLogValue(requestCorrelationId ?? "(none)")}{bindingFields}; decision_status={FormatProtocolLogValue(decisionStatus)}; reason_code={FormatProtocolLogValue(reasonCode)}; authority_effect={FormatProtocolLogValue(authorityEffect)}; decision_reason={FormatProtocolLogValue(reasonCode)}");
     }
 
     private static void LogFallbackV6ProofBootstrapPeerBoundaryBound(
         FileTransferFallbackV6ProofBootstrapPeerBoundary boundary,
         string status,
-        string reason)
+        string reason,
+        FileTransferFallbackV6ProofBootstrapPeerFrameBinding? binding = null)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; session_id={FormatProtocolLogValue(boundary.Command.Observation.SessionId)}; transfer_id={FormatProtocolLogValue(boundary.Command.Observation.TransferId)}; direction={boundary.Command.Observation.Direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(boundary.Command.AuthorityId.ToString())}; bootstrap_generation={boundary.Command.BootstrapGeneration}; fallback_epoch={boundary.Command.Observation.FallbackEpoch}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={boundary.Command.SourceLiveRouteEpoch}; source_runtime_generation={boundary.Command.SourceRuntimeOwner.RuntimeGeneration}; source_route_publication_generation={boundary.Command.SourceRoutePublication.PublicationGeneration}; source_route_commit_generation={boundary.Command.SourceRouteCommit.CommitGeneration}; source_terminal_generation={boundary.Command.SourceTerminalGeneration}; source_leg_generation={boundary.Command.SourceLegGeneration}; source_transport_epoch={boundary.Command.SourceTransportEpoch}; source_bridge_recovery_generation={boundary.Command.SourceBridgeRecoveryGeneration}; source_data_session_generation={boundary.Command.SourceDataSessionGeneration}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport_epoch={boundary.Command.TargetTransportEpoch}; local_receipt_status={boundary.LocalDeliveryReceipt.Status}; local_frame_fingerprint={FormatProtocolLogValue(boundary.LocalDeliveryReceipt.FrameIdentity?.Sha256 ?? "(none)")}; peer_frame_type={FormatProtocolLogValue(boundary.PeerFrameIdentity.FrameType)}; peer_frame_fingerprint={FormatProtocolLogValue(boundary.PeerFrameIdentity.Sha256)}; proof_generation={boundary.PeerProofEvidence.ProofGeneration}; proof_kind={FormatProtocolLogValue(boundary.PeerProofEvidence.ProofKind)}; pairing_status={FormatProtocolLogValue(status)}; authority_effect=peer_proof_binding_only; decision_reason={reason}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; session_id={FormatProtocolLogValue(boundary.Command.Observation.SessionId)}; transfer_id={FormatProtocolLogValue(boundary.Command.Observation.TransferId)}; direction={boundary.Command.Observation.Direction.ToString().ToLowerInvariant()}; authority_id={FormatProtocolLogValue(boundary.Command.AuthorityId.ToString())}; bootstrap_generation={boundary.Command.BootstrapGeneration}; fallback_epoch={boundary.Command.Observation.FallbackEpoch}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={boundary.Command.SourceLiveRouteEpoch}; source_runtime_generation={boundary.Command.SourceRuntimeOwner.RuntimeGeneration}; source_route_publication_generation={boundary.Command.SourceRoutePublication.PublicationGeneration}; source_route_commit_generation={boundary.Command.SourceRouteCommit.CommitGeneration}; source_terminal_generation={boundary.Command.SourceTerminalGeneration}; source_leg_generation={boundary.Command.SourceLegGeneration}; source_transport_epoch={boundary.Command.SourceTransportEpoch}; source_bridge_recovery_generation={boundary.Command.SourceBridgeRecoveryGeneration}; source_data_session_generation={boundary.Command.SourceDataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(binding?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={binding?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={boundary.Command.Observation.DurableCheckpoint.CheckpointGeneration}; source_state_epoch={boundary.Command.Observation.DurableCheckpoint.StateEpoch}; source_contiguous_frontier={boundary.Command.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex}; source_durable_highest={boundary.Command.Observation.DurableCheckpoint.DurableHighestChunkIndex}; source_chunk_count={boundary.Command.Observation.DurableCheckpoint.ChunkCount}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport_epoch={boundary.Command.TargetTransportEpoch}; local_receipt_status={boundary.LocalDeliveryReceipt.Status}; local_frame_fingerprint={FormatProtocolLogValue(boundary.LocalDeliveryReceipt.FrameIdentity?.Sha256 ?? "(none)")}; peer_frame_type={FormatProtocolLogValue(boundary.PeerFrameIdentity.FrameType)}; peer_frame_fingerprint={FormatProtocolLogValue(boundary.PeerFrameIdentity.Sha256)}; proof_generation={boundary.PeerProofEvidence.ProofGeneration}; proof_kind={FormatProtocolLogValue(boundary.PeerProofEvidence.ProofKind)}; pairing_status={FormatProtocolLogValue(status)}; authority_effect=peer_proof_binding_only; decision_reason={reason}");
 
     private bool ShouldBoundOutboundV4TransportSendForV6RegularNknSparseRuntime(OutboundTransferContext context)
     {

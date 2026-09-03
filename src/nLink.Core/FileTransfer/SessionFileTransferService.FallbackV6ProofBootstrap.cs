@@ -2,6 +2,20 @@ using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
 
+internal sealed record FileTransferFallbackV6ProofBootstrapPeerFrameBinding(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    PostTunaFallbackPeerProofFrameIdentity FrameIdentity,
+    IFileTransferDataSession DataSession,
+    long DataSessionReferenceGeneration,
+    long DataSessionGeneration,
+    FileTransferRouteTransitionDurableCheckpoint DurableCheckpoint,
+    RouteCommitToken SourceRouteCommit,
+    FallbackCheckpointLease? FallbackCheckpointLease,
+    string CheckpointRequestId,
+    int CheckpointGeneration);
+
 public sealed partial class SessionFileTransferService
 {
     private void OnFallbackV6ProofBootstrapEvaluationRequested(
@@ -133,6 +147,16 @@ public sealed partial class SessionFileTransferService
 
         if (evaluation.Direction == FileTransferDirection.Outbound)
         {
+            if (outboundTransfer is { IsTerminal: false } currentOutbound &&
+                string.Equals(
+                    currentOutbound.SessionId,
+                    evaluation.SessionId,
+                    StringComparison.Ordinal))
+            {
+                RetireFallbackV6ProofBootstrapPeerFrameBindingIfSourceChanged(
+                    currentOutbound);
+            }
+
             if (outboundTransfer is not { IsTerminal: false } context ||
                 !string.Equals(context.SessionId, evaluation.SessionId, StringComparison.Ordinal) ||
                 !MatchesFallbackV6ProofBootstrapTrigger(
@@ -155,6 +179,27 @@ public sealed partial class SessionFileTransferService
                 owner,
                 publication,
                 leg);
+            if (!MatchesFallbackV6ProofBootstrapPhysicalTrigger(
+                    evaluation,
+                    checkpoint) ||
+                (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) &&
+                 (evaluation.FallbackEpoch <= 1 ||
+                  !IsPostRecoveryFileTunaV4LiveActivationEpoch(
+                     context.CurrentLiveRouteEpoch,
+                     context.LastRecoveredV6TransportLiveRouteEpochId) ||
+                  !IsStalePostReactivationFallbackV6Proof(
+                      context,
+                      evaluation.TriggerTransportEpoch) ||
+                  !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
+                      evaluation,
+                      checkpoint,
+                      context.RuntimeUnlockRouteCommitToken.Value,
+                      context.CurrentTransferLeg.CheckpointRequestId,
+                      context.CurrentTransferLeg.CheckpointGeneration))))
+            {
+                return false;
+            }
+
             var observation = CreateFallbackV6ProofBootstrapObservation(
                 evaluation,
                 context.TransferId,
@@ -180,7 +225,8 @@ public sealed partial class SessionFileTransferService
             command = issued;
             TryAdmitOutboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
                 context,
-                command);
+                command,
+                evaluation);
             dataSession = currentDataSession;
             epochFrame = CreateFallbackV6ProofBootstrapEpochFrame(command);
             proofFrame = new FileTransferFrontierRequestFrameV6
@@ -204,6 +250,16 @@ public sealed partial class SessionFileTransferService
                 decision.Status.ToString(),
                 decision.Reason);
             return true;
+        }
+
+        if (inboundTransfer is { IsTerminal: false } currentInbound &&
+            string.Equals(
+                currentInbound.SessionId,
+                evaluation.SessionId,
+                StringComparison.Ordinal))
+        {
+            RetireFallbackV6ProofBootstrapPeerFrameBindingIfSourceChanged(
+                currentInbound);
         }
 
         if (inboundTransfer is not { IsTerminal: false } inbound ||
@@ -230,6 +286,27 @@ public sealed partial class SessionFileTransferService
             inboundOwner,
             inboundPublication,
             inboundLeg);
+        if (!MatchesFallbackV6ProofBootstrapPhysicalTrigger(
+                evaluation,
+                inboundCheckpoint) ||
+            (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) &&
+             (evaluation.FallbackEpoch <= 1 ||
+              !IsPostRecoveryFileTunaV4LiveActivationEpoch(
+                 inbound.CurrentLiveRouteEpoch,
+                 inbound.LastRecoveredV6TransportLiveRouteEpochId) ||
+              !IsStalePostReactivationFallbackV6Proof(
+                  inbound,
+                  evaluation.TriggerTransportEpoch) ||
+              !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
+                  evaluation,
+                  inboundCheckpoint,
+                  inbound.RuntimeUnlockRouteCommitToken.Value,
+                  inbound.CurrentTransferLeg.CheckpointRequestId,
+                  inbound.CurrentTransferLeg.CheckpointGeneration))))
+        {
+            return false;
+        }
+
         var inboundObservation = CreateFallbackV6ProofBootstrapObservation(
             evaluation,
             inbound.TransferId,
@@ -255,7 +332,8 @@ public sealed partial class SessionFileTransferService
         command = inboundCommand;
         TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
             inbound,
-            command);
+            command,
+            evaluation);
         dataSession = inboundDataSession;
         epochFrame = CreateFallbackV6ProofBootstrapEpochFrame(command);
         proofFrame = new FileTransferReceiverStateFrameV6
@@ -366,12 +444,17 @@ public sealed partial class SessionFileTransferService
             context.DataSession is not { } dataSession ||
             context.FileTransferRouteTransitionExecution?.RetainedPeerFrame is not
                 { } retainedFrame ||
-            !FileTransferCoordinator
-                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
-                    CreateCoordinatorStateLocked(context),
-                    retainedFrame,
-                    out var boundary,
-                    out _))
+             !FileTransferCoordinator
+                 .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                     CreateCoordinatorStateLocked(context),
+                     retainedFrame,
+                     out var boundary,
+                     out _) ||
+             !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                 context,
+                 retainedFrame,
+                 FileTransferDirection.Outbound,
+                 out var binding))
         {
             return false;
         }
@@ -393,7 +476,8 @@ public sealed partial class SessionFileTransferService
             duplicate ? "Idempotent" : "Bound",
             duplicate
                 ? "bootstrap_peer_frame_binding_duplicate"
-                : "bootstrap_peer_frame_bound_after_delivery");
+                : "bootstrap_peer_frame_bound_after_delivery",
+            binding);
         return true;
     }
 
@@ -407,12 +491,17 @@ public sealed partial class SessionFileTransferService
             context.DataSession is not { } dataSession ||
             context.FileTransferRouteTransitionExecution?.RetainedPeerFrame is not
                 { } retainedFrame ||
-            !FileTransferCoordinator
-                .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
-                    CreateCoordinatorStateLocked(context),
-                    retainedFrame,
-                    out var boundary,
-                    out _))
+             !FileTransferCoordinator
+                 .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                     CreateCoordinatorStateLocked(context),
+                     retainedFrame,
+                     out var boundary,
+                     out _) ||
+             !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                 context,
+                 retainedFrame,
+                 FileTransferDirection.Inbound,
+                 out var binding))
         {
             return false;
         }
@@ -434,7 +523,8 @@ public sealed partial class SessionFileTransferService
             duplicate ? "Idempotent" : "Bound",
             duplicate
                 ? "bootstrap_peer_frame_binding_duplicate"
-                : "bootstrap_peer_frame_bound_after_delivery");
+                : "bootstrap_peer_frame_bound_after_delivery",
+            binding);
         return true;
     }
 
@@ -451,9 +541,11 @@ public sealed partial class SessionFileTransferService
             frame is not FileTransferReceiverStateFrameV6 receiverState ||
             !FileTransferProtocol.IsFallbackV6ProofBootstrapReceiverState(
                 receiverState) ||
-            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+            !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
                 frame,
-                out var candidateIdentity))
+                FileTransferDirection.Outbound,
+                out var candidateBinding))
         {
             return false;
         }
@@ -464,7 +556,19 @@ public sealed partial class SessionFileTransferService
             if (!PostTunaFallbackPeerProofFrameIdentity.TryCreate(
                     existing,
                     out var existingIdentity) ||
-                existingIdentity != candidateIdentity)
+                context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not
+                    { } existingBinding ||
+                !MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+                    existingBinding,
+                    candidateBinding))
+            {
+                context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+                context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+                reason = "precommand_peer_frame_source_changed";
+                return false;
+            }
+
+            if (existingIdentity != candidateBinding.FrameIdentity)
             {
                 reason = "precommand_peer_frame_conflict";
                 return false;
@@ -475,6 +579,8 @@ public sealed partial class SessionFileTransferService
         }
 
         context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = frame;
+        context.PendingFallbackV6ProofBootstrapPeerFrameBinding =
+            candidateBinding;
         reason = "precommand_peer_frame_staged";
         return true;
     }
@@ -493,9 +599,11 @@ public sealed partial class SessionFileTransferService
             !FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
                 frontierRequest,
                 out _) ||
-            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+            !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
                 frame,
-                out var candidateIdentity))
+                FileTransferDirection.Inbound,
+                out var candidateBinding))
         {
             return false;
         }
@@ -506,7 +614,19 @@ public sealed partial class SessionFileTransferService
             if (!PostTunaFallbackPeerProofFrameIdentity.TryCreate(
                     existing,
                     out var existingIdentity) ||
-                existingIdentity != candidateIdentity)
+                context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not
+                    { } existingBinding ||
+                !MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+                    existingBinding,
+                    candidateBinding))
+            {
+                context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+                context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+                reason = "precommand_peer_frame_source_changed";
+                return false;
+            }
+
+            if (existingIdentity != candidateBinding.FrameIdentity)
             {
                 reason = "precommand_peer_frame_conflict";
                 return false;
@@ -517,13 +637,16 @@ public sealed partial class SessionFileTransferService
         }
 
         context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = frame;
+        context.PendingFallbackV6ProofBootstrapPeerFrameBinding =
+            candidateBinding;
         reason = "precommand_peer_frame_staged";
         return true;
     }
 
     private void TryAdmitOutboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
         OutboundTransferContext context,
-        FileTransferFallbackV6ProofBootstrapCommand command)
+        FileTransferFallbackV6ProofBootstrapCommand command,
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
     {
         if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not
             { } frame)
@@ -532,15 +655,31 @@ public sealed partial class SessionFileTransferService
         }
 
         var coordinatorState = CreateCoordinatorStateLocked(context);
-        if (!FileTransferCoordinator
+        var reasonCode = "precommand_peer_frame_trigger_mismatch";
+        if (!TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
+                frame,
+                FileTransferDirection.Outbound,
+                out var currentBinding) ||
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not
+                { } pendingBinding ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+                pendingBinding,
+                currentBinding) ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameEvaluation(
+                pendingBinding,
+                evaluation,
+                command) ||
+            !FileTransferCoordinator
                 .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
                     coordinatorState,
                     frame,
                     out var currentCommand,
-                    out var reasonCode) ||
+                    out reasonCode) ||
             currentCommand != command)
         {
             context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
             LogFallbackV6ProofBootstrapPeerFrameDecision(
                 context.SessionId,
                 context.TransferId,
@@ -561,6 +700,7 @@ public sealed partial class SessionFileTransferService
             out _,
             out var retained);
         context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+        context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
         LogFallbackV6ProofBootstrapPeerFrameDecision(
             context.SessionId,
             context.TransferId,
@@ -571,12 +711,14 @@ public sealed partial class SessionFileTransferService
             handled && retained
                 ? "precommand_peer_frame_admitted"
                 : "peer_frame_retention_rejected",
-            handled && retained ? "peer_frame_retention_only" : "none");
+            handled && retained ? "peer_frame_retention_only" : "none",
+            pendingBinding);
     }
 
     private void TryAdmitInboundStagedFallbackV6ProofBootstrapPeerFrameLocked(
         InboundTransferContext context,
-        FileTransferFallbackV6ProofBootstrapCommand command)
+        FileTransferFallbackV6ProofBootstrapCommand command,
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
     {
         if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not
             { } frame)
@@ -585,15 +727,31 @@ public sealed partial class SessionFileTransferService
         }
 
         var coordinatorState = CreateCoordinatorStateLocked(context);
-        if (!FileTransferCoordinator
+        var reasonCode = "precommand_peer_frame_trigger_mismatch";
+        if (!TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
+                frame,
+                FileTransferDirection.Inbound,
+                out var currentBinding) ||
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not
+                { } pendingBinding ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+                pendingBinding,
+                currentBinding) ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameEvaluation(
+                pendingBinding,
+                evaluation,
+                command) ||
+            !FileTransferCoordinator
                 .TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerBoundary(
                     coordinatorState,
                     frame,
                     out var currentCommand,
-                    out var reasonCode) ||
+                    out reasonCode) ||
             currentCommand != command)
         {
             context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
             LogFallbackV6ProofBootstrapPeerFrameDecision(
                 context.SessionId,
                 context.TransferId,
@@ -614,6 +772,7 @@ public sealed partial class SessionFileTransferService
             out _,
             out var retained);
         context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+        context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
         LogFallbackV6ProofBootstrapPeerFrameDecision(
             context.SessionId,
             context.TransferId,
@@ -624,7 +783,197 @@ public sealed partial class SessionFileTransferService
             handled && retained
                 ? "precommand_peer_frame_admitted"
                 : "peer_frame_retention_rejected",
-            handled && retained ? "peer_frame_retention_only" : "none");
+            handled && retained ? "peer_frame_retention_only" : "none",
+            pendingBinding);
+    }
+
+    private static bool TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+        OutboundTransferContext context,
+        FileTransferDataFrame frame,
+        FileTransferDirection direction,
+        out FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding)
+    {
+        binding = null!;
+        if (direction != FileTransferDirection.Outbound ||
+            context.DataSession is not { } dataSession ||
+            dataSession is not IFileTransferDataSessionGenerationProvider provider ||
+            provider.Generation <= 0 ||
+            context.DataSessionGeneration <= 0 ||
+            context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
+            context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
+            context.CurrentTransferLeg is not { } leg ||
+            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out var frameIdentity))
+        {
+            return false;
+        }
+
+        binding = new FileTransferFallbackV6ProofBootstrapPeerFrameBinding(
+            context.SessionId,
+            context.TransferId,
+            direction,
+            frameIdentity,
+            dataSession,
+            provider.Generation,
+            context.DataSessionGeneration,
+            CreateOutboundFileTransferRouteTransitionCheckpoint(
+                context,
+                owner,
+                publication,
+                leg),
+            routeCommit,
+            context.CurrentFallbackCheckpointLease,
+            leg.CheckpointRequestId ?? "(none)",
+            leg.CheckpointGeneration);
+        return true;
+    }
+
+    private static bool TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+        InboundTransferContext context,
+        FileTransferDataFrame frame,
+        FileTransferDirection direction,
+        out FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding)
+    {
+        binding = null!;
+        if (direction != FileTransferDirection.Inbound ||
+            context.DataSession is not { } dataSession ||
+            dataSession is not IFileTransferDataSessionGenerationProvider provider ||
+            provider.Generation <= 0 ||
+            context.DataSessionGeneration <= 0 ||
+            context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
+            context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
+            context.CurrentTransferLeg is not { } leg ||
+            !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                frame,
+                out var frameIdentity))
+        {
+            return false;
+        }
+
+        binding = new FileTransferFallbackV6ProofBootstrapPeerFrameBinding(
+            context.SessionId,
+            context.TransferId,
+            direction,
+            frameIdentity,
+            dataSession,
+            provider.Generation,
+            context.DataSessionGeneration,
+            CreateInboundFileTransferRouteTransitionCheckpoint(
+                context,
+                owner,
+                publication,
+                leg),
+            routeCommit,
+            context.CurrentFallbackCheckpointLease,
+            leg.CheckpointRequestId ?? "(none)",
+            leg.CheckpointGeneration);
+        return true;
+    }
+
+    private static bool MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+        FileTransferFallbackV6ProofBootstrapPeerFrameBinding left,
+        FileTransferFallbackV6ProofBootstrapPeerFrameBinding right)
+        => string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal) &&
+           string.Equals(left.TransferId, right.TransferId, StringComparison.Ordinal) &&
+           left.Direction == right.Direction &&
+           ReferenceEquals(left.DataSession, right.DataSession) &&
+           left.DataSessionReferenceGeneration ==
+               right.DataSessionReferenceGeneration &&
+           left.DataSessionGeneration == right.DataSessionGeneration &&
+           left.DurableCheckpoint == right.DurableCheckpoint &&
+           left.SourceRouteCommit == right.SourceRouteCommit &&
+           left.FallbackCheckpointLease == right.FallbackCheckpointLease &&
+           string.Equals(
+               left.CheckpointRequestId,
+               right.CheckpointRequestId,
+               StringComparison.Ordinal) &&
+           left.CheckpointGeneration == right.CheckpointGeneration;
+
+    private static bool MatchesFallbackV6ProofBootstrapPeerFrameEvaluation(
+        FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding,
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        FileTransferFallbackV6ProofBootstrapCommand command)
+        => string.Equals(
+               binding.SessionId,
+               evaluation.SessionId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               binding.TransferId,
+               evaluation.TriggerTransferId,
+               StringComparison.Ordinal) &&
+           binding.Direction == evaluation.Direction &&
+           binding.FrameIdentity.TransportEpoch ==
+               evaluation.TriggerTransportEpoch &&
+           string.Equals(
+               binding.FrameIdentity.Sha256,
+               evaluation.TriggerFrameFingerprint,
+               StringComparison.Ordinal) &&
+           ReferenceEquals(binding.DataSession, evaluation.TriggerDataSession) &&
+           binding.DataSessionReferenceGeneration ==
+               evaluation.TriggerDataSessionGeneration &&
+           MatchesFallbackV6ProofBootstrapTriggerSourceScope(
+               evaluation,
+               binding.DurableCheckpoint,
+               binding.SourceRouteCommit,
+               binding.CheckpointRequestId,
+               binding.CheckpointGeneration) &&
+           binding.DurableCheckpoint == command.Observation.DurableCheckpoint &&
+           binding.SourceRouteCommit == command.SourceRouteCommit &&
+           binding.DataSessionGeneration == command.SourceDataSessionGeneration;
+
+    private static void
+        RetireFallbackV6ProofBootstrapPeerFrameBindingIfSourceChanged(
+            OutboundTransferContext context)
+    {
+        if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not
+                { } frame ||
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not
+                { } pendingBinding)
+        {
+            return;
+        }
+
+        if (!TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
+                frame,
+                FileTransferDirection.Outbound,
+                out var currentBinding) ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+                pendingBinding,
+                currentBinding))
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+        }
+    }
+
+    private static void
+        RetireFallbackV6ProofBootstrapPeerFrameBindingIfSourceChanged(
+            InboundTransferContext context)
+    {
+        if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not
+                { } frame ||
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding is not
+                { } pendingBinding)
+        {
+            return;
+        }
+
+        if (!TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
+                frame,
+                FileTransferDirection.Inbound,
+                out var currentBinding) ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameBinding(
+                pendingBinding,
+                currentBinding))
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+        }
     }
 
     private static FileTransferFallbackV6ProofBootstrapObservation
@@ -657,7 +1006,26 @@ public sealed partial class SessionFileTransferService
                    evaluation.TriggerDataSessionGeneration == 0;
         }
 
-        return evaluation.Direction == FileTransferDirection.Inbound &&
+        var triggerKindMatchesDirection = evaluation.Direction switch
+        {
+            FileTransferDirection.Outbound =>
+                string.Equals(
+                    evaluation.ProofKind,
+                    "file_transfer_v6_state_frame_received",
+                    StringComparison.Ordinal),
+            FileTransferDirection.Inbound =>
+                string.Equals(
+                    evaluation.ProofKind,
+                    "file_transfer_v6_frontier_request_frame_received",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    evaluation.ProofKind,
+                    "file_transfer_bulk_frame_received",
+                    StringComparison.Ordinal),
+            _ => false,
+        };
+
+        return triggerKindMatchesDirection &&
                string.Equals(
                    evaluation.TriggerTransferId,
                    transferId,
@@ -670,6 +1038,63 @@ public sealed partial class SessionFileTransferService
                evaluation.TriggerDataSessionGeneration > 0 &&
                evaluation.TriggerDataSessionGeneration == generationProvider.Generation &&
                dataSessionGeneration > 0;
+    }
+
+    private static bool MatchesFallbackV6ProofBootstrapPhysicalTrigger(
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        FileTransferRouteTransitionDurableCheckpoint checkpoint)
+    {
+        if (string.IsNullOrWhiteSpace(evaluation.TriggerTransferId) ||
+            string.Equals(
+                evaluation.ProofKind,
+                "file_transfer_bulk_frame_received",
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return evaluation.TriggerTransportEpoch > 0 &&
+               evaluation.TriggerTransportEpoch ==
+                   checkpoint.SourceTransportEpoch + 1;
+    }
+
+    private static bool IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
+        => !string.IsNullOrWhiteSpace(evaluation.TriggerTransferId) &&
+           evaluation.ProofKind is
+               "file_transfer_v6_state_frame_received" or
+               "file_transfer_v6_frontier_request_frame_received";
+
+    private static bool MatchesFallbackV6ProofBootstrapTriggerSourceScope(
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        FileTransferRouteTransitionDurableCheckpoint checkpoint,
+        RouteCommitToken routeCommit,
+        string? checkpointRequestId,
+        int checkpointGeneration)
+    {
+        var source = evaluation.TriggerSourceScope;
+        return source is not null &&
+               string.Equals(
+                   source.RouteToken,
+                   routeCommit.RouteToken,
+                   StringComparison.Ordinal) &&
+               source.ProtocolVersion == routeCommit.ProtocolVersion &&
+               source.LiveRouteEpoch == routeCommit.LiveRouteEpoch &&
+               source.RuntimeGeneration ==
+                   checkpoint.SourceRuntimeOwner.RuntimeGeneration &&
+               source.RoutePublicationGeneration ==
+                   checkpoint.SourceRoutePublication.PublicationGeneration &&
+               source.RouteCommitGeneration == routeCommit.CommitGeneration &&
+               source.TerminalGeneration == checkpoint.SourceTerminalGeneration &&
+               source.LegGeneration == checkpoint.SourceLegGeneration &&
+               source.TransportEpoch == checkpoint.SourceTransportEpoch &&
+               source.BridgeRecoveryGeneration ==
+                   checkpoint.SourceBridgeRecoveryGeneration &&
+                string.Equals(
+                    source.CheckpointRequestId,
+                    checkpointRequestId ?? "(none)",
+                    StringComparison.Ordinal) &&
+                source.CheckpointGeneration == checkpointGeneration;
     }
 
     private static FileTransferTransportEpochFrameV6
@@ -692,7 +1117,7 @@ public sealed partial class SessionFileTransferService
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={command?.Observation.DurableCheckpoint.CheckpointGeneration ?? 0}; source_state_epoch={command?.Observation.DurableCheckpoint.StateEpoch ?? 0}; source_contiguous_frontier={command?.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={command?.Observation.DurableCheckpoint.DurableHighestChunkIndex ?? -1}; source_chunk_count={command?.Observation.DurableCheckpoint.ChunkCount ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
 
     private static void LogFallbackV6ProofBootstrapReceipt(
         FileTransferFallbackV6ProofBootstrapCommand command,
