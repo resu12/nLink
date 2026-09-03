@@ -18,6 +18,17 @@ internal sealed record FileTransferFallbackV6ProofBootstrapPeerFrameBinding(
 
 public sealed partial class SessionFileTransferService
 {
+    private sealed record InboundFallbackV6ProofBootstrapPendingWriteWake(
+        long WakeGeneration,
+        IFileTransferRouteTransitionBridge Bridge,
+        FileTransferFallbackV6ProofBootstrapEvaluation Evaluation,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration,
+        RouteCommitToken RouteCommit,
+        int PendingSparseWriteCount,
+        int PendingContiguousChunkCount,
+        bool RecheckClaimed);
+
     private void OnFallbackV6ProofBootstrapEvaluationRequested(
         object? sender,
         FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs e)
@@ -35,25 +46,139 @@ public sealed partial class SessionFileTransferService
     private async Task ProcessFallbackV6ProofBootstrapEvaluationAsync(
         IFileTransferRouteTransitionBridge bridge,
         FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
+        => await ProcessFallbackV6ProofBootstrapEvaluationCoreAsync(
+                bridge,
+                evaluation,
+                expectedPendingWriteWake: null)
+            .ConfigureAwait(false);
+
+    private Task ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync(
+        InboundFallbackV6ProofBootstrapPendingWriteWake wake)
+        => ProcessFallbackV6ProofBootstrapEvaluationCoreAsync(
+            wake.Bridge,
+            wake.Evaluation,
+            wake);
+
+    private async Task ProcessFallbackV6ProofBootstrapEvaluationCoreAsync(
+        IFileTransferRouteTransitionBridge bridge,
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        InboundFallbackV6ProofBootstrapPendingWriteWake?
+            expectedPendingWriteWake)
     {
         FileTransferFallbackV6ProofBootstrapCommand command;
         FileTransferTransportEpochFrameV6 epochFrame;
         FileTransferDataFrame proofFrame;
         IFileTransferDataSession dataSession;
         SessionFileTransferSnapshot? issuedSnapshot;
+        InboundFallbackV6ProofBootstrapPendingWriteWake? deferredWake = null;
+        InboundFallbackV6ProofBootstrapPendingWriteWake? replacedWake = null;
+        string? deferredStatus = null;
 
         lock (gate)
         {
-            if (!TryIssueFallbackV6ProofBootstrapLocked(
+            if (expectedPendingWriteWake is not null)
+            {
+                if (inboundTransfer?.CurrentFallbackV6ProofBootstrapPendingWriteWake
+                        is not { } currentWake ||
+                    !ReferenceEquals(currentWake, expectedPendingWriteWake) ||
+                    !currentWake.RecheckClaimed)
+                {
+                    return;
+                }
+
+                if (inboundTransfer.ReceiverSparseChunksPendingWrite.Count == 0 &&
+                    inboundTransfer.PendingChunks.Count == 0 &&
+                    !TryRefreshInboundFallbackV6ProofBootstrapPeerFrameBindingAfterPendingWriteDrainLocked(
+                        inboundTransfer,
+                        expectedPendingWriteWake.Evaluation,
+                        out _))
+                {
+                    inboundTransfer
+                            .CurrentFallbackV6ProofBootstrapPendingWriteWake =
+                        null;
+                    return;
+                }
+            }
+            else if (inboundTransfer?.CurrentFallbackV6ProofBootstrapPendingWriteWake
+                         is { } claimedWake &&
+                     (claimedWake.RecheckClaimed ||
+                      (inboundTransfer.ReceiverSparseChunksPendingWrite.Count == 0 &&
+                       inboundTransfer.PendingChunks.Count == 0)))
+            {
+                return;
+            }
+
+            if (!TryIssueFallbackV6ProofBootstrapLockedCore(
                     evaluation,
                     out command,
                     out epochFrame,
                     out proofFrame,
                     out dataSession,
-                    out issuedSnapshot))
+                    out issuedSnapshot,
+                    out var pendingWriteContext))
             {
-                return;
+                if (pendingWriteContext is not null)
+                {
+                    if (expectedPendingWriteWake is not null &&
+                        ReferenceEquals(
+                            pendingWriteContext
+                                .CurrentFallbackV6ProofBootstrapPendingWriteWake,
+                            expectedPendingWriteWake))
+                    {
+                        expectedPendingWriteWake =
+                            expectedPendingWriteWake with
+                            {
+                                RecheckClaimed = false,
+                            };
+                        pendingWriteContext
+                                .CurrentFallbackV6ProofBootstrapPendingWriteWake =
+                            expectedPendingWriteWake;
+                    }
+
+                    deferredWake = HoldInboundFallbackV6ProofBootstrapPendingWriteWakeLocked(
+                        pendingWriteContext,
+                        bridge,
+                        evaluation,
+                        out replacedWake,
+                        out deferredStatus);
+                }
+                else if (expectedPendingWriteWake is not null &&
+                         inboundTransfer is { } staleContext &&
+                         ReferenceEquals(
+                             staleContext
+                                 .CurrentFallbackV6ProofBootstrapPendingWriteWake,
+                             expectedPendingWriteWake))
+                {
+                    staleContext.CurrentFallbackV6ProofBootstrapPendingWriteWake =
+                        null;
+                    RetireInboundFallbackV6ProofBootstrapPeerFrameForWakeLocked(
+                        staleContext,
+                        expectedPendingWriteWake);
+                }
             }
+            else if (evaluation.Direction == FileTransferDirection.Inbound &&
+                     inboundTransfer is { } inbound &&
+                     (expectedPendingWriteWake is null ||
+                      ReferenceEquals(
+                          inbound.CurrentFallbackV6ProofBootstrapPendingWriteWake,
+                          expectedPendingWriteWake)))
+            {
+                inbound.CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
+            }
+        }
+
+        if (deferredWake is not null)
+        {
+            LogInboundFallbackV6ProofBootstrapPendingWriteDeferred(
+                deferredWake,
+                replacedWake,
+                deferredStatus ?? "Held");
+            return;
+        }
+
+        if (command is null)
+        {
+            return;
         }
 
         if (issuedSnapshot is not null)
@@ -138,12 +263,30 @@ public sealed partial class SessionFileTransferService
         out FileTransferDataFrame proofFrame,
         out IFileTransferDataSession dataSession,
         out SessionFileTransferSnapshot? snapshot)
+        => TryIssueFallbackV6ProofBootstrapLockedCore(
+            evaluation,
+            out command,
+            out epochFrame,
+            out proofFrame,
+            out dataSession,
+            out snapshot,
+            out _);
+
+    private bool TryIssueFallbackV6ProofBootstrapLockedCore(
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        out FileTransferFallbackV6ProofBootstrapCommand command,
+        out FileTransferTransportEpochFrameV6 epochFrame,
+        out FileTransferDataFrame proofFrame,
+        out IFileTransferDataSession dataSession,
+        out SessionFileTransferSnapshot? snapshot,
+        out InboundTransferContext? pendingWriteContext)
     {
         command = null!;
         epochFrame = null!;
         proofFrame = null!;
         dataSession = null!;
         snapshot = null;
+        pendingWriteContext = null;
 
         if (evaluation.Direction == FileTransferDirection.Outbound)
         {
@@ -274,9 +417,7 @@ public sealed partial class SessionFileTransferService
             inbound.CurrentRuntimeOwner is not { IsDefault: false } inboundOwner ||
             inbound.CurrentRoutePublicationToken is not { IsDefault: false } inboundPublication ||
             inbound.RuntimeUnlockRouteCommitToken is not { IsDefault: false } ||
-            inbound.CurrentTransferLeg is not { } inboundLeg ||
-            inbound.ReceiverSparseChunksPendingWrite.Count != 0 ||
-            inbound.PendingChunks.Count != 0)
+            inbound.CurrentTransferLeg is not { } inboundLeg)
         {
             return false;
         }
@@ -304,6 +445,17 @@ public sealed partial class SessionFileTransferService
                   inbound.CurrentTransferLeg.CheckpointRequestId,
                   inbound.CurrentTransferLeg.CheckpointGeneration))))
         {
+            return false;
+        }
+
+        if (inbound.ReceiverSparseChunksPendingWrite.Count != 0 ||
+            inbound.PendingChunks.Count != 0)
+        {
+            if (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation))
+            {
+                pendingWriteContext = inbound;
+            }
+
             return false;
         }
 
@@ -481,6 +633,324 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    private InboundFallbackV6ProofBootstrapPendingWriteWake?
+        HoldInboundFallbackV6ProofBootstrapPendingWriteWakeLocked(
+            InboundTransferContext context,
+            IFileTransferRouteTransitionBridge bridge,
+            FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+            out InboundFallbackV6ProofBootstrapPendingWriteWake? replacedWake,
+            out string status)
+    {
+        replacedWake = null;
+        var current = context.CurrentFallbackV6ProofBootstrapPendingWriteWake;
+        if (current is not null &&
+            ReferenceEquals(current.Bridge, bridge) &&
+            current.Evaluation == evaluation &&
+            ReferenceEquals(current.DataSession, context.DataSession) &&
+            current.DataSessionGeneration == context.DataSessionGeneration)
+        {
+            status = "Coalesced";
+            return current;
+        }
+
+        if (current is not null &&
+            IsInboundFallbackV6ProofBootstrapPendingWriteWakeCurrentLocked(
+                context,
+                current,
+                out _) &&
+            (!MatchesInboundFallbackV6ProofBootstrapPendingWriteWakeSourceLineage(
+                 current.Evaluation,
+                 evaluation) ||
+             evaluation.ObservationGeneration <=
+                 current.Evaluation.ObservationGeneration))
+        {
+            status = "Stale";
+            return null;
+        }
+
+        var stagedFrame =
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence;
+        var stagedBinding =
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding;
+        if ((stagedFrame is null) != (stagedBinding is null) ||
+            (stagedFrame is not null &&
+             (!MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+                  stagedBinding!,
+                  evaluation) ||
+              !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
+                  stagedFrame,
+                  out var stagedFrameIdentity) ||
+              stagedFrameIdentity != stagedBinding!.FrameIdentity)))
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+        }
+
+        var wakeGeneration =
+            context.LastFallbackV6ProofBootstrapPendingWriteWakeGeneration <
+                long.MaxValue
+                ? context.LastFallbackV6ProofBootstrapPendingWriteWakeGeneration + 1
+                : long.MaxValue;
+        status = context.CurrentFallbackV6ProofBootstrapPendingWriteWake is null
+            ? "Held"
+            : "Replaced";
+        if (string.Equals(status, "Replaced", StringComparison.Ordinal))
+        {
+            replacedWake = current;
+        }
+
+        context.LastFallbackV6ProofBootstrapPendingWriteWakeGeneration =
+            wakeGeneration;
+        var wake = new InboundFallbackV6ProofBootstrapPendingWriteWake(
+            wakeGeneration,
+            bridge,
+            evaluation,
+            context.DataSession!,
+            context.DataSessionGeneration,
+            context.RuntimeUnlockRouteCommitToken!.Value,
+            context.ReceiverSparseChunksPendingWrite.Count,
+            context.PendingChunks.Count,
+            RecheckClaimed: false);
+        context.CurrentFallbackV6ProofBootstrapPendingWriteWake = wake;
+        return wake;
+    }
+
+    private static bool
+        MatchesInboundFallbackV6ProofBootstrapPendingWriteWakeSourceLineage(
+            FileTransferFallbackV6ProofBootstrapEvaluation left,
+            FileTransferFallbackV6ProofBootstrapEvaluation right)
+        => string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal) &&
+           left.Direction == FileTransferDirection.Inbound &&
+           right.Direction == FileTransferDirection.Inbound &&
+           left.FallbackEpoch == right.FallbackEpoch &&
+           string.Equals(left.Source, right.Source, StringComparison.Ordinal) &&
+           string.Equals(left.ProofKind, right.ProofKind, StringComparison.Ordinal) &&
+           string.Equals(
+               left.TriggerTransferId,
+               right.TriggerTransferId,
+               StringComparison.Ordinal) &&
+           left.TriggerTransportEpoch == right.TriggerTransportEpoch &&
+           ReferenceEquals(left.TriggerDataSession, right.TriggerDataSession) &&
+           left.TriggerDataSessionGeneration ==
+               right.TriggerDataSessionGeneration &&
+           left.TriggerSourceScope == right.TriggerSourceScope;
+
+    private InboundFallbackV6ProofBootstrapPendingWriteWake?
+        TakeInboundFallbackV6ProofBootstrapPendingWriteWakeAfterDrainLocked(
+            InboundTransferContext context,
+            out InboundFallbackV6ProofBootstrapPendingWriteWake? observedWake,
+            out string status,
+            out string result)
+    {
+        observedWake = context.CurrentFallbackV6ProofBootstrapPendingWriteWake;
+        if (observedWake is null)
+        {
+            status = "Stale";
+            result = "wake_missing";
+            return null;
+        }
+
+        if (observedWake.RecheckClaimed)
+        {
+            observedWake = null;
+            status = "Held";
+            result = "recheck_already_claimed";
+            return null;
+        }
+
+        if (context.ReceiverSparseChunksPendingWrite.Count != 0 ||
+            context.PendingChunks.Count != 0)
+        {
+            status = "Held";
+            result = "pending_writes_remain";
+            return null;
+        }
+
+        if (!IsInboundFallbackV6ProofBootstrapPendingWriteWakeCurrentLocked(
+                context,
+                observedWake,
+                out result))
+        {
+            context.CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
+            RetireInboundFallbackV6ProofBootstrapPeerFrameForWakeLocked(
+                context,
+                observedWake);
+            status = "Stale";
+            return null;
+        }
+
+        if (!TryRefreshInboundFallbackV6ProofBootstrapPeerFrameBindingAfterPendingWriteDrainLocked(
+                context,
+                observedWake.Evaluation,
+                out result))
+        {
+            context.CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
+            status = "Stale";
+            return null;
+        }
+
+        observedWake = observedWake with
+        {
+            RecheckClaimed = true,
+        };
+        context.CurrentFallbackV6ProofBootstrapPendingWriteWake = observedWake;
+        status = "Rechecked";
+        result = "pending_writes_drained";
+        return observedWake;
+    }
+
+    private static bool
+        TryRefreshInboundFallbackV6ProofBootstrapPeerFrameBindingAfterPendingWriteDrainLocked(
+            InboundTransferContext context,
+            FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+            out string reason)
+    {
+        var frame = context.PendingFallbackV6ProofBootstrapPeerFrameEvidence;
+        var pendingBinding =
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding;
+        if (frame is null && pendingBinding is null)
+        {
+            reason = "current";
+            return true;
+        }
+
+        if (frame is null ||
+            pendingBinding is null ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+                pendingBinding,
+                evaluation) ||
+            !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
+                context,
+                frame,
+                FileTransferDirection.Inbound,
+                out var currentBinding) ||
+            !MatchesFallbackV6ProofBootstrapPeerFrameBindingAfterPendingWriteDrain(
+                pendingBinding,
+                currentBinding))
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+            reason = "peer_frame_binding_changed";
+            return false;
+        }
+
+        context.PendingFallbackV6ProofBootstrapPeerFrameBinding = currentBinding;
+        reason = "current";
+        return true;
+    }
+
+    private bool IsInboundFallbackV6ProofBootstrapPendingWriteWakeCurrentLocked(
+        InboundTransferContext context,
+        InboundFallbackV6ProofBootstrapPendingWriteWake wake,
+        out string reason)
+    {
+        if (!ReferenceEquals(inboundTransfer, context) ||
+            !ReferenceEquals(transport, wake.Bridge))
+        {
+            reason = "source_not_current";
+            return false;
+        }
+
+        return IsInboundFallbackV6ProofBootstrapPendingWriteWakeContextCurrentLocked(
+            context,
+            wake,
+            out reason);
+    }
+
+    private static bool
+        IsInboundFallbackV6ProofBootstrapPendingWriteWakeContextCurrentLocked(
+            InboundTransferContext context,
+            InboundFallbackV6ProofBootstrapPendingWriteWake wake,
+            out string reason)
+    {
+        var evaluation = wake.Evaluation;
+        if (context.IsTerminal ||
+            evaluation.Direction != FileTransferDirection.Inbound ||
+            !string.Equals(
+                context.SessionId,
+                evaluation.SessionId,
+                StringComparison.Ordinal) ||
+            !MatchesFallbackV6ProofBootstrapTrigger(
+                evaluation,
+                context.TransferId,
+                context.DataSession,
+                context.DataSessionGeneration) ||
+            !ReferenceEquals(context.DataSession, wake.DataSession) ||
+            context.DataSessionGeneration != wake.DataSessionGeneration)
+        {
+            reason = context.IsTerminal
+                ? "transfer_terminal"
+                : "source_not_current";
+            return false;
+        }
+
+        if (!context.RouteRuntime.UsesFileTunaV4Runtime ||
+            context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
+            context.CurrentRoutePublicationToken is not
+                { IsDefault: false } publication ||
+            context.RuntimeUnlockRouteCommitToken is not
+                { IsDefault: false } routeCommit ||
+            context.CurrentTransferLeg is not { } leg ||
+            routeCommit != wake.RouteCommit)
+        {
+            reason = "route_scope_changed";
+            return false;
+        }
+
+        var checkpoint = CreateInboundFileTransferRouteTransitionCheckpoint(
+            context,
+            owner,
+            publication,
+            leg);
+        if (!MatchesFallbackV6ProofBootstrapPhysicalTrigger(
+                evaluation,
+                checkpoint) ||
+            !IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) ||
+            evaluation.FallbackEpoch <= 1 ||
+            !IsPostRecoveryFileTunaV4LiveActivationEpoch(
+                context.CurrentLiveRouteEpoch,
+                context.LastRecoveredV6TransportLiveRouteEpochId) ||
+            !IsStalePostReactivationFallbackV6Proof(
+                context,
+                evaluation.TriggerTransportEpoch) ||
+            !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
+                evaluation,
+                checkpoint,
+                routeCommit,
+                leg.CheckpointRequestId,
+                leg.CheckpointGeneration))
+        {
+            reason = "bootstrap_trigger_scope_changed";
+            return false;
+        }
+
+        reason = "current";
+        return true;
+    }
+
+    private static void
+        RetireInboundFallbackV6ProofBootstrapPeerFrameForWakeLocked(
+            InboundTransferContext context,
+            InboundFallbackV6ProofBootstrapPendingWriteWake wake)
+    {
+        var frame = context.PendingFallbackV6ProofBootstrapPeerFrameEvidence;
+        var binding = context.PendingFallbackV6ProofBootstrapPeerFrameBinding;
+        if (frame is null && binding is null)
+        {
+            return;
+        }
+
+        if (frame is null ||
+            binding is null ||
+            MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+                binding,
+                wake.Evaluation))
+        {
+            context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+        }
+    }
+
     private bool TryBindInboundFallbackV6ProofBootstrapRetainedPeerFrameLocked(
         InboundTransferContext context,
         out SessionFileTransferSnapshot? snapshot)
@@ -606,6 +1076,28 @@ public sealed partial class SessionFileTransferService
                 out var candidateBinding))
         {
             return false;
+        }
+
+        if (context.CurrentFallbackV6ProofBootstrapPendingWriteWake is
+                { } pendingWriteWake)
+        {
+            if (!IsInboundFallbackV6ProofBootstrapPendingWriteWakeContextCurrentLocked(
+                    context,
+                    pendingWriteWake,
+                    out _))
+            {
+                context.CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
+                RetireInboundFallbackV6ProofBootstrapPeerFrameForWakeLocked(
+                    context,
+                    pendingWriteWake);
+            }
+            else if (!MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+                         candidateBinding,
+                         pendingWriteWake.Evaluation))
+            {
+                reason = "precommand_peer_frame_pending_write_wake_mismatch";
+                return false;
+            }
         }
 
         if (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is
@@ -892,10 +1384,59 @@ public sealed partial class SessionFileTransferService
                StringComparison.Ordinal) &&
            left.CheckpointGeneration == right.CheckpointGeneration;
 
-    private static bool MatchesFallbackV6ProofBootstrapPeerFrameEvaluation(
+    private static bool
+        MatchesFallbackV6ProofBootstrapPeerFrameBindingAfterPendingWriteDrain(
+            FileTransferFallbackV6ProofBootstrapPeerFrameBinding before,
+            FileTransferFallbackV6ProofBootstrapPeerFrameBinding after)
+        => string.Equals(
+               before.SessionId,
+               after.SessionId,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               before.TransferId,
+               after.TransferId,
+               StringComparison.Ordinal) &&
+           before.Direction == after.Direction &&
+           before.FrameIdentity == after.FrameIdentity &&
+           ReferenceEquals(before.DataSession, after.DataSession) &&
+           before.DataSessionReferenceGeneration ==
+               after.DataSessionReferenceGeneration &&
+           before.DataSessionGeneration == after.DataSessionGeneration &&
+           before.SourceRouteCommit == after.SourceRouteCommit &&
+           before.FallbackCheckpointLease == after.FallbackCheckpointLease &&
+           string.Equals(
+               before.CheckpointRequestId,
+               after.CheckpointRequestId,
+               StringComparison.Ordinal) &&
+           before.CheckpointGeneration == after.CheckpointGeneration &&
+           before.DurableCheckpoint.SourceRuntimeOwner ==
+               after.DurableCheckpoint.SourceRuntimeOwner &&
+           before.DurableCheckpoint.SourceRoutePublication ==
+               after.DurableCheckpoint.SourceRoutePublication &&
+           before.DurableCheckpoint.SourceTerminalGeneration ==
+               after.DurableCheckpoint.SourceTerminalGeneration &&
+           before.DurableCheckpoint.SourceLegGeneration ==
+               after.DurableCheckpoint.SourceLegGeneration &&
+           before.DurableCheckpoint.SourceTransportEpoch ==
+               after.DurableCheckpoint.SourceTransportEpoch &&
+           before.DurableCheckpoint.SourceBridgeRecoveryGeneration ==
+               after.DurableCheckpoint.SourceBridgeRecoveryGeneration &&
+           before.DurableCheckpoint.DataSessionGeneration ==
+               after.DurableCheckpoint.DataSessionGeneration &&
+           before.DurableCheckpoint.StateEpoch ==
+               after.DurableCheckpoint.StateEpoch &&
+           before.DurableCheckpoint.ChunkCount ==
+               after.DurableCheckpoint.ChunkCount &&
+           before.DurableCheckpoint.CheckpointGeneration ==
+               after.DurableCheckpoint.CheckpointGeneration &&
+           after.DurableCheckpoint.ContiguousCommittedChunkIndex >=
+               before.DurableCheckpoint.ContiguousCommittedChunkIndex &&
+           after.DurableCheckpoint.DurableHighestChunkIndex >=
+               before.DurableCheckpoint.DurableHighestChunkIndex;
+
+    private static bool MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
         FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding,
-        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
-        FileTransferFallbackV6ProofBootstrapCommand command)
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
         => string.Equals(
                binding.SessionId,
                evaluation.SessionId,
@@ -919,7 +1460,15 @@ public sealed partial class SessionFileTransferService
                binding.DurableCheckpoint,
                binding.SourceRouteCommit,
                binding.CheckpointRequestId,
-               binding.CheckpointGeneration) &&
+               binding.CheckpointGeneration);
+
+    private static bool MatchesFallbackV6ProofBootstrapPeerFrameEvaluation(
+        FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding,
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        FileTransferFallbackV6ProofBootstrapCommand command)
+        => MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+               binding,
+               evaluation) &&
            binding.DurableCheckpoint == command.Observation.DurableCheckpoint &&
            binding.SourceRouteCommit == command.SourceRouteCommit &&
            binding.DataSessionGeneration == command.SourceDataSessionGeneration;
@@ -1118,6 +1667,31 @@ public sealed partial class SessionFileTransferService
         => LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={command?.Observation.DurableCheckpoint.CheckpointGeneration ?? 0}; source_state_epoch={command?.Observation.DurableCheckpoint.StateEpoch ?? 0}; source_contiguous_frontier={command?.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={command?.Observation.DurableCheckpoint.DurableHighestChunkIndex ?? -1}; source_chunk_count={command?.Observation.DurableCheckpoint.ChunkCount ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+
+    private static void LogInboundFallbackV6ProofBootstrapPendingWriteDeferred(
+        InboundFallbackV6ProofBootstrapPendingWriteWake wake,
+        InboundFallbackV6ProofBootstrapPendingWriteWake? replacedWake,
+        string status)
+    {
+        var evaluation = wake.Evaluation;
+        var source = evaluation.TriggerSourceScope;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred; decision_status={FormatProtocolLogValue(status)}; decision_result=inbound_pending_write_current; authority_effect=none; wake_generation={wake.WakeGeneration}; predecessor_wake_generation={replacedWake?.WakeGeneration ?? 0}; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; direction=inbound; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; evaluation_source={FormatProtocolLogValue(evaluation.Source)}; proof_kind={FormatProtocolLogValue(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={FormatProtocolLogValue(source?.RouteToken ?? "(none)")}; source_protocol_version={source?.ProtocolVersion ?? 0}; source_live_route_epoch={source?.LiveRouteEpoch ?? 0}; source_runtime_generation={source?.RuntimeGeneration ?? 0}; source_route_publication_generation={source?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={source?.RouteCommitGeneration ?? 0}; source_terminal_generation={source?.TerminalGeneration ?? 0}; source_leg_generation={source?.LegGeneration ?? 0}; source_transport_epoch={source?.TransportEpoch ?? 0}; source_bridge_recovery_generation={source?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={wake.DataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(source?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={source?.CheckpointGeneration ?? 0}; pending_sparse_write_count={wake.PendingSparseWriteCount}; pending_contiguous_chunk_count={wake.PendingContiguousChunkCount}");
+    }
+
+    private static void
+        LogInboundFallbackV6ProofBootstrapPendingWriteRecheckDecision(
+            InboundFallbackV6ProofBootstrapPendingWriteWake wake,
+            string status,
+            string result)
+    {
+        var evaluation = wake.Evaluation;
+        var source = evaluation.TriggerSourceScope;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided; decision_status={FormatProtocolLogValue(status)}; decision_result={FormatProtocolLogValue(result)}; authority_effect=none; wake_generation={wake.WakeGeneration}; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; direction=inbound; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; evaluation_source={FormatProtocolLogValue(evaluation.Source)}; proof_kind={FormatProtocolLogValue(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={FormatProtocolLogValue(source?.RouteToken ?? "(none)")}; source_protocol_version={source?.ProtocolVersion ?? 0}; source_live_route_epoch={source?.LiveRouteEpoch ?? 0}; source_runtime_generation={source?.RuntimeGeneration ?? 0}; source_route_publication_generation={source?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={source?.RouteCommitGeneration ?? 0}; source_terminal_generation={source?.TerminalGeneration ?? 0}; source_leg_generation={source?.LegGeneration ?? 0}; source_transport_epoch={source?.TransportEpoch ?? 0}; source_bridge_recovery_generation={source?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={wake.DataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(source?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={source?.CheckpointGeneration ?? 0}; pending_sparse_write_count=0; pending_contiguous_chunk_count=0");
+    }
 
     private static void LogFallbackV6ProofBootstrapReceipt(
         FileTransferFallbackV6ProofBootstrapCommand command,

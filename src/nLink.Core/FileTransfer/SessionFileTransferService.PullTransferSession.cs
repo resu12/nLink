@@ -6214,6 +6214,9 @@ public sealed partial class SessionFileTransferService
         InvalidateFallbackTailYieldTransportEpochReauthorizationLocked(
             context,
             "data_session_replaced");
+        context.CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
+        context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+        context.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
         context.DataSession = session;
         var previousDataSessionGeneration = context.DataSessionGeneration;
         context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);

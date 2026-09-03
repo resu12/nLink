@@ -25150,6 +25150,15 @@ public sealed partial class SessionFileTransferService :
         public FileTransferReceiveRecoveryProofStatePublicationCommand?
             ReceiveRecoveryProofStatePublicationInFlightCommand { get; set; }
 
+        public long LastFallbackV6ProofBootstrapPendingWriteWakeGeneration
+        {
+            get;
+            set;
+        }
+
+        public InboundFallbackV6ProofBootstrapPendingWriteWake?
+            CurrentFallbackV6ProofBootstrapPendingWriteWake { get; set; }
+
         public long LastBridgeRecoveryEvaluationObservationGeneration { get; set; }
 
         public long LastReceiveRecoveryHealthEvaluationGeneration { get; set; }
@@ -25501,6 +25510,7 @@ public sealed partial class SessionFileTransferService :
 
         public void CancelLifetime()
         {
+            CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
             try
             {
                 LifetimeCts.Cancel();

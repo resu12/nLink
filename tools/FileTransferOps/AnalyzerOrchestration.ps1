@@ -143,6 +143,8 @@ function Write-FileTransferIndexedRawEvidenceArtifact {
         'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
         'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
         'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
+        'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
+        'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided',
         'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
         'filetransfer_route_selected',
         'filetransfer_live_route_epoch_started',
@@ -2915,6 +2917,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_post_tuna_fallback_v6_route_consumed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected') +

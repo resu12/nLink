@@ -15425,7 +15425,7 @@ public sealed partial class SessionFileTransferService
         contract = context.CurrentRegularV4FrontierRepairContract;
         repairState = null;
         if (repairKind != RepairReplayKind.V4Repair ||
-            !IsCurrentRegularV4FrontierRepairRuntime(context) ||
+            !IsCurrentV4FrontierRepairRuntime(context) ||
             contract is null ||
             contract.Lifecycle.IsSettled ||
             !IsRegularV4FrontierRepairContractCurrent(context, contract, out _) ||
@@ -23422,6 +23422,12 @@ public sealed partial class SessionFileTransferService
         bool primaryRegularNknFrontierRepairTransactionMatchedActive = false;
         int primaryRegularNknFrontierRepairTransactionObservedCount = 0;
         long primaryRegularNknFrontierRepairTransactionRequestToObserveMs = -1;
+        InboundFallbackV6ProofBootstrapPendingWriteWake?
+            fallbackV6ProofBootstrapObservedWake = null;
+        InboundFallbackV6ProofBootstrapPendingWriteWake?
+            fallbackV6ProofBootstrapRecheck = null;
+        string? fallbackV6ProofBootstrapRecheckStatus = null;
+        string? fallbackV6ProofBootstrapRecheckResult = null;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -23543,7 +23549,32 @@ public sealed partial class SessionFileTransferService
             TryRecheckHeldInboundRuntimeUnlockResponderPeerProbeRouteTransitionAfterOwnerWorkClearedLocked(
                 context,
                 "receiver_sparse_pending_write_cleared");
+            if (context.CurrentFallbackV6ProofBootstrapPendingWriteWake is not null &&
+                context.ReceiverSparseChunksPendingWrite.Count == 0 &&
+                context.PendingChunks.Count == 0)
+            {
+                fallbackV6ProofBootstrapRecheck =
+                    TakeInboundFallbackV6ProofBootstrapPendingWriteWakeAfterDrainLocked(
+                        context,
+                        out fallbackV6ProofBootstrapObservedWake,
+                        out fallbackV6ProofBootstrapRecheckStatus,
+                        out fallbackV6ProofBootstrapRecheckResult);
+            }
             snapshot = CreateSnapshotLocked();
+        }
+
+        if (fallbackV6ProofBootstrapObservedWake is not null)
+        {
+            LogInboundFallbackV6ProofBootstrapPendingWriteRecheckDecision(
+                fallbackV6ProofBootstrapObservedWake,
+                fallbackV6ProofBootstrapRecheckStatus ?? "Stale",
+                fallbackV6ProofBootstrapRecheckResult ?? "source_not_current");
+        }
+
+        if (fallbackV6ProofBootstrapRecheck is not null)
+        {
+            _ = ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync(
+                fallbackV6ProofBootstrapRecheck);
         }
 
         LogReceiverWriteBatchCommitted(

@@ -411,6 +411,8 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
             'tuna_fallback_started',
             'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided',
             'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
+            'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
+            'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided',
             'filetransfer_fallback_v6_proof_bootstrap_observed',
             'filetransfer_fallback_v6_proof_bootstrap_decided',
             'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
@@ -754,6 +756,163 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
             -Fields $fields
     }
 
+    function Test-PeerFirstPendingWriteDiagnosticTuple {
+        param(
+            [Parameter(Mandatory = $true)]$Diagnostic,
+            [Parameter(Mandatory = $true)]$Episode,
+            [Parameter(Mandatory = $true)]$Wake,
+            [Parameter(Mandatory = $true)]$Observation
+        )
+
+        return (
+            (Get-PeerFirstField -Record $Diagnostic -Name 'direction') -eq 'inbound' -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'observation_generation') -eq
+                [string]$Wake.PendingGeneration -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'fallback_epoch') -eq
+                [string]$Episode.FallbackEpoch -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'proof_kind') -eq
+                $Wake.ProofKind -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'evaluation_source') -eq
+                (Get-PeerFirstField -Record $Observation -Name 'source') -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'trigger_transport_epoch') -eq
+                [string]$Episode.FrameTransportEpoch -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'trigger_frame_fingerprint') -eq
+                $Episode.FrameFingerprint -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'trigger_data_session_generation') -eq
+                [string]$Wake.DataSessionGeneration -and
+            $Episode.HasExactStageBinding -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'source_data_session_generation') -eq
+                (Get-PeerFirstField `
+                    -Record $Episode.FirstStage `
+                    -Name 'peer_data_session_generation') -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'source_checkpoint_request_id') -eq
+                (Get-PeerFirstField -Record $Wake.Record -Name 'source_checkpoint_request_id') -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'source_checkpoint_generation') -eq
+                (Get-PeerFirstField -Record $Wake.Record -Name 'source_checkpoint_generation') -and
+            (Get-PeerFirstField -Record $Diagnostic -Name 'authority_effect') -eq 'none' -and
+            (Test-PeerFirstSourceScopeEqual -Left $Wake.Record -Right $Diagnostic))
+    }
+
+    function Get-PeerFirstPendingWriteCounts {
+        param([Parameter(Mandatory = $true)]$Record)
+
+        $sparse = -1L
+        $contiguous = -1L
+        if (-not [long]::TryParse(
+                (Get-PeerFirstField -Record $Record -Name 'pending_sparse_write_count'),
+                [ref]$sparse) -or
+            -not [long]::TryParse(
+                (Get-PeerFirstField -Record $Record -Name 'pending_contiguous_chunk_count'),
+                [ref]$contiguous) -or
+            $sparse -lt 0 -or
+            $contiguous -lt 0) {
+            return $null
+        }
+
+        return [pscustomobject]@{
+            Sparse = $sparse
+            Contiguous = $contiguous
+        }
+    }
+
+    function Test-PeerFirstPendingWriteReplacementLink {
+        param(
+            [Parameter(Mandatory = $true)]$Predecessor,
+            [Parameter(Mandatory = $true)]$Successor
+        )
+
+        $declaredPredecessorGeneration = 0L
+        if ((Get-PeerFirstField -Record $Successor.Deferral -Name 'decision_status') -ne
+                'Replaced' -or
+            -not [long]::TryParse(
+                (Get-PeerFirstField `
+                    -Record $Successor.Deferral `
+                    -Name 'predecessor_wake_generation'),
+                [ref]$declaredPredecessorGeneration) -or
+            $declaredPredecessorGeneration -ne $Predecessor.WakeGeneration -or
+            $Successor.WakeGeneration -ne ($Predecessor.WakeGeneration + 1) -or
+            $Successor.ObservationGeneration -le $Predecessor.ObservationGeneration -or
+            [string]::Equals(
+                $Successor.Episode.FrameFingerprint,
+                $Predecessor.Episode.FrameFingerprint,
+                [System.StringComparison]::OrdinalIgnoreCase) -or
+            [long]$Successor.Deferral.WriterSequence -le
+                [long]$Predecessor.Wake.Record.WriterSequence) {
+            return $false
+        }
+
+        return Test-FileTransferAuthorityFieldsEqual `
+            -LeftLine $Predecessor.Deferral.Line `
+            -RightLine $Successor.Deferral.Line `
+            -Fields @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'fallback_epoch',
+                'evaluation_source',
+                'proof_kind',
+                'trigger_transport_epoch',
+                'trigger_data_session_generation',
+                'source_route',
+                'source_protocol_version',
+                'source_live_route_epoch',
+                'source_runtime_generation',
+                'source_route_publication_generation',
+                'source_route_commit_generation',
+                'source_terminal_generation',
+                'source_leg_generation',
+                'source_transport_epoch',
+                'source_bridge_recovery_generation',
+                'source_data_session_generation',
+                'source_checkpoint_request_id',
+                'source_checkpoint_generation')
+    }
+
+    function Test-PeerFirstPendingWriteReplacementIntervalClean {
+        param(
+            [Parameter(Mandatory = $true)]$Predecessor,
+            [Parameter(Mandatory = $true)]$Successor
+        )
+
+        $startSequence = [long]$Predecessor.Deferral.WriterSequence
+        $endSequence = [long]$Successor.Deferral.WriterSequence
+        foreach ($record in $Predecessor.ScopeRecords) {
+            if ([long]$record.WriterSequence -le $startSequence -or
+                [long]$record.WriterSequence -ge $endSequence) {
+                continue
+            }
+            if ($record.EventName -in @(
+                    'file_transfer_outbound_terminal',
+                    'file_transfer_inbound_terminal',
+                    'transfer_terminal',
+                    'filetransfer_runtime_terminalized',
+                    'filetransfer_route_transition_invalidated') -or
+                ($record.EventName -eq
+                    'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided' -and
+                 (Get-PeerFirstField -Record $record -Name 'wake_generation') -eq
+                    [string]$Predecessor.WakeGeneration -and
+                 (Test-PeerFirstPendingWriteDiagnosticTuple `
+                    -Diagnostic $record `
+                    -Episode $Predecessor.Episode `
+                    -Wake $Predecessor.Wake `
+                    -Observation $Predecessor.Observation)) -or
+                ($record.EventName -eq
+                    'filetransfer_data_session_availability_changed' -and
+                 (Get-PeerFirstField -Record $record -Name 'available') -eq '0') -or
+                ($record.EventName -eq
+                    'filetransfer_route_hint_authorized_publication_accepted' -and
+                 ((Get-PeerFirstField -Record $record -Name 'route') -ne
+                    'file_tuna_v4' -or
+                  (Get-PeerFirstRouteScopeFingerprint -Record $record) -ne
+                    (Get-PeerFirstRouteScopeFingerprint `
+                        -Record $Predecessor.Episode.RouteScope)))) {
+                return $false
+            }
+        }
+        return $true
+    }
+
     $records = New-Object System.Collections.Generic.List[object]
     for ($index = 0; $index -lt $Lines.Count; $index++) {
         $rawLine = [string]$Lines[$index]
@@ -942,6 +1101,7 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                 Key = $episodeKey
                 TransferScopeKey = $transferScopeKey
                 RouteScope = $routeScope.Record
+                FallbackStartSequence = [long]$fallback.Sequence
                 FallbackEpoch = [long]$fallback.Epoch
                 FrameType = $frameType
                 ExpectedProofKind = $expectedProofKind
@@ -961,6 +1121,7 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
     $rawCandidates = New-Object System.Collections.Generic.List[object]
     $recoveredKeys = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
+    $pendingWriteStates = New-Object System.Collections.Generic.List[object]
 
     foreach ($episode in @($episodes.Values | Sort-Object {
                 $_.FirstStage.InputIndex
@@ -973,13 +1134,16 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
             @()
         }
         $stageSequence = [long]$episode.FirstStage.WriterSequence
+        [object[]]$episodeRecords = @($scopeRecords | Where-Object {
+                [long]$_.WriterSequence -gt [long]$episode.FallbackStartSequence
+            } | Sort-Object WriterSequence, InputIndex)
         [object[]]$afterStage = @($scopeRecords | Where-Object {
                 [long]$_.WriterSequence -gt $stageSequence
             } | Sort-Object WriterSequence, InputIndex)
 
         $wakeIdentities = @{}
         $poisoned = [bool]$episode.StageBindingMalformed
-        foreach ($wake in @($afterStage | Where-Object {
+        foreach ($wake in @($episodeRecords | Where-Object {
                     $_.EventName -eq
                         'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided'
                 })) {
@@ -1061,9 +1225,25 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
         }
 
         $recovered = $false
+        $candidateRecord = $episode.FirstStage
+        $candidateReason = 'peer_first_bootstrap_frame_staged_without_exact_coordinator_evaluation_wake'
+        $candidateVariant = if ((Get-PeerFirstField `
+                -Record $episode.FirstStage `
+                -Name 'direction') -eq 'outbound') {
+            'second_cycle_receiver_state_completed_transport_proof_before_outbound_bootstrap_observation'
+        }
+        else {
+            'second_cycle_frontier_request_completed_transport_proof_before_inbound_bootstrap_observation'
+        }
+        [object[]]$rawEvidenceRecords = @($episode.StageRecords.ToArray())
+        $pendingWriteDeferral = $null
+        $pendingWriteDeferralGeneration = 0L
+        $pendingWriteObservation = $null
+        $pendingWriteWake = $null
+        $pendingWriteRecheckSucceeded = $false
         if (-not $poisoned -and $wakeIdentities.Count -eq 1) {
             $wake = @($wakeIdentities.Values)[0]
-            [object[]]$observations = @($afterStage | Where-Object {
+            [object[]]$observations = @($episodeRecords | Where-Object {
                     $_.EventName -eq 'filetransfer_fallback_v6_proof_bootstrap_observed' -and
                     [long]$_.WriterSequence -lt [long]$wake.Record.WriterSequence -and
                     (Get-PeerFirstField -Record $_ -Name 'observation_generation') -eq
@@ -1085,9 +1265,132 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                 } | Select-Object -First 2)
             if ($observations.Count -eq 1) {
                 $observation = $observations[0]
+                $pendingWriteRecheckSequence = 0L
+                $pendingWriteRecheckRequired = $false
+                if ((Get-PeerFirstField -Record $episode.FirstStage -Name 'direction') -eq
+                    'inbound') {
+                    $currentDeferral = $null
+                    $currentDeferralGeneration = 0L
+                    foreach ($diagnostic in @($episodeRecords | Where-Object {
+                                $_.EventName -eq
+                                    'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred' -and
+                                [long]$_.WriterSequence -gt [long]$observation.WriterSequence -and
+                                [long]$_.WriterSequence -lt [long]$wake.Record.WriterSequence -and
+                                (Get-PeerFirstField -Record $_ -Name 'observation_generation') -eq
+                                    [string]$wake.PendingGeneration -and
+                                (Get-PeerFirstField -Record $_ -Name 'fallback_epoch') -eq
+                                    [string]$episode.FallbackEpoch -and
+                                (Get-PeerFirstField -Record $_ -Name 'proof_kind') -eq
+                                    $wake.ProofKind -and
+                                (Get-PeerFirstField -Record $_ -Name 'trigger_transport_epoch') -eq
+                                    [string]$episode.FrameTransportEpoch -and
+                                (Get-PeerFirstField -Record $_ -Name 'trigger_frame_fingerprint') -eq
+                                    $episode.FrameFingerprint -and
+                                (Get-PeerFirstField -Record $_ -Name 'trigger_data_session_generation') -eq
+                                    [string]$wake.DataSessionGeneration
+                            } | Sort-Object WriterSequence, InputIndex)) {
+                        $diagnosticGeneration = 0L
+                        $declaredPredecessorGeneration = -1L
+                        $counts = Get-PeerFirstPendingWriteCounts -Record $diagnostic
+                        $diagnosticStatus =
+                            Get-PeerFirstField -Record $diagnostic -Name 'decision_status'
+                        $diagnosticValid =
+                            (Test-PeerFirstPendingWriteDiagnosticTuple `
+                                -Diagnostic $diagnostic `
+                                -Episode $episode `
+                                -Wake $wake `
+                                -Observation $observation) -and
+                            [long]::TryParse(
+                                (Get-PeerFirstField -Record $diagnostic -Name 'wake_generation'),
+                                [ref]$diagnosticGeneration) -and
+                            $diagnosticGeneration -gt 0 -and
+                            [long]::TryParse(
+                                (Get-PeerFirstField `
+                                    -Record $diagnostic `
+                                    -Name 'predecessor_wake_generation'),
+                                [ref]$declaredPredecessorGeneration) -and
+                            (($diagnosticStatus -eq 'Replaced' -and
+                              $declaredPredecessorGeneration -gt 0 -and
+                              $declaredPredecessorGeneration -lt $diagnosticGeneration) -or
+                             ($diagnosticStatus -ne 'Replaced' -and
+                              $declaredPredecessorGeneration -eq 0)) -and
+                            $null -ne $counts -and
+                            ([long]$counts.Sparse + [long]$counts.Contiguous) -gt 0 -and
+                            (Get-PeerFirstField -Record $diagnostic -Name 'decision_result') -eq
+                                'inbound_pending_write_current' -and
+                            $diagnosticStatus -in
+                                @('Held', 'Coalesced', 'Replaced')
+                        if (-not $diagnosticValid) {
+                            $poisoned = $true
+                            continue
+                        }
+
+                        if ($diagnosticStatus -eq 'Coalesced') {
+                            if ($null -eq $currentDeferral -or
+                                $diagnosticGeneration -ne $currentDeferralGeneration) {
+                                $poisoned = $true
+                            }
+                            continue
+                        }
+
+                        $currentDeferral = $diagnostic
+                        $currentDeferralGeneration = $diagnosticGeneration
+                    }
+
+                    if (-not $poisoned -and $null -ne $currentDeferral) {
+                        $pendingWriteRecheckRequired = $true
+                        $candidateRecord = $wake.Record
+                        $candidateReason =
+                            'peer_first_bootstrap_evaluation_published_but_inbound_pending_write_recheck_missing'
+                        $candidateVariant =
+                            'second_cycle_frontier_request_arrived_during_sparse_write_and_one_shot_evaluation_was_dropped'
+                        $rawEvidenceRecords = @($wake.Record)
+
+                        [object[]]$matchingRechecks = @($episodeRecords | Where-Object {
+                                $_.EventName -eq
+                                    'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided' -and
+                                [long]$_.WriterSequence -gt
+                                    [long]$currentDeferral.WriterSequence -and
+                                (Get-PeerFirstField -Record $_ -Name 'wake_generation') -eq
+                                    [string]$currentDeferralGeneration -and
+                                (Test-PeerFirstPendingWriteDiagnosticTuple `
+                                    -Diagnostic $_ `
+                                    -Episode $episode `
+                                    -Wake $wake `
+                                    -Observation $observation)
+                            } | Sort-Object WriterSequence, InputIndex)
+                        [object[]]$successfulRechecks = @($matchingRechecks | Where-Object {
+                                $counts = Get-PeerFirstPendingWriteCounts -Record $_
+                                $null -ne $counts -and
+                                [long]$counts.Sparse -eq 0 -and
+                                [long]$counts.Contiguous -eq 0 -and
+                                (Get-PeerFirstField -Record $_ -Name 'decision_status') -eq
+                                    'Rechecked' -and
+                                (Get-PeerFirstField -Record $_ -Name 'decision_result') -eq
+                                    'pending_writes_drained'
+                            } | Select-Object -First 2)
+                        if ($matchingRechecks.Count -eq 1 -and
+                            $successfulRechecks.Count -eq 1) {
+                            $pendingWriteRecheckSequence =
+                                [long]$successfulRechecks[0].WriterSequence
+                        }
+                        $pendingWriteDeferral = $currentDeferral
+                        $pendingWriteDeferralGeneration =
+                            $currentDeferralGeneration
+                        $pendingWriteObservation = $observation
+                        $pendingWriteWake = $wake
+                        $pendingWriteRecheckSucceeded =
+                            $pendingWriteRecheckSequence -gt 0
+                    }
+                }
+
                 [object[]]$commands = @($afterStage | Where-Object {
+                        -not $poisoned -and
                         $_.EventName -eq 'filetransfer_fallback_v6_proof_bootstrap_decided' -and
                         [long]$_.WriterSequence -gt [long]$observation.WriterSequence -and
+                        (-not $pendingWriteRecheckRequired -or
+                         ($pendingWriteRecheckSequence -gt 0 -and
+                          [long]$_.WriterSequence -gt $pendingWriteRecheckSequence)) -and
                         (Get-PeerFirstField -Record $_ -Name 'decision_status') -in
                             @('Issued', 'Idempotent') -and
                         (Get-PeerFirstField -Record $_ -Name 'observation_generation') -eq
@@ -1301,31 +1604,23 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
             }
         }
 
-        $variant = if ((Get-PeerFirstField `
-                -Record $episode.FirstStage `
-                -Name 'direction') -eq 'outbound') {
-            'second_cycle_receiver_state_completed_transport_proof_before_outbound_bootstrap_observation'
-        }
-        else {
-            'second_cycle_frontier_request_completed_transport_proof_before_inbound_bootstrap_observation'
-        }
         $distinctRecord = [pscustomobject]@{
             Class = 'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing'
-            Reason = 'peer_first_bootstrap_frame_staged_without_exact_coordinator_evaluation_wake'
-            Variant = $variant
+            Reason = $candidateReason
+            Variant = $candidateVariant
             DistinctKey = $episode.Key.ToLowerInvariant()
-            Writer = $episode.FirstStage.Writer
-            WriterSequence = [long]$episode.FirstStage.WriterSequence
-            InputIndex = [long]$episode.FirstStage.InputIndex
-            Line = $episode.FirstStage.Line
+            Writer = $candidateRecord.Writer
+            WriterSequence = [long]$candidateRecord.WriterSequence
+            InputIndex = [long]$candidateRecord.InputIndex
+            Line = $candidateRecord.Line
             Recovered = $recovered
         }
         $distinctCandidates.Add($distinctRecord) | Out-Null
         if ($recovered) {
             $recoveredKeys.Add($distinctRecord.DistinctKey) | Out-Null
         }
-        foreach ($stageRecord in $episode.StageRecords.ToArray()) {
-            $rawCandidates.Add([pscustomobject]@{
+        foreach ($stageRecord in $rawEvidenceRecords) {
+            $rawRecord = [pscustomobject]@{
                     Class = $distinctRecord.Class
                     Reason = $distinctRecord.Reason
                     Variant = $distinctRecord.Variant
@@ -1335,7 +1630,59 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                     InputIndex = [long]$stageRecord.InputIndex
                     Line = $stageRecord.RawLine
                     Recovered = $recovered
-                }) | Out-Null
+                }
+            $rawCandidates.Add($rawRecord) | Out-Null
+        }
+        if (-not $poisoned -and
+            $null -ne $pendingWriteDeferral -and
+            $null -ne $pendingWriteObservation -and
+            $null -ne $pendingWriteWake) {
+            $observationGeneration = 0L
+            if ([long]::TryParse(
+                    (Get-PeerFirstField `
+                        -Record $pendingWriteObservation `
+                        -Name 'observation_generation'),
+                    [ref]$observationGeneration) -and
+                $observationGeneration -gt 0) {
+                $pendingWriteStates.Add([pscustomobject]@{
+                        Episode = $episode
+                        ScopeRecords = $scopeRecords
+                        Observation = $pendingWriteObservation
+                        ObservationGeneration = $observationGeneration
+                        Wake = $pendingWriteWake
+                        WakeGeneration = $pendingWriteDeferralGeneration
+                        Deferral = $pendingWriteDeferral
+                        RecheckSucceeded = $pendingWriteRecheckSucceeded
+                        DistinctRecord = $distinctRecord
+                    }) | Out-Null
+            }
+        }
+    }
+
+    foreach ($predecessor in $pendingWriteStates) {
+        if ($predecessor.RecheckSucceeded -or
+            $predecessor.DistinctRecord.Recovered) {
+            continue
+        }
+        [object[]]$successors = @($pendingWriteStates | Where-Object {
+                Test-PeerFirstPendingWriteReplacementLink `
+                    -Predecessor $predecessor `
+                    -Successor $_
+            } | Select-Object -First 2)
+        if ($successors.Count -ne 1 -or
+            -not (Test-PeerFirstPendingWriteReplacementIntervalClean `
+                -Predecessor $predecessor `
+                -Successor $successors[0])) {
+            continue
+        }
+
+        $predecessor.DistinctRecord.Recovered = $true
+        $recoveredKeys.Add($predecessor.DistinctRecord.DistinctKey) | Out-Null
+        foreach ($rawRecord in $rawCandidates) {
+            if ($rawRecord.DistinctKey -eq
+                $predecessor.DistinctRecord.DistinctKey) {
+                $rawRecord.Recovered = $true
+            }
         }
     }
 

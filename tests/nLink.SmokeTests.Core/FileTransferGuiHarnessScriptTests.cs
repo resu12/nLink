@@ -7699,6 +7699,65 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $result.Variant -ne 'second_cycle_receiver_state_completed_transport_proof_before_outbound_bootstrap_observation') {
                 throw "shared GUI peer-first bootstrap mismatch: $($result | ConvertTo-Json -Compress)"
             }
+
+            $pendingScope = 'session_id=pending-session; transfer_id=pending-transfer; direction=inbound; log_writer_id=pending-writer'
+            $pendingSource = 'source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=7'
+            $pendingDiagnosticSource = 'source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0'
+            $pendingCheckpoint = 'source_checkpoint_request_id=(none); source_checkpoint_generation=1; source_durable_checkpoint_generation=1; source_state_epoch=1; source_contiguous_frontier=100; source_durable_highest=99; source_chunk_count=256'
+            $pendingDiagnosticCheckpoint = 'source_checkpoint_request_id=(none); source_checkpoint_generation=1'
+            $pendingBinding = "peer_binding_present=1; peer_data_session_reference_generation=1; peer_data_session_generation=7; $pendingSource; $pendingCheckpoint"
+            $pendingLines = @(
+                "event=filetransfer_route_hint_authorized_publication_accepted; $pendingScope; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; live_route_epoch=3; runtime_generation=4; route_publication_generation=4; route_commit_generation=2; terminal_generation=0; leg_generation=4; fallback_transport_epoch=0; fallback_bridge_recovery_generation=0; fallback_checkpoint_request_id=(none); log_writer_sequence=100",
+                'event=tuna_fallback_started; session_id=pending-session; fallback_epoch=2; log_writer_id=pending-writer; log_writer_sequence=101',
+                "event=filetransfer_fallback_v6_proof_bootstrap_observed; $pendingScope; observation_generation=3; fallback_epoch=2; source=peer_first_test; proof_kind=file_transfer_v6_frontier_request_frame_received; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; authority_effect=coordinator_evaluation_only; log_writer_sequence=102",
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred; $pendingScope; wake_generation=5; predecessor_wake_generation=0; observation_generation=3; fallback_epoch=2; evaluation_source=peer_first_test; proof_kind=file_transfer_v6_frontier_request_frame_received; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; $pendingDiagnosticSource; source_data_session_generation=7; $pendingDiagnosticCheckpoint; pending_sparse_write_count=1; pending_contiguous_chunk_count=0; decision_status=Held; decision_result=inbound_pending_write_current; authority_effect=none; log_writer_sequence=103",
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; $pendingScope; pending_generation=3; fallback_epoch=2; proof_kind=file_transfer_v6_frontier_request_frame_received; transport_epoch=1; frame_fingerprint=peer-frame; trigger_data_session_generation=1; $pendingDiagnosticSource; source_checkpoint_request_id=(none); source_checkpoint_generation=1; decision_status=Published; decision_result=local_bootstrap_evaluation_published; authority_effect=none; log_writer_sequence=104",
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $pendingScope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=filetransfer.frontier_request.v6; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=(none); $pendingBinding; decision_status=staged; reason_code=precommand_peer_frame_staged; authority_effect=evidence_only; log_writer_sequence=105"
+            )
+            $pendingResult = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines $pendingLines
+            if (-not $pendingResult.Unresolved -or $pendingResult.RawCount -ne 1 -or
+                $pendingResult.DistinctCount -ne 1 -or $pendingResult.RecoveredCount -ne 0 -or
+                $pendingResult.UnresolvedCount -ne 1 -or $pendingResult.FirstSequence -ne 104 -or
+                $pendingResult.Reason -ne 'peer_first_bootstrap_evaluation_published_but_inbound_pending_write_recheck_missing' -or
+                $pendingResult.Variant -ne 'second_cycle_frontier_request_arrived_during_sparse_write_and_one_shot_evaluation_was_dropped') {
+                throw "shared GUI pending-write bootstrap mismatch: $($pendingResult | ConvertTo-Json -Compress)"
+            }
+
+            $replacementSuccessor = @($pendingLines | ForEach-Object {
+                    $updated = $_.Replace(
+                        'observation_generation=3',
+                        'observation_generation=4')
+                    $updated = $updated.Replace(
+                        'pending_generation=3',
+                        'pending_generation=4')
+                    $updated = $updated.Replace(
+                        'wake_generation=5',
+                        'wake_generation=6')
+                    $updated = $updated.Replace(
+                        'predecessor_wake_generation=0',
+                        'predecessor_wake_generation=5')
+                    $updated = $updated.Replace('peer-frame', 'peer-frame-b')
+                    $updated.Replace('decision_status=Held', 'decision_status=Replaced')
+                })
+            [string[]]$replacementLines = @(
+                $pendingLines[0..1] +
+                $pendingLines[2..($pendingLines.Count - 1)] +
+                $replacementSuccessor[2..($replacementSuccessor.Count - 1)]
+            )
+            for ($index = 0; $index -lt $replacementLines.Count; $index++) {
+                $replacementLines[$index] = $replacementLines[$index] -replace
+                    'log_writer_sequence=\d+',
+                    "log_writer_sequence=$($index + 100)"
+            }
+            $replacementResult = Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines $replacementLines
+            if (-not $replacementResult.Unresolved -or
+                $replacementResult.RawCount -ne 2 -or
+                $replacementResult.DistinctCount -ne 2 -or
+                $replacementResult.RecoveredCount -ne 1 -or
+                $replacementResult.UnresolvedCount -ne 1 -or
+                $replacementResult.FirstSequence -ne 108) {
+                throw "shared GUI replacement bootstrap mismatch: $($replacementResult | ConvertTo-Json -Compress)"
+            }
             Write-Output 'gui-bootstrap-peer-first-shared-correlation-ok'
             """;
 

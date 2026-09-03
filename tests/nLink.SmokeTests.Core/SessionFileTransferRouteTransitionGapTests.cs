@@ -783,6 +783,781 @@ public sealed partial class SessionFileTransferV4SenderTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public async Task FallbackV6ProofBootstrap_InboundPeerFirstPendingSparseWrite_DrainRechecksAndAdmitsStagedFrame(
+        bool useV6SparseWriteDrain,
+        bool replaceDataSessionBeforeDrain)
+    {
+        const string transferId =
+            "transfer_fallback_v6_bootstrap_inbound_peer_first_pending_write";
+        var sessionId = $"session_{transferId}";
+        using var service = new SessionFileTransferService();
+        using var bridge = new LoopbackFileTransferTransport(sessionId);
+        service.AttachTransport(bridge);
+        var dataSession = new GenerationBoundDataSession(
+            sessionId,
+            transferId,
+            generation: 7);
+        var context = CreateFileTunaV4InboundContext(
+            transferId,
+            dataSession: dataSession,
+            startCoordinatorSnapshotStream: false);
+        SetPrivateProperty(context, "V4StateEpoch", 1);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 99);
+        var writtenChunks = new BitArray(256);
+        for (var index = 0; index < 100; index++)
+        {
+            writtenChunks[index] = true;
+        }
+
+        SetPrivateProperty(context, "ReceiverSparseChunksWritten", writtenChunks);
+        SeedRecoveredFileTunaV4SecondCycleScopeForTest(context);
+        StartCoordinatorSnapshotStreamForTest(context);
+        typeof(SessionFileTransferService)
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var state = CreateCoordinatorStateForTest(context);
+        var targetTransportEpoch = state.CurrentLeg!.TransportEpochId + 1;
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportEpoch",
+            targetTransportEpoch + 1);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportEpochKind",
+            FileTransferTransportHandoffKind.NormalToTunaActivation);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportTargetTransport",
+            FileTransferTransportKind.Tuna);
+        var peerRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = targetTransportEpoch,
+            RequestCorrelationId =
+                FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(1),
+            MissingRanges = [],
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode =
+                FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        };
+        var frameIdentity =
+            PostTunaFallbackPeerProofFrameIdentity.Create(peerRequest);
+        var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(
+            sessionId,
+            FileTransferDirection.Inbound,
+            ObservationGeneration: 11,
+            FallbackEpoch: 2,
+            Source: "unit_test_peer_first_bootstrap_pending_write",
+            ProofKind: "file_transfer_v6_frontier_request_frame_received",
+            ObservedUtcMilliseconds:
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            TriggerTransferId: transferId,
+            TriggerTransportEpoch: peerRequest.TransportEpoch,
+            TriggerFrameFingerprint: frameIdentity.Sha256,
+            TriggerDataSession: dataSession,
+            TriggerDataSessionGeneration: dataSession.Generation,
+            TriggerSourceScope:
+                CreateFallbackV6ProofBootstrapTriggerSourceScope(state));
+
+        using var sparseWrite = new BlockingSparseWriteStream();
+        SetPrivateProperty(context, "WriteStream", sparseWrite);
+        var chunkSizeBytes = GetPrivateProperty<int>(context, "ChunkSizeBytes");
+        Task sparseWriteTask;
+        if (useV6SparseWriteDrain)
+        {
+            var chunkBytes = new byte[chunkSizeBytes];
+            var sparseBatch = new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = targetTransportEpoch,
+                StartChunkIndex = 120,
+                ChunkCount = 1,
+                DataSegments = [chunkBytes],
+            };
+            IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> chunks =
+                [(120, chunkBytes)];
+            sparseWriteTask = Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "HandleInboundV6SparseChunkBatchAsync",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [
+                            context,
+                            sparseBatch,
+                            chunks,
+                            sparseWrite,
+                            FileTransferTransportKind.Tuna,
+                            null,
+                        ])!);
+        }
+        else
+        {
+            var sparseBatch = new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 120,
+                ChunkCount = 1,
+                DataSegments = [new byte[chunkSizeBytes]],
+                BatchProfile = "v4_default_21k",
+            };
+            sparseWriteTask = Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService)
+                    .GetMethod(
+                        "HandleInboundV4ChunkBatchAsync",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(
+                        service,
+                        [context, sparseBatch, FileTransferTransportKind.Tuna])!);
+        }
+        await sparseWrite.WaitForWriteStartedAsync();
+        var pendingSparseWrites = GetPrivateProperty<HashSet<int>>(
+            context,
+            "ReceiverSparseChunksPendingWrite");
+        Assert.Contains(120, pendingSparseWrites);
+
+        var coordinatorBeforeHold =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        var process = typeof(SessionFileTransferService).GetMethod(
+            "ProcessFallbackV6ProofBootstrapEvaluationAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var logStart = GetOperationalLogLength();
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluation])!);
+
+        Assert.NotNull(GetPrivatePropertyValue(
+            context,
+            "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+
+        var stage = typeof(SessionFileTransferService).GetMethod(
+            "TryStageInboundFallbackV6ProofBootstrapPeerFrameLocked",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        object?[] stageArguments = [context, peerRequest, null];
+        Assert.True(Assert.IsType<bool>(stage.Invoke(null, stageArguments)));
+        Assert.Equal("precommand_peer_frame_staged", stageArguments[2]);
+        Assert.Equal(
+            99,
+            Assert.IsType<FileTransferFallbackV6ProofBootstrapPeerFrameBinding>(
+                    GetPrivatePropertyValue(
+                        context,
+                        "PendingFallbackV6ProofBootstrapPeerFrameBinding"))
+                .DurableCheckpoint.DurableHighestChunkIndex);
+
+        Assert.Equal(
+            coordinatorBeforeHold,
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState"));
+        Assert.Null(
+            coordinatorBeforeHold.FileTransferRouteTransition
+                .PendingFallbackV6ProofBootstrap);
+        Assert.Same(
+            peerRequest,
+            GetPrivatePropertyValue(
+                context,
+                "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+        var heldLog = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                heldLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred;"));
+        Assert.Contains(
+            "source_data_session_generation=1;",
+            heldLog,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_fallback_v6_proof_bootstrap_decided;",
+            heldLog,
+            StringComparison.Ordinal);
+
+        if (replaceDataSessionBeforeDrain)
+        {
+            var replacementDataSession = new GenerationBoundDataSession(
+                sessionId,
+                transferId,
+                generation: 8);
+            var replaceDataSession =
+                typeof(SessionFileTransferService).GetMethod(
+                    "ReplaceInboundDataSessionLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var serviceGate = typeof(SessionFileTransferService)
+                .GetField(
+                    "gate",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(service)!;
+            lock (serviceGate)
+            {
+                Assert.True(Assert.IsType<bool>(replaceDataSession.Invoke(
+                    service,
+                    [context, replacementDataSession])));
+            }
+
+            Assert.Null(GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+            Assert.Same(
+                replacementDataSession,
+                GetPrivatePropertyValue(context, "DataSession"));
+            Assert.Equal(
+                2,
+                GetPrivateProperty<long>(context, "DataSessionGeneration"));
+
+            sparseWrite.ReleaseWrites();
+            await sparseWriteTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Empty(pendingSparseWrites);
+            var coordinatorAfterReplacement =
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState");
+            Assert.Equal(
+                coordinatorBeforeHold.SnapshotStateGeneration,
+                coordinatorAfterReplacement.SnapshotStateGeneration);
+            Assert.Null(
+                coordinatorAfterReplacement.FileTransferRouteTransition
+                    .PendingFallbackV6ProofBootstrap);
+            Assert.Null(
+                coordinatorAfterReplacement.FileTransferRouteTransition
+                    .LastFallbackV6ProofBootstrapReceipt);
+            Assert.Equal(
+                0,
+                coordinatorAfterReplacement.FileTransferRouteTransition
+                    .LastFallbackV6ProofBootstrapGeneration);
+            var replacementLog = ReadOperationalLogTail(logStart);
+            Assert.Equal(
+                1,
+                CountOccurrences(
+                    replacementLog,
+                    "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred;"));
+            Assert.DoesNotContain(
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided;",
+                replacementLog,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_fallback_v6_proof_bootstrap_decided;",
+                replacementLog,
+                StringComparison.Ordinal);
+            return;
+        }
+
+        sparseWrite.ReleaseWrites();
+        await sparseWriteTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Empty(pendingSparseWrites);
+        Assert.Equal(120, GetPrivateProperty<int>(context, "HighestBufferedChunkIndex"));
+        Assert.Equal(100, GetPrivateProperty<int>(context, "NextChunkIndex"));
+        await WaitUntilAsync(
+            () =>
+            {
+                var persistent =
+                    GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState");
+                return persistent.FileTransferRouteTransition
+                           .LastFallbackV6ProofBootstrapReceipt is
+                       {
+                           Status:
+                               FileTransferFallbackV6ProofBootstrapReceiptStatus
+                                   .Delivered,
+                       } &&
+                       persistent.FileTransferRouteTransition
+                           .LastTerminalOperation is
+                       {
+                           State: FileTransferRouteTransitionState.Committed,
+                           RetainedFrameApplyReceipt: not null,
+                           DispositionReceipt: not null,
+                       };
+            },
+            timeoutMs: 5000);
+
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+        var coordinatorAfterRecheck =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        var bootstrapReceipt = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapReceipt>(
+            coordinatorAfterRecheck.FileTransferRouteTransition
+                .LastFallbackV6ProofBootstrapReceipt);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+            bootstrapReceipt.Status);
+        var terminal = Assert.IsType<FileTransferRouteTransitionOperation>(
+            coordinatorAfterRecheck.FileTransferRouteTransition
+                .LastTerminalOperation);
+        Assert.Equal(FileTransferRouteTransitionState.Committed, terminal.State);
+        var retainedFrameReceipt = Assert.IsType<
+            FileTransferRouteTransitionRetainedFrameApplyReceipt>(
+            terminal.RetainedFrameApplyReceipt);
+        Assert.Equal(
+            FileTransferRouteTransitionRetainedFrameApplyStatus.Applied,
+            retainedFrameReceipt.Status);
+        Assert.Equal(frameIdentity, retainedFrameReceipt.Command.FrameIdentity);
+        Assert.Equal(
+            FileTransferRouteTransitionDispositionApplyStatus.Applied,
+            Assert.IsType<FileTransferRouteTransitionDispositionReceipt>(
+                terminal.DispositionReceipt).Status);
+        Assert.Equal(
+            FileTransferRoute.PostTunaFallbackV6,
+            GetPrivateProperty<FileTransferRouteSelection>(
+                context,
+                "RouteSelection").Route);
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution"));
+        var completedLog = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                completedLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided;"));
+        Assert.Contains(
+            "source_data_session_generation=1;",
+            completedLog,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                completedLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_decided;"));
+
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluation])!);
+        var coordinatorAfterDuplicate =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        Assert.Equal(
+            bootstrapReceipt.Command.AuthorityId,
+            coordinatorAfterDuplicate.FileTransferRouteTransition
+                .LastFallbackV6ProofBootstrapReceipt?.Command.AuthorityId);
+        Assert.Equal(
+            bootstrapReceipt.Command.BootstrapGeneration,
+            coordinatorAfterDuplicate.FileTransferRouteTransition
+                .LastFallbackV6ProofBootstrapGeneration);
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution"));
+        var duplicateLog = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                duplicateLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                duplicateLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_decided;"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public async Task FallbackV6ProofBootstrap_InboundPendingWriteWake_NewerPeerFirstEvaluationWinsDelayedPredecessor()
+    {
+        const string transferId =
+            "transfer_fallback_v6_bootstrap_inbound_pending_write_wake_aba";
+        var sessionId = $"session_{transferId}";
+        using var service = new SessionFileTransferService();
+        using var bridge = new LoopbackFileTransferTransport(sessionId);
+        service.AttachTransport(bridge);
+        var dataSession = new GenerationBoundDataSession(
+            sessionId,
+            transferId,
+            generation: 7);
+        var context = CreateFileTunaV4InboundContext(
+            transferId,
+            dataSession: dataSession,
+            startCoordinatorSnapshotStream: false);
+        SetPrivateProperty(context, "V4StateEpoch", 1);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 99);
+        var writtenChunks = new BitArray(256);
+        for (var index = 0; index < 100; index++)
+        {
+            writtenChunks[index] = true;
+        }
+
+        SetPrivateProperty(context, "ReceiverSparseChunksWritten", writtenChunks);
+        SeedRecoveredFileTunaV4SecondCycleScopeForTest(context);
+        var seededPersistent =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            seededPersistent with
+            {
+                FileTransferRouteTransition =
+                    seededPersistent.FileTransferRouteTransition with
+                    {
+                        LastFallbackV6ProofBootstrapGeneration = 1,
+                    },
+            });
+        StartCoordinatorSnapshotStreamForTest(context);
+        typeof(SessionFileTransferService)
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var state = CreateCoordinatorStateForTest(context);
+        var targetTransportEpoch = state.CurrentLeg!.TransportEpochId + 1;
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportEpoch",
+            targetTransportEpoch + 1);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportEpochKind",
+            FileTransferTransportHandoffKind.NormalToTunaActivation);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportTargetTransport",
+            FileTransferTransportKind.Tuna);
+
+        FileTransferFrontierRequestFrameV6 CreatePeerFrame(
+            long bootstrapGeneration)
+            => new()
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = targetTransportEpoch,
+                RequestCorrelationId =
+                    FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                        bootstrapGeneration),
+                MissingRanges = [],
+                Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+                RecoveryMode =
+                    FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+            };
+
+        FileTransferFallbackV6ProofBootstrapEvaluation CreateEvaluation(
+            long observationGeneration,
+            FileTransferFrontierRequestFrameV6 frame)
+        {
+            var identity = PostTunaFallbackPeerProofFrameIdentity.Create(frame);
+            return new FileTransferFallbackV6ProofBootstrapEvaluation(
+                sessionId,
+                FileTransferDirection.Inbound,
+                observationGeneration,
+                FallbackEpoch: 2,
+                Source: "unit_test_peer_first_bootstrap_pending_write_aba",
+                ProofKind: "file_transfer_v6_frontier_request_frame_received",
+                ObservedUtcMilliseconds:
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                TriggerTransferId: transferId,
+                TriggerTransportEpoch: frame.TransportEpoch,
+                TriggerFrameFingerprint: identity.Sha256,
+                TriggerDataSession: dataSession,
+                TriggerDataSessionGeneration: dataSession.Generation,
+                TriggerSourceScope:
+                    CreateFallbackV6ProofBootstrapTriggerSourceScope(state));
+        }
+
+        var frameA = CreatePeerFrame(bootstrapGeneration: 1);
+        var frameB = CreatePeerFrame(bootstrapGeneration: 2);
+        var conflictingFrameB = CreatePeerFrame(bootstrapGeneration: 3);
+        var frameAIdentity = PostTunaFallbackPeerProofFrameIdentity.Create(frameA);
+        var frameBIdentity = PostTunaFallbackPeerProofFrameIdentity.Create(frameB);
+        Assert.NotEqual(frameAIdentity, frameBIdentity);
+        var evaluationA = CreateEvaluation(observationGeneration: 11, frameA);
+        var evaluationB = CreateEvaluation(observationGeneration: 12, frameB);
+        var conflictingEvaluationB =
+            CreateEvaluation(observationGeneration: 12, conflictingFrameB);
+
+        var pendingSparseWrites = GetPrivateProperty<HashSet<int>>(
+            context,
+            "ReceiverSparseChunksPendingWrite");
+        pendingSparseWrites.Add(120);
+        Assert.Contains(120, pendingSparseWrites);
+
+        var process = typeof(SessionFileTransferService).GetMethod(
+            "ProcessFallbackV6ProofBootstrapEvaluationAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var stage = typeof(SessionFileTransferService).GetMethod(
+            "TryStageInboundFallbackV6ProofBootstrapPeerFrameLocked",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var logStart = GetOperationalLogLength();
+
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluationA])!);
+        var wakeA = Assert.IsAssignableFrom<object>(
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.Equal(
+            evaluationA,
+            GetPrivateProperty<FileTransferFallbackV6ProofBootstrapEvaluation>(
+                wakeA,
+                "Evaluation"));
+        object?[] stageAArguments = [context, frameA, null];
+        Assert.True(Assert.IsType<bool>(stage.Invoke(null, stageAArguments)));
+        Assert.Equal("precommand_peer_frame_staged", stageAArguments[2]);
+        Assert.Same(
+            frameA,
+            GetPrivatePropertyValue(
+                context,
+                "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluationB])!);
+        var wakeB = Assert.IsAssignableFrom<object>(
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.NotSame(wakeA, wakeB);
+        Assert.True(
+            GetPrivateProperty<long>(wakeB, "WakeGeneration") >
+            GetPrivateProperty<long>(wakeA, "WakeGeneration"));
+        Assert.Equal(
+            evaluationB,
+            GetPrivateProperty<FileTransferFallbackV6ProofBootstrapEvaluation>(
+                wakeB,
+                "Evaluation"));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "PendingFallbackV6ProofBootstrapPeerFrameBinding"));
+
+        object?[] delayedStageAArguments = [context, frameA, null];
+        Assert.False(Assert.IsType<bool>(stage.Invoke(
+            null,
+            delayedStageAArguments)));
+        Assert.Equal(
+            "precommand_peer_frame_pending_write_wake_mismatch",
+            delayedStageAArguments[2]);
+        Assert.Same(
+            wakeB,
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "PendingFallbackV6ProofBootstrapPeerFrameBinding"));
+
+        object?[] stageBArguments = [context, frameB, null];
+        Assert.True(Assert.IsType<bool>(stage.Invoke(null, stageBArguments)));
+        Assert.Equal("precommand_peer_frame_staged", stageBArguments[2]);
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluationA])!);
+        Assert.Same(
+            wakeB,
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.Same(
+            frameB,
+            GetPrivatePropertyValue(
+                context,
+                "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+
+        object?[] conflictingStageArguments =
+            [context, conflictingFrameB, null];
+        Assert.False(Assert.IsType<bool>(stage.Invoke(
+            null,
+            conflictingStageArguments)));
+        Assert.Equal(
+            "precommand_peer_frame_pending_write_wake_mismatch",
+            conflictingStageArguments[2]);
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, conflictingEvaluationB])!);
+        Assert.Same(
+            wakeB,
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.Same(
+            frameB,
+            GetPrivatePropertyValue(
+                context,
+                "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
+
+        pendingSparseWrites.Clear();
+        Assert.Empty(pendingSparseWrites);
+        var takePendingWriteWake = typeof(SessionFileTransferService).GetMethod(
+            "TakeInboundFallbackV6ProofBootstrapPendingWriteWakeAfterDrainLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        object?[] takeArguments = [context, null, null, null];
+        var claimedWakeValue = takePendingWriteWake.Invoke(service, takeArguments);
+        Assert.True(
+            claimedWakeValue is not null,
+            $"status={takeArguments[2]}; result={takeArguments[3]}; " +
+            $"sparse={GetPrivateProperty<HashSet<int>>(context, "ReceiverSparseChunksPendingWrite").Count}; " +
+            $"contiguous={GetPrivateProperty<SortedDictionary<int, byte[]>>(context, "PendingChunks").Count}");
+        var claimedWake = Assert.IsAssignableFrom<object>(claimedWakeValue);
+        Assert.Same(claimedWake, takeArguments[1]);
+        Assert.True(GetPrivateProperty<bool>(claimedWake, "RecheckClaimed"));
+        Assert.Equal("Rechecked", takeArguments[2]);
+        Assert.Equal("pending_writes_drained", takeArguments[3]);
+        Assert.Same(
+            claimedWake,
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+
+        var writtenAfterClaim = GetPrivateProperty<BitArray>(
+            context,
+            "ReceiverSparseChunksWritten");
+        writtenAfterClaim[100] = true;
+        writtenAfterClaim[120] = true;
+        SetPrivateProperty(context, "NextChunkIndex", 101);
+        SetPrivateProperty(context, "HighestBufferedChunkIndex", 120);
+
+        var coordinatorBeforeDelayedEvaluation =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluationA])!);
+        Assert.Same(
+            claimedWake,
+            GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        Assert.Equal(
+            coordinatorBeforeDelayedEvaluation,
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState"));
+        Assert.DoesNotContain(
+            "event=filetransfer_fallback_v6_proof_bootstrap_decided;",
+            ReadOperationalLogTail(logStart),
+            StringComparison.Ordinal);
+
+        typeof(SessionFileTransferService)
+            .GetMethod(
+                "LogInboundFallbackV6ProofBootstrapPendingWriteRecheckDecision",
+                BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [claimedWake, takeArguments[2], takeArguments[3]]);
+        await Assert.IsAssignableFrom<Task>(
+            typeof(SessionFileTransferService)
+                .GetMethod(
+                    "ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [claimedWake])!);
+        await WaitUntilAsync(
+            () =>
+            {
+                var persistent =
+                    GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState");
+                return persistent.FileTransferRouteTransition
+                           .LastFallbackV6ProofBootstrapReceipt is
+                       {
+                           Status:
+                               FileTransferFallbackV6ProofBootstrapReceiptStatus
+                                   .Delivered,
+                           Command.BootstrapGeneration: 2,
+                       } &&
+                       persistent.FileTransferRouteTransition
+                           .LastTerminalOperation is
+                       {
+                           State: FileTransferRouteTransitionState.Committed,
+                           RetainedFrameApplyReceipt: not null,
+                           DispositionReceipt: not null,
+                       };
+            },
+            timeoutMs: 5000);
+
+        var completed =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+        var bootstrapReceipt = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapReceipt>(
+            completed.FileTransferRouteTransition
+                .LastFallbackV6ProofBootstrapReceipt);
+        Assert.Equal(2, bootstrapReceipt.Command.BootstrapGeneration);
+        Assert.Equal(
+            evaluationB.ObservationGeneration,
+            bootstrapReceipt.Command.Observation.ObservationGeneration);
+        Assert.Equal(
+            101,
+            bootstrapReceipt.Command.Observation.DurableCheckpoint
+                .ContiguousCommittedChunkIndex);
+        Assert.Equal(
+            120,
+            bootstrapReceipt.Command.Observation.DurableCheckpoint
+                .DurableHighestChunkIndex);
+        var terminal = Assert.IsType<FileTransferRouteTransitionOperation>(
+            completed.FileTransferRouteTransition.LastTerminalOperation);
+        var proofBoundary = Assert.IsType<FileTransferFallbackTransitionProofBoundary>(
+            terminal.Authority.ProofBoundary);
+        Assert.Equal(frameBIdentity, proofBoundary.RetainedFrameIdentity);
+        Assert.Equal(
+            frameBIdentity,
+            Assert.IsType<FileTransferRouteTransitionRetainedFrameApplyReceipt>(
+                terminal.RetainedFrameApplyReceipt).Command.FrameIdentity);
+        var completedLog = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            2,
+            CountOccurrences(
+                completedLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                completedLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                completedLog,
+                "event=filetransfer_fallback_v6_proof_bootstrap_decided;"));
+        Assert.Contains(
+            "observation_generation=12;",
+            completedLog,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "bootstrap_generation=2;",
+            completedLog,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "predecessor_wake_generation=1;",
+            completedLog,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "evaluation_source=unit_test_peer_first_bootstrap_pending_write_aba;",
+            completedLog,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(FileTransferDirection.Outbound)]
     [InlineData(FileTransferDirection.Inbound)]
     [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]

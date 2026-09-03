@@ -4848,11 +4848,17 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     [switch]$WrongPreparedTarget,
                     [switch]$WrongInboundCorrelation,
                     [switch]$AddConflictingBinding,
+                    [switch]$PendingWriteDeferred,
+                    [switch]$MissingPendingWriteRecheck,
+                    [switch]$WrongPendingWriteRecheck,
+                    [switch]$WrongPendingWriteDataSession,
                     [ValidateSet('outbound', 'inbound')][string]$Direction = 'outbound') {
                 $scope = "session_id=sess; transfer_id=transfer; direction=$Direction; log_writer_id=writer"
                 $route = 'live_route_epoch=3; runtime_generation=4; route_publication_generation=4; route_commit_generation=2; terminal_generation=0; leg_generation=4; fallback_transport_epoch=0; fallback_bridge_recovery_generation=0; fallback_checkpoint_request_id=(none)'
                 $source = 'source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_data_session_generation=7'
+                $diagnosticSource = 'source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0'
                 $checkpoint = 'source_checkpoint_request_id=(none); source_checkpoint_generation=1; source_durable_checkpoint_generation=1; source_state_epoch=1; source_contiguous_frontier=100; source_durable_highest=99; source_chunk_count=256'
+                $diagnosticCheckpoint = 'source_checkpoint_request_id=(none); source_checkpoint_generation=1'
                 $binding = if ($MalformedBinding) {
                     'peer_binding_present=1; peer_data_session_reference_generation=1'
                 }
@@ -4892,19 +4898,78 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     $conflictingBindingText = "peer_binding_present=1; peer_data_session_reference_generation=1; peer_data_session_generation=7; $source; $($checkpoint.Replace('source_checkpoint_generation=1', 'source_checkpoint_generation=2'))"
                     $lines += "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $conflictingBindingText; decision_status=staged; reason_code=precommand_peer_frame_duplicate; authority_effect=evidence_only; log_writer_sequence=104"
                 }
-                if (-not $Recovered) { return $lines }
+                if (-not $Recovered -and -not $PendingWriteDeferred) { return $lines }
 
                 $wakeFingerprint = if ($WrongTuple) { 'other-frame' } else { 'peer-frame' }
-                return $lines + @(
-                    "event=filetransfer_fallback_v6_proof_bootstrap_observed; $scope; observation_generation=3; fallback_epoch=2; proof_kind=$proofKind; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; authority_effect=coordinator_evaluation_only; log_writer_sequence=109",
-                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; $scope; pending_generation=3; fallback_epoch=2; proof_kind=$proofKind; transport_epoch=1; frame_fingerprint=$wakeFingerprint; trigger_data_session_generation=1; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_checkpoint_request_id=(none); source_checkpoint_generation=1; decision_status=Published; decision_result=local_bootstrap_evaluation_published; authority_effect=none; log_writer_sequence=110",
-                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; $command; frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $binding; decision_status=accepted; reason_code=precommand_peer_frame_admitted; authority_effect=peer_frame_retention_only; log_writer_sequence=111",
-                    "event=filetransfer_fallback_v6_proof_bootstrap_decided; $scope; observation_generation=3; trigger_transfer_id=transfer; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; $source; $checkpoint; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; $command; decision_status=Issued; log_writer_sequence=112",
-                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $scope; $command; frame_fingerprint=local-frame; receipt_status=Delivered; log_writer_sequence=113",
-                    "event=filetransfer_route_transition_prepared; $scope; authority_id=transition; transition_generation=2; $preparedSource; $preparedCheckpoint; $preparedTarget; retained_frame_fingerprint=peer-frame; peer_proof_generation=1; log_writer_sequence=114",
-                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; $scope; $source; $checkpoint; authority_id=bootstrap; bootstrap_generation=2; fallback_epoch=2; target_transport_epoch=1; peer_frame_type=$frameType; peer_frame_fingerprint=peer-frame; proof_generation=1; proof_kind=$proofKind; pairing_status=Bound; log_writer_sequence=115",
-                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $scope; $command; frame_fingerprint=local-frame; receipt_status=Delivered; application_status=Applied; log_writer_sequence=116"
+                $tail = @(
+                    "event=filetransfer_fallback_v6_proof_bootstrap_observed; $scope; observation_generation=3; fallback_epoch=2; source=peer_first_test; proof_kind=$proofKind; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; authority_effect=coordinator_evaluation_only; log_writer_sequence=109"
                 )
+                $wakeSequence = 110
+                $nextSequence = 111
+                if ($PendingWriteDeferred) {
+                    $diagnosticDataSessionGeneration = if ($WrongPendingWriteDataSession) { 8 } else { 7 }
+                    $tail += "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred; $scope; wake_generation=5; predecessor_wake_generation=0; observation_generation=3; fallback_epoch=2; evaluation_source=peer_first_test; proof_kind=$proofKind; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; $diagnosticSource; source_data_session_generation=$diagnosticDataSessionGeneration; $diagnosticCheckpoint; pending_sparse_write_count=1; pending_contiguous_chunk_count=0; decision_status=Held; decision_result=inbound_pending_write_current; authority_effect=none; log_writer_sequence=110"
+                    $wakeSequence = 111
+                    $nextSequence = 112
+                }
+                $tail += "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; $scope; pending_generation=3; fallback_epoch=2; proof_kind=$proofKind; transport_epoch=1; frame_fingerprint=$wakeFingerprint; trigger_data_session_generation=1; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; source_runtime_generation=4; source_route_publication_generation=4; source_route_commit_generation=2; source_terminal_generation=0; source_leg_generation=4; source_transport_epoch=0; source_bridge_recovery_generation=0; source_checkpoint_request_id=(none); source_checkpoint_generation=1; decision_status=Published; decision_result=local_bootstrap_evaluation_published; authority_effect=none; log_writer_sequence=$wakeSequence"
+                if ($PendingWriteDeferred -and -not $MissingPendingWriteRecheck) {
+                    $recheckGeneration = if ($WrongPendingWriteRecheck) { 6 } else { 5 }
+                    $tail += "event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided; $scope; wake_generation=$recheckGeneration; observation_generation=3; fallback_epoch=2; evaluation_source=peer_first_test; proof_kind=$proofKind; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; $diagnosticSource; source_data_session_generation=$diagnosticDataSessionGeneration; $diagnosticCheckpoint; pending_sparse_write_count=0; pending_contiguous_chunk_count=0; decision_status=Rechecked; decision_result=pending_writes_drained; authority_effect=none; log_writer_sequence=$nextSequence"
+                    $nextSequence++
+                }
+                if (-not $Recovered) { return $lines + $tail }
+
+                return $lines + $tail + @(
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $scope; $command; frame_type=$frameType; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=$requestCorrelationId; $binding; decision_status=accepted; reason_code=precommand_peer_frame_admitted; authority_effect=peer_frame_retention_only; log_writer_sequence=$nextSequence",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_decided; $scope; observation_generation=3; trigger_transfer_id=transfer; trigger_transport_epoch=1; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; $source; $checkpoint; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; $command; decision_status=Issued; log_writer_sequence=$($nextSequence + 1)",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_execution_completed; $scope; $command; frame_fingerprint=local-frame; receipt_status=Delivered; log_writer_sequence=$($nextSequence + 2)",
+                    "event=filetransfer_route_transition_prepared; $scope; authority_id=transition; transition_generation=2; $preparedSource; $preparedCheckpoint; $preparedTarget; retained_frame_fingerprint=peer-frame; peer_proof_generation=1; log_writer_sequence=$($nextSequence + 3)",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound; $scope; $source; $checkpoint; authority_id=bootstrap; bootstrap_generation=2; fallback_epoch=2; target_transport_epoch=1; peer_frame_type=$frameType; peer_frame_fingerprint=peer-frame; proof_generation=1; proof_kind=$proofKind; pairing_status=Bound; log_writer_sequence=$($nextSequence + 4)",
+                    "event=filetransfer_fallback_v6_proof_bootstrap_receipt_applied; $scope; $command; frame_fingerprint=local-frame; receipt_status=Delivered; application_status=Applied; log_writer_sequence=$($nextSequence + 5)"
+                )
+            }
+
+            function ConvertTo-ProductionPeerFirstOrder(
+                    [string[]]$Lines,
+                    [switch]$RecheckBeforeTransportWake) {
+                $ranked = @($Lines | Sort-Object {
+                        $event = Get-FileTransferAuthorityLogField -Line $_ -Name 'event'
+                        if ($event -eq 'filetransfer_route_hint_authorized_publication_accepted') { 0 }
+                        elseif ($event -eq 'tuna_fallback_started') { 1 }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_observed') { 2 }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred') { 3 }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided') {
+                            if ($RecheckBeforeTransportWake) { 5 } else { 4 }
+                        }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided') {
+                            $reason = Get-FileTransferAuthorityLogField -Line $_ -Name 'reason_code'
+                            if ($reason -eq 'precommand_peer_frame_staged') {
+                                if ($RecheckBeforeTransportWake) { 6 } else { 5 }
+                            }
+                            elseif ($reason -eq 'precommand_peer_frame_duplicate') {
+                                if ($RecheckBeforeTransportWake) { 7 } else { 6 }
+                            }
+                            elseif ($reason -eq 'precommand_peer_frame_admitted') { 8 }
+                            else { 99 }
+                        }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided') {
+                            if ($RecheckBeforeTransportWake) { 4 } else { 7 }
+                        }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_decided') { 9 }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_execution_completed') { 10 }
+                        elseif ($event -eq 'filetransfer_route_transition_prepared') { 11 }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound') { 12 }
+                        elseif ($event -eq 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied') { 13 }
+                        else { 99 }
+                    })
+                $result = New-Object System.Collections.Generic.List[string]
+                for ($index = 0; $index -lt $ranked.Count; $index++) {
+                    $result.Add(($ranked[$index] -replace
+                            'log_writer_sequence=\d+',
+                            "log_writer_sequence=$($index + 100)")) | Out-Null
+                }
+                return $result.ToArray()
             }
 
             $open = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines)
@@ -4917,6 +4982,86 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $wrongPreparedTarget = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongPreparedTarget)
             $wrongInboundCorrelation = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -WrongInboundCorrelation -Direction inbound)
             $conflictingBinding = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -AddConflictingBinding)
+            $pendingWriteOpen = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -PendingWriteDeferred -Direction inbound)
+            $pendingWriteClosed = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -PendingWriteDeferred -Direction inbound)
+            $pendingWriteMissingRecheck = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -PendingWriteDeferred -MissingPendingWriteRecheck -Direction inbound)
+            $pendingWriteWrongRecheck = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -PendingWriteDeferred -WrongPendingWriteRecheck -Direction inbound)
+            $pendingWriteWrongDataSession = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines (New-PeerFirstLines -Recovered -PendingWriteDeferred -WrongPendingWriteDataSession -Direction inbound)
+            $productionPendingWriteOpenLines = ConvertTo-ProductionPeerFirstOrder -Lines (New-PeerFirstLines -PendingWriteDeferred -Direction inbound)
+            $productionPendingWriteClosedLines = ConvertTo-ProductionPeerFirstOrder -Lines (New-PeerFirstLines -Recovered -PendingWriteDeferred -Direction inbound)
+            $concurrentPendingWriteClosedLines = ConvertTo-ProductionPeerFirstOrder -Lines (New-PeerFirstLines -Recovered -PendingWriteDeferred -Direction inbound) -RecheckBeforeTransportWake
+            $productionPendingWriteOpen = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $productionPendingWriteOpenLines
+            $productionPendingWriteClosed = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $productionPendingWriteClosedLines
+            $concurrentPendingWriteClosed = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $concurrentPendingWriteClosedLines
+            $replacementBaseLines = ConvertTo-ProductionPeerFirstOrder -Lines (New-PeerFirstLines -PendingWriteDeferred -MissingPendingWriteRecheck -Direction inbound)
+            $replacementSuccessorLines = @($replacementBaseLines | ForEach-Object {
+                    $updated = $_.Replace(
+                        'observation_generation=3',
+                        'observation_generation=4')
+                    $updated = $updated.Replace(
+                        'pending_generation=3',
+                        'pending_generation=4')
+                    $updated = $updated.Replace(
+                        'wake_generation=5',
+                        'wake_generation=6')
+                    $updated = $updated.Replace(
+                        'predecessor_wake_generation=0',
+                        'predecessor_wake_generation=5')
+                    $updated = $updated.Replace('peer-frame', 'peer-frame-b')
+                    $updated.Replace('decision_status=Held', 'decision_status=Replaced')
+                })
+            $staleReplacementCallback = @($replacementBaseLines | Where-Object {
+                    (Get-FileTransferAuthorityLogField -Line $_ -Name 'event') -eq
+                        'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred'
+                })[0]
+            $staleReplacementCallback = $staleReplacementCallback.Replace(
+                'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
+                'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided')
+            $staleReplacementCallback = $staleReplacementCallback.Replace(
+                'predecessor_wake_generation=0; ',
+                '')
+            $staleReplacementCallback = $staleReplacementCallback.Replace(
+                'pending_sparse_write_count=1',
+                'pending_sparse_write_count=0')
+            $staleReplacementCallback = $staleReplacementCallback.Replace(
+                'decision_status=Held',
+                'decision_status=Stale')
+            $staleReplacementCallback = $staleReplacementCallback.Replace(
+                'decision_result=inbound_pending_write_current',
+                'decision_result=wake_generation_replaced')
+            [string[]]$replacementLines = @(
+                $replacementBaseLines[0..1] +
+                $replacementBaseLines[2..($replacementBaseLines.Count - 1)] +
+                $replacementSuccessorLines[2..($replacementSuccessorLines.Count - 1)] +
+                $staleReplacementCallback
+            )
+            for ($index = 0; $index -lt $replacementLines.Count; $index++) {
+                $replacementLines[$index] = $replacementLines[$index] -replace
+                    'log_writer_sequence=\d+',
+                    "log_writer_sequence=$($index + 100)"
+            }
+            $wrongReplacementPredecessorLines = @($replacementLines | ForEach-Object {
+                    if ($_ -like '*pending_write_deferred*peer-frame-b*') {
+                        $_.Replace(
+                            'predecessor_wake_generation=5',
+                            'predecessor_wake_generation=4')
+                    }
+                    else { $_ }
+                })
+            [string[]]$contradictoryReplacementLines = @(
+                $replacementLines[0..6] +
+                $replacementLines[$replacementLines.Count - 1] +
+                $replacementLines[7..($replacementLines.Count - 2)]
+            )
+            for ($index = 0; $index -lt $contradictoryReplacementLines.Count; $index++) {
+                $contradictoryReplacementLines[$index] =
+                    $contradictoryReplacementLines[$index] -replace
+                        'log_writer_sequence=\d+',
+                        "log_writer_sequence=$($index + 100)"
+            }
+            $replacement = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $replacementLines
+            $wrongReplacementPredecessor = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $wrongReplacementPredecessorLines
+            $contradictoryReplacement = Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $contradictoryReplacementLines
             if ($open.RawCount -ne 2 -or $open.DistinctCount -ne 1 -or
                 $open.RecoveredCount -ne 0 -or $open.UnresolvedCount -ne 1 -or
                 $open.UnresolvedCandidateRecords[0].WriterSequence -ne 102 -or
@@ -4952,6 +5097,79 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 $conflictingBinding.RecoveredCount -ne 1 -or
                 $conflictingBinding.UnresolvedCount -ne 1) {
                 throw "conflicting-binding peer-first bootstrap mismatch: $($conflictingBinding | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($pendingWriteOpen.RawCount -ne 1 -or
+                $pendingWriteOpen.DistinctCount -ne 1 -or
+                $pendingWriteOpen.RecoveredCount -ne 0 -or
+                $pendingWriteOpen.UnresolvedCount -ne 1 -or
+                $pendingWriteOpen.UnresolvedCandidateRecords[0].WriterSequence -ne 111 -or
+                $pendingWriteOpen.UnresolvedCandidateRecords[0].Reason -ne
+                    'peer_first_bootstrap_evaluation_published_but_inbound_pending_write_recheck_missing' -or
+                $pendingWriteOpen.UnresolvedCandidateRecords[0].Variant -ne
+                    'second_cycle_frontier_request_arrived_during_sparse_write_and_one_shot_evaluation_was_dropped') {
+                throw "pending-write peer-first bootstrap mismatch: $($pendingWriteOpen | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($pendingWriteClosed.RawCount -ne 1 -or
+                $pendingWriteClosed.DistinctCount -ne 1 -or
+                $pendingWriteClosed.RecoveredCount -ne 1 -or
+                $pendingWriteClosed.UnresolvedCount -ne 0) {
+                throw "pending-write recheck did not recover: $($pendingWriteClosed | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            foreach ($negative in @(
+                    @{ Name = 'pending-write-missing-recheck'; Result = $pendingWriteMissingRecheck },
+                    @{ Name = 'pending-write-wrong-recheck'; Result = $pendingWriteWrongRecheck })) {
+                if ($negative.Result.RecoveredCount -ne 0 -or
+                    $negative.Result.UnresolvedCount -ne 1 -or
+                    $negative.Result.UnresolvedCandidateRecords[0].Reason -ne
+                        'peer_first_bootstrap_evaluation_published_but_inbound_pending_write_recheck_missing') {
+                    throw "$($negative.Name) unexpectedly recovered: $($negative.Result | ConvertTo-Json -Depth 6 -Compress)"
+                }
+            }
+            if ($pendingWriteWrongDataSession.RecoveredCount -ne 0 -or
+                $pendingWriteWrongDataSession.UnresolvedCount -ne 1 -or
+                $pendingWriteWrongDataSession.UnresolvedCandidateRecords[0].Reason -ne
+                    'peer_first_bootstrap_frame_staged_without_exact_coordinator_evaluation_wake') {
+                throw "wrong pending-write data session was admitted: $($pendingWriteWrongDataSession | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($productionPendingWriteOpen.RawCount -ne 1 -or
+                $productionPendingWriteOpen.DistinctCount -ne 1 -or
+                $productionPendingWriteOpen.RecoveredCount -ne 0 -or
+                $productionPendingWriteOpen.UnresolvedCount -ne 1 -or
+                $productionPendingWriteOpen.UnresolvedCandidateRecords[0].WriterSequence -ne 104 -or
+                $productionPendingWriteOpen.UnresolvedCandidateRecords[0].Reason -ne
+                    'peer_first_bootstrap_evaluation_published_but_inbound_pending_write_recheck_missing') {
+                throw "production-order pending-write bootstrap mismatch: $($productionPendingWriteOpen | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($productionPendingWriteClosed.RawCount -ne 1 -or
+                $productionPendingWriteClosed.DistinctCount -ne 1 -or
+                $productionPendingWriteClosed.RecoveredCount -ne 1 -or
+                $productionPendingWriteClosed.UnresolvedCount -ne 0) {
+                throw "production-order pending-write recheck did not recover: $($productionPendingWriteClosed | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($concurrentPendingWriteClosed.RawCount -ne 1 -or
+                $concurrentPendingWriteClosed.DistinctCount -ne 1 -or
+                $concurrentPendingWriteClosed.RecoveredCount -ne 1 -or
+                $concurrentPendingWriteClosed.UnresolvedCount -ne 0) {
+                throw "deferral-first concurrent recheck did not recover: $($concurrentPendingWriteClosed | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($replacement.RawCount -ne 2 -or
+                $replacement.DistinctCount -ne 2 -or
+                $replacement.RecoveredCount -ne 1 -or
+                $replacement.UnresolvedCount -ne 1 -or
+                $replacement.UnresolvedCandidateRecords[0].WriterSequence -ne 109) {
+                throw "exact pending-write replacement did not close only A: $($replacement | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($wrongReplacementPredecessor.RawCount -ne 2 -or
+                $wrongReplacementPredecessor.DistinctCount -ne 2 -or
+                $wrongReplacementPredecessor.RecoveredCount -ne 0 -or
+                $wrongReplacementPredecessor.UnresolvedCount -ne 2) {
+                throw "wrong predecessor generation closed pending-write A: $($wrongReplacementPredecessor | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            if ($contradictoryReplacement.RawCount -ne 2 -or
+                $contradictoryReplacement.DistinctCount -ne 2 -or
+                $contradictoryReplacement.RecoveredCount -ne 0 -or
+                $contradictoryReplacement.UnresolvedCount -ne 2) {
+                throw "stale recheck before replacement was accepted: $($contradictoryReplacement | ConvertTo-Json -Depth 6 -Compress)"
             }
             Write-Output 'peer-first-bootstrap-shared-correlation-ok'
             """;
@@ -5077,6 +5295,22 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             StringComparison.Ordinal);
         Assert.Contains(
             "'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided'",
+            orchestration,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred'",
+            artifactWriter,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided'",
+            artifactWriter,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred'",
+            orchestration,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided'",
             orchestration,
             StringComparison.Ordinal);
         Assert.Contains(

@@ -5310,6 +5310,12 @@ public sealed partial class SessionFileTransferService
         int postTunaFallbackRepairProgressAfter = 0;
         int postTunaFallbackRepairProgressRequestedCount = 0;
         InboundFallbackFrontierProgressReceipt? fallbackFrontierProgressReceipt = null;
+        InboundFallbackV6ProofBootstrapPendingWriteWake?
+            fallbackV6ProofBootstrapObservedWake = null;
+        InboundFallbackV6ProofBootstrapPendingWriteWake?
+            fallbackV6ProofBootstrapRecheck = null;
+        string? fallbackV6ProofBootstrapRecheckStatus = null;
+        string? fallbackV6ProofBootstrapRecheckResult = null;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -5404,9 +5410,35 @@ public sealed partial class SessionFileTransferService
                 context,
                 "receiver_sparse_pending_write_cleared");
 
+            if (context.CurrentFallbackV6ProofBootstrapPendingWriteWake is not null &&
+                context.ReceiverSparseChunksPendingWrite.Count == 0 &&
+                context.PendingChunks.Count == 0)
+            {
+                fallbackV6ProofBootstrapRecheck =
+                    TakeInboundFallbackV6ProofBootstrapPendingWriteWakeAfterDrainLocked(
+                        context,
+                        out fallbackV6ProofBootstrapObservedWake,
+                        out fallbackV6ProofBootstrapRecheckStatus,
+                        out fallbackV6ProofBootstrapRecheckResult);
+            }
+
             ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(context, progressUtc);
 
             snapshot = CreateSnapshotLocked();
+        }
+
+        if (fallbackV6ProofBootstrapObservedWake is not null)
+        {
+            LogInboundFallbackV6ProofBootstrapPendingWriteRecheckDecision(
+                fallbackV6ProofBootstrapObservedWake,
+                fallbackV6ProofBootstrapRecheckStatus ?? "Stale",
+                fallbackV6ProofBootstrapRecheckResult ?? "source_not_current");
+        }
+
+        if (fallbackV6ProofBootstrapRecheck is not null)
+        {
+            _ = ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync(
+                fallbackV6ProofBootstrapRecheck);
         }
 
         SchedulePendingInboundV6FrontierRecentProgressGraceWake(context);

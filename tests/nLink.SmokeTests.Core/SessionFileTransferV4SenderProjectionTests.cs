@@ -741,6 +741,60 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void FileTunaV4Projection_DuplicatePeerStateWhileExactRepairInFlightCoalescesCurrentAuthority()
+    {
+        const string transferId = "transfer_file_tuna_v4_projection_in_flight_dedupe";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateFileTunaV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 9,
+            chunksAcceptedForTransport: 32,
+            remoteGrantedUntilExclusive: 32,
+            chunkCount: 64);
+        serviceType.GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(service, context);
+
+        InvokeEnqueueAuthorizedV4RepairsFromState(service, context, CreatePeerProjectionState(transferId, epoch: 8));
+
+        var firstQueued = Assert.Single(GetQueuedV4RepairSends(context));
+        var firstContract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract");
+        Assert.NotNull(firstContract);
+        var firstAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(firstContract!, "Authority"));
+        var repairStates = Assert.IsAssignableFrom<IDictionary>(
+            GetPrivatePropertyValue(context, "PullV4SenderPumpRepairRequests"));
+        var repairState = Assert.Single(repairStates.Values.Cast<object>());
+
+        var repairQueue = GetPrivatePropertyValue(context, "PullV4SenderPumpRepairQueue");
+        Assert.NotNull(repairQueue);
+        Assert.Same(firstQueued, repairQueue!.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null));
+        var queuedChunkIndices = GetPrivatePropertyValue(context, "PullV4SenderPumpRepairQueuedChunkIndices");
+        Assert.NotNull(queuedChunkIndices);
+        queuedChunkIndices!.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        SetPrivateProperty(repairState, "Queued", false);
+        SetPrivateProperty(repairState, "QueuedUtc", null);
+        SetPrivateProperty(repairState, "InFlight", true);
+
+        InvokeEnqueueAuthorizedV4RepairsFromState(service, context, CreatePeerProjectionState(transferId, epoch: 9));
+
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Same(firstContract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+        Assert.Same(repairState, Assert.Single(repairStates.Values.Cast<object>()));
+        Assert.False(Assert.IsType<bool>(GetPrivatePropertyValue(repairState, "Queued")));
+        Assert.True(Assert.IsType<bool>(GetPrivatePropertyValue(repairState, "InFlight")));
+        var retainedAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(firstContract!, "Authority"));
+        Assert.Equal(firstAuthority.AuthorityId, retainedAuthority.AuthorityId);
+
+        var log = ReadV4SenderLogSnapshot(logStart);
+        Assert.Contains("reason=current_authority_work_outstanding", log, StringComparison.Ordinal);
+        Assert.Contains("in_flight=1", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_file_tuna_v4_frontier_repair_missing_dispatch", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4Projection_RetainedStateUsesNormalProgressCoalescing()
     {
         const string transferId = "transfer_regular_v4_projection_coalescing";
