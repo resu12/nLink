@@ -10,6 +10,7 @@ internal sealed record FileTransferFallbackV6ProofBootstrapPeerFrameBinding(
     IFileTransferDataSession DataSession,
     long DataSessionReferenceGeneration,
     long DataSessionGeneration,
+    long BootstrapGeneration,
     FileTransferRouteTransitionDurableCheckpoint DurableCheckpoint,
     RouteCommitToken SourceRouteCommit,
     FallbackCheckpointLease? FallbackCheckpointLease,
@@ -435,9 +436,9 @@ public sealed partial class SessionFileTransferService
               !IsPostRecoveryFileTunaV4LiveActivationEpoch(
                  inbound.CurrentLiveRouteEpoch,
                  inbound.LastRecoveredV6TransportLiveRouteEpochId) ||
-              !IsStalePostReactivationFallbackV6Proof(
+              !IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
                   inbound,
-                  evaluation.TriggerTransportEpoch) ||
+                  evaluation) ||
               !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
                   evaluation,
                   inboundCheckpoint,
@@ -910,9 +911,9 @@ public sealed partial class SessionFileTransferService
             !IsPostRecoveryFileTunaV4LiveActivationEpoch(
                 context.CurrentLiveRouteEpoch,
                 context.LastRecoveredV6TransportLiveRouteEpochId) ||
-            !IsStalePostReactivationFallbackV6Proof(
+            !IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
                 context,
-                evaluation.TriggerTransportEpoch) ||
+                evaluation) ||
             !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
                 evaluation,
                 checkpoint,
@@ -1310,6 +1311,7 @@ public sealed partial class SessionFileTransferService
             dataSession,
             provider.Generation,
             context.DataSessionGeneration,
+            0,
             CreateOutboundFileTransferRouteTransitionCheckpoint(
                 context,
                 owner,
@@ -1329,6 +1331,13 @@ public sealed partial class SessionFileTransferService
         out FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding)
     {
         binding = null!;
+        var bootstrapGeneration =
+            frame is FileTransferFrontierRequestFrameV6 frontierRequest &&
+            FileTransferProtocol.TryGetFallbackV6ProofBootstrapGeneration(
+                frontierRequest,
+                out var parsedBootstrapGeneration)
+                ? parsedBootstrapGeneration
+                : 0;
         if (direction != FileTransferDirection.Inbound ||
             context.DataSession is not { } dataSession ||
             dataSession is not IFileTransferDataSessionGenerationProvider provider ||
@@ -1353,6 +1362,7 @@ public sealed partial class SessionFileTransferService
             dataSession,
             provider.Generation,
             context.DataSessionGeneration,
+            bootstrapGeneration,
             CreateInboundFileTransferRouteTransitionCheckpoint(
                 context,
                 owner,
@@ -1375,6 +1385,7 @@ public sealed partial class SessionFileTransferService
            left.DataSessionReferenceGeneration ==
                right.DataSessionReferenceGeneration &&
            left.DataSessionGeneration == right.DataSessionGeneration &&
+           left.BootstrapGeneration == right.BootstrapGeneration &&
            left.DurableCheckpoint == right.DurableCheckpoint &&
            left.SourceRouteCommit == right.SourceRouteCommit &&
            left.FallbackCheckpointLease == right.FallbackCheckpointLease &&
@@ -1455,6 +1466,9 @@ public sealed partial class SessionFileTransferService
            ReferenceEquals(binding.DataSession, evaluation.TriggerDataSession) &&
            binding.DataSessionReferenceGeneration ==
                evaluation.TriggerDataSessionGeneration &&
+           (binding.Direction != FileTransferDirection.Inbound ||
+            binding.BootstrapGeneration ==
+                evaluation.TriggerBootstrapGeneration) &&
            MatchesFallbackV6ProofBootstrapTriggerSourceScope(
                evaluation,
                binding.DurableCheckpoint,
@@ -1614,6 +1628,60 @@ public sealed partial class SessionFileTransferService
                "file_transfer_v6_state_frame_received" or
                "file_transfer_v6_frontier_request_frame_received";
 
+    private static bool IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
+        InboundTransferContext context,
+        FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
+    {
+        if (IsStalePostReactivationFallbackV6Proof(
+                context,
+                evaluation.TriggerTransportEpoch))
+        {
+            return true;
+        }
+
+        var transitionState =
+            context.CoordinatorPersistentState.FileTransferRouteTransition;
+        var priorReceipt = transitionState.LastFallbackV6ProofBootstrapReceipt;
+        var priorCommand = priorReceipt?.Command;
+        return evaluation.Direction == FileTransferDirection.Inbound &&
+               evaluation.TriggerBootstrapGeneration > 0 &&
+               evaluation.TriggerBootstrapGeneration == evaluation.FallbackEpoch &&
+               transitionState.PendingFallbackV6ProofBootstrap is null &&
+               priorReceipt is
+               {
+                   IsDefault: false,
+                   Status:
+                       FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                   FrameIdentity.IsComplete: true,
+               } &&
+               priorCommand is not null &&
+               transitionState.LastFallbackV6ProofBootstrapGeneration ==
+                   priorCommand.BootstrapGeneration &&
+               priorCommand.BootstrapGeneration < long.MaxValue &&
+               evaluation.TriggerBootstrapGeneration ==
+                   priorCommand.BootstrapGeneration + 1 &&
+               priorCommand.Observation.FallbackEpoch < long.MaxValue &&
+               evaluation.FallbackEpoch ==
+                   priorCommand.Observation.FallbackEpoch + 1 &&
+               priorCommand.Observation.Direction == evaluation.Direction &&
+               string.Equals(
+                   priorCommand.Observation.SessionId,
+                   evaluation.SessionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   priorCommand.Observation.TransferId,
+                   evaluation.TriggerTransferId,
+                   StringComparison.Ordinal) &&
+               priorCommand.SourceDataSessionGeneration ==
+                   context.DataSessionGeneration &&
+               priorCommand.TargetTransportEpoch ==
+                   evaluation.TriggerTransportEpoch &&
+               priorReceipt.FrameIdentity.TransportEpoch ==
+                   evaluation.TriggerTransportEpoch &&
+               context.CurrentLiveRouteEpoch is { } currentEpoch &&
+               currentEpoch.EpochId > priorCommand.SourceLiveRouteEpoch;
+    }
+
     private static bool MatchesFallbackV6ProofBootstrapTriggerSourceScope(
         FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
         FileTransferRouteTransitionDurableCheckpoint checkpoint,
@@ -1666,7 +1734,7 @@ public sealed partial class SessionFileTransferService
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={command?.Observation.DurableCheckpoint.CheckpointGeneration ?? 0}; source_state_epoch={command?.Observation.DurableCheckpoint.StateEpoch ?? 0}; source_contiguous_frontier={command?.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={command?.Observation.DurableCheckpoint.DurableHighestChunkIndex ?? -1}; source_chunk_count={command?.Observation.DurableCheckpoint.ChunkCount ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_bootstrap_generation={evaluation.TriggerBootstrapGeneration}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={command?.Observation.DurableCheckpoint.CheckpointGeneration ?? 0}; source_state_epoch={command?.Observation.DurableCheckpoint.StateEpoch ?? 0}; source_contiguous_frontier={command?.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={command?.Observation.DurableCheckpoint.DurableHighestChunkIndex ?? -1}; source_chunk_count={command?.Observation.DurableCheckpoint.ChunkCount ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
 
     private static void LogInboundFallbackV6ProofBootstrapPendingWriteDeferred(
         InboundFallbackV6ProofBootstrapPendingWriteWake wake,
@@ -1677,7 +1745,7 @@ public sealed partial class SessionFileTransferService
         var source = evaluation.TriggerSourceScope;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred; decision_status={FormatProtocolLogValue(status)}; decision_result=inbound_pending_write_current; authority_effect=none; wake_generation={wake.WakeGeneration}; predecessor_wake_generation={replacedWake?.WakeGeneration ?? 0}; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; direction=inbound; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; evaluation_source={FormatProtocolLogValue(evaluation.Source)}; proof_kind={FormatProtocolLogValue(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={FormatProtocolLogValue(source?.RouteToken ?? "(none)")}; source_protocol_version={source?.ProtocolVersion ?? 0}; source_live_route_epoch={source?.LiveRouteEpoch ?? 0}; source_runtime_generation={source?.RuntimeGeneration ?? 0}; source_route_publication_generation={source?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={source?.RouteCommitGeneration ?? 0}; source_terminal_generation={source?.TerminalGeneration ?? 0}; source_leg_generation={source?.LegGeneration ?? 0}; source_transport_epoch={source?.TransportEpoch ?? 0}; source_bridge_recovery_generation={source?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={wake.DataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(source?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={source?.CheckpointGeneration ?? 0}; pending_sparse_write_count={wake.PendingSparseWriteCount}; pending_contiguous_chunk_count={wake.PendingContiguousChunkCount}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred; decision_status={FormatProtocolLogValue(status)}; decision_result=inbound_pending_write_current; authority_effect=none; wake_generation={wake.WakeGeneration}; predecessor_wake_generation={replacedWake?.WakeGeneration ?? 0}; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; direction=inbound; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; evaluation_source={FormatProtocolLogValue(evaluation.Source)}; proof_kind={FormatProtocolLogValue(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_bootstrap_generation={evaluation.TriggerBootstrapGeneration}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={FormatProtocolLogValue(source?.RouteToken ?? "(none)")}; source_protocol_version={source?.ProtocolVersion ?? 0}; source_live_route_epoch={source?.LiveRouteEpoch ?? 0}; source_runtime_generation={source?.RuntimeGeneration ?? 0}; source_route_publication_generation={source?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={source?.RouteCommitGeneration ?? 0}; source_terminal_generation={source?.TerminalGeneration ?? 0}; source_leg_generation={source?.LegGeneration ?? 0}; source_transport_epoch={source?.TransportEpoch ?? 0}; source_bridge_recovery_generation={source?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={wake.DataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(source?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={source?.CheckpointGeneration ?? 0}; pending_sparse_write_count={wake.PendingSparseWriteCount}; pending_contiguous_chunk_count={wake.PendingContiguousChunkCount}");
     }
 
     private static void
@@ -1690,7 +1758,7 @@ public sealed partial class SessionFileTransferService
         var source = evaluation.TriggerSourceScope;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided; decision_status={FormatProtocolLogValue(status)}; decision_result={FormatProtocolLogValue(result)}; authority_effect=none; wake_generation={wake.WakeGeneration}; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; direction=inbound; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; evaluation_source={FormatProtocolLogValue(evaluation.Source)}; proof_kind={FormatProtocolLogValue(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={FormatProtocolLogValue(source?.RouteToken ?? "(none)")}; source_protocol_version={source?.ProtocolVersion ?? 0}; source_live_route_epoch={source?.LiveRouteEpoch ?? 0}; source_runtime_generation={source?.RuntimeGeneration ?? 0}; source_route_publication_generation={source?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={source?.RouteCommitGeneration ?? 0}; source_terminal_generation={source?.TerminalGeneration ?? 0}; source_leg_generation={source?.LegGeneration ?? 0}; source_transport_epoch={source?.TransportEpoch ?? 0}; source_bridge_recovery_generation={source?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={wake.DataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(source?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={source?.CheckpointGeneration ?? 0}; pending_sparse_write_count=0; pending_contiguous_chunk_count=0");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided; decision_status={FormatProtocolLogValue(status)}; decision_result={FormatProtocolLogValue(result)}; authority_effect=none; wake_generation={wake.WakeGeneration}; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; direction=inbound; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; evaluation_source={FormatProtocolLogValue(evaluation.Source)}; proof_kind={FormatProtocolLogValue(evaluation.ProofKind)}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_bootstrap_generation={evaluation.TriggerBootstrapGeneration}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; source_route={FormatProtocolLogValue(source?.RouteToken ?? "(none)")}; source_protocol_version={source?.ProtocolVersion ?? 0}; source_live_route_epoch={source?.LiveRouteEpoch ?? 0}; source_runtime_generation={source?.RuntimeGeneration ?? 0}; source_route_publication_generation={source?.RoutePublicationGeneration ?? 0}; source_route_commit_generation={source?.RouteCommitGeneration ?? 0}; source_terminal_generation={source?.TerminalGeneration ?? 0}; source_leg_generation={source?.LegGeneration ?? 0}; source_transport_epoch={source?.TransportEpoch ?? 0}; source_bridge_recovery_generation={source?.BridgeRecoveryGeneration ?? 0}; source_data_session_generation={wake.DataSessionGeneration}; source_checkpoint_request_id={FormatProtocolLogValue(source?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={source?.CheckpointGeneration ?? 0}; pending_sparse_write_count=0; pending_contiguous_chunk_count=0");
     }
 
     private static void LogFallbackV6ProofBootstrapReceipt(

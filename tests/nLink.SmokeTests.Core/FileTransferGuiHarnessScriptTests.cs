@@ -21,7 +21,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             . '{{helperPath.Replace("'", "''", StringComparison.Ordinal)}}'
             $names = @(Get-GuiSmokeSemanticEvidenceEventNames)
-            foreach ($required in @('filetransfer_fallback_tail_terminal_proof_consumed', 'integrity_verify_passed', 'temp_finalize_succeeded')) {
+            foreach ($required in @(
+                'filetransfer_fallback_tail_terminal_proof_consumed',
+                'integrity_verify_passed',
+                'temp_finalize_succeeded',
+                'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
+                'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
+                'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided')) {
                 if ($required -notin $names) { throw "semantic event missing: $required" }
             }
             Write-Output 'terminal-frontier-semantic-catalog-ok'
@@ -7721,6 +7727,25 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $pendingResult.Reason -ne 'peer_first_bootstrap_evaluation_published_but_inbound_pending_write_recheck_missing' -or
                 $pendingResult.Variant -ne 'second_cycle_frontier_request_arrived_during_sparse_write_and_one_shot_evaluation_was_dropped') {
                 throw "shared GUI pending-write bootstrap mismatch: $($pendingResult | ConvertTo-Json -Compress)"
+            }
+
+            $runtimeUnlockLines = @(
+                "event=filetransfer_route_hint_authorized_publication_accepted; $pendingScope; route=file_tuna_v4; protocol_version=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; live_route_epoch=3; runtime_generation=4; route_publication_generation=4; route_commit_generation=2; terminal_generation=0; leg_generation=4; fallback_transport_epoch=0; fallback_bridge_recovery_generation=0; fallback_checkpoint_request_id=(none); log_writer_sequence=100",
+                'event=tuna_fallback_started; session_id=pending-session; fallback_epoch=2; log_writer_id=pending-writer; log_writer_sequence=101',
+                "event=filetransfer_fallback_v6_proof_bootstrap_observed; $pendingScope; observation_generation=3; fallback_epoch=2; source=peer_first_test; proof_kind=file_transfer_v6_frontier_request_frame_received; trigger_transport_epoch=1; trigger_bootstrap_generation=2; trigger_frame_fingerprint=peer-frame; trigger_data_session_generation=1; authority_effect=coordinator_evaluation_only; log_writer_sequence=106",
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; $pendingScope; pending_generation=3; fallback_epoch=2; proof_kind=file_transfer_v6_frontier_request_frame_received; transport_epoch=1; bootstrap_generation=2; frame_fingerprint=peer-frame; trigger_data_session_generation=1; $pendingDiagnosticSource; source_checkpoint_request_id=(none); source_checkpoint_generation=1; decision_status=Published; decision_result=local_bootstrap_evaluation_published; authority_effect=none; log_writer_sequence=107",
+                "event=filetransfer_fallback_v6_proof_bootstrap_peer_frame_decided; $pendingScope; authority_id=(none); bootstrap_generation=0; fallback_epoch=0; target_transport_epoch=0; frame_kind=(none); frame_type=filetransfer.frontier_request.v6; frame_transport_epoch=1; frame_fingerprint=peer-frame; request_correlation_id=fallback-v6-proof-bootstrap:2; $pendingBinding; decision_status=staged; reason_code=precommand_peer_frame_staged; authority_effect=evidence_only; log_writer_sequence=108"
+            )
+            $runtimeUnlockResult =
+                Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure `
+                    -Lines $runtimeUnlockLines
+            if (-not $runtimeUnlockResult.Unresolved -or
+                $runtimeUnlockResult.FirstSequence -ne 107 -or
+                $runtimeUnlockResult.Reason -ne
+                    'peer_first_bootstrap_evaluation_published_before_exact_coordinator_admission' -or
+                $runtimeUnlockResult.Variant -ne
+                    'runtime_unlock_tuna_reactivation_exact_successor_generation_not_admitted') {
+                throw "shared GUI runtime-unlock bootstrap mismatch: $($runtimeUnlockResult | ConvertTo-Json -Compress)"
             }
 
             $replacementSuccessor = @($pendingLines | ForEach-Object {

@@ -31212,7 +31212,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     TransferId = transferId,
                     TransportEpoch = 4,
                     RequestCorrelationId =
-                        FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(1),
+                        FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                            fallbackEpoch),
                     MissingRanges = Array.Empty<FileTransferRangeV4>(),
                     Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
                     RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
@@ -31323,6 +31324,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Equal(
                 GetPrivatePropertyValue<long>(dataSession, "Generation"),
                 evaluation.TriggerDataSessionGeneration);
+            Assert.Equal(
+                outbound ? 0 : fallbackEpoch,
+                evaluation.TriggerBootstrapGeneration);
 
             _ = InvokePrivateMethod(
                 helper,
@@ -31337,7 +31341,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 : ((FileTransferFrontierRequestFrameV6)frame) with
                 {
                     RequestCorrelationId =
-                        FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(2),
+                        FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                            fallbackEpoch + 1),
                 };
             _ = InvokePrivateMethod(
                 helper,
@@ -31355,6 +31360,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.Contains("decision_status=Published", logTail, StringComparison.Ordinal);
             Assert.Contains("decision_status=Coalesced", logTail, StringComparison.Ordinal);
             Assert.Contains("decision_status=Conflict", logTail, StringComparison.Ordinal);
+            Assert.Contains(
+                $"bootstrap_generation={(outbound ? 0 : fallbackEpoch)}",
+                logTail,
+                StringComparison.Ordinal);
             Assert.Contains("authority_effect=none", logTail, StringComparison.Ordinal);
 
             var routeMutationTrigger = CaptureCurrentTrigger();
@@ -31746,6 +31755,21 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 typeof(NknSignalingTransport)
                     .GetField("runtimeUnlockTransactionState", BindingFlags.Instance | BindingFlags.NonPublic)!
                     .GetValue(helper));
+            var authorityModeType = typeof(NknSignalingTransport).GetNestedType(
+                "RuntimeUnlockOfferAuthorityMode",
+                BindingFlags.NonPublic)!;
+            SetPrivateField(
+                helper,
+                "runtimeUnlockResponderAnswerProbeConvergence",
+                CreateRuntimeUnlockResponderWaitingConvergenceForTests(
+                    helper,
+                    transactionState,
+                    11,
+                    offer.Nonce,
+                    Enum.Parse(authorityModeType, "InitialActivation"),
+                    offer.PayerDecisionId,
+                    DateTimeOffset.UtcNow.AddSeconds(30).ToUnixTimeMilliseconds(),
+                    "uncommitted-v6-proof"));
             InvokePrivateMethod(
                 helper,
                 "RequestRuntimeUnlockPreCommitProbeLaunch",
@@ -31753,6 +31777,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 NknAccelerationLaneKind.File,
                 "unit_test_uncommitted_v6_proof",
                 transactionState);
+            var launchSnapshot = Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
+                GetPrivateField(
+                    helper,
+                    "runtimeUnlockPreCommitProbeLaunchSnapshot"));
+            Assert.True(launchSnapshot.LaunchGeneration > 0);
 
             var proofProvider = Assert.IsAssignableFrom<IRuntimeUnlockRouteCommitProofProvider>(helper);
             proofProvider.NotifyRuntimeUnlockPathProbeStarted(

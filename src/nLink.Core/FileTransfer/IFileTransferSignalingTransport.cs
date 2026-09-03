@@ -535,7 +535,8 @@ internal sealed record FileTransferFallbackV6ProofBootstrapEvaluation(
     IFileTransferDataSession? TriggerDataSession = null,
     long TriggerDataSessionGeneration = 0,
     FileTransferFallbackV6ProofBootstrapTriggerSourceScope?
-        TriggerSourceScope = null);
+        TriggerSourceScope = null,
+    long TriggerBootstrapGeneration = 0);
 
 internal sealed record FileTransferFallbackV6ProofBootstrapTriggerSourceScope(
     string RouteToken,

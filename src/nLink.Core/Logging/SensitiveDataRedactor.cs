@@ -40,6 +40,10 @@ public static partial class SensitiveDataRedactor
         var redacted = ProtectSnapshotEvidenceValues(
             text,
             protectedSnapshotEvidenceValues);
+        var protectedFallbackBootstrapProofKinds = new List<string>();
+        redacted = ProtectFallbackBootstrapProofKinds(
+            redacted,
+            protectedFallbackBootstrapProofKinds);
         var protectedEventValues = new List<string>();
         redacted = ProtectStructuredEventValues(redacted, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
@@ -49,6 +53,9 @@ public static partial class SensitiveDataRedactor
         var protectedStructuredKeys = new List<string>();
         redacted = ProtectStructuredKeys(redacted, protectedStructuredKeys);
         redacted = LongSecretTokenRegex().Replace(redacted, "[redacted]");
+        redacted = RestoreFallbackBootstrapProofKinds(
+            redacted,
+            protectedFallbackBootstrapProofKinds);
         redacted = RestoreStructuredKeys(redacted, protectedStructuredKeys);
         redacted = RestoreSnapshotEvidenceValues(
             redacted,
@@ -103,6 +110,9 @@ public static partial class SensitiveDataRedactor
 
     [GeneratedRegex(@"\boperation_key=(?<value>[A-Za-z0-9._/:-]+\|[A-Za-z0-9._/:-]+\|(?:fte1-[a-f0-9]{24}|\(none\))\|[0-9]+\|[A-Za-z0-9._/:-]+)(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceOperationKeyValueRegex();
+
+    [GeneratedRegex(@"\bproof_kind=(?<value>file_transfer_(?:bulk_frame|v4_state_frame|v6_state_frame|v6_frontier_request_frame)_(?:received|sent))(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex FallbackBootstrapProofKindValueRegex();
 
     [GeneratedRegex(@"\b(?<key>snapshot_catalog_hash|coordinator_instance_id|session_id|transfer_id|transition_id|snapshot_sha256|snapshot_payload|initial_state_hash|final_state_hash|operation_authority_id|effect_identity|receipt_identity|receipt_fingerprint|checkpoint_request_id|data_session_identity)=(?<value>fte1-[a-f0-9]{24}|[a-f0-9]{64}|[A-Za-z0-9_-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceKeyValueRegex();
@@ -201,6 +211,41 @@ public static partial class SensitiveDataRedactor
         {
             restored = restored.Replace(
                 $"SEVP{i}",
+                protectedValues[i],
+                StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
+
+    private static string ProtectFallbackBootstrapProofKinds(
+        string text,
+        List<string> protectedValues)
+    {
+        if (!text.Contains(
+                "event=filetransfer_fallback_v6_proof_bootstrap_",
+                StringComparison.Ordinal))
+        {
+            return text;
+        }
+
+        return FallbackBootstrapProofKindValueRegex().Replace(text, match =>
+        {
+            var placeholder = $"FBPKP{protectedValues.Count}";
+            protectedValues.Add(match.Groups["value"].Value);
+            return $"proof_kind={placeholder}";
+        });
+    }
+
+    private static string RestoreFallbackBootstrapProofKinds(
+        string text,
+        List<string> protectedValues)
+    {
+        var restored = text;
+        for (var i = protectedValues.Count - 1; i >= 0; i--)
+        {
+            restored = restored.Replace(
+                $"FBPKP{i}",
                 protectedValues[i],
                 StringComparison.Ordinal);
         }

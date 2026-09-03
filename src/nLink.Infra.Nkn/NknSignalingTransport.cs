@@ -62,6 +62,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         long PendingProofGeneration,
         long FallbackEpoch,
         long TransportEpoch,
+        long BootstrapGeneration,
         string FrameFingerprint,
         IFileTransferDataSession DataSession,
         long DataSessionGeneration,

@@ -6918,6 +6918,46 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     -Name 'ResponderProbeHandoffFamilyLegacySelectionCount' `
                     -Default 1L))
     }
+    if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative' -and
+        $RouteMode -eq 'live-regular-activation-cycle' -and
+        $ErrorMessage.IndexOf(
+            'Timed out waiting for both authoritative post_tuna_fallback_v6 coordinator projections.',
+            [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $peerFirstBootstrap =
+            Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation `
+                -Lines ([string[]]$evidenceLines)
+        if ($peerFirstBootstrap.UnresolvedCount -gt 0) {
+            $firstBootstrapBoundary =
+                $peerFirstBootstrap.UnresolvedCandidateRecords[0]
+            if ($null -ne $TestMetrics) {
+                $TestMetrics.evidenceLineVisitCount = [long]$evidenceLines.Count
+                $TestMetrics.evidenceLookupCount =
+                    [long]$peerFirstBootstrap.RawCount
+                $TestMetrics.classificationSource =
+                    'coordinator_snapshot_authority_v1_fallback_v6_bootstrap_index'
+            }
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'route_transition' `
+                -Reason ([string]$firstBootstrapBoundary.Reason) `
+                -FailureClass ([string]$firstBootstrapBoundary.Class) `
+                -FailureVariant ([string]$firstBootstrapBoundary.Variant) `
+                -RouteMode $RouteMode `
+                -ClassificationSource 'coordinator_snapshot_authority_v1_fallback_v6_bootstrap_index' `
+                -EvidenceLineVisitCount ([long]$evidenceLines.Count) `
+                -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
+                -EvidenceLookupCount ([long]$peerFirstBootstrap.RawCount) `
+                -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+                -CoordinatorRawCount ([int]$peerFirstBootstrap.RawCount) `
+                -CoordinatorDistinctCount ([int]$peerFirstBootstrap.DistinctCount) `
+                -CoordinatorRecoveredCount ([int]$peerFirstBootstrap.RecoveredCount) `
+                -CoordinatorUnresolvedCount ([int]$peerFirstBootstrap.UnresolvedCount) `
+                -CoordinatorWriter ([string]$firstBootstrapBoundary.Writer) `
+                -CoordinatorWriterSequence ([long]$firstBootstrapBoundary.WriterSequence) `
+                -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount 0L `
+                -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount 0L
+        }
+    }
     if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative') {
         $harnessClassification =
             Get-TunaGuiAuthoritativePassHarnessClassification `

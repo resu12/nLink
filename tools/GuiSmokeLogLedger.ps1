@@ -7,6 +7,11 @@ if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
 }
 
 $script:GuiSmokeLegacyV0EvidenceCatalog = $null
+$script:GuiSmokeLiveDiagnosticEvidenceEventNames = @(
+    'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
+    'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
+    'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided'
+)
 
 function Get-GuiSmokeLegacyV0EvidenceCatalog {
     if ($null -ne $script:GuiSmokeLegacyV0EvidenceCatalog) {
@@ -66,6 +71,9 @@ function Get-GuiSmokeSemanticEvidenceEventNames {
             $coordinatorCatalog.SnapshotAuthorityV1 +
             $coordinatorCatalog.GenerationStampedEffects +
             $coordinatorCatalog.NonAuthorityEvidence)) {
+        [void]$names.Add([string]$name)
+    }
+    foreach ($name in $script:GuiSmokeLiveDiagnosticEvidenceEventNames) {
         [void]$names.Add([string]$name)
     }
     return [string[]]@($names | Sort-Object)

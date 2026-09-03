@@ -780,6 +780,9 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                 $Episode.FrameFingerprint -and
             (Get-PeerFirstField -Record $Diagnostic -Name 'trigger_data_session_generation') -eq
                 [string]$Wake.DataSessionGeneration -and
+            ($Wake.BootstrapGeneration -le 0 -or
+             (Get-PeerFirstField -Record $Diagnostic -Name 'trigger_bootstrap_generation') -eq
+                [string]$Wake.BootstrapGeneration) -and
             $Episode.HasExactStageBinding -and
             (Get-PeerFirstField -Record $Diagnostic -Name 'source_data_session_generation') -eq
                 (Get-PeerFirstField `
@@ -1152,8 +1155,11 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
             $pendingGeneration = 0L
             $fallbackEpoch = 0L
             $transportEpoch = 0L
+            $bootstrapGeneration = 0L
             $dataSessionGeneration = 0L
             $proofKind = Get-PeerFirstField -Record $wake -Name 'proof_kind'
+            $bootstrapGenerationText =
+                Get-PeerFirstField -Record $wake -Name 'bootstrap_generation'
             if ((Get-PeerFirstField -Record $wake -Name 'authority_effect') -ne 'none' -or
                 $proofKind -ne $episode.ExpectedProofKind -or
                 -not [long]::TryParse(
@@ -1172,6 +1178,12 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                     (Get-PeerFirstField -Record $wake -Name 'trigger_data_session_generation'),
                     [ref]$dataSessionGeneration) -or
                 $dataSessionGeneration -le 0 -or
+                (-not [string]::IsNullOrWhiteSpace($bootstrapGenerationText) -and
+                 (-not [long]::TryParse(
+                        $bootstrapGenerationText,
+                        [ref]$bootstrapGeneration) -or
+                  $bootstrapGeneration -le 0 -or
+                  $bootstrapGeneration -ne $fallbackEpoch)) -or
                 -not [string]::Equals(
                     (Get-PeerFirstField -Record $wake -Name 'frame_fingerprint'),
                     $episode.FrameFingerprint,
@@ -1210,6 +1222,7 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
             $wakeIdentity = @(
                 [string]$pendingGeneration
                 [string]$fallbackEpoch
+                [string]$bootstrapGeneration
                 $proofKind.ToLowerInvariant()
                 [string]$transportEpoch
                 $episode.FrameFingerprint.ToLowerInvariant()
@@ -1218,6 +1231,7 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                 $wakeIdentities[$wakeIdentity] = [pscustomobject]@{
                     Record = $wake
                     PendingGeneration = $pendingGeneration
+                    BootstrapGeneration = $bootstrapGeneration
                     DataSessionGeneration = $dataSessionGeneration
                     ProofKind = $proofKind
                 }
@@ -1265,6 +1279,29 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                 } | Select-Object -First 2)
             if ($observations.Count -eq 1) {
                 $observation = $observations[0]
+                if ($wake.BootstrapGeneration -gt 0) {
+                    if ((Get-PeerFirstField `
+                            -Record $observation `
+                            -Name 'trigger_bootstrap_generation') -ne
+                        [string]$wake.BootstrapGeneration -or
+                        ((Get-PeerFirstField `
+                                -Record $episode.FirstStage `
+                                -Name 'direction') -eq 'inbound' -and
+                         (Get-PeerFirstField `
+                                -Record $episode.FirstStage `
+                                -Name 'request_correlation_id') -ne
+                            "fallback-v6-proof-bootstrap:$($wake.BootstrapGeneration)")) {
+                        $poisoned = $true
+                    }
+                    else {
+                        $candidateRecord = $wake.Record
+                        $candidateReason =
+                            'peer_first_bootstrap_evaluation_published_before_exact_coordinator_admission'
+                        $candidateVariant =
+                            'runtime_unlock_tuna_reactivation_exact_successor_generation_not_admitted'
+                        $rawEvidenceRecords = @($wake.Record)
+                    }
+                }
                 $pendingWriteRecheckSequence = 0L
                 $pendingWriteRecheckRequired = $false
                 if ((Get-PeerFirstField -Record $episode.FirstStage -Name 'direction') -eq
@@ -1405,6 +1442,9 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
                             $episode.FrameFingerprint -and
                         (Get-PeerFirstField -Record $_ -Name 'trigger_data_session_generation') -eq
                             [string]$wake.DataSessionGeneration -and
+                        ($wake.BootstrapGeneration -le 0 -or
+                         (Get-PeerFirstField -Record $_ -Name 'trigger_bootstrap_generation') -eq
+                            [string]$wake.BootstrapGeneration) -and
                         (Test-PeerFirstCommandSourceScope `
                             -RouteScope $episode.RouteScope `
                             -Command $_)

@@ -45,4 +45,37 @@ public sealed class SensitiveDataRedactorTests
         Assert.Contains("tuna_last_session_run_id_hash: [redacted]", redacted, StringComparison.Ordinal);
         Assert.DoesNotContain("0123456789abcdef", redacted, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("file_transfer_bulk_frame_received")]
+    [InlineData("file_transfer_v6_state_frame_received")]
+    [InlineData("file_transfer_v6_frontier_request_frame_received")]
+    public void SensitiveDataRedactor_Preserves_Cataloged_FallbackBootstrap_ProofKinds(
+        string proofKind)
+    {
+        var input =
+            "event=filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided; " +
+            $"proof_kind={proofKind}; secret=0123456789abcdef0123456789abcdef";
+
+        var redacted = SensitiveDataRedactor.Redact(input);
+
+        Assert.Contains($"proof_kind={proofKind};", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "0123456789abcdef0123456789abcdef",
+            redacted,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SensitiveDataRedactor_DoesNotProtect_UncatalogedBootstrapProofKind()
+    {
+        const string proofKind =
+            "file_transfer_v6_frontier_request_frame_received_secret_1234567890";
+        var redacted = SensitiveDataRedactor.Redact(
+            "event=filetransfer_fallback_v6_proof_bootstrap_observed; " +
+            $"proof_kind={proofKind}");
+
+        Assert.DoesNotContain(proofKind, redacted, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+    }
 }
