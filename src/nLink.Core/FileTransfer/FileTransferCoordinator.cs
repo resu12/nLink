@@ -5795,6 +5795,79 @@ internal static partial class FileTransferCoordinator
         return true;
     }
 
+    internal static bool
+        IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(
+            FileTransferCoordinatorState state,
+            FileTransferFallbackV6ProofBootstrapCommand priorBootstrap,
+            out string rejectionReason)
+    {
+        rejectionReason =
+            "filetransfer_route_transition_reactivation_not_current";
+        if (state.IsTerminal ||
+            priorBootstrap.IsDefault ||
+            !string.Equals(
+                state.SessionId,
+                priorBootstrap.Observation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                state.TransferId,
+                priorBootstrap.Observation.TransferId,
+                StringComparison.Ordinal) ||
+            state.Direction != priorBootstrap.Observation.Direction ||
+            state.PersistentState.FileTransferRouteTransition
+                .LastTerminalOperation is not
+                {
+                    State: FileTransferRouteTransitionState.Committed,
+                    DispositionReceipt:
+                    {
+                        Status:
+                            FileTransferRouteTransitionDispositionApplyStatus
+                                .Applied or
+                            FileTransferRouteTransitionDispositionApplyStatus
+                                .Idempotent,
+                    },
+                } terminal ||
+            terminal.Authority.Kind !=
+                FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4 ||
+            terminal.Authority.SourceRoute !=
+                FileTransferRoute.PostTunaFallbackV6 ||
+            terminal.Authority.SourceProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV6 ||
+            terminal.Authority.SourceTransport !=
+                FileTransferTransportKind.RegularNkn ||
+            terminal.Authority.SourceRouteCommit is not null ||
+            terminal.Authority.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            terminal.Authority.TargetProtocolVersion !=
+                FileTransferProtocol.ProtocolVersionV4 ||
+            terminal.Authority.TargetTransport != FileTransferTransportKind.Tuna ||
+            terminal.Authority.HandoffKind !=
+                FileTransferTransportHandoffKind.NormalToTunaActivation ||
+            terminal.Authority.DataSessionGeneration !=
+                priorBootstrap.SourceDataSessionGeneration ||
+            terminal.Authority.SourceTerminalGeneration !=
+                priorBootstrap.SourceTerminalGeneration ||
+            priorBootstrap.SourceLiveRouteEpoch == int.MaxValue ||
+            terminal.Authority.SourceLiveRouteEpoch !=
+                priorBootstrap.SourceLiveRouteEpoch + 1 ||
+            terminal.Authority.SourceLiveRouteEpoch == int.MaxValue ||
+            state.CurrentLiveRouteEpoch?.EpochId !=
+                terminal.Authority.SourceLiveRouteEpoch + 1 ||
+            terminal.Authority.SourceTransportEpoch !=
+                priorBootstrap.TargetTransportEpoch ||
+            !IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(
+                terminal) ||
+            !IsFileTransferRouteTransitionTargetScopeCurrent(
+                state,
+                terminal,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
+    }
+
     internal static bool TryGetPendingFileTransferRouteTransitionDisposition(
         FileTransferCoordinatorState state,
         out FileTransferRouteTransitionDispositionCommand command)

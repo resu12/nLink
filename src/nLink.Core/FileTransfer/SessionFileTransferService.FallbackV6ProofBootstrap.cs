@@ -433,9 +433,6 @@ public sealed partial class SessionFileTransferService
                 inboundCheckpoint) ||
             (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) &&
              (evaluation.FallbackEpoch <= 1 ||
-              !IsPostRecoveryFileTunaV4LiveActivationEpoch(
-                 inbound.CurrentLiveRouteEpoch,
-                 inbound.LastRecoveredV6TransportLiveRouteEpochId) ||
               !IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
                   inbound,
                   evaluation) ||
@@ -908,9 +905,6 @@ public sealed partial class SessionFileTransferService
                 checkpoint) ||
             !IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) ||
             evaluation.FallbackEpoch <= 1 ||
-            !IsPostRecoveryFileTunaV4LiveActivationEpoch(
-                context.CurrentLiveRouteEpoch,
-                context.LastRecoveredV6TransportLiveRouteEpochId) ||
             !IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
                 context,
                 evaluation) ||
@@ -1636,50 +1630,63 @@ public sealed partial class SessionFileTransferService
                 context,
                 evaluation.TriggerTransportEpoch))
         {
-            return true;
+            return IsPostRecoveryFileTunaV4LiveActivationEpoch(
+                context.CurrentLiveRouteEpoch,
+                context.LastRecoveredV6TransportLiveRouteEpochId);
         }
 
         var transitionState =
             context.CoordinatorPersistentState.FileTransferRouteTransition;
         var priorReceipt = transitionState.LastFallbackV6ProofBootstrapReceipt;
         var priorCommand = priorReceipt?.Command;
-        return evaluation.Direction == FileTransferDirection.Inbound &&
-               evaluation.TriggerBootstrapGeneration > 0 &&
-               evaluation.TriggerBootstrapGeneration == evaluation.FallbackEpoch &&
-               transitionState.PendingFallbackV6ProofBootstrap is null &&
-               priorReceipt is
-               {
-                   IsDefault: false,
-                   Status:
-                       FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
-                   FrameIdentity.IsComplete: true,
-               } &&
-               priorCommand is not null &&
-               transitionState.LastFallbackV6ProofBootstrapGeneration ==
-                   priorCommand.BootstrapGeneration &&
-               priorCommand.BootstrapGeneration < long.MaxValue &&
-               evaluation.TriggerBootstrapGeneration ==
-                   priorCommand.BootstrapGeneration + 1 &&
-               priorCommand.Observation.FallbackEpoch < long.MaxValue &&
-               evaluation.FallbackEpoch ==
-                   priorCommand.Observation.FallbackEpoch + 1 &&
-               priorCommand.Observation.Direction == evaluation.Direction &&
-               string.Equals(
-                   priorCommand.Observation.SessionId,
-                   evaluation.SessionId,
-                   StringComparison.Ordinal) &&
-               string.Equals(
-                   priorCommand.Observation.TransferId,
-                   evaluation.TriggerTransferId,
-                   StringComparison.Ordinal) &&
-               priorCommand.SourceDataSessionGeneration ==
-                   context.DataSessionGeneration &&
-               priorCommand.TargetTransportEpoch ==
-                   evaluation.TriggerTransportEpoch &&
-               priorReceipt.FrameIdentity.TransportEpoch ==
-                   evaluation.TriggerTransportEpoch &&
-               context.CurrentLiveRouteEpoch is { } currentEpoch &&
-               currentEpoch.EpochId > priorCommand.SourceLiveRouteEpoch;
+        if (evaluation.Direction != FileTransferDirection.Inbound ||
+            !IsRecoveredFileTunaV4LiveActivationEpoch(
+                context.CurrentLiveRouteEpoch) ||
+            evaluation.TriggerBootstrapGeneration <= 0 ||
+            evaluation.TriggerBootstrapGeneration != evaluation.FallbackEpoch ||
+            transitionState.PendingFallbackV6ProofBootstrap is not null ||
+            priorReceipt is not
+            {
+                IsDefault: false,
+                Status:
+                    FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                FrameIdentity.IsComplete: true,
+            } ||
+            priorCommand is null ||
+            transitionState.LastFallbackV6ProofBootstrapGeneration !=
+                priorCommand.BootstrapGeneration ||
+            priorCommand.BootstrapGeneration == long.MaxValue ||
+            evaluation.TriggerBootstrapGeneration !=
+                priorCommand.BootstrapGeneration + 1 ||
+            priorCommand.Observation.FallbackEpoch == long.MaxValue ||
+            evaluation.FallbackEpoch !=
+                priorCommand.Observation.FallbackEpoch + 1 ||
+            priorCommand.Observation.Direction != evaluation.Direction ||
+            !string.Equals(
+                priorCommand.Observation.SessionId,
+                evaluation.SessionId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                priorCommand.Observation.TransferId,
+                evaluation.TriggerTransferId,
+                StringComparison.Ordinal) ||
+            priorCommand.SourceDataSessionGeneration !=
+                context.DataSessionGeneration ||
+            priorCommand.TargetTransportEpoch !=
+                evaluation.TriggerTransportEpoch ||
+            priorReceipt.FrameIdentity.TransportEpoch !=
+                evaluation.TriggerTransportEpoch ||
+            context.CurrentLiveRouteEpoch is not { } currentEpoch ||
+            currentEpoch.EpochId <= priorCommand.SourceLiveRouteEpoch)
+        {
+            return false;
+        }
+
+        return FileTransferCoordinator
+            .IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(
+                CreateCoordinatorStateLocked(context),
+                priorCommand,
+                out _);
     }
 
     private static bool MatchesFallbackV6ProofBootstrapTriggerSourceScope(

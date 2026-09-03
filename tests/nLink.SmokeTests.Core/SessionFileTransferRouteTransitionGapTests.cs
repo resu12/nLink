@@ -783,9 +783,12 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(targetTransportEpoch, proof.TransportEpoch);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
-    public void FallbackV6ProofBootstrap_InboundPeerFirstRuntimeUnlockReactivation_UsesExactSuccessorGeneration()
+    public async Task FallbackV6ProofBootstrap_InboundPeerFirstRuntimeUnlockReactivation_UsesExactSuccessorGeneration(
+        bool deferForPendingWrite)
     {
         const string transferId =
             "transfer_fallback_v6_bootstrap_inbound_runtime_unlock_successor";
@@ -801,8 +804,16 @@ public sealed partial class SessionFileTransferV4SenderTests
             transferId,
             dataSession: dataSession,
             startCoordinatorSnapshotStream: false);
+        var snapshotMetadata = GetPrivateProperty<
+            FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState");
         SetPrivateProperty(context, "V4StateEpoch", 1);
         SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        var initialLeg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        SetPrivateProperty(initialLeg, "TransportEpochId", 0L);
+        SetPrivateProperty(initialLeg, "BridgeRecoveryGeneration", 0);
 
         var priorState = CreateCoordinatorStateForTest(context);
         var createCheckpoint = typeof(SessionFileTransferService)
@@ -867,9 +878,21 @@ public sealed partial class SessionFileTransferV4SenderTests
         SetPrivateProperty(
             context,
             "CoordinatorPersistentState",
-            priorApply.State.PersistentState);
+            priorApply.State.PersistentState with
+            {
+                CoordinatorInstanceId = snapshotMetadata.CoordinatorInstanceId,
+                SnapshotStateGeneration =
+                    snapshotMetadata.SnapshotStateGeneration,
+                SnapshotStateFingerprint =
+                    snapshotMetadata.SnapshotStateFingerprint,
+            });
 
         SeedRecoveredFileTunaV4SecondCycleScopeForTest(context);
+        SeedRecoveredFileTunaV4SecondCycleScopeForTest(context);
+        SetPrivateProperty(
+            context,
+            "LastRecoveredV6TransportLiveRouteEpochId",
+            0);
         SetPrivateProperty(
             context,
             "LastRecoveredV6TransportEpoch",
@@ -882,6 +905,14 @@ public sealed partial class SessionFileTransferV4SenderTests
             context,
             "LastRecoveredV6TransportTargetTransport",
             FileTransferTransportKind.RegularNkn);
+        SeedCommittedPostFallbackV6ToTunaV4TransitionForBootstrapTest(
+            context,
+            priorCommand);
+        typeof(SessionFileTransferService)
+            .GetField(
+                "inboundTransfer",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
         var currentState = CreateCoordinatorStateForTest(context);
         var peerRequest = new FileTransferFrontierRequestFrameV6
         {
@@ -914,6 +945,13 @@ public sealed partial class SessionFileTransferV4SenderTests
             TriggerSourceScope:
                 CreateFallbackV6ProofBootstrapTriggerSourceScope(currentState),
             TriggerBootstrapGeneration: 2);
+        Assert.True(
+            FileTransferCoordinator
+                .IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(
+                    currentState,
+                    priorCommand,
+                    out var reactivationReason),
+            reactivationReason);
         var cycleMatcher = typeof(SessionFileTransferService).GetMethod(
             "IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle",
             BindingFlags.Static | BindingFlags.NonPublic)!;
@@ -923,6 +961,50 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.False(Assert.IsType<bool>(cycleMatcher.Invoke(
             null,
             [context, evaluation with { TriggerBootstrapGeneration = 1 }])));
+
+        var persistentState = GetPrivateProperty<
+            FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState");
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            persistentState with
+            {
+                FileTransferRouteTransition =
+                    persistentState.FileTransferRouteTransition with
+                    {
+                        LastTerminalOperation = null,
+                    },
+            });
+        Assert.False(Assert.IsType<bool>(cycleMatcher.Invoke(
+            null,
+            [context, evaluation])));
+        var committedTerminal = Assert.IsType<
+            FileTransferRouteTransitionOperation>(
+            persistentState.FileTransferRouteTransition
+                .LastTerminalOperation);
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            persistentState with
+            {
+                FileTransferRouteTransition =
+                    persistentState.FileTransferRouteTransition with
+                    {
+                        LastTerminalOperation = committedTerminal with
+                        {
+                            DispositionReceipt = null,
+                        },
+                    },
+            });
+        Assert.False(Assert.IsType<bool>(cycleMatcher.Invoke(
+            null,
+            [context, evaluation])));
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            persistentState);
 
         var stage = typeof(SessionFileTransferService).GetMethod(
             "TryStageInboundFallbackV6ProofBootstrapPeerFrameLocked",
@@ -938,6 +1020,305 @@ public sealed partial class SessionFileTransferV4SenderTests
                         "PendingFallbackV6ProofBootstrapPeerFrameBinding"))
                 .BootstrapGeneration);
 
+        var createCurrentCheckpoint = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name ==
+                    "CreateInboundFileTransferRouteTransitionCheckpoint" &&
+                method.GetParameters()[0].ParameterType == context.GetType());
+        var currentCheckpoint = Assert.IsType<
+            FileTransferRouteTransitionDurableCheckpoint>(
+            createCurrentCheckpoint.Invoke(
+                null,
+                [context,
+                 currentState.CurrentRuntimeOwner!.Value,
+                 currentState.CurrentRoutePublicationToken!.Value,
+                 currentState.CurrentLeg!]));
+        var matchesPhysical = typeof(SessionFileTransferService).GetMethod(
+            "MatchesFallbackV6ProofBootstrapPhysicalTrigger",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.True(Assert.IsType<bool>(matchesPhysical.Invoke(
+            null,
+            [evaluation, currentCheckpoint])));
+        var matchesSource = typeof(SessionFileTransferService).GetMethod(
+            "MatchesFallbackV6ProofBootstrapTriggerSourceScope",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.True(Assert.IsType<bool>(matchesSource.Invoke(
+            null,
+            [evaluation,
+             currentCheckpoint,
+             currentState.CurrentRouteCommit!.Value,
+             currentState.CurrentLeg!.CheckpointRequestId,
+             currentState.CurrentLeg.CheckpointGeneration])));
+        var process = typeof(SessionFileTransferService).GetMethod(
+            "ProcessFallbackV6ProofBootstrapEvaluationAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var pendingWrites = GetPrivateProperty<HashSet<int>>(
+            context,
+            "ReceiverSparseChunksPendingWrite");
+        if (deferForPendingWrite)
+        {
+            pendingWrites.Add(120);
+        }
+        await Assert.IsAssignableFrom<Task>(process.Invoke(
+            service,
+            [bridge, evaluation])!);
+        if (deferForPendingWrite)
+        {
+            var heldState = GetPrivateProperty<
+                FileTransferCoordinatorPersistentState>(
+                context,
+                "CoordinatorPersistentState");
+            Assert.Null(
+                heldState.FileTransferRouteTransition
+                    .PendingFallbackV6ProofBootstrap);
+            Assert.NotNull(GetPrivatePropertyValue(
+                context,
+                "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+            pendingWrites.Clear();
+            var takeWake = typeof(SessionFileTransferService).GetMethod(
+                "TakeInboundFallbackV6ProofBootstrapPendingWriteWakeAfterDrainLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            object?[] takeArguments = [context, null, null, null];
+            var claimedWake = Assert.IsAssignableFrom<object>(
+                takeWake.Invoke(service, takeArguments));
+            Assert.True(GetPrivateProperty<bool>(
+                claimedWake,
+                "RecheckClaimed"));
+            await Assert.IsAssignableFrom<Task>(
+                typeof(SessionFileTransferService).GetMethod(
+                        "ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(service, [claimedWake])!);
+        }
+
+        var completedState = GetPrivateProperty<
+            FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState");
+        Assert.Null(
+            completedState.FileTransferRouteTransition
+                .PendingFallbackV6ProofBootstrap);
+        var successorReceipt = Assert.IsType<
+            FileTransferFallbackV6ProofBootstrapReceipt>(
+            completedState.FileTransferRouteTransition
+                .LastFallbackV6ProofBootstrapReceipt);
+        Assert.Equal(
+            FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+            successorReceipt.Status);
+        Assert.Equal(2, successorReceipt.Command.BootstrapGeneration);
+        Assert.NotNull(GetPrivatePropertyValue(
+            context,
+            "FileTransferRouteTransitionExecution"));
+
+    }
+
+    private static void
+        SeedCommittedPostFallbackV6ToTunaV4TransitionForBootstrapTest(
+            object context,
+            FileTransferFallbackV6ProofBootstrapCommand priorBootstrap)
+    {
+        var state = CreateCoordinatorStateForTest(context);
+        var currentOwner = state.CurrentRuntimeOwner!.Value;
+        var currentCommit = state.CurrentRouteCommit!.Value;
+        var currentPublication = state.CurrentRoutePublicationToken!.Value with
+        {
+            RouteCommitGeneration = currentCommit.CommitGeneration,
+            TargetRoute = FileTransferRoute.FileTunaV4,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport = FileTransferTransportKind.Tuna,
+            ActionKind =
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
+            Reason = "unit_test_post_fallback_reactivation",
+        };
+        SetPrivateProperty(
+            context,
+            "CurrentRoutePublicationToken",
+            currentPublication);
+        var currentLeg = state.CurrentLeg!;
+        SetPrivateProperty(currentLeg, "TransportEpochId", 0L);
+        SetPrivateProperty(currentLeg, "BridgeRecoveryGeneration", 0);
+        var sourceEpoch = checked(priorBootstrap.SourceLiveRouteEpoch + 1);
+        var sourceOwner = currentOwner with
+        {
+            Route = FileTransferRoute.PostTunaFallbackV6,
+            RouteToken = "post_tuna_fallback_v6",
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch = sourceEpoch,
+            RuntimeFamily = "unit_test_post_tuna_fallback_v6",
+            CreatedReason = "unit_test_post_fallback_source",
+        };
+        var sourcePublication = currentPublication with
+        {
+            RuntimeOwner = sourceOwner,
+            Route = FileTransferRoute.PostTunaFallbackV6,
+            RouteToken = "post_tuna_fallback_v6",
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch = sourceEpoch,
+            RouteCommitGeneration = null,
+            TargetRoute = FileTransferRoute.PostTunaFallbackV6,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            TargetTransport = FileTransferTransportKind.RegularNkn,
+            ActionKind = FileTransferCoordinatorActionKind.RoutePublication,
+            Reason = "unit_test_post_fallback_source",
+        };
+        var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(
+            sourceOwner,
+            sourcePublication,
+            state.TerminalGeneration,
+            SourceLegGeneration: Math.Max(1, currentLeg.Generation - 1),
+            SourceTransportEpoch: priorBootstrap.TargetTransportEpoch,
+            SourceBridgeRecoveryGeneration: Math.Max(
+                1,
+                priorBootstrap.SourceBridgeRecoveryGeneration + 1),
+            state.CurrentDataSessionGeneration,
+            StateEpoch: 1,
+            ContiguousCommittedChunkIndex: 100,
+            DurableHighestChunkIndex: 100,
+            ChunkCount: 256,
+            CheckpointGeneration: 1);
+        var admission = currentCommit.RuntimeUnlockAdmission;
+        var pending = new RuntimeUnlockPendingPreCommitProbeRequest(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            sourceOwner,
+            admission,
+            FileTransferRoute.PostTunaFallbackV6,
+            "post_tuna_fallback_v6",
+            FileTransferProtocol.ProtocolVersionV6,
+            sourceEpoch,
+            sourceOwner.RuntimeGeneration,
+            state.TerminalGeneration,
+            checkpoint.SourceLegGeneration,
+            currentCommit.TransactionGeneration,
+            currentCommit.OfferGeneration,
+            currentCommit.TunaPathLeaseGeneration,
+            currentCommit.TunaPathLeaseListenerRunId,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            PendingGeneration: 1,
+            "unit_test_post_fallback_reactivation");
+        var finalProof = new RuntimeUnlockRouteCommitProof(
+            state.SessionId,
+            state.TransferId,
+            currentCommit.TransactionGeneration,
+            currentCommit.OfferGeneration,
+            PeerVisibleProof: true,
+            PeerReceived: true,
+            AnswerReceived: true,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna,
+            RuntimeUnlockTransactionState.RouteCommitPending,
+            "unit_test_post_fallback_reactivation",
+            PathProbeId: currentCommit.SamePathTunaProbeAckId,
+            PathProbeState: RuntimeUnlockPathProbeState.Acked,
+            PathProbeTransport: FileTransferTransportKind.Tuna,
+            PathProbeAckedUtcMs:
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            TunaPathLeaseRequired: true,
+            TunaPathLeaseGeneration: currentCommit.TunaPathLeaseGeneration,
+            TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            TunaPathLeaseListenerRunId:
+                currentCommit.TunaPathLeaseListenerRunId,
+            TunaPathLeaseCurrent: true,
+            AdmissionToken: admission,
+            SamePathTunaProbeAckId:
+                currentCommit.SamePathTunaProbeAckId);
+        var authority = new FileTransferRouteTransitionAuthority(
+            FileTransferRouteTransitionKind.PostTunaFallbackV6ToTunaV4,
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            sourceOwner,
+            sourcePublication,
+            SourceRouteCommit: null,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            FileTransferTransportKind.RegularNkn,
+            state.TerminalGeneration,
+            sourceEpoch,
+            checkpoint.SourceLegGeneration,
+            priorBootstrap.TargetTransportEpoch,
+            checkpoint.SourceBridgeRecoveryGeneration,
+            state.CurrentDataSessionGeneration,
+            new FileTransferTunaActivationTransitionProofBoundary(
+                admission,
+                pending,
+                finalProof,
+                LaunchGeneration: 1),
+            checkpoint,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            TransitionGeneration: 1,
+            new FileTransferAuthorityId(
+                "fta2-unit-test-post-fallback-reactivation"),
+            PredecessorTransitionAuthorityId: null,
+            "unit_test_post_fallback_reactivation");
+        var emptyLeases = Array.Empty<long>();
+        var fingerprint = FileTransferCoordinator
+            .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
+                emptyLeases);
+        var drainCommand =
+            new FileTransferRouteTransitionPhysicalDrainCommand(
+                authority,
+                CapturedThroughPhysicalSendGeneration: 0,
+                emptyLeases,
+                CapturedPhysicalSendCount: 0,
+                fingerprint);
+        var drainReceipt = new FileTransferRouteTransitionPhysicalDrainReceipt(
+            drainCommand,
+            emptyLeases,
+            CompletedPhysicalSendCount: 0,
+            fingerprint,
+            FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
+            "physical_drain_completed");
+        var disposition = new FileTransferRouteTransitionDispositionCommand(
+            authority,
+            FileTransferRouteTransitionDispositionKind.Committed,
+            currentCommit,
+            currentPublication,
+            "unit_test_post_fallback_reactivation")
+        {
+            FinalProof = finalProof,
+        };
+        var terminal = new FileTransferRouteTransitionOperation(
+            authority,
+            FileTransferRouteTransitionState.Committed,
+            DrainCommand: drainCommand,
+            DrainReceipt: drainReceipt,
+            FinalProof: finalProof,
+            RouteCommitToken: currentCommit,
+            RoutePublicationToken: currentPublication,
+            DispositionCommand: disposition,
+            DispositionReceipt:
+                new FileTransferRouteTransitionDispositionReceipt(
+                    disposition,
+                    FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                    "filetransfer_route_transition_committed"));
+        var persistent = GetPrivateProperty<
+            FileTransferCoordinatorPersistentState>(
+            context,
+            "CoordinatorPersistentState");
+        SetPrivateProperty(
+            context,
+            "CoordinatorPersistentState",
+            persistent with
+            {
+                FileTransferRouteTransition =
+                    persistent.FileTransferRouteTransition with
+                    {
+                        LastTerminalOperation = terminal,
+                        LastTransitionGeneration =
+                            authority.TransitionGeneration,
+                    },
+            });
     }
 
     [Theory]
