@@ -432,8 +432,7 @@ public sealed partial class SessionFileTransferService
                 evaluation,
                 inboundCheckpoint) ||
             (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) &&
-             (evaluation.FallbackEpoch <= 1 ||
-              !IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
+             (!IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
                   inbound,
                   evaluation) ||
               !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
@@ -904,7 +903,6 @@ public sealed partial class SessionFileTransferService
                 evaluation,
                 checkpoint) ||
             !IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) ||
-            evaluation.FallbackEpoch <= 1 ||
             !IsCurrentInboundPeerFirstFallbackV6ProofBootstrapCycle(
                 context,
                 evaluation) ||
@@ -1626,6 +1624,23 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
     {
+        if (evaluation.FallbackEpoch <= 1)
+        {
+            var initialTransitionState =
+                context.CoordinatorPersistentState.FileTransferRouteTransition;
+            return evaluation.Direction == FileTransferDirection.Inbound &&
+                   evaluation.FallbackEpoch == 1 &&
+                   evaluation.TriggerBootstrapGeneration == 1 &&
+                   evaluation.TriggerTransportEpoch == 1 &&
+                   context.LastRecoveredV6TransportLiveRouteEpochId == 0 &&
+                   initialTransitionState.PendingFallbackV6ProofBootstrap is null &&
+                   initialTransitionState.LastFallbackV6ProofBootstrapReceipt is null &&
+                   initialTransitionState.LastFallbackV6ProofBootstrapGeneration == 0 &&
+                   FileTransferCoordinator.IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(
+                       CreateCoordinatorStateLocked(context),
+                       out _);
+        }
+
         if (IsStalePostReactivationFallbackV6Proof(
                 context,
                 evaluation.TriggerTransportEpoch))
