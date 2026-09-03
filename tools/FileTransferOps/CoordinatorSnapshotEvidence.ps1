@@ -6498,10 +6498,7 @@ function Test-FileTransferCoordinatorPressureTerminalSourceCarry {
             -Left $PreviousSource -Right $CurrentSource) {
         return $true
     }
-    if ([string]$Boundary.decisionKind -notin @(
-            'FallbackCheckpointRequested', 'FallbackCheckpointAccepted') -or
-        [string]$Boundary.decisionStatus -cne 'Accepted' -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint `
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint `
             -Left $PreviousSource -Right $CurrentSource) -or
         [long]$PreviousSource.checkpointGeneration -ne
             [long]$Entry.BeforeBoundary.checkpointGeneration -or
@@ -6511,6 +6508,30 @@ function Test-FileTransferCoordinatorPressureTerminalSourceCarry {
             [long]$Entry.AfterBoundary.checkpointGeneration -or
         [string]$CurrentSource.checkpointRequestId -cne
             [string]$Entry.AfterBoundary.checkpointRequestId) {
+        return $false
+    }
+
+    $routeCommitCheckpointBootstrap =
+        [string]$Boundary.decisionKind -ceq
+            'CommitFileTransferRouteTransition' -and
+        [string]$Boundary.decisionStatus -ceq 'Committed' -and
+        [string]$Entry.BeforeBoundary.route -ceq 'file_tuna_v4' -and
+        [int]$Entry.BeforeBoundary.protocolVersion -eq 4 -and
+        [long]$Entry.BeforeBoundary.checkpointGeneration -eq 0 -and
+        [string]$Entry.BeforeBoundary.checkpointRequestId -ceq '(none)' -and
+        [string]$Entry.AfterBoundary.route -ceq
+            'post_tuna_fallback_v6' -and
+        [int]$Entry.AfterBoundary.protocolVersion -eq 6 -and
+        [long]$Entry.AfterBoundary.checkpointGeneration -gt 0 -and
+        [string]$Entry.AfterBoundary.checkpointRequestId -notin @(
+            '', '(none)')
+    if ($routeCommitCheckpointBootstrap) {
+        return $true
+    }
+
+    if ([string]$Boundary.decisionKind -notin @(
+            'FallbackCheckpointRequested', 'FallbackCheckpointAccepted') -or
+        [string]$Boundary.decisionStatus -cne 'Accepted') {
         return $false
     }
 

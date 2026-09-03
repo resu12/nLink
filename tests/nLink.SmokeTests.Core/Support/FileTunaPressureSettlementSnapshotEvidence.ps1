@@ -9,15 +9,18 @@ $first = $envelopes[0]
 $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$($first.coordinatorInstanceId); session_id=$($first.sessionId); transfer_id=$($first.transferId); direction=$($first.direction)"
 $families = $catalog.RequiredFamilies -join ','
 $coverage = "emitted_family_coverage=$families; shadow_family_coverage=; authoritative_family_coverage=$families"
-function New-Effect($envelope, $operation, [string]$kind, [long]$sequence) {
+function New-Effect($envelope, $operation, [string]$kind, [long]$sequence, $receipt = $null) {
     $scope = switch -Exact ($operation.family) {
         'regular_v4_frontier_repair_pressure' { $operation.regularV4FrontierRepairPressure.sourceBoundary }
         'responder_probe_handoff' { $operation.responderProbeHandoff.sourceBoundary }
         'route_transition' { $operation.routeTransition.sourceBoundary }
         'route_runtime' { $operation.routeRuntime.boundary }
         'receive_recovery' { $operation.receiveRecovery.sourceBoundary }
+        'runtime_unlock_retry_lifecycle' { $operation.runtimeUnlockRetry.sourceBoundary }
+        'fallback_tail_yield' { $operation.fallbackTailYield.sourceBoundary }
     }
-    "event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$($envelope.transitionId); coordinator_state_generation=$($envelope.aggregate.afterStateGeneration); operation_family=$($operation.family); operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=$kind; effect_identity=$($operation.operationKey):$kind; effect_generation=$($operation.receiptGeneration); receipt_identity=$($operation.receiptIdentity); receipt_generation=$($operation.receiptGeneration); receipt_status=$($operation.receiptStatus); receipt_fingerprint=$($operation.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=fixture-writer; log_writer_sequence=$sequence"
+    if ($null -eq $receipt) { $receipt = $operation }
+    "event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$($envelope.transitionId); coordinator_state_generation=$($envelope.aggregate.afterStateGeneration); operation_family=$($operation.family); operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=$kind; effect_identity=$($operation.operationKey):$kind; effect_generation=$($receipt.receiptGeneration); receipt_identity=$($receipt.receiptIdentity); receipt_generation=$($receipt.receiptGeneration); receipt_status=$($receipt.receiptStatus); receipt_fingerprint=$($receipt.receiptFingerprint); route=$($scope.route); protocol_version=$($scope.protocolVersion); live_route_epoch=$($scope.liveRouteEpoch); route_publication_generation=$($scope.routePublicationGeneration); route_commit_generation=$($scope.routeCommitGeneration); runtime_generation=$($scope.runtimeGeneration); terminal_generation=$($scope.terminalGeneration); leg_generation=$($scope.legGeneration); transport_epoch=$($scope.transportEpoch); bridge_recovery_generation=$($scope.bridgeRecoveryGeneration); checkpoint_generation=$($scope.checkpointGeneration); checkpoint_request_id=$($scope.checkpointRequestId); data_session_identity=$($scope.dataSessionIdentity); data_session_generation=$($scope.dataSessionGeneration); authority_effect=applied; log_writer_id=fixture-writer; log_writer_sequence=$sequence"
 }
 function New-Lines([object[]]$envelopes) {
 $lines = [Collections.Generic.List[string]]::new()
@@ -69,6 +72,47 @@ for ($i=0; $i -lt $envelopes.Count; $i++) {
         }
         elseif ($operation.family -ceq 'route_runtime' -and $operation.operationRole -ceq 'route_commit' -and $operation.afterState -ceq 'Committed') {
             $kinds = @('route_commit_adopted','target_runtime_leg_installed')
+        }
+        elseif ($operation.family -ceq 'runtime_unlock_retry_lifecycle' -and
+            $operation.operationRole -ceq 'scope_invalidation' -and $operation.afterState -ceq 'Applied') {
+            $kinds = @('scope_invalidation_applied')
+        }
+        elseif ($operation.family -ceq 'runtime_unlock_retry_lifecycle' -and
+            $envelope.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchStage' -and
+            $operation.operationRole -ceq 'attempt_pending') {
+            $receipt = @($operation.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'stage')
+            if ($receipt.Count -eq 1) {
+                $sequence++
+                $lines.Add((New-Effect $envelope $operation 'dispatch_stage_observed' $sequence $receipt[0]))
+            }
+        }
+        elseif ($operation.family -ceq 'runtime_unlock_retry_lifecycle' -and
+            $envelope.decisionKind -ceq 'CommitRuntimeUnlockRetryDispatchInstall' -and
+            $operation.operationRole -ceq 'attempt_installed' -and $operation.afterState -ceq 'Installed') {
+            $receipt = @($operation.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'install')
+            if ($receipt.Count -eq 1) {
+                $sequence++
+                $lines.Add((New-Effect $envelope $operation 'install_committed' $sequence $receipt[0]))
+            }
+        }
+        elseif ($operation.family -ceq 'fallback_tail_yield' -and
+            $operation.operationRole -ceq 'yield_current') {
+            $stageKinds = switch -Exact ($envelope.decisionKind) {
+                'FallbackTailQuiescent' { @{ yield = @('recovery_owner_retired_after_yield') } }
+                'ApplyFallbackTailLocalProofReceipt' { @{ local_proof = @('local_proof_sent','local_proof_applied') } }
+                'ApplyFallbackTailPeerProofReceipt' { @{ peer_proof = @('peer_proof_observed'); paired_release = @('paired_release_published') } }
+            }
+            if ($null -ne $stageKinds) {
+                foreach ($stage in $stageKinds.Keys) {
+                    $receipt = @($operation.fallbackTailYield.receipts | Where-Object stage -CEQ $stage)
+                    if ($receipt.Count -eq 1) {
+                        foreach ($kind in $stageKinds[$stage]) {
+                            $sequence++
+                            $lines.Add((New-Effect $envelope $operation $kind $sequence $receipt[0]))
+                        }
+                    }
+                }
+            }
         }
         elseif ($operation.family -ceq 'route_transition') {
             if ($envelope.decisionKind -ceq 'BeginFileTransferRouteTransitionPhysicalDrain' -and $operation.operationRole -ceq 'current') { $kinds=@('pause_installed') }

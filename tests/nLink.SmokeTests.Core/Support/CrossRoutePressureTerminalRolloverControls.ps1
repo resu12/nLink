@@ -36,6 +36,38 @@ function Assert-Reduction([object[]]$values, [bool]$invalid, [hashtable]$blocked
     }
 }
 Assert-Reduction $entries $false
+$fallbackBootstrap = @($entries | Where-Object {
+    $_.Boundary.decisionKind -ceq 'CommitFileTransferRouteTransition' -and
+    $_.AfterBoundary.route -ceq 'post_tuna_fallback_v6'
+})
+if ($fallbackBootstrap.Count -gt 1) { throw 'Fallback checkpoint bootstrap carry is ambiguous.' }
+if ($fallbackBootstrap.Count -eq 1) {
+    $fallbackBootstrapId = [string]$fallbackBootstrap[0].Boundary.boundaryId
+    foreach ($mutation in @(
+        'decision_status', 'source_route', 'source_protocol', 'target_route',
+        'target_protocol', 'target_checkpoint', 'target_request',
+        'carried_checkpoint', 'non_checkpoint_source')) {
+        $values = $entries | ConvertTo-Json -Depth 64 | ConvertFrom-Json
+        $bootstrap = @($values | Where-Object {
+            $_.Boundary.boundaryId -ceq $fallbackBootstrapId
+        })[0]
+        $carry = @(Get-Terminals $bootstrap | Where-Object {
+            $_.operationRole -ceq 'pressure_settlement_terminal'
+        })[0]
+        switch -Exact ($mutation) {
+            'decision_status' { $bootstrap.Boundary.decisionStatus = 'Rejected' }
+            'source_route' { $bootstrap.BeforeBoundary.route = 'regular_nkn_v4_fast' }
+            'source_protocol' { $bootstrap.BeforeBoundary.protocolVersion = 6 }
+            'target_route' { $bootstrap.AfterBoundary.route = 'file_tuna_v4' }
+            'target_protocol' { $bootstrap.AfterBoundary.protocolVersion = 4 }
+            'target_checkpoint' { $bootstrap.AfterBoundary.checkpointGeneration = 0 }
+            'target_request' { $bootstrap.AfterBoundary.checkpointRequestId = '(none)' }
+            'carried_checkpoint' { $carry.regularV4FrontierRepairPressure.sourceBoundary.checkpointGeneration++ }
+            'non_checkpoint_source' { $carry.regularV4FrontierRepairPressure.sourceBoundary.transportEpoch++ }
+        }
+        try { Assert-Reduction $values $true } catch { throw "fallback_$mutation : $_; $($_.ScriptStackTrace)" }
+    }
+}
 foreach ($mutation in @('missing_original','missing_carry','missing_original_mirror','missing_retired_mirror',
     'source','receipt','command','authority','operation_generation','operation_key','effective_scope','carry_source_aba',
     'data_session_aba','slot_aba','generation_gap','transfer_replacement','terminal_poison','blocked_original','conflicting_generation','conflicting_candidate')) {

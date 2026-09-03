@@ -23642,7 +23642,8 @@ public sealed class FileTransferCoordinatorTests
         FileTransferRouteTransitionPrepareRequest Request,
         RuntimeUnlockRouteCommitProof FinalProof)
         CreateFallbackV6ToTunaRouteTransitionSetup(
-            FileTransferCoordinatorState? sourceState = null)
+            FileTransferCoordinatorState? sourceState = null,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         FileTransferCoordinatorState installedState;
         RuntimeUnlockRetryDispatchInstallReceipt installReceipt;
@@ -23667,9 +23668,21 @@ public sealed class FileTransferCoordinatorTests
         }
         else
         {
+            var setupSnapshots = capture is null
+                ? null
+                : new List<FileTransferCoordinatorTransitionEnvelope>();
             var (fallbackState, retryRequest, tailYield) =
                 AuthorizeFallbackRuntimeUnlockRetryDispatchSource(
-                    sourceState);
+                    sourceState,
+                    setupSnapshots,
+                    preserveSnapshotStream: capture is not null);
+            if (setupSnapshots is not null)
+            {
+                foreach (var envelope in setupSnapshots)
+                {
+                    capture!(envelope);
+                }
+            }
             var granted =
                 FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
                     fallbackState,
@@ -23679,11 +23692,13 @@ public sealed class FileTransferCoordinatorTests
                     tailYield.YieldGeneration,
                     tailYield.YieldKind.ToString());
             Assert.True(granted.Granted);
+            capture?.Invoke(granted.SnapshotEnvelope!);
             var installed = StageAndInstallPersistentRetryLifecycle(
                 granted.State,
                 granted,
                 retryRequest,
-                stagedUtcMs: 3_000_000);
+                stagedUtcMs: 3_000_000,
+                capture: capture);
             installedState = installed.State;
             installReceipt = installed.Receipt;
             pairedRelease =
@@ -23697,11 +23712,13 @@ public sealed class FileTransferCoordinatorTests
         var admitted = RequestRuntimeUnlockAdmission(
             installedState,
             installedState.CurrentRuntimeOwner);
+        capture?.Invoke(admitted.SnapshotEnvelope!);
         var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
             admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
         var pendingDecision = RecordPendingPreCommitProbe(
             admitted.State,
             admission);
+        capture?.Invoke(pendingDecision.SnapshotEnvelope!);
         var pending = Assert.IsType<RuntimeUnlockPendingPreCommitProbeRequest>(
             pendingDecision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
         var state = pendingDecision.State;
@@ -23736,7 +23753,7 @@ public sealed class FileTransferCoordinatorTests
             leg.Generation,
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
-            DataSessionGeneration: 23,
+            DataSessionGeneration: state.CurrentDataSessionGeneration,
             StateEpoch: 5,
             ContiguousCommittedChunkIndex: 6,
             DurableHighestChunkIndex: 7,
@@ -24118,7 +24135,8 @@ public sealed class FileTransferCoordinatorTests
         {
             commitState =
                 InvalidateRuntimeUnlockRetryLifecycleForRouteTransitionCommitForTest(
-                    draining.State);
+                    draining.State,
+                    capture);
         }
         else
         {
@@ -24190,7 +24208,8 @@ public sealed class FileTransferCoordinatorTests
 
     private static FileTransferCoordinatorState
         InvalidateRuntimeUnlockRetryLifecycleForRouteTransitionCommitForTest(
-            FileTransferCoordinatorState state)
+            FileTransferCoordinatorState state,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var prepared =
             FileTransferCoordinator
@@ -24202,6 +24221,7 @@ public sealed class FileTransferCoordinatorTests
         {
             return prepared.State;
         }
+        capture?.Invoke(prepared.SnapshotEnvelope!);
 
         var committed =
             FileTransferCoordinator
@@ -24212,6 +24232,7 @@ public sealed class FileTransferCoordinatorTests
                         RuntimeUnlockRetryDispatchScopeInvalidationStatus.Applied,
                         "applied"));
         Assert.True(committed.Accepted);
+        capture?.Invoke(committed.SnapshotEnvelope!);
         return committed.State;
     }
 
@@ -25159,6 +25180,45 @@ public sealed class FileTransferCoordinatorTests
             var setup = CreateRegularV4ToTunaRouteTransitionSetup(state, Capture);
             state = CommitEmptyFileTransferRouteTransitionForTest(setup.State, setup.Request,
                 setup.FinalProof, capture: Capture).State;
+        }
+
+        if (direction == FileTransferDirection.Outbound)
+        {
+            var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+            state = FallBack(state, fallback, committedChunk: 5, transportEpoch: 1, Capture).State;
+            var fallbackCommit = Assert.Single(envelopes,
+                envelope => envelope.DecisionKind == "CommitFileTransferRouteTransition" &&
+                    envelope.Aggregate.AfterBoundary.Route == "post_tuna_fallback_v6");
+            var fallbackCarry = Assert.Single(fallbackCommit.Aggregate.Operations,
+                operation => operation.OperationRole == "pressure_settlement_terminal");
+            Assert.Equal("Applied", fallbackCarry.BeforeState);
+            Assert.Equal("Applied", fallbackCarry.AfterState);
+            Assert.Equal(firstTerminal.OperationKey, fallbackCarry.OperationKey);
+            Assert.Equal(firstTerminal.ReceiptFingerprint, fallbackCarry.ReceiptFingerprint);
+            Assert.Equal(0, firstTerminal.RegularV4FrontierRepairPressure!.SourceBoundary.CheckpointGeneration);
+            Assert.Equal(fallbackCommit.Aggregate.AfterBoundary.CheckpointGeneration,
+                fallbackCarry.RegularV4FrontierRepairPressure!.SourceBoundary.CheckpointGeneration);
+            Assert.Equal(fallbackCommit.Aggregate.AfterBoundary.CheckpointRequestId,
+                fallbackCarry.RegularV4FrontierRepairPressure.SourceBoundary.CheckpointRequestId);
+            Assert.Equal(fallbackCommit.Aggregate.AfterBoundary,
+                fallbackCarry.RegularV4FrontierRepairPressure.EffectiveBoundary);
+
+            if (state.CurrentFallbackCheckpointLease is { } bootstrapCheckpoint)
+            {
+                var checkpointAccepted = AcceptFallbackCheckpoint(state, fallback,
+                    bootstrapCheckpoint.CheckpointRequestId, state.CurrentLeg!.TransportEpochId, 5, 5);
+                Assert.Null(checkpointAccepted.MutationRejectedReason);
+                Capture(checkpointAccepted.SnapshotEnvelope!);
+                state = checkpointAccepted.State;
+                var acceptedCarry = Assert.Single(checkpointAccepted.SnapshotEnvelope!.Aggregate.Operations,
+                    operation => operation.OperationRole == "pressure_settlement_terminal");
+                Assert.Equal(0, acceptedCarry.RegularV4FrontierRepairPressure!.SourceBoundary.CheckpointGeneration);
+                Assert.Equal("(none)", acceptedCarry.RegularV4FrontierRepairPressure.SourceBoundary.CheckpointRequestId);
+            }
+
+            var secondTuna = CreateFallbackV6ToTunaRouteTransitionSetup(state, Capture);
+            state = CommitEmptyFileTransferRouteTransitionForTest(secondTuna.State, secondTuna.Request,
+                secondTuna.FinalProof, capture: Capture).State;
         }
         Settle(state);
         var rollover = envelopes[^1];
@@ -26114,7 +26174,8 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockRetryDispatchDecision granted,
             RuntimeUnlockRetryDispatchAuthorityRequest request,
             long stagedUtcMs,
-            bool stageAlreadyRecorded = false)
+            bool stageAlreadyRecorded = false,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var stagedState = state;
         if (!stageAlreadyRecorded)
@@ -26126,6 +26187,7 @@ public sealed class FileTransferCoordinatorTests
             Assert.Equal(
                 RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
                 staged.Status);
+            capture?.Invoke(staged.SnapshotEnvelope!);
             stagedState = staged.State;
         }
 
@@ -26138,6 +26200,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
             issuance.Status);
+        capture?.Invoke(issuance.SnapshotEnvelope!);
         var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(
             issuance.Receipt);
         var committed =
@@ -26151,6 +26214,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockRetryLifecycleTransitionStatus.Accepted,
             committed.Status);
+        capture?.Invoke(committed.SnapshotEnvelope!);
         return new PersistentRetryInstallFixture(committed.State, receipt);
     }
 
@@ -26418,7 +26482,8 @@ public sealed class FileTransferCoordinatorTests
         RuntimeUnlockRetryDispatchAuthorityRequest Request,
         FallbackTailYieldDecision TailYield) AuthorizeFallbackRuntimeUnlockRetryDispatchSource(
             FileTransferCoordinatorState? sourceState = null,
-            List<FileTransferCoordinatorTransitionEnvelope>? snapshotCapture = null)
+            List<FileTransferCoordinatorTransitionEnvelope>? snapshotCapture = null,
+            bool preserveSnapshotStream = false)
     {
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var state = sourceState ?? ActiveFallbackStateWithoutCheckpoint();
@@ -26442,27 +26507,36 @@ public sealed class FileTransferCoordinatorTests
                 TargetTransport: FileTransferTransportKind.RegularNkn));
         Assert.True(publication.Accepted);
 
-        state = publication.State with
-        {
-            CurrentDataSessionIdentity = "fallback-retry-data-session",
-            CurrentDataSessionGeneration = Math.Max(
-                1,
-                publication.State.CurrentDataSessionGeneration + 1),
-        };
+        state = preserveSnapshotStream
+            ? publication.State
+            : publication.State with
+            {
+                CurrentDataSessionIdentity = "fallback-retry-data-session",
+                CurrentDataSessionGeneration = Math.Max(
+                    1,
+                    publication.State.CurrentDataSessionGeneration + 1),
+            };
         if (snapshotCapture is not null)
         {
-            var checkpoint = RequestFallbackCheckpoint(state, fallback, "applied-invalidation-checkpoint", leg.TransportEpochId);
-            Assert.Null(checkpoint.MutationRejectedReason);
-            var accepted = AcceptFallbackCheckpoint(checkpoint.State, fallback, "applied-invalidation-checkpoint",
-                leg.TransportEpochId, Math.Max(0, leg.ProvenCommittedChunkIndex), leg.ProvenHighestObservedChunkIndex);
-            Assert.Null(accepted.MutationRejectedReason);
-            state = accepted.State;
-            state = state with { PersistentState = state.PersistentState with
+            if (preserveSnapshotStream)
             {
-                CoordinatorInstanceId = "applied-invalidation-fallback",
-                SnapshotStateGeneration = 0,
-                FileTransferRouteTransition = default,
-            } };
+                snapshotCapture.Add(publication.SnapshotEnvelope!);
+            }
+            else
+            {
+                var checkpoint = RequestFallbackCheckpoint(state, fallback, "applied-invalidation-checkpoint", leg.TransportEpochId);
+                Assert.Null(checkpoint.MutationRejectedReason);
+                var accepted = AcceptFallbackCheckpoint(checkpoint.State, fallback, "applied-invalidation-checkpoint",
+                    leg.TransportEpochId, Math.Max(0, leg.ProvenCommittedChunkIndex), leg.ProvenHighestObservedChunkIndex);
+                Assert.Null(accepted.MutationRejectedReason);
+                state = accepted.State;
+                state = state with { PersistentState = state.PersistentState with
+                {
+                    CoordinatorInstanceId = "applied-invalidation-fallback",
+                    SnapshotStateGeneration = 0,
+                    FileTransferRouteTransition = default,
+                } };
+            }
         }
         var yielded = FileTransferCoordinator.Apply(
             CoordinatorEvent(
