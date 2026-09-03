@@ -26268,7 +26268,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure {
         param(
-            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+            $NaturalProofRecoveryIndex = $null
         )
 
         $indexedLines = @(
@@ -27418,6 +27419,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         -Line $boundary.Line `
                         -Name 'lane')
             } | Select-Object -First 1)
+            if ($recheck.Count -eq 1 -and $null -ne $NaturalProofRecoveryIndex -and
+                (Test-FileTransferHeldPublicationNaturalProofRecovery `
+                    -Index $NaturalProofRecoveryIndex `
+                    -AuthorityId (Get-TunaGuiLogLineFieldValue -Line $issued.Line -Name 'receive_recovery_operation_authority_id') `
+                    -RecheckLine ([string]$recheck[0].Line))) {
+                continue
+            }
             $recheckSend = @($indexedLines | Where-Object {
                 $recheck.Count -eq 1 -and
                 $_.Index -gt $recheck[0].Index -and
@@ -30159,7 +30167,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Lines $regularV4EvidenceLineText
     $receiveRecoveryCompletedRetainedProofStatePublicationMissing =
         Test-TunaGuiReceiveRecoveryCompletedRetainedProofStatePublicationFailure `
-            -Lines $regularV4EvidenceLineText
+            -Lines $regularV4EvidenceLineText `
+            -NaturalProofRecoveryIndex $(if ($snapshotEvaluatorAvailable) {
+                New-FileTransferHeldPublicationNaturalProofRecoveryIndex `
+                    -Evaluation $coordinatorSnapshotEvaluation -Lines $regularV4EvidenceLineText
+            } else { $null })
     $receiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressed =
         Test-TunaGuiReceiveRecoveryProofStateRecheckHeartbeatSuppressionFailure `
             -Lines $regularV4EvidenceLineText

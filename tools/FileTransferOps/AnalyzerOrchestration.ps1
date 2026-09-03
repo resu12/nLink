@@ -1939,7 +1939,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -Action {
                 Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation `
                     -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
-                    -AlreadyChronologicallyOrdered
+                    -AlreadyChronologicallyOrdered `
+                    -CoordinatorSnapshotEvaluation $compactSnapshotEvaluation
             }
     $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionProof =
         Invoke-FileTransferCompactCorrelator `
@@ -6958,8 +6959,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.BoundedLookupVisitCount
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
-    $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
-    $fullSnapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
     $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
     return [pscustomobject]@{
@@ -10323,9 +10324,9 @@ function Invoke-FileTransferRetainedAnalysis {
         $snapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
             -Full $fullSnapshotEvaluation `
             -Compact $compactSnapshotEvaluation
-        $fullSnapshotEvaluation | ConvertTo-Json -Depth 64 |
+        $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
             Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
-        $compactSnapshotEvaluation | ConvertTo-Json -Depth 64 |
+        $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
             Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
         $snapshotParity | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8

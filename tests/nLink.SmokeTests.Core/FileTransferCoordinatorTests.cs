@@ -9373,7 +9373,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateProofPublicationCancellationSnapshotFixture(
-        long recoveryGeneration)
+        long recoveryGeneration, bool heldRecheck = false)
     {
         var fixture = CreateReceiveRecoveryOperationFixture(FileTransferDirection.Inbound,
             "proof-cancellation-generations", recoveryGeneration - 1);
@@ -9392,11 +9392,31 @@ public sealed class FileTransferCoordinatorTests
         var delivered = FileTransferCoordinator.ApplyReceiveRecoveryProofStatePublicationReceipt(reachable.State,
             new FileTransferReceiveRecoveryProofStatePublicationReceipt(command,
                 FileTransferReceiveRecoveryProofStatePublicationOutcome.Delivered, "published-state", "delivered"), 350);
-        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(delivered.State,
-            new FileTransferReceiveRecoveryProof(authority, "proof-cancels-arm", "file_transfer_data_frame", 375));
+        var decisions = new List<FileTransferReceiveRecoveryDecision> { fixture.Decision, started, completed, reachable, delivered };
+        var proofState = delivered.State;
+        if (heldRecheck)
+        {
+            var recheck = FileTransferCoordinator.ObserveReceiveRecoveryProofStatePublicationRecheckEvidence(
+                delivered.State, CreateReceiveRecoveryProofStatePublicationRecheckEvidence(
+                    delivered.State.SessionId, heartbeatSequence: 19, observedUtcMs: 400));
+            Assert.True(recheck.Accepted, recheck.Reason);
+            var recheckCommand = Assert.IsType<FileTransferReceiveRecoveryProofStatePublicationCommand>(
+                recheck.ProofStatePublicationCommand);
+            var held = FileTransferCoordinator.ApplyReceiveRecoveryProofStatePublicationReceipt(recheck.State,
+                new FileTransferReceiveRecoveryProofStatePublicationReceipt(recheckCommand,
+                    FileTransferReceiveRecoveryProofStatePublicationOutcome.Held, "(none)",
+                    "filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause"), 450);
+            Assert.True(held.Accepted, held.Reason);
+            decisions.Add(recheck);
+            decisions.Add(held);
+            proofState = held.State;
+        }
+        var proof = FileTransferCoordinator.ObserveReceiveRecoveryProof(proofState,
+            new FileTransferReceiveRecoveryProof(authority, "proof-cancels-arm", "file_transfer_data_frame", heldRecheck ? 475 : 375));
         Assert.True(proof.Accepted, proof.Reason);
         Assert.Null(proof.State.PersistentState.FileTransferReceiveRecovery.ProofStatePublication);
-        return new[] { fixture.Decision, started, completed, reachable, delivered, proof }
+        decisions.Add(proof);
+        return decisions
             .Select(decision => Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(decision.SnapshotEnvelope))
             .ToArray();
     }

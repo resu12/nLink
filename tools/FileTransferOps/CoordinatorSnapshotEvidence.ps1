@@ -10743,6 +10743,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $heldPublicationProofClosures = [Collections.Generic.List[object]]::new()
     $receiveRecoveryEntries = @($operationHistory | Where-Object {
             [string]$_.Operation.family -ceq 'receive_recovery' -and
             [string]$_.Operation.operationRole -ne 'attempted_decision'
@@ -10781,6 +10782,68 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 $_.Family -ceq 'receive_recovery' -and
                 $_.AuthorityId -ceq $authorityId
             })
+        foreach ($publicationGroup in @($history | Where-Object {
+                $_.Operation.operationRole -ceq 'proof_publication_pending' -and
+                $_.Operation.stateApplied
+            } | Group-Object { [string]$_.Operation.operationKey })) {
+            $publicationHistory = @($publicationGroup.Group | Sort-Object {
+                    [long]$_.Boundary.afterStateGeneration
+                })
+            $origin = $publicationHistory[0]
+            $retired = $publicationHistory[-1]
+            if ($origin.Boundary.decisionKind -cne 'ObserveReceiveRecoveryProofStatePublicationRecheckEvidence' -or
+                $origin.Operation.beforeState -cne 'None' -or $origin.Operation.afterState -cne 'Pending' -or
+                $retired.Boundary.decisionKind -cne 'ObserveReceiveRecoveryProof' -or
+                $retired.Operation.beforeState -cne 'Held' -or $retired.Operation.afterState -cne 'None') { continue }
+            $held = @($publicationHistory | Where-Object {
+                    $_.Operation.beforeState -ceq 'Pending' -and $_.Operation.afterState -ceq 'Held'
+                })
+            if ($held.Count -ne 1 -or $held[0].Operation.receiptStatus -cne 'Held' -or
+                -not $held[0].Operation.receiptValidated) { continue }
+            $valid = $true
+            $state = 'None'
+            foreach ($entry in $publicationHistory) {
+                $operation = $entry.Operation
+                if ($operation.beforeState -cne $state -or
+                    ($state -ceq 'None' -and $entry -ne $origin)) { $valid = $false; break }
+                foreach ($field in @('operationKey','authorityId','operationGeneration',
+                        'commandIdentity','commandGeneration','commandFingerprint')) {
+                    if ([string]$operation.$field -cne [string]$origin.Operation.$field) { $valid = $false }
+                }
+                foreach ($scope in @('sourceBoundary','effectiveBoundary')) {
+                    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+                            $operation.receiveRecovery.$scope $origin.Operation.receiveRecovery.$scope)) { $valid = $false }
+                }
+                if ($operation.beforeState -ceq 'Held') {
+                    foreach ($field in @('receiptIdentity','receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
+                        if ([string]$operation.$field -cne [string]$held[0].Operation.$field) { $valid = $false }
+                    }
+                }
+                $state = [string]$operation.afterState
+            }
+            if (-not $valid -or -not (Test-FileTransferCoordinatorReceiveRecoveryRecheckCancellation `
+                    -Arm $held[0] -Closure $retired -ParentHistory $operationEntries -Effects $authorityEffects)) { continue }
+            $parent = @($operationEntries | Where-Object {
+                    $_.Boundary.boundaryId -ceq $retired.Boundary.boundaryId -and
+                    $_.Operation.afterState -ceq 'Completed:Adopted'
+                })
+            if ($parent.Count -ne 1) { continue }
+            $heldPublicationProofClosures.Add([pscustomobject]@{
+                    Writer = [string]$retired.Boundary.writer
+                    AuthorityId = $authorityId
+                    OperationGeneration = [long]$parent[0].Operation.operationGeneration
+                    ClosureGeneration = [long]$parent[0].Operation.receiveRecovery.closureGeneration
+                    PublicationGeneration = [long]$retired.Operation.operationGeneration
+                    ProofIdentity = [string]$parent[0].Operation.receiveRecovery.proofIdentity
+                    ProofObservedUtcMs = [long]$parent[0].Operation.receiveRecovery.proofObservedUtcMs
+                    SourceBoundary = $parent[0].Operation.receiveRecovery.sourceBoundary
+                    Direction = [string]$streams[$instanceId].Direction
+                    OriginSequence = [long]$origin.Boundary.writerSequence
+                    HeldSequence = [long]$held[0].Boundary.writerSequence
+                    ClosureSequence = [long]$retired.Boundary.writerSequence
+                    TransitionId = [string]$retired.Boundary.boundaryId
+                })
+        }
         if ($null -ne $latestOperation) {
             $executionState = [string]$latestOperation.Operation.receiveRecovery.executionState
             $closureState = [string]$latestOperation.Operation.receiveRecovery.closureState
@@ -11459,6 +11522,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         BoundaryCount = $boundaries.Count
         BoundaryHash = $boundaryHash
         Boundaries = @($boundaries)
+        # Internal correlation evidence; excluded from normalized boundary JSON/hash.
+        __HeldPublicationProofClosures = @($heldPublicationProofClosures.ToArray() | Where-Object { $artifactVerdict -ceq 'pass' })
         FirstUnresolvedBoundary = $firstUnresolvedBoundary
         AuthoritativeFamilies = @($streams.Values | ForEach-Object { $_.AuthoritativeFamilies } | Sort-Object -Unique)
         ShadowFamilies = @($streams.Values | ForEach-Object { $_.ShadowFamilies } | Sort-Object -Unique)
@@ -11542,6 +11607,162 @@ function Test-FileTransferCoordinatorSnapshotFamilyAuthoritative {
     return $Evaluation.Mode -ne 'LegacyV0' -and
         $Evaluation.ArtifactEvidenceVerdict -ceq 'pass' -and
         @($Evaluation.AuthoritativeFamilies) -contains $Family
+}
+
+function ConvertTo-FileTransferCoordinatorEvidenceToken {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -ceq '(none)') { return '(none)' }
+    'fte1-' + (Get-FileTransferCoordinatorSnapshotSha256 `
+        -Bytes ([Text.Encoding]::UTF8.GetBytes($Value))).Substring(0, 24)
+}
+
+function New-FileTransferHeldPublicationNaturalProofRecoveryIndex {
+    param($Evaluation, [AllowEmptyCollection()][string[]]$Lines = @())
+
+    $result = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if ($null -eq $Evaluation -or $Evaluation.Mode -cne 'SnapshotV1Authoritative' -or
+        $Evaluation.ArtifactEvidenceVerdict -cne 'pass' -or -not $Evaluation.StreamComplete -or
+        $null -eq $Evaluation.PSObject.Properties['__HeldPublicationProofClosures']) { return ,$result }
+
+    $publicationEvents = @(
+        'filetransfer_receive_recovery_proof_state_publication_recheck_decided',
+        'filetransfer_receive_recovery_proof_state_publication_receipt_applied',
+        'filetransfer_receive_recovery_proof_state_publication_invalidated')
+    $proofEvents = @('filetransfer_receive_recovery_operation_proof_observed',
+        'filetransfer_receive_recovery_operation_closure_adopted')
+    $buckets = @{}
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($line in $Lines) {
+        $eventName = Get-FileTransferCoordinatorSnapshotEventName -Line $line
+        if (($publicationEvents -notcontains $eventName -and $proofEvents -notcontains $eventName) -or
+            -not $seen.Add($line)) { continue }
+        $fields = @{}
+        $conflictingFields = $false
+        foreach ($match in [regex]::Matches($line, '(?:^|;\s*)([a-z0-9_]+)=([^;\r\n]*)')) {
+            $name = $match.Groups[1].Value
+            $value = $match.Groups[2].Value.Trim()
+            if ($fields.ContainsKey($name) -and $fields[$name] -cne $value) { $conflictingFields = $true }
+            $fields[$name] = $value
+        }
+        $writerSequence = 0L
+        if ($conflictingFields -or -not [long]::TryParse([string]$fields['log_writer_sequence'], [ref]$writerSequence) -or
+            $writerSequence -le 0) { continue }
+        foreach ($name in @('log_writer_id','publication_generation','receive_recovery_operation_authority_id',
+                'receive_recovery_operation_generation','direction','publication_attempt','decision_status',
+                'recovery_operation_generation','closure_generation','predecessor_publication_generation',
+                'proof_kind','publication_outcome','publication_reason','invalidation_target','decision_reason',
+                'closure_state','proof_observed_utc_ms','proof_identity')) {
+            if (-not $fields.ContainsKey($name)) { $fields[$name] = '' }
+        }
+        $key = if ($publicationEvents -contains $eventName) {
+            "$($fields.log_writer_id)|$($fields.publication_generation)|$eventName"
+        } else {
+            $authority = ConvertTo-FileTransferCoordinatorEvidenceToken $fields.receive_recovery_operation_authority_id
+            "$($fields.log_writer_id)|$authority|$($fields.receive_recovery_operation_generation)|$eventName"
+        }
+        if (-not $buckets.ContainsKey($key)) { $buckets[$key] = [Collections.Generic.List[object]]::new() }
+        $buckets[$key].Add([pscustomobject]@{ Line = $line; Fields = $fields })
+    }
+
+    function Get-ClosureRecords([string]$key) {
+        if ($buckets.ContainsKey($key)) { $buckets[$key].ToArray() }
+    }
+    function Test-DiagnosticScope($record, $closure) {
+        if ($record.Fields.direction -cne $closure.Direction) { return $false }
+        # Physical diagnostics do not serialize checkpoint generation or an unredacted
+        # data-session identity. Those are bound by the exact parent/child V1 history.
+        foreach ($mapping in @(
+                @('route','route'), @('protocol_version','protocolVersion'),
+                @('live_route_epoch','liveRouteEpoch'), @('route_publication_generation','routePublicationGeneration'),
+                @('route_commit_generation','routeCommitGeneration'), @('runtime_generation','runtimeGeneration'),
+                @('terminal_generation','terminalGeneration'), @('leg_generation','legGeneration'),
+                @('transport_epoch','transportEpoch'), @('bridge_recovery_generation','bridgeRecoveryGeneration'),
+                @('checkpoint_request_id','checkpointRequestId'), @('data_session_generation','dataSessionGeneration'))) {
+            if ([string]$record.Fields[$mapping[0]] -cne [string]$closure.SourceBoundary.($mapping[1])) { return $false }
+        }
+        return $true
+    }
+    function Test-DiagnosticIdentity($left, $right) {
+        foreach ($field in @('log_writer_id','session_id','transfer_id','direction','data_session_identity',
+                'data_session_generation','closure_generation')) {
+            if ([string]::IsNullOrWhiteSpace([string]$left.Fields[$field]) -or
+                [string]$left.Fields[$field] -cne [string]$right.Fields[$field]) { return $false }
+        }
+        return $true
+    }
+    function Test-PublicationTuple($recheck, $record) {
+        foreach ($field in @('recovery_operation_generation','closure_generation','publication_generation',
+                'predecessor_publication_generation','predecessor_frame_fingerprint','predecessor_receipt_observed_utc_ms')) {
+            if ([string]::IsNullOrWhiteSpace([string]$recheck.Fields[$field]) -or
+                [string]$recheck.Fields[$field] -cne [string]$record.Fields[$field]) { return $false }
+        }
+        foreach ($mapping in @(@('heartbeat_generation','recheck_heartbeat_generation'),
+                @('heartbeat_sequence','recheck_heartbeat_sequence'), @('proof_kind','recheck_proof_kind'), @('lane','recheck_lane'))) {
+            if ([string]::IsNullOrWhiteSpace([string]$recheck.Fields[$mapping[0]]) -or
+                [string]$recheck.Fields[$mapping[0]] -cne [string]$record.Fields[$mapping[1]]) { return $false }
+        }
+        return $record.Fields.publication_attempt -ceq 'post_delivery_recheck'
+    }
+
+    foreach ($closure in $Evaluation.__HeldPublicationProofClosures) {
+        $publicationKey = "$($closure.Writer)|$($closure.PublicationGeneration)"
+        $parentKey = "$($closure.Writer)|$($closure.AuthorityId)|$($closure.OperationGeneration)"
+        $rechecks = @(Get-ClosureRecords "$publicationKey|$($publicationEvents[0])" | Where-Object {
+                $_.Fields.decision_status -ceq 'Accepted' -and
+                $_.Fields.recovery_operation_generation -ceq [string]$closure.OperationGeneration -and
+                $_.Fields.closure_generation -ceq [string]$closure.ClosureGeneration -and
+                $_.Fields.predecessor_publication_generation -ceq [string]($closure.PublicationGeneration - 1) -and
+                $_.Fields.proof_kind -ceq 'heartbeat_received' -and
+                [long]$_.Fields.log_writer_sequence -gt $closure.OriginSequence -and
+                [long]$_.Fields.log_writer_sequence -lt $closure.HeldSequence -and
+                (Test-DiagnosticScope $_ $closure)
+            })
+        $held = @(Get-ClosureRecords "$publicationKey|$($publicationEvents[1])" | Where-Object {
+                $_.Fields.publication_outcome -ceq 'Held' -and
+                $_.Fields.decision_status -in @('Accepted','Idempotent') -and
+                $_.Fields.publication_reason -ceq 'filetransfer_receive_recovery_proof_state_held_for_tuna_activation_pause' -and
+                [long]$_.Fields.log_writer_sequence -gt $closure.HeldSequence -and
+                [long]$_.Fields.log_writer_sequence -lt $closure.ClosureSequence -and
+                (Test-DiagnosticScope $_ $closure)
+            })
+        $invalidations = @(Get-ClosureRecords "$publicationKey|$($publicationEvents[2])" | Where-Object {
+                $_.Fields.invalidation_target -ceq 'pending_command' -and
+                $_.Fields.decision_reason -ceq 'coordinator_receive_recovery_transition' -and
+                [long]$_.Fields.log_writer_sequence -gt $closure.ClosureSequence -and
+                (Test-DiagnosticScope $_ $closure)
+            })
+        $proof = @(Get-ClosureRecords "$parentKey|$($proofEvents[0])" | Where-Object {
+                $_.Fields.closure_state -ceq 'Adopted' -and
+                $_.Fields.proof_observed_utc_ms -ceq [string]$closure.ProofObservedUtcMs -and
+                (ConvertTo-FileTransferCoordinatorEvidenceToken $_.Fields.proof_identity) -ceq $closure.ProofIdentity -and
+                [long]$_.Fields.log_writer_sequence -gt $closure.ClosureSequence -and
+                (Test-DiagnosticScope $_ $closure)
+            })
+        $adopted = @(Get-ClosureRecords "$parentKey|$($proofEvents[1])" | Where-Object {
+                $_.Fields.closure_state -ceq 'Adopted' -and
+                $_.Fields.proof_observed_utc_ms -ceq [string]$closure.ProofObservedUtcMs -and
+                (ConvertTo-FileTransferCoordinatorEvidenceToken $_.Fields.proof_identity) -ceq $closure.ProofIdentity -and
+                [long]$_.Fields.log_writer_sequence -gt $closure.ClosureSequence -and
+                (Test-DiagnosticScope $_ $closure)
+            })
+        if ($rechecks.Count -ne 1 -or $held.Count -ne 1 -or $invalidations.Count -ne 1 -or
+            $proof.Count -ne 1 -or $adopted.Count -ne 1) { continue }
+        $valid = $true
+        foreach ($record in @($held[0], $invalidations[0], $proof[0], $adopted[0])) {
+            $valid = $valid -and (Test-DiagnosticIdentity $rechecks[0] $record)
+        }
+        foreach ($record in @($held[0], $invalidations[0])) {
+            $valid = $valid -and (Test-PublicationTuple $rechecks[0] $record)
+        }
+        if ($valid) { [void]$result.Add("$($closure.AuthorityId)|$($rechecks[0].Line)") }
+    }
+    return ,$result
+}
+
+function Test-FileTransferHeldPublicationNaturalProofRecovery {
+    param($Index, [string]$AuthorityId, [string]$RecheckLine)
+    $null -ne $Index -and $Index.Contains(
+        "$(ConvertTo-FileTransferCoordinatorEvidenceToken $AuthorityId)|$RecheckLine")
 }
 
 function Get-FileTransferCoordinatorSnapshotCorrelationResult {

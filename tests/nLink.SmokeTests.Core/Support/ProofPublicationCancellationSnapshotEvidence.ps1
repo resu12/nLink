@@ -34,7 +34,11 @@ function New-Lines([object[]]$records, [bool]$includeProofEffect = $true) {
         $kind = switch -Exact ($envelope.decisionKind) {
             'ObserveReceiveRecoveryExecutionStart' { 'execution_started' }
             'ObserveReceiveRecoveryExecutionReceipt' { 'execution_receipt_observed' }
-            'ApplyReceiveRecoveryProofStatePublicationReceipt' { 'proof_publication_delivered' }
+            'ApplyReceiveRecoveryProofStatePublicationReceipt' {
+                if (@($envelope.aggregate.operations | Where-Object {
+                    $_.operationRole -ceq 'proof_publication_terminal' -and $_.afterState -ceq 'Delivered'
+                }).Count -eq 1) { 'proof_publication_delivered' }
+            }
             'ObserveReceiveRecoveryProof' { if ($includeProofEffect) { 'receive_proof_observed' } }
         }
         if ($kind) {

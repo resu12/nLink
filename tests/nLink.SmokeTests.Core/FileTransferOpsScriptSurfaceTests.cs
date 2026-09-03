@@ -6000,6 +6000,33 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public async Task FileTransferOps_HeldPublicationRecheckClosesThroughExactReceiveProof(long recoveryGeneration)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-held-proof-closure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var envelopes = FileTransferCoordinatorTests.CreateProofPublicationCancellationSnapshotFixture(
+                recoveryGeneration, heldRecheck: true);
+            var fixturePath = Path.Combine(tempRoot, "envelopes.json");
+            var projected = envelopes.Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
+            await File.WriteAllTextAsync(fixturePath,
+                "{\"raw\":[" + string.Join(",", envelopes.Select(e => e.ToCanonicalJson())) +
+                "],\"projected\":[" + string.Join(",", projected.Select(e => e.ToCanonicalJson())) + "]}");
+            var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+                "Support", "HeldPublicationNaturalProofSnapshotEvidence.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+        finally { TryDeleteDirectory(tempRoot); }
+    }
+
+    [Theory]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
     public async Task FileTransferOps_RetainedHandoffReceiptUsesSharedSnapshotEvaluation(

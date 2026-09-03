@@ -40190,7 +40190,8 @@ function Get-FileTransferReceiveRecoveryCompletedUnprovenPayloadHoldCorrelation 
 function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
-        [switch]$AlreadyChronologicallyOrdered
+        [switch]$AlreadyChronologicallyOrdered,
+        $CoordinatorSnapshotEvaluation = $null
     )
 
     [object[]]$events = if ($null -eq $Events -or $Events.Count -eq 0) {
@@ -40202,6 +40203,11 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
     else {
         @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
     }
+
+    $naturalProofRecoveryIndex = if ($null -ne $CoordinatorSnapshotEvaluation) {
+        New-FileTransferHeldPublicationNaturalProofRecoveryIndex `
+            -Evaluation $CoordinatorSnapshotEvaluation -Lines @($events | ForEach-Object { [string]$_.RawLine })
+    } else { $null }
 
     function Get-ProofStateField {
         param(
@@ -41703,6 +41709,14 @@ function Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCo
                 (Get-ProofStateField -Event $_ -Names @('lane')) -eq
                     $heartbeatLane
             } | Select-Object -First 1)
+            if ($decision.Count -eq 1 -and $null -ne $naturalProofRecoveryIndex -and
+                (Test-FileTransferHeldPublicationNaturalProofRecovery `
+                    -Index $naturalProofRecoveryIndex `
+                    -AuthorityId (Get-ProofStateField -Event $record.Issued -Names @('receive_recovery_operation_authority_id')) `
+                    -RecheckLine ([string]$decision[0].RawLine))) {
+                $recovered.Add($record.Event) | Out-Null
+                continue
+            }
             $stateSend = @($stateSends | Where-Object {
                 $decision.Count -eq 1 -and
                 [int64]$_.Sequence -gt [int64]$decision[0].Sequence -and
@@ -64239,7 +64253,7 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fileTransferReceiveRecoveryCompletedRetainedProofStatePublicationProof =
         Get-FileTransferReceiveRecoveryCompletedRetainedProofStatePublicationCorrelation `
-            -Events $events
+            -Events $events -CoordinatorSnapshotEvaluation $coordinatorSnapshotEvaluation
     $fileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionProof =
         Get-FileTransferReceiveRecoveryCompletedRetainedProofStateRecheckHeartbeatSuppressionCorrelation `
             -Events $events
@@ -72680,7 +72694,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count={0}" -f $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount)
     ) + $verdictLines
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
-    $snapshotEvaluation | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-coordinator-snapshot-summary.txt' -Lines @(
         ("mode={0}" -f $snapshotEvaluation.Mode),
         ("contract_version={0}" -f $snapshotEvaluation.ContractVersion),
