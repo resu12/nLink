@@ -7202,6 +7202,9 @@ public sealed partial class SessionFileTransferService
                         context.V6RegularNknStateRefreshActivePriority = null;
                         context.V6RegularNknStateRefreshActiveStartedUtc = null;
                         context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
+                        RecheckOutboundFallbackTailPeerFirstYieldAfterOwnerWorkChangedLocked(
+                            context,
+                            "state_refresh_send_completed");
                     }
                 }
                 else if (!retiredSendObserved &&

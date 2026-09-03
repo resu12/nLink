@@ -16686,6 +16686,238 @@ public sealed partial class SessionFileTransferService :
         HandleOutboundFallbackTailPairedReleaseLocked(context, reason);
     }
 
+    private static bool TryGetOutboundFallbackTailPeerFirstYieldSubjectLocked(
+        OutboundTransferContext context,
+        out FileTransferFallbackTailPeerProofReceipt peerProof,
+        out FallbackTailYieldDecision? currentDecision)
+    {
+        if (GetCurrentFallbackTailYieldOperation(context) is
+            {
+                Decision: var decision,
+                LocalProof: null,
+                PeerProof: { } currentPeerProof,
+                PairedRelease: null,
+            })
+        {
+            peerProof = currentPeerProof;
+            currentDecision = decision;
+            return true;
+        }
+
+        if (context.CoordinatorPersistentState.FallbackTailYield
+                .PendingPeerProofBeforeLocalYield is { } pendingPeerProof)
+        {
+            peerProof = pendingPeerProof;
+            currentDecision = null;
+            return true;
+        }
+
+        peerProof = default;
+        currentDecision = null;
+        return false;
+    }
+
+    private static string? GetOutboundFallbackTailPeerFirstYieldOwnerWorkBlockerLocked(
+        OutboundTransferContext context)
+    {
+        if (context.FileTransferRouteTransitionExecution is not null)
+        {
+            return "route_transition_execution";
+        }
+
+        if (context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending)
+        {
+            return "checkpoint_delivery_recovery";
+        }
+
+        if (context.V6RegularNknStateRefreshSendInFlight != 0)
+        {
+            return "state_refresh_send";
+        }
+
+        if (context.V6RegularNknDeferredStateRefreshRequest is not null)
+        {
+            return "deferred_state_refresh";
+        }
+
+        if (context.PullTransportFrontierOnlyRepairActive ||
+            context.CurrentFallbackFrontierRepairContract is
+                { Lifecycle.IsSettled: false })
+        {
+            return "frontier_repair";
+        }
+
+        return IsV6TransportHandoffBlockingTail(context.V6TransportHandoff)
+            ? "transport_handoff"
+            : null;
+    }
+
+    private void ArmOutboundFallbackTailPeerFirstYieldUnblockRecheckLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        int committedChunkIndex,
+        int highestObservedChunkIndex,
+        string reason)
+    {
+        if (context.DataSession is not { } dataSession ||
+            !TryGetOutboundFallbackTailPeerFirstYieldSubjectLocked(
+                context,
+                out var peerProof,
+                out var currentDecision))
+        {
+            return;
+        }
+
+        var blocker =
+            GetOutboundFallbackTailPeerFirstYieldOwnerWorkBlockerLocked(context);
+        if (blocker is null)
+        {
+            return;
+        }
+
+        var current = context.PendingFallbackTailPeerFirstYieldUnblockRecheck;
+        if (current is not null &&
+            current.PeerProof == peerProof &&
+            current.CurrentDecision == currentDecision &&
+            ReferenceEquals(current.DataSession, dataSession) &&
+            current.DataSessionGeneration == context.DataSessionGeneration &&
+            current.ReceiverStateEpoch == state.Epoch &&
+            current.CommittedChunkIndex == committedChunkIndex &&
+            current.HighestObservedChunkIndex == highestObservedChunkIndex)
+        {
+            return;
+        }
+
+        var generation =
+            checked(context.LastFallbackTailPeerFirstYieldUnblockRecheckGeneration + 1);
+        context.LastFallbackTailPeerFirstYieldUnblockRecheckGeneration = generation;
+        context.PendingFallbackTailPeerFirstYieldUnblockRecheck =
+            new OutboundFallbackTailPeerFirstYieldUnblockRecheck(
+                generation,
+                peerProof,
+                currentDecision,
+                dataSession,
+                context.DataSessionGeneration,
+                state.Epoch,
+                committedChunkIndex,
+                highestObservedChunkIndex);
+        LogOutboundFallbackTailPeerFirstYieldUnblockRecheck(
+            context,
+            generation,
+            peerProof,
+            currentDecision,
+            "Held",
+            blocker,
+            reason);
+    }
+
+    private void RecheckOutboundFallbackTailPeerFirstYieldAfterOwnerWorkChangedLocked(
+        OutboundTransferContext context,
+        string reason)
+    {
+        var recheck = context.PendingFallbackTailPeerFirstYieldUnblockRecheck;
+        if (recheck is null)
+        {
+            return;
+        }
+
+        var staleReason = default(string);
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            staleReason = "context_replaced";
+        }
+        else if (context.IsTerminal ||
+                 !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+                 context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                 context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
+        {
+            staleReason = "fallback_owner_not_current";
+        }
+        else if (!ReferenceEquals(context.DataSession, recheck.DataSession) ||
+                 context.DataSessionGeneration != recheck.DataSessionGeneration)
+        {
+            staleReason = "data_session_replaced";
+        }
+        else if (context.CurrentTransferLeg is not { } currentLeg ||
+                 !IsCurrentPostTunaFallbackLeg(currentLeg) ||
+                 context.RemoteNextExpectedChunkIndex < recheck.CommittedChunkIndex)
+        {
+            staleReason = "fallback_leg_replaced";
+        }
+        else if (!TryGetOutboundFallbackTailPeerFirstYieldSubjectLocked(
+                     context,
+                     out var peerProof,
+                     out var currentDecision) ||
+                 peerProof != recheck.PeerProof ||
+                 currentDecision != recheck.CurrentDecision)
+        {
+            staleReason = "peer_proof_replaced";
+        }
+
+        if (staleReason is not null)
+        {
+            context.PendingFallbackTailPeerFirstYieldUnblockRecheck = null;
+            LogOutboundFallbackTailPeerFirstYieldUnblockRecheck(
+                context,
+                recheck.Generation,
+                recheck.PeerProof,
+                recheck.CurrentDecision,
+                "Stale",
+                staleReason,
+                reason);
+            return;
+        }
+
+        var blocker =
+            GetOutboundFallbackTailPeerFirstYieldOwnerWorkBlockerLocked(context);
+        if (blocker is not null)
+        {
+            LogOutboundFallbackTailPeerFirstYieldUnblockRecheck(
+                context,
+                recheck.Generation,
+                recheck.PeerProof,
+                recheck.CurrentDecision,
+                "Held",
+                blocker,
+                reason);
+            return;
+        }
+
+        context.PendingFallbackTailPeerFirstYieldUnblockRecheck = null;
+        if (recheck.CurrentDecision is not null)
+        {
+            RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(context, reason);
+        }
+        else
+        {
+            ResolveOutboundFallbackTailSurvivalLocked(context, reason);
+        }
+
+        LogOutboundFallbackTailPeerFirstYieldUnblockRecheck(
+            context,
+            recheck.Generation,
+            recheck.PeerProof,
+            recheck.CurrentDecision,
+            "Rechecked",
+            "owner_work_cleared",
+            reason);
+    }
+
+    private static void LogOutboundFallbackTailPeerFirstYieldUnblockRecheck(
+        OutboundTransferContext context,
+        long generation,
+        FileTransferFallbackTailPeerProofReceipt peerProof,
+        FallbackTailYieldDecision? currentDecision,
+        string status,
+        string result,
+        string reason)
+    {
+        var scope = peerProof.ObservationScope;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_tail_peer_first_yield_unblock_recheck_decided; authority_effect=none; recheck_generation={generation}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(result)}; trigger={FormatProtocolLogValue(reason)}; session_id={FormatProtocolLogValue(scope.SessionId)}; transfer_id={FormatProtocolLogValue(scope.TransferId)}; direction=outbound; route={FormatProtocolLogValue(scope.RouteToken)}; protocol_version={scope.ProtocolVersion}; live_route_epoch={scope.LiveRouteEpoch}; route_publication_generation={scope.RoutePublication?.PublicationGeneration ?? 0}; runtime_generation={scope.RuntimeOwner.RuntimeGeneration}; terminal_generation={scope.TerminalGeneration}; leg_generation={scope.LegGeneration}; transport_epoch={scope.TransportEpoch}; bridge_recovery_generation={scope.BridgeRecoveryGeneration}; checkpoint_generation={scope.CheckpointGeneration}; checkpoint_request_id={FormatProtocolLogValue(scope.CheckpointRequestIdSnapshot)}; data_session_identity={FormatProtocolLogValue(scope.DataSessionIdentity ?? "(none)")}; data_session_generation={scope.DataSessionGeneration}; authority_id={FormatProtocolLogValue(currentDecision?.AuthorityId.ToString() ?? "(none)")}; yield_generation={currentDecision?.YieldGeneration ?? 0}; peer_authority_id={FormatProtocolLogValue(peerProof.Proof.AuthorityId.ToString())}; peer_yield_generation={peerProof.Proof.YieldGeneration}; owner_key={FormatProtocolLogValue(scope.OwnerKey)}; pair_key={FormatProtocolLogValue(scope.PairKey)}; peer_observation_identity={FormatProtocolLogValue(peerProof.ObservationIdentity)}; peer_frame_fingerprint={FormatProtocolLogValue(peerProof.Proof.FrameFingerprint)}");
+    }
+
     private void ResolveInboundFallbackTailSurvivalLocked(InboundTransferContext context, string reason)
     {
         var operation = GetCurrentFallbackTailYieldOperation(context);
@@ -17241,6 +17473,7 @@ public sealed partial class SessionFileTransferService :
         context.FallbackTailQuiescenceTupleLastDiagnosticUtc = null;
         context.FallbackTailQuiescenceSuppressedDiagnosticCount = 0;
         context.FallbackTailQuiescenceTimedOut = false;
+        context.PendingFallbackTailPeerFirstYieldUnblockRecheck = null;
     }
 
     private static void LogOutboundFallbackTailTerminalProofConsumedOnceLocked(
@@ -18297,6 +18530,20 @@ public sealed partial class SessionFileTransferService :
             IsV6TransportHandoffBlockingTail(context.V6TransportHandoff);
         if (pendingOwnerWork || stateRecoveryWorkStillBlocking)
         {
+            if (pendingOwnerWork && !stateRecoveryWorkStillBlocking)
+            {
+                ArmOutboundFallbackTailPeerFirstYieldUnblockRecheckLocked(
+                    context,
+                    state,
+                    committed,
+                    highestObserved,
+                    reason);
+            }
+            else if (stateRecoveryWorkStillBlocking)
+            {
+                context.PendingFallbackTailPeerFirstYieldUnblockRecheck = null;
+            }
+
             var fallbackTailOperation =
                 GetCurrentFallbackTailYieldOperation(context);
             if (fallbackTailOperation is
@@ -23433,6 +23680,16 @@ public sealed partial class SessionFileTransferService :
         string Reason,
         long DrainGeneration);
 
+    private sealed record OutboundFallbackTailPeerFirstYieldUnblockRecheck(
+        long Generation,
+        FileTransferFallbackTailPeerProofReceipt PeerProof,
+        FallbackTailYieldDecision? CurrentDecision,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration,
+        int ReceiverStateEpoch,
+        int CommittedChunkIndex,
+        int HighestObservedChunkIndex);
+
     private sealed class OutboundTransferContext
     {
         public string CoordinatorInstanceId { get; } =
@@ -23746,6 +24003,11 @@ public sealed partial class SessionFileTransferService :
         public int FallbackTailQuiescenceSuppressedDiagnosticCount { get; set; }
 
         public bool FallbackTailQuiescenceTimedOut { get; set; }
+
+        public long LastFallbackTailPeerFirstYieldUnblockRecheckGeneration { get; set; }
+
+        public OutboundFallbackTailPeerFirstYieldUnblockRecheck?
+            PendingFallbackTailPeerFirstYieldUnblockRecheck { get; set; }
 
         public bool FallbackTailTerminalProofConsumedLogged { get; set; }
 

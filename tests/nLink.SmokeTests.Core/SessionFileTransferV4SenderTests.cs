@@ -6841,6 +6841,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     private static void AcceptOutboundFallbackCheckpointForTest(
+        SessionFileTransferService service,
         object context,
         FileTransferLeg leg,
         long transportEpoch,
@@ -6850,17 +6851,19 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         string reason)
     {
         checkpointRequestId = EnsureOutboundFallbackCheckpointLeaseForTest(
+            service,
             context,
             leg,
             transportEpoch,
             checkpointRequestId,
             reason);
+        leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         var method = typeof(SessionFileTransferService)
-            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
             .Single(static candidate =>
                 candidate.Name == "TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked" &&
                 candidate.GetParameters()[0].ParameterType.Name.Contains("OutboundTransferContext", StringComparison.Ordinal));
-        Assert.True((bool)method.Invoke(null, [context, leg, transportEpoch, committed, highestObserved, checkpointRequestId, reason])!);
+        Assert.True((bool)method.Invoke(service, [context, leg, transportEpoch, committed, highestObserved, checkpointRequestId, reason])!);
     }
 
     private static string EnsureInboundFallbackCheckpointLeaseForTest(
@@ -6896,6 +6899,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     private static string EnsureOutboundFallbackCheckpointLeaseForTest(
+        SessionFileTransferService service,
         object context,
         FileTransferLeg leg,
         long transportEpoch,
@@ -6922,8 +6926,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = Math.Max(0, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex")), ChunkCount = 1 }],
         };
         var method = typeof(SessionFileTransferService)
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!;
-        Assert.True((bool)method.Invoke(null, [context, request, reason])!);
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)method.Invoke(service, [context, request, reason])!);
         return requestId;
     }
 
@@ -29801,6 +29805,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .Invoke(service, [context, "test_sparse_progress_yields"]);
         var initialLeg = (FileTransferLeg)GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
         AcceptOutboundFallbackCheckpointForTest(
+            service,
             context,
             initialLeg,
             transportEpoch: 3,
@@ -29838,6 +29843,160 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Contains("event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_tail_quiescence_timeout;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void PostTunaFallbackV6PeerFirstYield_RechecksAfterFrontierAndStateRefreshClear()
+    {
+        const string transferId = "transfer_post_tuna_fallback_v6_peer_first_unblock";
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            chunkCount: 512);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_peer_first_unblock"]);
+        var initialLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        AcceptOutboundFallbackCheckpointForTest(
+            service,
+            context,
+            initialLeg,
+            transportEpoch: 3,
+            committed: 100,
+            highestObserved: 180,
+            checkpointRequestId: initialLeg.CheckpointRequestId,
+            reason: "test_peer_first_unblock_checkpoint_accepted");
+        var leg = GetCurrentContextLeg(context);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 1);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveSendGeneration", 7L);
+
+        var sessionId = GetPrivateProperty<string>(context, "SessionId");
+        var ownerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            leg.RouteSelection.TelemetryToken,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.Generation,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)");
+        var pairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+            sessionId,
+            transferId,
+            leg.RouteSelection.TelemetryToken,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.TransportEpochId,
+            "(none)");
+        var peerYield = new FileTransferFallbackTailYieldFrameV6
+        {
+            AuthoritySchema = FileTransferAuthoritySchema.Current,
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = leg.TransportEpochId,
+            OwnerKey = ownerKey,
+            PairKey = pairKey,
+            Direction = "inbound",
+            YieldGeneration = 1,
+            AuthorityId = CreatePeerFallbackTailYieldAuthorityId(transferId),
+            LiveRouteEpoch = leg.LiveRouteEpochId,
+            FallbackLegGeneration = leg.Generation,
+            BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+            CommittedChunkIndex = 100,
+            HighestObservedChunkIndex = 180,
+            RecoveryMode = "fallback_tail_yield",
+        };
+        var state = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            Epoch = 1,
+            ContiguousCommittedChunkIndex = 103,
+            DurableReceivedHighestChunkIndex = 102,
+            CreditUntilChunkIndexExclusive = 256,
+            MissingRanges = [],
+            BytesCommitted = 103L * 21 * 1024,
+            TransportEpoch = leg.TransportEpochId,
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ApplyOutboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, peerYield]);
+        Assert.NotNull(
+            GetCoordinatorFallbackTailYieldSubstate(context)
+                .PendingPeerProofBeforeLocalYield);
+        Assert.False(HasPairedFallbackTailYieldInAggregate(context));
+
+        serviceType
+            .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, state]);
+
+        Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
+        Assert.NotNull(GetPrivatePropertyValue(
+            context,
+            "PendingFallbackTailPeerFirstYieldUnblockRecheck"));
+        Assert.False(HasPairedFallbackTailYieldInAggregate(context));
+
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveSendGeneration", 0L);
+        serviceType
+            .GetMethod(
+                "RecheckOutboundFallbackTailPeerFirstYieldAfterOwnerWorkChangedLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_state_refresh_send_completed"]);
+
+        var paired = ApplyCurrentFallbackTailLocalProofForTest(
+            context,
+            "peer_first_unblock_local_proof");
+        Assert.NotNull(paired.PairedRelease);
+        serviceType
+            .GetMethod(
+                "HandleOutboundFallbackTailPairedReleaseLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_peer_first_unblock_paired"]);
+        Assert.True(HasPairedFallbackTailYieldInAggregate(context));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_fallback_tail_peer_first_yield_unblock_recheck_decided; authority_effect=none; recheck_generation=1; decision_status=Held;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_fallback_tail_peer_first_yield_unblock_recheck_decided; authority_effect=none; recheck_generation=1; decision_status=Rechecked;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound;"));
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                log,
+                "event=filetransfer_fallback_paired_tail_yield_runtime_unlock_retry_requested;"));
+
+        serviceType
+            .GetMethod(
+                "RecheckOutboundFallbackTailPeerFirstYieldAfterOwnerWorkChangedLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "test_duplicate_completion"]);
+        Assert.Equal(
+            1,
+            CountOccurrences(
+                ReadOperationalLogTail(logStart),
+                "event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound;"));
     }
 
     [Fact]
