@@ -7882,6 +7882,22 @@ internal static partial class FileTransferCoordinator
             state,
             decision.State,
             coordinatorEvent);
+        if (coordinatorEvent.Kind ==
+                FileTransferCoordinatorEventKind.FallbackTailFailed &&
+            (rejected ||
+             state.PersistentState == decision.State.PersistentState))
+        {
+            attemptedOperations = attemptedOperations.AddRange(
+                CreateFallbackTailYieldAttemptedDecisionSnapshots(
+                    state,
+                    coordinatorEvent.Kind.ToString(),
+                    rejected ? "Rejected" : "Idempotent",
+                    decision.MutationRejectedReason ??
+                    decision.RuntimeUnlockCommitRejectedReason ??
+                    decision.Reason,
+                    coordinatorEvent,
+                    decision.FallbackTailYieldDecision?.AuthorityId));
+        }
         if (coordinatorEvent.Kind == FileTransferCoordinatorEventKind.Terminalized)
         {
             attemptedOperations = attemptedOperations.AddRange(

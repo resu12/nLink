@@ -3055,42 +3055,303 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailQuiescentEnvelope {
 function Test-FileTransferCoordinatorSnapshotFallbackTailFailedEnvelope {
     param($Envelope)
 
-    if ($Envelope.decisionKind -cne 'FallbackTailFailed' -or $Envelope.decisionStatus -cne 'Accepted' -or
-        [long]$Envelope.aggregate.afterStateGeneration -ne ([long]$Envelope.aggregate.beforeStateGeneration + 1L) -or
-        $Envelope.aggregate.beforeStateFingerprint -ceq $Envelope.aggregate.afterStateFingerprint -or
+    if ($Envelope.decisionKind -cne 'FallbackTailFailed' -or
         -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Envelope.aggregate.beforeBoundary) -or
         -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $Envelope.aggregate.beforeBoundary $Envelope.aggregate.afterBoundary) -or
         $Envelope.aggregate.afterBoundary.route -cne 'post_tuna_fallback_v6' -or
-        [int]$Envelope.aggregate.afterBoundary.protocolVersion -ne 6 -or
-        @($Envelope.aggregate.changedFamilies).Count -ne 1 -or
-        $Envelope.aggregate.changedFamilies[0] -cne 'fallback_tail_yield') { return $false }
+        [int]$Envelope.aggregate.afterBoundary.protocolVersion -ne 6) { return $false }
+
     $operations = @($Envelope.aggregate.operations)
-    if ($operations.Count -ne 1) { return $false }
-    $operation = $operations[0]; $typed = $operation.fallbackTailYield
+    if ([string]$Envelope.decisionStatus -in @('Idempotent', 'Rejected')) {
+        if ([long]$Envelope.aggregate.afterStateGeneration -ne
+                [long]$Envelope.aggregate.beforeStateGeneration -or
+            [string]$Envelope.aggregate.beforeStateFingerprint -cne
+                [string]$Envelope.aggregate.afterStateFingerprint -or
+            @($Envelope.aggregate.changedFamilies).Count -ne 1 -or
+            [string]$Envelope.aggregate.changedFamilies[0] -cne
+                'fallback_tail_yield' -or
+            $operations.Count -ne 1) {
+            return $false
+        }
+
+        $attempt = $operations[0]
+        $typed = $attempt.fallbackTailYield
+        $expectedKey = @(
+            'fallback_tail_yield', 'attempted_decision',
+            [string]$attempt.authorityId,
+            ([long]$attempt.operationGeneration).ToString(
+                [System.Globalization.CultureInfo]::InvariantCulture),
+            'FallbackTailFailed') -join '|'
+        if ([string]$attempt.family -cne 'fallback_tail_yield' -or
+            [string]$attempt.operationRole -cne 'attempted_decision' -or
+            [string]$attempt.operationKind -cne 'FallbackTailFailed' -or
+            [string]$attempt.operationKey -cne $expectedKey -or
+            [string]$attempt.authorityId -in @('', '(none)') -or
+            [long]$attempt.operationGeneration -le 0 -or
+            [string]$attempt.predecessorAuthorityId -cne '(none)' -or
+            [string]$attempt.beforeState -cne [string]$attempt.afterState -or
+            [bool]$attempt.stateApplied -or $null -eq $typed -or
+            [string]$typed.role -cne 'attempted_decision' -or
+            -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
+                $Envelope $attempt) -or
+            -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+                $attempt)) {
+            return $false
+        }
+
+        $receipts = @($typed.receipts)
+        if ($receipts.Count -ne 1 -or
+            [string]$receipts[0].stage -cne 'attempted_decision' -or
+            [string]$receipts[0].receiptStatus -cne
+                [string]$Envelope.decisionStatus -or
+            [string]$receipts[0].receiptReason -cne
+                [string]$Envelope.decisionReason -or
+            -not [bool]$receipts[0].receiptValidated) {
+            return $false
+        }
+        foreach ($field in @(
+                'commandIdentity', 'commandGeneration', 'commandFingerprint',
+                'receiptIdentity', 'receiptGeneration', 'receiptStatus',
+                'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$attempt.$field -cne [string]$receipts[0].$field) {
+                return $false
+            }
+        }
+        if ([long]$receipts[0].commandGeneration -ne
+                [long]$attempt.operationGeneration -or
+            [long]$receipts[0].receiptGeneration -ne
+                [long]$attempt.operationGeneration) {
+            return $false
+        }
+
+        if ([string]$Envelope.decisionStatus -ceq 'Idempotent') {
+            return [string]$typed.yieldKind -ceq 'Failed' -and
+                [string]$typed.pairingState -ceq [string]$attempt.afterState -and
+                [string]$typed.ownerKey -notin @('', '(none)') -and
+                [string]$typed.pairKey -notin @('', '(none)')
+        }
+
+        if ([string]$typed.yieldKind -ceq 'Attempt') {
+            if ([string]$attempt.beforeState -cne 'None' -or
+                [string]$typed.pairingState -cne 'Rejected' -or
+                [string]$typed.invalidationReason -cne
+                    [string]$Envelope.decisionReason -or
+                [bool]$typed.failedSupersessionCarriedPeerProof) {
+                return $false
+            }
+            foreach ($field in @(
+                    'ownerKey', 'pairKey', 'localProofIdentity',
+                    'localProofFingerprint', 'peerProofAuthorityId',
+                    'peerProofIdentity', 'peerProofFingerprint',
+                    'pairedReleaseAuthorityId', 'pairedReleaseOutcome',
+                    'failedPredecessorAuthorityId',
+                    'reservedRetryAuthorityId')) {
+                if ([string]$typed.$field -cne '(none)') { return $false }
+            }
+            foreach ($field in @(
+                    'peerProofYieldGeneration', 'pairingGeneration',
+                    'pairedReleaseGeneration', 'reauthorizationGeneration',
+                    'reservationGeneration', 'consumingInstallGeneration',
+                    'retryHoldGeneration', 'retryRecheckGeneration')) {
+                if ([long]$typed.$field -ne 0) { return $false }
+            }
+            return [long]$typed.reauthorizationSourceTransportEpoch -eq
+                    [long]$typed.sourceBoundary.transportEpoch -and
+                [long]$typed.reauthorizationTargetTransportEpoch -eq
+                    [long]$typed.sourceBoundary.transportEpoch
+        }
+        return [string]$typed.yieldKind -ceq 'Failed' -and
+            [string]$typed.pairingState -ceq [string]$attempt.afterState -and
+            [string]$typed.ownerKey -notin @('', '(none)') -and
+            [string]$typed.pairKey -notin @('', '(none)')
+    }
+
+    if ([string]$Envelope.decisionStatus -cne 'Accepted' -or
+        [long]$Envelope.aggregate.afterStateGeneration -ne
+            ([long]$Envelope.aggregate.beforeStateGeneration + 1L) -or
+        $Envelope.aggregate.beforeStateFingerprint -ceq
+            $Envelope.aggregate.afterStateFingerprint -or
+        @($Envelope.aggregate.changedFamilies).Count -ne 1 -or
+        $Envelope.aggregate.changedFamilies[0] -cne 'fallback_tail_yield') {
+        return $false
+    }
+
+    $current = @($operations | Where-Object {
+            [string]$_.family -ceq 'fallback_tail_yield' -and
+            [string]$_.operationRole -ceq 'yield_current' -and
+            [string]$_.operationKind -ceq 'Failed' -and
+            [string]$_.beforeState -ceq 'None' -and
+            [string]$_.afterState -in @('YieldIssued', 'PeerProofObserved') -and
+            [bool]$_.stateApplied
+        })
+    if ($current.Count -ne 1) { return $false }
+    $operation = $current[0]; $typed = $operation.fallbackTailYield
+    $expectedOperationKey = @(
+        'fallback_tail_yield', 'yield_current', [string]$operation.authorityId,
+        ([long]$operation.operationGeneration).ToString(
+            [System.Globalization.CultureInfo]::InvariantCulture), 'Failed') -join '|'
     if ($operation.family -cne 'fallback_tail_yield' -or $operation.operationRole -cne 'yield_current' -or
+        $operation.operationKey -cne $expectedOperationKey -or
         $operation.operationKind -cne 'Failed' -or $operation.beforeState -cne 'None' -or
-        $operation.afterState -cne 'YieldIssued' -or -not $operation.stateApplied -or
+        $operation.afterState -notin @('YieldIssued', 'PeerProofObserved') -or
+        -not $operation.stateApplied -or
         $operation.authorityId -in @('', '(none)') -or [long]$operation.operationGeneration -le 0 -or
         $operation.predecessorAuthorityId -cne '(none)' -or $null -eq $typed -or
-        $typed.role -cne 'yield_current' -or $typed.yieldKind -cne 'Failed' -or $typed.pairingState -cne 'YieldIssued' -or
-        -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope $Envelope $operation)) { return $false }
-    foreach ($field in @('localProofIdentity','localProofFingerprint','peerProofAuthorityId','peerProofIdentity',
-            'peerProofFingerprint','pairedReleaseAuthorityId','pairedReleaseOutcome','reservedRetryAuthorityId')) {
+        $typed.role -cne 'yield_current' -or $typed.yieldKind -cne 'Failed' -or
+        $typed.pairingState -cne $operation.afterState -or
+        [string]$typed.ownerKey -in @('', '(none)') -or
+        [string]$typed.pairKey -in @('', '(none)') -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope $Envelope $operation) -or
+        -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence $operation)) { return $false }
+    foreach ($field in @('localProofIdentity','localProofFingerprint',
+            'pairedReleaseAuthorityId','pairedReleaseOutcome','reservedRetryAuthorityId',
+            'failedPredecessorAuthorityId','invalidationReason')) {
         if ([string]$typed.$field -cne '(none)') { return $false }
     }
-    foreach ($field in @('peerProofYieldGeneration','pairingGeneration','pairedReleaseGeneration',
+    if ([bool]$typed.failedSupersessionCarriedPeerProof) { return $false }
+    foreach ($field in @('pairingGeneration','pairedReleaseGeneration',
             'reservationGeneration','consumingInstallGeneration')) {
         if ([long]$typed.$field -ne 0) { return $false }
     }
-    $receipts = @($typed.receipts)
-    if ($receipts.Count -ne 1 -or $receipts[0].stage -cne 'yield' -or
-        $receipts[0].receiptStatus -cne 'Accepted' -or -not $receipts[0].receiptValidated) { return $false }
-    foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint',
-            'receiptIdentity','receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
-        if ([string]$operation.$field -cne [string]$receipts[0].$field) { return $false }
+
+    $yieldReceipts = @($typed.receipts | Where-Object {
+            [string]$_.stage -ceq 'yield' -and
+            [string]$_.receiptStatus -ceq 'Accepted' -and
+            [bool]$_.receiptValidated
+        })
+    if ($yieldReceipts.Count -ne 1 -or
+        [long]$yieldReceipts[0].commandGeneration -ne
+            [long]$operation.operationGeneration -or
+        [long]$yieldReceipts[0].receiptGeneration -ne
+            [long]$operation.operationGeneration) {
+        return $false
     }
-    return [long]$receipts[0].commandGeneration -eq [long]$operation.operationGeneration -and
-        [long]$receipts[0].receiptGeneration -eq [long]$operation.operationGeneration
+
+    if ([string]$operation.afterState -ceq 'YieldIssued') {
+        if ($operations.Count -ne 1 -or @($typed.receipts).Count -ne 1) {
+            return $false
+        }
+        foreach ($field in @('peerProofAuthorityId','peerProofIdentity',
+                'peerProofFingerprint')) {
+            if ([string]$typed.$field -cne '(none)') { return $false }
+        }
+        if ([long]$typed.peerProofYieldGeneration -ne 0) { return $false }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint',
+                'receiptIdentity','receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
+            if ([string]$operation.$field -cne [string]$yieldReceipts[0].$field) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    $pending = @($operations | Where-Object {
+            [string]$_.family -ceq 'fallback_tail_yield' -and
+            [string]$_.operationRole -ceq 'peer_proof_pending_initial' -and
+            [string]$_.operationKind -ceq 'PeerProof' -and
+            [string]$_.beforeState -ceq 'Pending' -and
+            [string]$_.afterState -ceq 'None' -and
+            [bool]$_.stateApplied
+        })
+    if ($operations.Count -ne 2 -or $pending.Count -ne 1) { return $false }
+    $pendingOperation = $pending[0]
+    $pendingTyped = $pendingOperation.fallbackTailYield
+    $expectedPendingKey = @(
+        'fallback_tail_yield', 'peer_proof_pending_initial',
+        [string]$pendingOperation.authorityId,
+        ([long]$pendingOperation.operationGeneration).ToString(
+            [System.Globalization.CultureInfo]::InvariantCulture), 'PeerProof') -join '|'
+    if ([string]$pendingOperation.operationKey -cne $expectedPendingKey -or
+        [string]$pendingOperation.authorityId -in @('', '(none)') -or
+        [string]$pendingOperation.authorityId -ceq [string]$operation.authorityId -or
+        [long]$pendingOperation.operationGeneration -le 0 -or
+        [string]$pendingOperation.predecessorAuthorityId -cne '(none)' -or
+        $null -eq $pendingTyped -or
+        [string]$pendingTyped.role -cne 'peer_proof_pending_initial' -or
+        [string]$pendingTyped.yieldKind -cne 'PeerProof' -or
+        [string]$pendingTyped.pairingState -cne 'Pending' -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
+            $Envelope $pendingOperation) -or
+        -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+            $pendingOperation)) {
+        return $false
+    }
+
+    $pendingPeerReceipts = @($pendingTyped.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    $carriedPeerReceipts = @($typed.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    if (@($pendingTyped.receipts).Count -ne 1 -or
+        @($typed.receipts).Count -ne 2 -or
+        $pendingPeerReceipts.Count -ne 1 -or
+        $carriedPeerReceipts.Count -ne 1 -or
+        -not (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual `
+            $pendingPeerReceipts[0] $carriedPeerReceipts[0])) {
+        return $false
+    }
+    $peerAuthorityHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
+        [System.Text.UTF8Encoding]::new($false).GetBytes(
+            [string]$pendingTyped.peerProofAuthorityId))
+    $expectedPendingAuthority = 'fte1-' + $peerAuthorityHash.Substring(0, 24)
+    if ([string]$pendingOperation.authorityId -cne
+            $expectedPendingAuthority -or
+        [long]$pendingTyped.peerProofYieldGeneration -ne
+            [long]$pendingOperation.operationGeneration -or
+        [string]$pendingTyped.peerProofIdentity -cne
+            [string]$pendingPeerReceipts[0].receiptIdentity) {
+        return $false
+    }
+    foreach ($field in @(
+            'ownerKey', 'pairKey', 'peerProofAuthorityId',
+            'peerProofIdentity', 'peerProofFingerprint',
+            'peerProofYieldGeneration')) {
+        if ([string]$pendingTyped.$field -in @('', '(none)', '0') -or
+            [string]$pendingTyped.$field -cne [string]$typed.$field) {
+            return $false
+        }
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            $pendingTyped.sourceBoundary $typed.sourceBoundary)) {
+        return $false
+    }
+    foreach ($subject in @($pendingOperation, $operation)) {
+        foreach ($field in @(
+                'commandIdentity', 'commandGeneration', 'commandFingerprint',
+                'receiptIdentity', 'receiptGeneration', 'receiptStatus',
+                'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$subject.$field -cne
+                [string]$pendingPeerReceipts[0].$field) {
+                return $false
+            }
+        }
+    }
+    foreach ($peerTyped in @($pendingTyped, $typed)) {
+        foreach ($field in @(
+                'localProofIdentity', 'localProofFingerprint',
+                'pairedReleaseAuthorityId', 'pairedReleaseOutcome',
+                'reservedRetryAuthorityId', 'failedPredecessorAuthorityId',
+                'invalidationReason')) {
+            if ([string]$peerTyped.$field -cne '(none)') { return $false }
+        }
+        if ([bool]$peerTyped.failedSupersessionCarriedPeerProof) {
+            return $false
+        }
+        foreach ($field in @(
+                'pairingGeneration', 'pairedReleaseGeneration',
+                'reservationGeneration', 'consumingInstallGeneration')) {
+            if ([long]$peerTyped.$field -ne 0) { return $false }
+        }
+    }
+    return [long]$pendingPeerReceipts[0].commandGeneration -eq
+            [long]$pendingOperation.operationGeneration -and
+        [long]$pendingPeerReceipts[0].receiptGeneration -eq
+            [long]$pendingOperation.operationGeneration
 }
 
 function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
@@ -3100,6 +3361,23 @@ function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
     )
 
     if ([string]$Envelope.decisionKind -ceq 'FallbackTailFailed') {
+        $operations = @($Envelope.aggregate.operations)
+        if ([string]$Envelope.decisionStatus -in @('Idempotent', 'Rejected')) {
+            if ($operations.Count -eq 0) {
+                return 'fallback_tail_failed_attempted_decision_missing'
+            }
+            return 'fallback_tail_failed_attempted_decision_invalid'
+        }
+        if (@($operations | Where-Object {
+                    [string]$_.operationRole -ceq
+                        'peer_proof_pending_initial'
+                }).Count -gt 0 -or
+            @($operations | Where-Object {
+                    [string]$_.operationRole -ceq 'yield_current' -and
+                    [string]$_.afterState -ceq 'PeerProofObserved'
+                }).Count -gt 0) {
+            return 'peer_first_failed_yield_omitted_from_family4_catalog'
+        }
         return 'fresh_failed_yield_rebound_unrelated_last_consumed_reservation_and_install_receipt'
     }
     if ($null -ne $Operation -and
@@ -3175,11 +3453,13 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
     }
 
     $isPeerFirstCarry =
-        [string]$Entry.Boundary.decisionKind -ceq
-            'FallbackTailQuiescent' -and
+        [string]$Entry.Boundary.decisionKind -in @(
+            'FallbackTailQuiescent', 'FallbackTailFailed') -and
         [string]$Entry.Boundary.decisionStatus -ceq 'Accepted' -and
         [string]$operation.operationRole -ceq 'yield_current' -and
-        [string]$operation.operationKind -ceq 'Quiescent' -and
+        [string]$operation.operationKind -ceq
+            ([string]$Entry.Boundary.decisionKind).Substring(
+                'FallbackTail'.Length) -and
         [string]$operation.beforeState -ceq 'None' -and
         [string]$operation.afterState -ceq 'PeerProofObserved'
     if (-not $isPeerFirstCarry) {
@@ -3541,12 +3821,18 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
                         'FailedSupersession'
                     }
                     elseif (
-                        [string]$entry.Boundary.decisionKind -ceq
-                            'FallbackTailQuiescent' -and
+                        [string]$entry.Boundary.decisionKind -in @(
+                            'FallbackTailQuiescent', 'FallbackTailFailed') -and
                         [string]$operation.beforeState -ceq 'None' -and
                         [string]$operation.afterState -ceq
                             'PeerProofObserved') {
-                        'PeerFirstPending'
+                        if ([string]$entry.Boundary.decisionKind -ceq
+                                'FallbackTailFailed') {
+                            'PeerFirstFailedPending'
+                        }
+                        else {
+                            'PeerFirstPending'
+                        }
                     }
                     else {
                         'DirectCurrent'
@@ -3559,7 +3845,13 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
                         'failed_to_quiescent_carried_peer_proof_provenance_invalid'
                     }
                     else {
-                        'fallback_tail_quiescent_peer_proof_carry_invalid'
+                        if ([string]$entry.Boundary.decisionKind -ceq
+                                'FallbackTailFailed') {
+                            'peer_first_failed_yield_peer_proof_provenance_invalid'
+                        }
+                        else {
+                            'fallback_tail_quiescent_peer_proof_carry_invalid'
+                        }
                     }
                 }
             }
@@ -3617,7 +3909,8 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
             else {
                 $valid = $false
             }
-            if (-not $valid -and $originKind -ceq 'PeerFirstPending' -and
+            if (-not $valid -and $originKind -in @(
+                    'PeerFirstPending', 'PeerFirstFailedPending') -and
                 $role -ceq 'yield_current' -and
                 [string]$operation.beforeState -ceq 'PeerProofObserved' -and
                 [string]$operation.afterState -ceq 'Paired') {
@@ -8314,6 +8607,51 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 'snapshot_fallback_tail_recovery_owner_retirement_effect_missing|' +
                 'failed_to_quiescent_supersession_ambiguous_yield_receipts_suppressed_exact_successor_effect:' +
                 [string]$boundary.evidenceLineIndex)
+        }
+    }
+
+    foreach ($boundary in @($boundaries | Where-Object {
+                [string]$_.decisionKind -ceq 'FallbackTailFailed' -and
+                [string]$_.decisionStatus -in @('Idempotent', 'Rejected')
+            })) {
+        $attemptEffects = @($effects | Where-Object {
+                [string]$_.CoordinatorInstanceId -ceq
+                    [string]$boundary.coordinatorInstanceId -and
+                [string]$_.TransitionId -ceq [string]$boundary.boundaryId -and
+                [string]$_.Family -ceq 'fallback_tail_yield'
+            })
+        if ($attemptEffects.Count -gt 0) {
+            $errors.Add(
+                'snapshot_fallback_tail_failed_attempt_effect_invalid|' +
+                'fallback_tail_failed_state_neutral_attempt_emitted_authority_effect:' +
+                [string]$attemptEffects[0].LineIndex)
+        }
+    }
+
+    foreach ($boundary in @($boundaries | Where-Object {
+                [string]$_.decisionKind -ceq 'FallbackTailFailed' -and
+                [string]$_.decisionStatus -ceq 'Accepted' -and
+                @($_.operations | Where-Object {
+                        [string]$_.operationRole -ceq
+                            'peer_proof_pending_initial'
+                    }).Count -eq 1 -and
+                @($_.operations | Where-Object {
+                        [string]$_.operationRole -ceq 'yield_current' -and
+                        [string]$_.operationKind -ceq 'Failed' -and
+                        [string]$_.afterState -ceq 'PeerProofObserved'
+                    }).Count -eq 1
+            })) {
+        $newEffects = @($effects | Where-Object {
+                [string]$_.CoordinatorInstanceId -ceq
+                    [string]$boundary.coordinatorInstanceId -and
+                [string]$_.TransitionId -ceq [string]$boundary.boundaryId -and
+                [string]$_.Family -ceq 'fallback_tail_yield'
+            })
+        if ($newEffects.Count -gt 0) {
+            $errors.Add(
+                'snapshot_fallback_tail_failed_peer_first_effect_invalid|' +
+                'peer_first_failed_yield_emitted_copied_authority_effect:' +
+                [string]$newEffects[0].LineIndex)
         }
     }
 

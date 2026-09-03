@@ -980,9 +980,36 @@ internal static partial class FileTransferCoordinator
                 exactAuthority.ToString(),
                 StringComparison.Ordinal));
         }
-        var descriptor = descriptors
-            .OrderBy(descriptor => descriptor.OperationRole, StringComparer.Ordinal)
-            .FirstOrDefault();
+        CoordinatorOperationDescriptor? descriptor;
+        if (string.Equals(
+                decisionKind,
+                FileTransferCoordinatorEventKind.FallbackTailFailed.ToString(),
+                StringComparison.Ordinal))
+        {
+            var exactFailedYieldSubjects = descriptors
+                .Where(candidate =>
+                    string.Equals(
+                        candidate.OperationRole,
+                        "yield_current",
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        candidate.OperationKind,
+                        FallbackTailYieldKind.Failed.ToString(),
+                        StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            descriptor = exactFailedYieldSubjects.Length == 1
+                ? exactFailedYieldSubjects[0]
+                : null;
+        }
+        else
+        {
+            descriptor = descriptors
+                .OrderBy(
+                    candidate => candidate.OperationRole,
+                    StringComparer.Ordinal)
+                .FirstOrDefault();
+        }
         if (descriptor is null &&
             string.Equals(
                 decisionKind,
