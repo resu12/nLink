@@ -4456,6 +4456,13 @@ public sealed partial class SessionFileTransferService
             return 0;
         }
 
+        if (!TryGetOutboundFallbackFrontierPeerRepairLocked(context, out var fallbackContract, out var authorityRejectionReason) ||
+            fallbackContract is null)
+        {
+            reason = $"fallback_frontier_authority_rejected_{authorityRejectionReason}";
+            return 0;
+        }
+
         var clearedInFlightCount = 0;
         for (var offset = 0; offset < prepared.SegmentCount; offset++)
         {
@@ -4470,42 +4477,13 @@ public sealed partial class SessionFileTransferService
             clearedInFlightCount++;
         }
 
-        var repairRequestId =
-            $"post-fallback-timeout-frontier:{frontierChunkIndex}:{++context.V6PostTunaFallbackSenderSelfRepairSequence}";
-        var identity = CreateFallbackFrontierRepairIdentity(
-            [new FileTransferRangeV4 { StartChunkIndex = frontierChunkIndex, ChunkCount = 1 }],
-            context.ChunkCount,
-            Math.Max(-1, context.ChunksAcceptedForTransport - 1));
-        FallbackFrontierRepairContract? fallbackContract = null;
-        var authorityRejectionReason = "empty_normalized_repair_window";
-        if (identity is null ||
-            !TryGetOrCreateOutboundFallbackFrontierLocalContractLocked(
-                context,
-                identity,
-                FallbackFrontierRepairSourceKind.SenderTimeoutRetry,
-                repairRequestId,
-                "frontier",
-                "frontier_repair_only",
-                "post_tuna_fallback_send_timeout_frontier_repair",
-                out fallbackContract,
-                out _,
-                out authorityRejectionReason) ||
-            fallbackContract is null)
-        {
-            reason = $"fallback_frontier_authority_rejected_{authorityRejectionReason}";
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_fallback_frontier_repair_authority_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; transport_epoch={prepared.Metadata.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(authorityRejectionReason)}; source=post_tuna_fallback_send_timeout_frontier_repair");
-            return 0;
-        }
-
         var metadata = new V6OutboundChunkRequestMetadata(
             fallbackContract.Authority.CanonicalRepairKey,
             Priority: true,
             TransportEpoch: fallbackContract.Authority.TransportEpoch,
             RepairRequestId: fallbackContract.Authority.ProtocolRepairRequestId,
-            PriorityName: "frontier",
-            RecoveryMode: "frontier_repair_only",
+            PriorityName: fallbackContract.Authority.Priority,
+            RecoveryMode: fallbackContract.Authority.RecoveryMode,
             ForceRegularNknBulk: true,
             FallbackFrontierRepairContract: fallbackContract);
 
@@ -7177,45 +7155,16 @@ public sealed partial class SessionFileTransferService
         }
 
         var frontierChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount - 1));
-        var requestedChunkCount = Math.Min(
-            V6PostTunaFallbackSenderSelfRepairChunks,
-            Math.Max(1, context.ChunkCount - frontierChunkIndex));
-        if (requestedChunkCount <= 0)
-        {
-            return false;
-        }
-
-        var nextRepairSequence = context.V6PostTunaFallbackSenderSelfRepairSequence + 1;
-        var repairRequestId =
-            $"post-fallback-local-frontier:{frontierChunkIndex}:{nextRepairSequence}";
-        var identity = CreateFallbackFrontierRepairIdentity(
-            [new FileTransferRangeV4 { StartChunkIndex = frontierChunkIndex, ChunkCount = requestedChunkCount }],
-            context.ChunkCount,
-            Math.Max(-1, context.ChunksAcceptedForTransport - 1));
-        FallbackFrontierRepairContract? fallbackContract = null;
-        var reusedContract = false;
-        var authorityRejectionReason = "empty_normalized_repair_window";
-        if (identity is null ||
-            !TryGetOrCreateOutboundFallbackFrontierLocalContractLocked(
-                context,
-                identity,
-                FallbackFrontierRepairSourceKind.SenderLivenessRescue,
-                repairRequestId,
-                "frontier",
-                "regular_nkn_frontier_stall_control_bulk",
-                reason,
-                out fallbackContract,
-                out reusedContract,
-                out authorityRejectionReason) ||
+        if (!TryGetOutboundFallbackFrontierPeerRepairLocked(context, out var fallbackContract, out var authorityRejectionReason) ||
             fallbackContract is null)
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_fallback_frontier_repair_authority_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(authorityRejectionReason)}; source=post_tuna_fallback_sender_frontier_rescue");
+                $"event=filetransfer_fallback_frontier_repair_authority_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; repair_request_id=(none); decision_reason={FormatProtocolLogValue(authorityRejectionReason)}; source=post_tuna_fallback_sender_frontier_rescue");
             return false;
         }
 
-        context.V6PostTunaFallbackSenderSelfRepairSequence = nextRepairSequence;
+        context.V6PostTunaFallbackSenderSelfRepairSequence++;
         context.V6PostTunaFallbackSenderSelfRepairChunkIndex = frontierChunkIndex;
         context.V6PostTunaFallbackSenderSelfRepairUtc = now;
         var metadata = new V6OutboundChunkRequestMetadata(
@@ -7223,14 +7172,14 @@ public sealed partial class SessionFileTransferService
             Priority: true,
             TransportEpoch: fallbackContract.Authority.TransportEpoch,
             RepairRequestId: fallbackContract.Authority.ProtocolRepairRequestId,
-            PriorityName: "frontier",
-            RecoveryMode: "regular_nkn_frontier_stall_control_bulk",
+            PriorityName: fallbackContract.Authority.Priority,
+            RecoveryMode: fallbackContract.Authority.RecoveryMode,
             FallbackFrontierRepairContract: fallbackContract);
         var queuedChunkCount = 0;
         var inFlightSkippedChunkCount = 0;
         var alreadyQueuedChunkCount = 0;
-        var endExclusive = Math.Min(context.ChunkCount, frontierChunkIndex + requestedChunkCount);
-        for (var chunkIndex = frontierChunkIndex; chunkIndex < endExclusive; chunkIndex++)
+        foreach (var chunkIndex in fallbackContract.Identity.Ranges.SelectMany(
+                     range => Enumerable.Range(range.StartChunkIndex, range.ChunkCount)))
         {
             if (chunkIndex < context.RemoteNextExpectedChunkIndex ||
                 IsOutboundV6ChunkBlockedByTransportEpochLocked(context, chunkIndex, metadata))
@@ -7257,14 +7206,6 @@ public sealed partial class SessionFileTransferService
 
         if (queuedChunkCount <= 0)
         {
-            if (!reusedContract)
-            {
-                TrySettleFallbackFrontierRepairContract(
-                    fallbackContract,
-                    FallbackFrontierRepairSettlementOutcome.MissingDispatch,
-                    "post_tuna_fallback_sender_frontier_rescue_had_no_schedulable_chunks");
-            }
-
             return false;
         }
 
@@ -7671,7 +7612,11 @@ public sealed partial class SessionFileTransferService
             context.RouteSelection.TelemetryToken,
             context.NegotiatedDataProtocolVersion,
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            context.CurrentLiveRouteEpoch,
+            context.CurrentLiveRouteEpoch?.State,
+            context.CurrentLiveRouteEpoch?.RouteSelection,
+            context.CurrentLiveRouteEpoch?.RoutePublicationToken,
+            context.CurrentLiveRouteEpoch?.HandoffKind,
+            context.CurrentLiveRouteEpoch?.TargetTransport,
             publication.PublicationGeneration,
             publication.RouteCommitGeneration ?? 0,
             publication,
@@ -7679,7 +7624,12 @@ public sealed partial class SessionFileTransferService
             context.TerminalGeneration,
             runtimeOwner,
             leg.Generation,
-            leg,
+            leg.LegId,
+            leg.State,
+            leg.CanSendData,
+            leg.RouteSelection,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
             context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0,
@@ -7862,7 +7812,11 @@ public sealed partial class SessionFileTransferService
         if (context.RouteSelection.Route != wake.Route ||
             !string.Equals(context.RouteSelection.TelemetryToken, wake.RouteToken, StringComparison.Ordinal) ||
             context.NegotiatedDataProtocolVersion != wake.ProtocolVersion ||
-            !ReferenceEquals(context.CurrentLiveRouteEpoch, wake.RouteEpoch) ||
+            !string.Equals(context.CurrentLiveRouteEpoch?.State, wake.RouteEpochState, StringComparison.Ordinal) ||
+            context.CurrentLiveRouteEpoch?.RouteSelection != wake.RouteEpochSelection ||
+            context.CurrentLiveRouteEpoch?.RoutePublicationToken != wake.RouteEpochPublication ||
+            context.CurrentLiveRouteEpoch?.HandoffKind != wake.RouteEpochHandoffKind ||
+            context.CurrentLiveRouteEpoch?.TargetTransport != wake.RouteEpochTargetTransport ||
             (context.CurrentLiveRouteEpoch?.EpochId ?? 0) != wake.LiveRouteEpoch ||
             context.CurrentRoutePublicationToken != wake.RoutePublication ||
             context.CurrentRoutePublicationToken?.PublicationGeneration != wake.RoutePublicationGeneration ||
@@ -7870,7 +7824,12 @@ public sealed partial class SessionFileTransferService
             context.CurrentRuntimeOwner != wake.RuntimeOwner ||
             context.CurrentRuntimeOwner?.RuntimeGeneration != wake.RuntimeGeneration ||
             context.TerminalGeneration != wake.TerminalGeneration ||
-            !ReferenceEquals(context.CurrentTransferLeg, wake.TransferLeg) ||
+            !string.Equals(context.CurrentTransferLeg?.LegId, wake.LegId, StringComparison.Ordinal) ||
+            context.CurrentTransferLeg?.State != wake.LegState ||
+            context.CurrentTransferLeg?.CanSendData != wake.LegCanSendData ||
+            context.CurrentTransferLeg?.RouteSelection != wake.LegRouteSelection ||
+            context.CurrentTransferLeg?.ProtocolVersion != wake.LegProtocolVersion ||
+            context.CurrentTransferLeg?.LiveRouteEpochId != wake.LegLiveRouteEpoch ||
             context.CurrentTransferLeg?.Generation != wake.LegGeneration ||
             context.CurrentTransferLeg?.TransportEpochId != wake.TransportEpoch ||
             context.CurrentTransferLeg?.BridgeRecoveryGeneration != wake.BridgeRecoveryGeneration ||
@@ -7935,9 +7894,30 @@ public sealed partial class SessionFileTransferService
             current.FrontierChunkIndex == context.NextChunkIndex &&
             current.HighestReceivedChunkIndex == context.PullHighestReceivedChunkIndex &&
             current.CommittedProgressUtc == committedProgressUtc &&
+            current.Route == context.RouteSelection.Route &&
+            string.Equals(current.RouteToken, context.RouteSelection.TelemetryToken, StringComparison.Ordinal) &&
+            current.ProtocolVersion == context.NegotiatedDataProtocolVersion &&
+            current.LiveRouteEpoch == (context.CurrentLiveRouteEpoch?.EpochId ?? 0) &&
             current.RoutePublication == publication &&
             current.RuntimeOwner == runtimeOwner &&
-            ReferenceEquals(current.TransferLeg, leg) &&
+            string.Equals(current.RouteEpochState, context.CurrentLiveRouteEpoch?.State, StringComparison.Ordinal) &&
+            current.RouteEpochSelection == context.CurrentLiveRouteEpoch?.RouteSelection &&
+            current.RouteEpochPublication == context.CurrentLiveRouteEpoch?.RoutePublicationToken &&
+            current.RouteEpochHandoffKind == context.CurrentLiveRouteEpoch?.HandoffKind &&
+            current.RouteEpochTargetTransport == context.CurrentLiveRouteEpoch?.TargetTransport &&
+            string.Equals(current.LegId, leg.LegId, StringComparison.Ordinal) &&
+            current.LegGeneration == leg.Generation &&
+            current.LegState == leg.State &&
+            current.LegCanSendData == leg.CanSendData &&
+            current.LegRouteSelection == leg.RouteSelection &&
+            current.LegProtocolVersion == leg.ProtocolVersion &&
+            current.LegLiveRouteEpoch == leg.LiveRouteEpochId &&
+            current.TransportEpoch == leg.TransportEpochId &&
+            current.BridgeRecoveryGeneration == leg.BridgeRecoveryGeneration &&
+            current.BridgeDecisionGeneration == (context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0) &&
+            string.Equals(current.CheckpointRequestId, leg.CheckpointRequestId ?? "(none)", StringComparison.Ordinal) &&
+            current.CheckpointGeneration == leg.CheckpointGeneration &&
+            current.TerminalGeneration == context.TerminalGeneration &&
             ReferenceEquals(current.DataSession, dataSession) &&
             current.DataSessionGeneration == context.DataSessionGeneration)
         {
@@ -7961,7 +7941,11 @@ public sealed partial class SessionFileTransferService
             context.RouteSelection.TelemetryToken,
             context.NegotiatedDataProtocolVersion,
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            context.CurrentLiveRouteEpoch,
+            context.CurrentLiveRouteEpoch?.State,
+            context.CurrentLiveRouteEpoch?.RouteSelection,
+            context.CurrentLiveRouteEpoch?.RoutePublicationToken,
+            context.CurrentLiveRouteEpoch?.HandoffKind,
+            context.CurrentLiveRouteEpoch?.TargetTransport,
             publication.PublicationGeneration,
             publication.RouteCommitGeneration ?? 0,
             publication,
@@ -7969,7 +7953,12 @@ public sealed partial class SessionFileTransferService
             context.TerminalGeneration,
             runtimeOwner,
             leg.Generation,
-            leg,
+            leg.LegId,
+            leg.State,
+            leg.CanSendData,
+            leg.RouteSelection,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
             context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0,
@@ -8128,7 +8117,11 @@ public sealed partial class SessionFileTransferService
         if (context.RouteSelection.Route != wake.Route ||
             !string.Equals(context.RouteSelection.TelemetryToken, wake.RouteToken, StringComparison.Ordinal) ||
             context.NegotiatedDataProtocolVersion != wake.ProtocolVersion ||
-            !ReferenceEquals(context.CurrentLiveRouteEpoch, wake.RouteEpoch) ||
+            !string.Equals(context.CurrentLiveRouteEpoch?.State, wake.RouteEpochState, StringComparison.Ordinal) ||
+            context.CurrentLiveRouteEpoch?.RouteSelection != wake.RouteEpochSelection ||
+            context.CurrentLiveRouteEpoch?.RoutePublicationToken != wake.RouteEpochPublication ||
+            context.CurrentLiveRouteEpoch?.HandoffKind != wake.RouteEpochHandoffKind ||
+            context.CurrentLiveRouteEpoch?.TargetTransport != wake.RouteEpochTargetTransport ||
             (context.CurrentLiveRouteEpoch?.EpochId ?? 0) != wake.LiveRouteEpoch ||
             context.CurrentRoutePublicationToken != wake.RoutePublication ||
             context.CurrentRoutePublicationToken?.PublicationGeneration != wake.RoutePublicationGeneration ||
@@ -8136,7 +8129,13 @@ public sealed partial class SessionFileTransferService
             context.CurrentRuntimeOwner != wake.RuntimeOwner ||
             context.CurrentRuntimeOwner?.RuntimeGeneration != wake.RuntimeGeneration ||
             context.TerminalGeneration != wake.TerminalGeneration ||
+            !string.Equals(context.CurrentTransferLeg?.LegId, wake.LegId, StringComparison.Ordinal) ||
             context.CurrentTransferLeg?.Generation != wake.LegGeneration ||
+            context.CurrentTransferLeg?.State != wake.LegState ||
+            context.CurrentTransferLeg?.CanSendData != wake.LegCanSendData ||
+            context.CurrentTransferLeg?.RouteSelection != wake.LegRouteSelection ||
+            context.CurrentTransferLeg?.ProtocolVersion != wake.LegProtocolVersion ||
+            context.CurrentTransferLeg?.LiveRouteEpochId != wake.LegLiveRouteEpoch ||
             context.CurrentTransferLeg?.TransportEpochId != wake.TransportEpoch ||
             context.CurrentTransferLeg?.BridgeRecoveryGeneration != wake.BridgeRecoveryGeneration ||
             (context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0) != wake.BridgeDecisionGeneration ||

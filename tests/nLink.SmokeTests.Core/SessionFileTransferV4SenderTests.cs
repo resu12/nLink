@@ -9506,7 +9506,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
-    public void PostTunaFallbackV6PeerSilenceSafetyReplay_DoesNotMoveAcceptedTailWhileHandoffBlocks()
+    public void PostTunaFallbackV6PeerSilenceSafetyReplay_WithoutPeerRequestPreservesAcceptedTail()
     {
         const string transferId = "transfer_post_tuna_fallback_replay_tail_static";
         var logStart = GetOperationalLogLength();
@@ -9535,17 +9535,14 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetMethod("QueueOutboundV4TransportRebindSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "post_tuna_fallback_peer_silence", true]);
 
-        var replay = Assert.Single(GetQueuedV4RepairSends(context));
-        Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
-        Assert.Equal(128, GetIntProperty(replay, "LastEndChunkExclusive"));
-        Assert.Equal(28, GetIntProperty(replay, "RequestedChunkCount"));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
         Assert.Equal(128, GetPrivateProperty<int>(context, "ChunksAcceptedForTransport"));
         Assert.Equal(128L * 21 * 1024, GetPrivateProperty<long>(context, "BytesAcceptedForTransport"));
 
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_post_tuna_fallback_replay_accepted_tail_preserved;", logTail, StringComparison.Ordinal);
-        Assert.Contains("replay_end_chunk_exclusive=128", logTail, StringComparison.Ordinal);
-        Assert.Contains("chunks_accepted_for_transport=128", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", logTail, StringComparison.Ordinal);
     }
 
@@ -15675,7 +15672,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
-    public void PostTunaFallbackV6PeerSilenceReplay_WrapsToProvenFrontierAfterSweepTail()
+    public void PostTunaFallbackV6PeerSilenceReplay_WithoutPeerRequestDoesNotWrapOrRearmSweep()
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -15721,25 +15718,23 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
 
+        var lastReplayUtc = GetPrivatePropertyValue(context, "PullTransportLastSafetyReplayUtc");
+        var rearmCount = GetPrivateProperty<int>(context, "PullTransportSafetyReplayRearmCount");
         var logStart = ReadOperationalLogText().Length;
         serviceType
             .GetMethod("QueueOutboundV4TransportRebindSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "post_tuna_fallback_peer_silence", true]);
 
-        var queue = (System.Collections.IEnumerable)contextType
-            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
-            .GetValue(context)!;
-        var queuedRepair = queue.Cast<object>().Single();
-        var queuedRepairType = queuedRepair.GetType();
-        var chunkIndices = ((IEnumerable<int>)queuedRepairType.GetProperty("ChunkIndices")!.GetValue(queuedRepair)!).ToArray();
-
-        Assert.Equal(100, queuedRepairType.GetProperty("FirstStartChunkIndex")!.GetValue(queuedRepair));
-        Assert.Equal(164, queuedRepairType.GetProperty("LastEndChunkExclusive")!.GetValue(queuedRepair));
-        Assert.Equal(Enumerable.Range(100, 64), chunkIndices);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        Assert.Equal(100, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
+        Assert.Equal(256, GetPrivateProperty<int>(context, "ChunksAcceptedForTransport"));
+        Assert.Equal(256, GetPrivateProperty<int>(context, "PullTransportLastSafetyReplayEndChunkIndex"));
+        Assert.Equal(lastReplayUtc, GetPrivatePropertyValue(context, "PullTransportLastSafetyReplayUtc"));
+        Assert.Equal(rearmCount, GetPrivateProperty<int>(context, "PullTransportSafetyReplayRearmCount"));
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_transport_rebind_frontier_only_replay;", log, StringComparison.Ordinal);
-        Assert.Contains("post_tuna_v6_frontier_sweep=1", log, StringComparison.Ordinal);
-        Assert.Contains("post_tuna_v6_frontier_sweep_wrapped=1", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -16515,7 +16510,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task PostTunaFallbackV6StateRefreshFailure_RequestsReceiveRecoveryAndFrontierReplay()
+    public async Task PostTunaFallbackV6StateRefreshFailure_RequestsReceiveRecoveryWithoutUnadmittedReplay()
     {
         using var service = new SessionFileTransferService();
         using var senderTransport = new LoopbackFileTransferTransport("session_post_tuna_fallback_v6_state_refresh_recovery");
@@ -16554,6 +16549,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "ChunksAcceptedForTransport", 256);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 100);
+        var dataSession = new ThrowingDataSession(
+            "session_post_tuna_fallback_v6_state_refresh_recovery",
+            "transfer_post_tuna_fallback_v6_state_refresh_recovery");
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 1L);
         var leg = SeedCurrentRuntimeOwnerForTest(
             context,
             FileTransferDirection.Outbound,
@@ -16584,7 +16584,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request, "state_refresh_send_queued"]);
+            .Invoke(service, [context, dataSession, request, "state_refresh_send_queued"]);
 
         await WaitUntilAsync(
             () => senderTransport.ReceiveRecoveryRequests.Any(recoveryRequest =>
@@ -16593,27 +16593,17 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 string.Equals(recoveryRequest.Reason, "post_tuna_fallback_state_refresh_failed", StringComparison.Ordinal)),
             timeoutMs: 5000);
 
-        var queue = (System.Collections.IEnumerable)contextType
-            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
-            .GetValue(context)!;
-        var queuedRepair = queue.Cast<object>().Single();
-        var queuedRepairType = queuedRepair.GetType();
-        var chunkIndices = ((IEnumerable<int>)queuedRepairType.GetProperty("ChunkIndices")!.GetValue(queuedRepair)!).ToArray();
-
-        Assert.Equal(100, queuedRepairType.GetProperty("FirstStartChunkIndex")!.GetValue(queuedRepair));
-        Assert.Equal(164, queuedRepairType.GetProperty("LastEndChunkExclusive")!.GetValue(queuedRepair));
-        Assert.Equal(Enumerable.Range(100, 64), chunkIndices);
-        Assert.NotNull(queuedRepairType.GetProperty("FallbackFrontierRepairContract")!.GetValue(queuedRepair));
-        Assert.StartsWith(
-            "fallback-frontier:100:64:",
-            (string)queuedRepairType.GetProperty("RepairRequestKey")!.GetValue(queuedRepair)!,
-            StringComparison.Ordinal);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        Assert.Equal(256, GetPrivateProperty<int>(context, "ChunksAcceptedForTransport"));
+        Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_send_failed;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_checkpoint_preserved_after_send_failure;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", log, StringComparison.Ordinal);
-        Assert.Contains("post_tuna_v6_frontier_sweep=1", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_fallback_frontier_repair_authority_granted; authority_schema=2;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", log, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -5,7 +5,7 @@ using NLink.Core.FileTransfer;
 namespace NLink.SmokeTests;
 
 [Trait("Area", "Core")]
-public sealed class FileTransferCoordinatorTests
+public sealed partial class FileTransferCoordinatorTests
 {
     [Fact]
     public void StartTransfer_RegularV4CreatesActiveV4Leg()

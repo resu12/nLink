@@ -1367,7 +1367,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task PostTunaFallbackV6_SendTimeoutQueuesExactFrontierRepairAndFreezesNormalSendAhead()
+    public async Task PostTunaFallbackV6_SendTimeoutWithoutPeerRequestDoesNotInventFrontierRepair()
     {
         var previousSendTimeout = SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests;
         SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests = TimeSpan.FromMilliseconds(100);
@@ -1417,30 +1417,24 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 CancellationToken.None);
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued",
-                    StringComparison.Ordinal),
-                timeoutMs: 5000);
-
-            await WaitUntilAsync(
-                () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch =>
-                    batch.StartChunkIndex == 0 &&
-                    batch.ChunkCount == 1 &&
-                    string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase)),
+                () => ReadOperationalLogTail(logStart)
+                    .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Any(static line =>
+                        line.Contains("event=filetransfer_v6_post_tuna_fallback_send_timeout_requeued;", StringComparison.Ordinal) &&
+                        line.Contains("exact_frontier_reason=fallback_frontier_authority_rejected_fallback_frontier_peer_request_missing", StringComparison.Ordinal)),
                 timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_fallback_frontier_repair_authority_granted; authority_schema=2;", logTail, StringComparison.Ordinal);
-            Assert.Contains("source_kind=SenderTimeoutRetry", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_fallback_frontier_repair_dispatched; authority_schema=2;", logTail, StringComparison.Ordinal);
-            Assert.Contains("stage=native_v6_send", logTail, StringComparison.Ordinal);
-            Assert.True(
-                logTail.Contains("event=filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_started", StringComparison.Ordinal) ||
-                logTail.Contains("event=filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_already_active", StringComparison.Ordinal),
-                logTail);
-            Assert.Contains("exact_frontier_requeued_chunk_count=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_chunk_batch_send_timeout", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_fallback_frontier_sender_replay_admission_decided;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>(),
+                static batch => !string.IsNullOrWhiteSpace(batch.RepairRequestId));
             Assert.DoesNotContain("state=Failed", logTail, StringComparison.Ordinal);
+            Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
+            Assert.Empty(senderTransport.SentErrors);
         }
         finally
         {
@@ -3403,7 +3397,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task V6Sender_RequestStarvationAfterFallbackRegularNknRecoverySuppressesRepeatBridgeRecovery()
+    public async Task V6Sender_RequestStarvationAfterFallbackRecoveryWaitsForPeerRequestWithoutRepeatBridgeRecovery()
     {
         const string transferId = "transfer_v6_sender_starved_requests_receive_recovery";
         var previousFeedbackDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
@@ -3461,16 +3455,20 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 timeoutMs: 5000);
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_v6_post_tuna_fallback_sender_frontier_rescue_queued; authority_schema=2;",
-                    StringComparison.Ordinal),
+                () => ReadOperationalLogTail(logStart)
+                    .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Any(static line =>
+                        line.Contains("event=filetransfer_fallback_frontier_sender_replay_admission_decided;", StringComparison.Ordinal) &&
+                        line.Contains("decision_reason=fallback_frontier_peer_request_missing", StringComparison.Ordinal)),
                 timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_suppressed; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_sender_frontier_rescue_queued; authority_schema=2;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_fallback_frontier_repair_authority_granted; authority_schema=2;", logTail, StringComparison.Ordinal);
-            Assert.Contains("source_kind=SenderLivenessRescue", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_post_tuna_fallback_sender_frontier_rescue_queued;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>(),
+                static batch => !string.IsNullOrWhiteSpace(batch.RepairRequestId));
             Assert.Contains("route=post_tuna_fallback_v6", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_v6_sender_request_feedback_stalled_recovery_requested", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
@@ -3479,6 +3477,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 request => request.Direction == FileTransferDirection.Outbound &&
                            request.TransferId == transferId &&
                            request.Reason == "sender_request_feedback_stalled");
+            Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
+            Assert.Empty(senderTransport.SentErrors);
         }
         finally
         {

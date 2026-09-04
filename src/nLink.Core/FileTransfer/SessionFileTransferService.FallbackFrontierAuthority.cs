@@ -174,6 +174,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!IsOutboundFallbackFrontierPeerRequestBindingCurrent(context, contract))
+        {
+            rejectionReason = "fallback_frontier_peer_request_scope_changed";
+            return false;
+        }
+
         return FileTransferCoordinator.IsRepairReplayDecisionCurrent(
             CreateCoordinatorStateLocked(context),
             contract.RepairDecision,
@@ -274,6 +280,14 @@ public sealed partial class SessionFileTransferService
         }
 
         contract = CreateFallbackFrontierRepairContract(identity, decision, issuedAuthority);
+        if (sourceKind == FallbackFrontierRepairSourceKind.PeerRequest)
+        {
+            contract.PeerRequestBinding = new FallbackFrontierPeerRequestBinding(
+                issuedAuthority,
+                context.DataSession,
+                context.DataSessionGeneration,
+                context.CurrentTransferLeg?.CheckpointGeneration ?? 0);
+        }
         LogFallbackFrontierRepairAuthorityGranted(contract, "receive");
         return true;
     }
@@ -2329,112 +2343,84 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private bool TryGetOrCreateOutboundFallbackFrontierLocalContractLocked(
+    private bool TryGetOutboundFallbackFrontierPeerRepairLocked(
         OutboundTransferContext context,
-        FallbackFrontierRepairIdentity identity,
-        FallbackFrontierRepairSourceKind sourceKind,
-        string protocolRepairRequestId,
-        string priority,
-        string recoveryMode,
-        string decisionReason,
         out FallbackFrontierRepairContract? contract,
-        out bool reusedContract,
         out string rejectionReason)
     {
         contract = null;
-        reusedContract = false;
         rejectionReason = "stale_or_non_fallback_context";
         if (!ReferenceEquals(outboundTransfer, context) ||
             context.IsTerminal ||
-            !IsStrictFallbackFrontierRuntime(context))
+            !IsStrictFallbackFrontierRuntime(context) ||
+            context.UserPaused || context.PeerPaused || context.PullTransportPaused)
         {
             return false;
         }
 
         var currentContract = context.CurrentFallbackFrontierRepairContract;
-        if (currentContract is not null &&
-            !IsFallbackFrontierRepairContractCurrent(context, currentContract, out var currentRejectionReason))
+        if (currentContract?.PeerRequestBinding is null)
         {
-            if (!currentContract.Lifecycle.IsSettled)
-            {
-                TrySettleFallbackFrontierRepairContract(
-                    currentContract,
-                    FallbackFrontierRepairSettlementOutcome.StaleRejected,
-                    currentRejectionReason);
-            }
-
-            currentContract = null;
-            context.CurrentFallbackFrontierRepairContract = null;
+            rejectionReason = "fallback_frontier_peer_request_missing";
         }
-
-        if (currentContract is not null &&
-            !currentContract.Lifecycle.IsSettled &&
-            IsSameFallbackFrontierRepairIdentity(currentContract, identity))
+        else if (!TryValidateOutboundFallbackFrontierDispatchLocked(context, currentContract, out rejectionReason))
         {
-            var correlationId = CreateFallbackFrontierRequestCorrelationId(
-                currentContract.Authority.AuthorityId,
-                identity,
-                protocolRepairRequestId,
-                priority,
-                recoveryMode);
-            if (!TryAddFallbackFrontierRepairAlias(
-                    currentContract,
-                    protocolRepairRequestId,
-                    correlationId,
-                    identity.RangeFingerprint,
-                    out var exactDuplicate) &&
-                !exactDuplicate)
-            {
-                rejectionReason = "fallback_frontier_alias_limit_reached";
-                return false;
-            }
-
+            // A stale rescue observation must not settle or replace the current contract.
+        }
+        else if (currentContract.Authority.FrontierChunkIndex != context.RemoteNextExpectedChunkIndex)
+        {
+            rejectionReason = "fallback_frontier_peer_request_frontier_changed";
+        }
+        else if (currentContract.Aliases.Any(alias =>
+                     !string.Equals(alias.ProtocolRepairRequestId,
+                         currentContract.Authority.ProtocolRepairRequestId, StringComparison.Ordinal) ||
+                     !string.Equals(alias.RequestCorrelationId,
+                         currentContract.Authority.RequestCorrelationId, StringComparison.Ordinal) ||
+                     !string.Equals(alias.RangeFingerprint,
+                         currentContract.Authority.RangeFingerprint, StringComparison.Ordinal)))
+        {
+            // Same-window peer requests may replace the receiver's contract. The local
+            // alias set does not prove the original primary is still admitted there.
+            rejectionReason = "fallback_frontier_peer_request_alias_replaced";
+        }
+        else
+        {
             contract = currentContract;
-            reusedContract = true;
-            rejectionReason = exactDuplicate
-                ? "duplicate_local_repair_alias"
-                : "active_window_alias_coalesced";
-            return true;
+            rejectionReason = "exact_peer_request_retry";
         }
 
-        var predecessorContract = currentContract;
-        var predecessorAuthorityId =
-            predecessorContract?.Authority.AuthorityId;
-        if (!TryIssueFallbackFrontierRepairContractLocked(
-                context,
-                identity,
-                sourceKind,
-                protocolRepairRequestId,
-                null,
-                priority,
-                recoveryMode,
-                decisionReason,
-                predecessorAuthorityId,
-                out var issuedContract,
-                out rejectionReason) ||
-            issuedContract is null)
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_sender_replay_admission_decided; authority_effect=none; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; authority_id={currentContract?.Authority.AuthorityId.ToString() ?? "(none)"}; repair_request_id={FormatProtocolLogValue(currentContract?.Authority.ProtocolRepairRequestId ?? "(none)")}; decision_reason={rejectionReason}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; data_session_generation={context.DataSessionGeneration}");
+        return contract is not null;
+    }
+
+    private static bool IsOutboundFallbackFrontierPeerRequestBindingCurrent(
+        OutboundTransferContext context,
+        FallbackFrontierRepairContract contract)
+    {
+        if (contract.PeerRequestBinding is not { } binding ||
+            !ReferenceEquals(binding.DataSession, context.DataSession) ||
+            binding.DataSessionGeneration != context.DataSessionGeneration ||
+            binding.CheckpointGeneration != (context.CurrentTransferLeg?.CheckpointGeneration ?? 0) ||
+            !string.Equals(binding.Authority.CheckpointRequestId,
+                context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)", StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (predecessorContract is not null &&
-            !predecessorContract.Lifecycle.IsSettled)
+        // Only local retry authority changes. The admitted wire identity, ranges, and
+        // complete source scope must remain the original Coordinator-issued peer request.
+        var admittedAuthority = contract.Authority with
         {
-            TrySettleFallbackFrontierRepairContract(
-                predecessorContract,
-                FallbackFrontierRepairSettlementOutcome.Superseded,
-                decisionReason,
-                issuedContract.Authority.AuthorityId);
-        }
-
-        context.CurrentFallbackFrontierRepairContract = issuedContract;
-        CarryFallbackTailYieldRetryDispatchHoldToRepairSuccessorLocked(
-            context,
-            predecessorContract,
-            issuedContract);
-        contract = issuedContract;
-        rejectionReason = "accepted";
-        return true;
+            AuthorityId = binding.Authority.AuthorityId,
+            PredecessorAuthorityId = binding.Authority.PredecessorAuthorityId,
+            DecisionGeneration = binding.Authority.DecisionGeneration,
+            DecisionReason = binding.Authority.DecisionReason,
+            SourceKind = binding.Authority.SourceKind,
+        };
+        return binding.Authority.SourceKind == FallbackFrontierRepairSourceKind.PeerRequest &&
+               admittedAuthority == binding.Authority;
     }
 
     private static void LogFallbackFrontierRepairDispatched(
@@ -2488,32 +2474,19 @@ public sealed partial class SessionFileTransferService
         out FallbackFrontierRepairContract? successor)
     {
         successor = null;
-        var rejectionReason = "fallback_frontier_predecessor_replaced";
         if (!ReferenceEquals(context.CurrentFallbackFrontierRepairContract, predecessor) ||
-            predecessor.Lifecycle.IsSettled ||
-            !IsFallbackFrontierRepairContractCurrent(context, predecessor, out rejectionReason))
+            !TryGetOutboundFallbackFrontierPeerRepairLocked(context, out var currentPeerContract, out _) ||
+            !ReferenceEquals(currentPeerContract, predecessor))
         {
-            if (!predecessor.Lifecycle.IsSettled)
-            {
-                TrySettleFallbackFrontierRepairContract(
-                    predecessor,
-                    FallbackFrontierRepairSettlementOutcome.StaleRejected,
-                    rejectionReason);
-            }
-
             return false;
         }
 
-        var retryOrdinal = ++context.V6PostTunaFallbackSenderSelfRepairSequence;
-        var protocolRepairRequestId = string.Create(
-            CultureInfo.InvariantCulture,
-            $"fallback-frontier-retry:{predecessor.Authority.FrontierChunkIndex}:{retryOrdinal}");
         if (!TryIssueFallbackFrontierRepairContractLocked(
                 context,
                 predecessor.Identity,
                 sourceKind,
-                protocolRepairRequestId,
-                null,
+                predecessor.Authority.ProtocolRepairRequestId,
+                predecessor.Authority.RequestCorrelationId,
                 predecessor.Authority.Priority,
                 predecessor.Authority.RecoveryMode,
                 decisionReason,
@@ -2531,6 +2504,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        successor.PeerRequestBinding = predecessor.PeerRequestBinding;
         TrySettleFallbackFrontierRepairContract(
             predecessor,
             FallbackFrontierRepairSettlementOutcome.Superseded,

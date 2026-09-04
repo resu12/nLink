@@ -370,7 +370,6 @@ public sealed partial class SessionFileTransferService :
     private const int V6PostTunaFallbackFrontierRescueStep1Chunks = V4PostFallbackFrontierBackfillStep1Chunks;
     private const int V6PostTunaFallbackFrontierRescueStep2Chunks = V4PostFallbackFrontierBackfillStep2Chunks;
     private const int V6PostTunaFallbackFrontierRescueStep3Chunks = V4PostFallbackFrontierBackfillStep3Chunks;
-    private const int V6PostTunaFallbackSenderSelfRepairChunks = V4PostFallbackFrontierBackfillStep3Chunks;
     private const int V6PostTunaFallbackFrontierRescueRequestsBeforeWiden = 2;
     private const int V6PostTunaFallbackNormalSendAheadFreezeChunks = V4PostFallbackFrontierBackfillStep3Chunks;
     private const int V6EpochFrontierRequestChunks = 1;
@@ -24645,6 +24644,12 @@ public sealed partial class SessionFileTransferService :
         string RequestCorrelationId,
         string RangeFingerprint);
 
+    private sealed record FallbackFrontierPeerRequestBinding(
+        FallbackFrontierRepairAuthority Authority,
+        IFileTransferDataSession? DataSession,
+        long DataSessionGeneration,
+        int CheckpointGeneration);
+
     private sealed class FallbackFrontierRepairContract
     {
         public required FallbackFrontierRepairIdentity Identity { get; init; }
@@ -24656,6 +24661,8 @@ public sealed partial class SessionFileTransferService :
         public required FileTransferAuthorityLifecycle<FallbackFrontierRepairSettlementOutcome> Lifecycle { get; init; }
 
         public List<FallbackFrontierRepairAlias> Aliases { get; } = [];
+
+        public FallbackFrontierPeerRequestBinding? PeerRequestBinding { get; set; }
 
         public int AliasOverflowCount { get; set; }
     }
@@ -24848,7 +24855,11 @@ public sealed partial class SessionFileTransferService :
         string RouteToken,
         int ProtocolVersion,
         int LiveRouteEpoch,
-        LiveRouteEpoch? RouteEpoch,
+        string? RouteEpochState,
+        FileTransferRouteSelection? RouteEpochSelection,
+        RoutePublicationToken? RouteEpochPublication,
+        FileTransferTransportHandoffKind? RouteEpochHandoffKind,
+        FileTransferTransportKind? RouteEpochTargetTransport,
         int RoutePublicationGeneration,
         int RouteCommitGeneration,
         RoutePublicationToken RoutePublication,
@@ -24856,7 +24867,12 @@ public sealed partial class SessionFileTransferService :
         int TerminalGeneration,
         RuntimeOwnerToken RuntimeOwner,
         int LegGeneration,
-        FileTransferLeg TransferLeg,
+        string LegId,
+        FileTransferLegState LegState,
+        bool LegCanSendData,
+        FileTransferRouteSelection LegRouteSelection,
+        int LegProtocolVersion,
+        int LegLiveRouteEpoch,
         long TransportEpoch,
         int BridgeRecoveryGeneration,
         int BridgeDecisionGeneration,
@@ -24878,7 +24894,11 @@ public sealed partial class SessionFileTransferService :
         string RouteToken,
         int ProtocolVersion,
         int LiveRouteEpoch,
-        LiveRouteEpoch? RouteEpoch,
+        string? RouteEpochState,
+        FileTransferRouteSelection? RouteEpochSelection,
+        RoutePublicationToken? RouteEpochPublication,
+        FileTransferTransportHandoffKind? RouteEpochHandoffKind,
+        FileTransferTransportKind? RouteEpochTargetTransport,
         int RoutePublicationGeneration,
         int RouteCommitGeneration,
         RoutePublicationToken RoutePublication,
@@ -24886,7 +24906,12 @@ public sealed partial class SessionFileTransferService :
         int TerminalGeneration,
         RuntimeOwnerToken RuntimeOwner,
         int LegGeneration,
-        FileTransferLeg TransferLeg,
+        string LegId,
+        FileTransferLegState LegState,
+        bool LegCanSendData,
+        FileTransferRouteSelection LegRouteSelection,
+        int LegProtocolVersion,
+        int LegLiveRouteEpoch,
         long TransportEpoch,
         int BridgeRecoveryGeneration,
         int BridgeDecisionGeneration,

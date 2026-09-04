@@ -21364,6 +21364,12 @@ public sealed partial class SessionFileTransferService
 
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
         var now = DateTimeOffset.UtcNow;
+        FallbackFrontierRepairContract? peerRepair = null;
+        if (allowPostTunaFallbackV6Repair &&
+            !TryGetOutboundFallbackFrontierPeerRepairLocked(context, out peerRepair, out _))
+        {
+            return;
+        }
         var currentPostTunaFallbackLegSweep = allowPostTunaFallbackV6Repair &&
             IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
             context.PullTransportFrontierOnlyRepairActive &&
@@ -21372,7 +21378,7 @@ public sealed partial class SessionFileTransferService
              string.Equals(reason, "post_tuna_fallback_peer_silence", StringComparison.Ordinal) ||
              string.Equals(reason, "post_tuna_fallback_state_refresh_send_timeout", StringComparison.Ordinal) ||
              string.Equals(reason, "post_tuna_fallback_state_refresh_send_failed", StringComparison.Ordinal));
-        if (currentPostTunaFallbackLegSweep &&
+        if (allowPostTunaFallbackV6Repair &&
             ShouldSuppressPostTunaFallbackSafetyReplayForExactFrontierRepairLocked(
                 context,
                 remoteFrontier,
@@ -21418,6 +21424,12 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_rebind_safety_replay_rearmed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={recoveryGeneration}; remote_next_expected_chunk_index={remoteFrontier}; rearm_count={context.PullTransportSafetyReplayRearmCount}; last_replay_age_ms={(context.PullTransportLastSafetyReplayUtc is null ? -1 : Math.Max(0, (long)lastReplayAge.TotalMilliseconds))}");
+        }
+
+        if (peerRepair is not null)
+        {
+            QueueOutboundFallbackFrontierPeerRepairRetryLocked(context, peerRepair, recoveryGeneration, now);
+            return;
         }
 
         var replayStartChunkIndex = remoteFrontier;
@@ -21574,55 +21586,11 @@ public sealed partial class SessionFileTransferService
 
         var protocolRepairRequestId =
             $"transport_rebind_safety_replay:{recoveryGeneration}:{remoteFrontier}:{replayStartChunkIndex}:{replayChunkCount}";
-        FallbackFrontierRepairContract? fallbackFrontierContract = null;
-        var reusedFallbackFrontierContract = false;
-        if (allowPostTunaFallbackV6Repair)
-        {
-            var identity = CreateFallbackFrontierRepairIdentity(
-                [
-                    new FileTransferRangeV4
-                    {
-                        StartChunkIndex = replayStartChunkIndex,
-                        ChunkCount = replayChunkCount,
-                    },
-                ],
-                context.ChunkCount,
-                Math.Max(-1, context.ChunksAcceptedForTransport - 1));
-            var authorityRejectionReason = "empty_normalized_repair_window";
-            if (identity is null ||
-                !TryGetOrCreateOutboundFallbackFrontierLocalContractLocked(
-                    context,
-                    identity,
-                    FallbackFrontierRepairSourceKind.SenderLivenessRescue,
-                    protocolRepairRequestId,
-                    "frontier",
-                    "transport_rebind_safety_replay",
-                    reason,
-                    out fallbackFrontierContract,
-                    out reusedFallbackFrontierContract,
-                    out authorityRejectionReason) ||
-                fallbackFrontierContract is null)
-            {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_fallback_frontier_repair_authority_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id=(none); direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; decision_reason={FormatProtocolLogValue(authorityRejectionReason)}; source=transport_rebind_safety_replay");
-                return;
-            }
-        }
-
         chunkIndices = chunkIndices
             .Where(context.PullV4SenderPumpRepairQueuedChunkIndices.Add)
             .ToList();
         if (chunkIndices.Count == 0)
         {
-            if (fallbackFrontierContract is not null && !reusedFallbackFrontierContract)
-            {
-                TrySettleFallbackFrontierRepairContract(
-                    fallbackFrontierContract,
-                    FallbackFrontierRepairSettlementOutcome.MissingDispatch,
-                    "transport_rebind_safety_replay_had_no_schedulable_chunks");
-            }
-
             return;
         }
 
@@ -21630,7 +21598,7 @@ public sealed partial class SessionFileTransferService
         context.PullTransportLastSafetyReplayFrontierChunkIndex = remoteFrontier;
         context.PullTransportLastSafetyReplayEndChunkIndex = replayEndExclusive;
         context.PullTransportLastSafetyReplayUtc = now;
-        var repairKey = fallbackFrontierContract?.Authority.CanonicalRepairKey ?? protocolRepairRequestId;
+        var repairKey = protocolRepairRequestId;
         MarkOutboundV6EpochRepairRequestPendingLocked(
             context,
             recoveryGeneration,
@@ -21649,9 +21617,9 @@ public sealed partial class SessionFileTransferService
                 SkippedFutureCount: replayChunkCount - chunkIndices.Count,
                 SkippedOutOfBoundsCount: 0,
                 RepairRequestKey: repairKey,
-                ProtocolRepairRequestId: fallbackFrontierContract?.Authority.ProtocolRepairRequestId,
-                ProtocolPriority: fallbackFrontierContract?.Authority.Priority,
-                ProtocolRecoveryMode: fallbackFrontierContract?.Authority.RecoveryMode,
+                ProtocolRepairRequestId: null,
+                ProtocolPriority: null,
+                ProtocolRecoveryMode: null,
                 FrontierRepair: true,
                 FrontierTailRepair: true,
                 EmergencyCreditRepair: emergencyCreditRepair,
@@ -21662,8 +21630,7 @@ public sealed partial class SessionFileTransferService
                         ? "transport_rebind_frontier_only"
                         : "transport_rebind_safety_replay",
                 CreditExhaustedTimeMsAtDecision: -1,
-                RuntimeOwner: context.CurrentRuntimeOwner,
-                FallbackFrontierRepairContract: fallbackFrontierContract));
+                RuntimeOwner: context.CurrentRuntimeOwner));
 
         if (preserveAcceptedTailForPostTunaFallbackReplay)
         {
@@ -21684,6 +21651,49 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_transport_rebind_safety_replay_started; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={recoveryGeneration}; remote_next_expected_chunk_index={remoteFrontier}; replay_start_chunk_index={replayStartChunkIndex}; replay_end_chunk_exclusive={replayEndExclusive}; requested_chunk_count={replayChunkCount}; scheduled_chunk_count={chunkIndices.Count}; replay_byte_cap={PullTransportRebindSafetyReplayMaxBytes}; replay_chunk_cap={PullTransportRebindSafetyReplayMaxChunks}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; file_tuna_v4_frontier_sweep={(allowFileTunaV4PostTunaReplay && fallbackFrontierSweep ? 1 : 0)}; post_tuna_v6_frontier_sweep={(allowPostTunaFallbackV6Repair && fallbackFrontierSweep ? 1 : 0)}; post_tuna_v6_frontier_sweep_wrapped={(postTunaFallbackSweepWrappedToFrontier ? 1 : 0)}");
+    }
+
+    private static void QueueOutboundFallbackFrontierPeerRepairRetryLocked(
+        OutboundTransferContext context,
+        FallbackFrontierRepairContract contract,
+        int recoveryGeneration,
+        DateTimeOffset now)
+    {
+        var identity = contract.Identity;
+        var chunks = identity.Ranges
+            .SelectMany(range => Enumerable.Range(range.StartChunkIndex, range.ChunkCount))
+            .Where(chunk => !context.PullV4SenderPumpRepairQueuedChunkIndices.Contains(chunk))
+            .ToList();
+        if (chunks.Count == 0 ||
+            !TryMarkOutboundV4RepairQueuedLocked(
+                context, identity.CanonicalRepairKey, now,
+                ResolveV4SenderRepairRepeatIntervalMs(context, frontierRepair: true),
+                out var repairState, out _, out _))
+        {
+            return;
+        }
+
+        foreach (var chunk in chunks)
+        {
+            context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunk);
+        }
+        repairState.FallbackFrontierRepairContract = contract;
+        var lastEnd = identity.Ranges[^1].StartChunkIndex + identity.Ranges[^1].ChunkCount;
+        context.PullV4SenderPumpRepairQueue.Enqueue(new PullV4QueuedRepairSend(
+            chunks, identity.RangeCount, identity.RequestedChunkCount,
+            identity.FrontierChunkIndex, lastEnd, context.RemoteNextExpectedChunkIndex,
+            context.ChunksAcceptedForTransport, 0, 0, 0, identity.CanonicalRepairKey,
+            contract.Authority.ProtocolRepairRequestId, contract.Authority.Priority,
+            contract.Authority.RecoveryMode, FrontierRepair: true, FrontierTailRepair: true,
+            EmergencyCreditRepair: false, DeliveryMode: FileTransferV4RepairDeliveryMode.ControlBulkRedundant,
+            DeliveryEscalationReason: "exact_peer_request_retry", CreditExhaustedTimeMsAtDecision: -1,
+            RuntimeOwner: context.CurrentRuntimeOwner, FallbackFrontierRepairContract: contract));
+        context.PullTransportLastSafetyReplayGeneration = recoveryGeneration;
+        context.PullTransportLastSafetyReplayFrontierChunkIndex = context.RemoteNextExpectedChunkIndex;
+        context.PullTransportLastSafetyReplayEndChunkIndex = lastEnd;
+        context.PullTransportLastSafetyReplayUtc = now;
+        context.SparseSenderPumpLastWakeReason = "exact_peer_request_retry";
+        context.SignalSparseSenderPump();
     }
 
     private static bool ShouldSuppressPostTunaFallbackSafetyReplayForExactFrontierRepairLocked(
@@ -21716,7 +21726,7 @@ public sealed partial class SessionFileTransferService
         var currentContract = context.CurrentFallbackFrontierRepairContract;
         if (currentContract is not null &&
             !currentContract.Lifecycle.IsSettled &&
-            currentContract.Authority.SourceKind == FallbackFrontierRepairSourceKind.PeerRequest &&
+            currentContract.PeerRequestBinding is not null &&
             currentContract.Authority.FrontierChunkIndex == remoteFrontier &&
             currentContract.Authority.TargetTransport == FileTransferTransportKind.RegularNkn &&
             IsFallbackFrontierRepairContractCurrent(context, currentContract, out _))

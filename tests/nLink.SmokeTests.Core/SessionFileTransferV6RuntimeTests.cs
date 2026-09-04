@@ -2004,9 +2004,12 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Contains("settlement_outcome=SettledStalled", logTail, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
-    public async Task V6SparseReceiver_PostTunaFallbackStallGraceWake_ContinuousRejectedFramesCannotStarveExactReceiverRequest()
+    public async Task V6SparseReceiver_PostTunaFallbackStallGraceWake_ContinuousRejectedFramesCannotStarveExactReceiverRequest(
+        bool adoptValueEquivalentCoordinatorState)
     {
         const string transferId = "transfer_v6_post_fallback_stall_grace_wake";
         const string sessionId = "session_v6_post_fallback_stall_grace_wake";
@@ -2014,7 +2017,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var previousStallGrace = SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests;
         var previousProgressGrace = SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests;
         SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests =
-            TimeSpan.FromMilliseconds(250);
+            TimeSpan.FromMilliseconds(adoptValueEquivalentCoordinatorState ? 1000 : 250);
         SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests =
             TimeSpan.FromMilliseconds(50);
         var logStart = GetOperationalLogLength();
@@ -2039,6 +2042,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 payload.Length,
                 sha256,
                 (_, _) => Task.FromResult<Stream>(destination));
+
+            if (adoptValueEquivalentCoordinatorState)
+            {
+                StartInboundCoordinatorEpochForGraceWakeTest(receiver);
+            }
 
             await senderSession.SendAsync(
                 CreateManifest(
@@ -2096,6 +2104,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 "continuous_rejected_frames_test",
                 true));
             Assert.False(await deferredSend);
+
+            if (adoptValueEquivalentCoordinatorState)
+            {
+                AssertInboundGraceWakeSurvivesCoordinatorAdoption(receiver, recentProgress: false);
+            }
 
             var requestCountAfterProgress = receiverTransport.SentDataFrames
                 .OfType<FileTransferFrontierRequestFrameV6>()
@@ -2160,6 +2173,9 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             var successorRequest = receiverTransport.SentDataFrames
                 .OfType<FileTransferFrontierRequestFrameV6>()
                 .Last();
+            Assert.Equal(
+                requestCountAfterProgress + 1,
+                receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count());
             Assert.Equal(1, successorRequest.MissingRanges[0].StartChunkIndex);
             Assert.NotEqual(predecessorRequest.RepairRequestId, successorRequest.RepairRequestId);
             await Task.Delay(100);
@@ -2194,9 +2210,12 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
-    public async Task V6SparseReceiver_PostTunaFallbackRecentProgressGraceWake_BlockedReceiverStateCannotStarveStallRecheck()
+    public async Task V6SparseReceiver_PostTunaFallbackRecentProgressGraceWake_BlockedReceiverStateCannotStarveStallRecheck(
+        bool adoptValueEquivalentCoordinatorState)
     {
         const string transferId = "transfer_v6_post_fallback_recent_progress_wake";
         const string sessionId = "session_v6_post_fallback_recent_progress_wake";
@@ -2206,7 +2225,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests =
             TimeSpan.FromMilliseconds(200);
         SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests =
-            TimeSpan.FromMilliseconds(200);
+            TimeSpan.FromMilliseconds(adoptValueEquivalentCoordinatorState ? 1000 : 200);
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 64 * chunkSize).Select(static index => (byte)(index % 251)).ToArray();
         var sha256 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
@@ -2243,6 +2262,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 payload.Length,
                 sha256,
                 (_, _) => Task.FromResult<Stream>(destination));
+
+            if (adoptValueEquivalentCoordinatorState)
+            {
+                StartInboundCoordinatorEpochForGraceWakeTest(receiver);
+            }
 
             await senderSession.SendAsync(
                 CreateManifest(
@@ -2294,6 +2318,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             await receiverStateBlocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal(1, receiver.Snapshot.Inbound?.ChunksTransferred);
 
+            if (adoptValueEquivalentCoordinatorState)
+            {
+                AssertInboundGraceWakeSurvivesCoordinatorAdoption(receiver, recentProgress: true);
+            }
+
             await Task.Delay(300);
             Assert.Equal(
                 requestCountBeforeProgress,
@@ -2306,6 +2335,9 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             var successorRequest = receiverTransport.SentDataFrames
                 .OfType<FileTransferFrontierRequestFrameV6>()
                 .Last();
+            Assert.Equal(
+                requestCountBeforeProgress + 1,
+                receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count());
             Assert.Equal(1, successorRequest.MissingRanges[0].StartChunkIndex);
             Assert.NotEqual(predecessorRequest.RepairRequestId, successorRequest.RepairRequestId);
 
@@ -4600,6 +4632,188 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         }
 
         return count;
+    }
+
+    private static void StartInboundCoordinatorEpochForGraceWakeTest(SessionFileTransferService receiver)
+    {
+        lock (GetPrivateField(receiver, "gate")!)
+        {
+            var context = GetPrivateField(receiver, "inboundTransfer")!;
+            var contextType = context.GetType();
+            var createState = typeof(SessionFileTransferService)
+                .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(method => method.Name == "CreateCoordinatorStateLocked" &&
+                                  method.GetParameters()[0].ParameterType == contextType);
+            var state = Assert.IsType<FileTransferCoordinatorState>(createState.Invoke(null, [context]));
+            var epoch = FileTransferCoordinator.StartLiveRouteEpoch(
+                3,
+                state.RouteSelection,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.RegularNkn,
+                "grace_wake_epoch4_fixture");
+            SetPrivateProperty(context, "CurrentLiveRouteEpoch", epoch);
+            SetPrivateProperty(context, "LastLiveRouteEpochId", epoch.EpochId);
+            state = Assert.IsType<FileTransferCoordinatorState>(createState.Invoke(null, [context]));
+            var previousLeg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+            var decision = FileTransferCoordinator.Apply(
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.StartTransfer,
+                    state.RouteSelection,
+                    epoch.HandoffKind,
+                    epoch.TargetTransport,
+                    "grace_wake_epoch4_fixture",
+                    FileTransferLegState.Active,
+                    CanSendData: true,
+                    CommittedChunkIndex: 0,
+                    HighestObservedChunkIndex: -1,
+                    previousLeg.TransportEpochId,
+                    previousLeg.BridgeRecoveryGeneration),
+                state);
+            Assert.Null(decision.MutationRejectedReason);
+            var apply = typeof(SessionFileTransferService)
+                .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(method => method.Name == "ApplyCoordinatorDecisionToContextLocked" &&
+                                  method.GetParameters()[0].ParameterType == contextType &&
+                                  method.GetParameters().Length == 4);
+            apply.Invoke(null, [context, decision, false, true]);
+            var publish = typeof(SessionFileTransferService)
+                .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(method => method.Name == "TryAuthorizeRoutePublicationLocked" &&
+                                  method.GetParameters()[0].ParameterType == contextType);
+            object?[] publicationArguments =
+            [
+                context,
+                FileTransferCoordinatorActionKind.RoutePublication,
+                "grace_wake_epoch4_fixture",
+                "grace_wake_epoch4_fixture",
+                null,
+                null,
+                null,
+            ];
+            Assert.True(Assert.IsType<bool>(publish.Invoke(null, publicationArguments)), publicationArguments[6]?.ToString());
+            Assert.Equal(4, Assert.IsType<RoutePublicationToken>(publicationArguments[5]).LiveRouteEpoch);
+        }
+    }
+
+    private static void AssertInboundGraceWakeSurvivesCoordinatorAdoption(
+        SessionFileTransferService receiver,
+        bool recentProgress)
+    {
+        lock (GetPrivateField(receiver, "gate")!)
+        {
+            var context = GetPrivateField(receiver, "inboundTransfer")!;
+            var wakeName = recentProgress ? "FrontierRecentProgressGraceWake" : "FrontierStallGraceWake";
+            var wakeProperty = "CurrentV6" + wakeName;
+            var scheduledGenerationProperty = "V6" + wakeName + "ScheduledGeneration";
+            var wake = Property(context, wakeProperty);
+            Assert.NotNull(wake);
+            AssertCurrent(true);
+            var epoch = Assert.IsType<LiveRouteEpoch>(Property(context, "CurrentLiveRouteEpoch"));
+            var leg = Assert.IsType<FileTransferLeg>(Property(context, "CurrentTransferLeg"));
+            var owner = Assert.IsType<RuntimeOwnerToken>(Property(context, "CurrentRuntimeOwner"));
+            var publication = Assert.IsType<RoutePublicationToken>(Property(context, "CurrentRoutePublicationToken"));
+            var frame = new FileTransferReceiverStateFrameV6
+            {
+                SessionId = owner.SessionId,
+                TransferId = owner.TransferId,
+                TransportEpoch = leg.TransportEpochId,
+            };
+            var request = Assert.IsType<FileTransferControlPlaneDeliveryRequest>(InvokePrivateMethod(
+                receiver,
+                "CreateInboundControlPlaneDeliveryRequestLocked",
+                context,
+                FileTransferControlPlaneKind.ReceiverState,
+                frame,
+                "grace_wake_coordinator_adoption_test"));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                receiver,
+                "TryAuthorizeInboundFallbackControlPlaneSendLocked",
+                context,
+                request,
+                null)));
+            Assert.NotSame(epoch, Property(context, "CurrentLiveRouteEpoch"));
+            Assert.NotSame(leg, Property(context, "CurrentTransferLeg"));
+            Assert.Equal(owner, Property(context, "CurrentRuntimeOwner"));
+            Assert.Equal(publication, Property(context, "CurrentRoutePublicationToken"));
+            Assert.Same(wake, Property(context, wakeProperty));
+            AssertCurrent(true);
+
+            if (recentProgress)
+            {
+                typeof(SessionFileTransferService).GetMethod(
+                    "ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked",
+                    BindingFlags.Static | BindingFlags.NonPublic)!
+                    .Invoke(null, [context, DateTimeOffset.UtcNow]);
+                Assert.Same(wake, Property(context, wakeProperty));
+                AssertCurrent(true);
+            }
+
+            // Value-equivalent adoption is harmless; real authority changes remain stale.
+            epoch = Assert.IsType<LiveRouteEpoch>(Property(context, "CurrentLiveRouteEpoch"));
+            leg = Assert.IsType<FileTransferLeg>(Property(context, "CurrentTransferLeg"));
+            RejectChange(epoch, "EpochId", epoch.EpochId + 1);
+            RejectChange(epoch, "State", "invalidated");
+            RejectChange(epoch, "RouteSelection", epoch.RouteSelection with { ProtocolVersion = FileTransferProtocol.ProtocolVersionV4 });
+            RejectChange(epoch, "RoutePublicationToken", publication with { PublicationGeneration = publication.PublicationGeneration + 1 });
+            RejectChange(epoch, "HandoffKind", FileTransferTransportHandoffKind.TunaRestart);
+            RejectChange(epoch, "TargetTransport", FileTransferTransportKind.Tuna);
+            RejectChange(leg, "LegId", leg.LegId + "-replacement");
+            RejectChange(leg, "Generation", leg.Generation + 1);
+            RejectChange(leg, "State", FileTransferLegState.Frozen);
+            RejectChange(leg, "CanSendData", !leg.CanSendData);
+            RejectChange(leg, "RouteSelection", leg.RouteSelection with { ProtocolVersion = FileTransferProtocol.ProtocolVersionV4 });
+            RejectChange(leg, "ProtocolVersion", FileTransferProtocol.ProtocolVersionV4);
+            RejectChange(leg, "LiveRouteEpochId", leg.LiveRouteEpochId + 1);
+            RejectChange(leg, "TransportEpochId", leg.TransportEpochId + 1);
+            RejectChange(leg, "BridgeRecoveryGeneration", leg.BridgeRecoveryGeneration + 1);
+            RejectChange(leg, "CheckpointRequestId", "replacement-checkpoint");
+            RejectChange(leg, "CheckpointGeneration", leg.CheckpointGeneration + 1);
+            RejectChange(context, "CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 1 });
+            RejectChange(context, "CurrentRoutePublicationToken", publication with { PublicationGeneration = publication.PublicationGeneration + 1 });
+            // Returning to A's route values with newer generations must not revive A's wake.
+            RejectChange(context, "CurrentRuntimeOwner", owner with { RuntimeGeneration = owner.RuntimeGeneration + 2 });
+            RejectChange(context, "CurrentRoutePublicationToken", publication with { PublicationGeneration = publication.PublicationGeneration + 2 });
+            RejectChange(context, "TerminalGeneration", Assert.IsType<int>(Property(context, "TerminalGeneration")) + 1);
+            RejectChange(context, "DataSessionGeneration", Assert.IsType<long>(Property(context, "DataSessionGeneration")) + 1);
+            RejectChange(context, "DataSession", null);
+            RejectChange(context, "State", FileTransferTransferState.Completed);
+            RejectChange(context, "UserPaused", true);
+            RejectChange(context, "PeerPaused", true);
+            RejectChange(context, scheduledGenerationProperty, Assert.IsType<long>(Property(context, scheduledGenerationProperty)) + 1);
+            RejectChange(context, wakeProperty, null);
+            AssertCurrent(true);
+
+            void RejectChange(object target, string name, object? value)
+            {
+                var previous = Property(target, name);
+                try
+                {
+                    SetPrivateProperty(target, name, value);
+                    AssertCurrent(false);
+                }
+                finally
+                {
+                    SetPrivateProperty(target, name, previous);
+                }
+            }
+
+            void AssertCurrent(bool expected)
+            {
+                object?[] arguments = [context, wake, null];
+                var method = typeof(SessionFileTransferService).GetMethod(
+                    "IsInboundV6" + wakeName + "CurrentLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                Assert.Equal(expected, Assert.IsType<bool>(method.Invoke(receiver, arguments)));
+                if (expected)
+                {
+                    Assert.Equal("current", arguments[2]);
+                }
+            }
+        }
+
+        static object? Property(object target, string name)
+            => target.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+                .GetValue(target);
     }
 
     private static long GetCurrentFallbackTransportEpoch(SessionFileTransferService service)

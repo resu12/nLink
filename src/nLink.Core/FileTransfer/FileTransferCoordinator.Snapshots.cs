@@ -4034,7 +4034,8 @@ internal static partial class FileTransferCoordinator
                     null,
                     "Pending"));
             }
-            if (fallback.LastRetryDispatchRecheckReceipt is { } recheckReceipt)
+            if (fallback.LastRetryDispatchRecheckReceipt is { IsDefault: false } recheckReceipt &&
+                FallbackTailRetryRecheckSnapshotBelongsToOperation(retryOperation, recheckReceipt.Command))
             {
                 builder.Add(CreateFallbackTailYieldChildDescriptor(
                     state,
@@ -4452,6 +4453,13 @@ internal static partial class FileTransferCoordinator
             FallbackTailConsumptionSnapshotMatchesReservation(owned, fallback.LastConsumingInstallReceipt)
                 ? fallback.LastConsumingInstallReceipt
                 : null;
+        var recheckGeneration = fallback.PendingRetryDispatchRecheckCommand is { } pendingRecheck &&
+                FallbackTailRetryRecheckSnapshotBelongsToOperation(operation, pendingRecheck)
+            ? pendingRecheck.RecheckGeneration
+            : fallback.LastRetryDispatchRecheckReceipt is { IsDefault: false } terminalRecheck &&
+                FallbackTailRetryRecheckSnapshotBelongsToOperation(operation, terminalRecheck.Command)
+                ? terminalRecheck.Command.RecheckGeneration
+                : 0;
         return new(
             role,
             source,
@@ -4481,11 +4489,27 @@ internal static partial class FileTransferCoordinator
             reservation?.RetryAuthority.AuthorityId.ToString() ?? "(none)",
             consumingInstall?.InstallGeneration ?? 0,
             fallback.CurrentRetryDispatchHold?.HoldGeneration ?? 0,
-            fallback.PendingRetryDispatchRecheckCommand?.RecheckGeneration ??
-                fallback.LastRetryDispatchRecheckReceipt?.Command
-                    .RecheckGeneration ?? 0,
+            recheckGeneration,
             operation.InvalidationReason ?? "(none)",
             receipts);
+    }
+
+    private static bool FallbackTailRetryRecheckSnapshotBelongsToOperation(
+        FileTransferFallbackTailYieldOperation operation,
+        FileTransferFallbackTailYieldRetryDispatchRecheckCommand command)
+    {
+        var hold = command.Hold;
+        // A retained receipt belongs to its original release, not whichever yield is
+        // current now. Do not require live hold/currentness for immutable history.
+        return !command.IsDefault &&
+            operation.PairedRelease == hold.Release &&
+            hold.Release.LocalProof.Decision == operation.Decision &&
+            hold.Release.LocalProof.Scope == operation.Scope &&
+            operation.LocalProof == hold.Release.LocalProof &&
+            operation.PeerProof == hold.Release.PeerProof &&
+            string.Equals(hold.DataSessionIdentity, operation.Scope.DataSessionIdentity,
+                StringComparison.Ordinal) &&
+            hold.DataSessionGeneration == operation.Scope.DataSessionGeneration;
     }
 
     private static bool FallbackTailReservationSnapshotBelongsToOperation(
