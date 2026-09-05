@@ -29607,7 +29607,7 @@ internal static partial class FileTransferCoordinator
                receipt.StageExpiresUtcMs == 0
            );
 
-    private static bool IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(
+    internal static bool IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(
         FileTransferRouteTransitionOperation terminal)
     {
         if (terminal.State != FileTransferRouteTransitionState.Committed ||

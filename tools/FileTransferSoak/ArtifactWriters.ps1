@@ -16978,6 +16978,10 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationDistinctCount)) | Out-Null
     $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRecoveredCount)) | Out-Null
     $lines.Add(("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount)) | Out-Null
+    $lines.Add(("fallback_tail_local_yield_missing_raw_count={0}" -f $RecoveryClassification.FallbackTailLocalYieldMissingRawCount)) | Out-Null
+    $lines.Add(("fallback_tail_local_yield_missing_distinct_count={0}" -f $RecoveryClassification.FallbackTailLocalYieldMissingDistinctCount)) | Out-Null
+    $lines.Add(("fallback_tail_local_yield_missing_recovered_count={0}" -f $RecoveryClassification.FallbackTailLocalYieldMissingRecoveredCount)) | Out-Null
+    $lines.Add(("fallback_tail_local_yield_missing_unresolved_count={0}" -f $RecoveryClassification.FallbackTailLocalYieldMissingUnresolvedCount)) | Out-Null
     $lines.Add(("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount)) | Out-Null
@@ -19344,6 +19348,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationDistinctCount),
         ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationRecoveredCount),
         ("classification_post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $recoveryClassification.FallbackTailTransportEpochReauthorizationUnresolvedCount),
+        ("classification_fallback_tail_local_yield_missing_raw_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRawCount),
+        ("classification_fallback_tail_local_yield_missing_distinct_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingDistinctCount),
+        ("classification_fallback_tail_local_yield_missing_recovered_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRecoveredCount),
+        ("classification_fallback_tail_local_yield_missing_unresolved_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingUnresolvedCount),
         ("classification_fallback_tail_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailLocalYieldBlockedCount),
         ("classification_fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailProofReplayLocalYieldBlockedCount),
         ("classification_fallback_tail_stale_yield_proof_ignored_count={0}" -f $recoveryClassification.FallbackTailStaleYieldProofIgnoredCount),
@@ -19462,6 +19470,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationDistinctCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRecoveredCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount),
+        ("fallback_tail_local_yield_missing_raw_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRawCount),
+        ("fallback_tail_local_yield_missing_distinct_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingDistinctCount),
+        ("fallback_tail_local_yield_missing_recovered_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRecoveredCount),
+        ("fallback_tail_local_yield_missing_unresolved_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingUnresolvedCount),
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
         ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
@@ -66170,6 +66182,52 @@ function Get-FileTransferRecoveryFailureClassification {
         & $StageObserver -Name 'full_classifier_authority_and_effect_proofs' -Status Started -InputCount $allEvents.Count
     }
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
+    $fallbackTailLocalYieldMissingReducer = Get-Command `
+        -Name 'Get-FileTransferFallbackTailLocalYieldMissingCorrelation' `
+        -CommandType Function `
+        -ErrorAction SilentlyContinue
+    $fallbackTailLocalYieldMissingProof = if ($null -ne $fallbackTailLocalYieldMissingReducer) {
+        Get-FileTransferFallbackTailLocalYieldMissingCorrelation `
+            -Events $allEvents `
+            -SnapshotEvaluation $coordinatorSnapshotEvaluation
+    }
+    else {
+        [pscustomobject]@{
+            RawCount = 0
+            DistinctCount = 0
+            RecoveredCount = 0
+            UnresolvedCount = 0
+            Verdict = 'pass'
+            UnresolvedCandidateRecords = @()
+        }
+    }
+    $fallbackTailLocalYieldMissingRawCount = [int]$fallbackTailLocalYieldMissingProof.RawCount
+    $fallbackTailLocalYieldMissingDistinctCount = [int]$fallbackTailLocalYieldMissingProof.DistinctCount
+    $fallbackTailLocalYieldMissingRecoveredCount = [int]$fallbackTailLocalYieldMissingProof.RecoveredCount
+    $fallbackTailLocalYieldMissingUnresolvedCount = [int]$fallbackTailLocalYieldMissingProof.UnresolvedCount
+    [object[]]$fallbackTailLocalYieldMissingUnresolvedCandidateRecords =
+        @($fallbackTailLocalYieldMissingProof.UnresolvedCandidateRecords)
+    $fallbackTailProof | Add-Member `
+        -NotePropertyName LocalYieldMissingRawCount `
+        -NotePropertyValue $fallbackTailLocalYieldMissingRawCount `
+        -Force
+    $fallbackTailProof | Add-Member `
+        -NotePropertyName LocalYieldMissingDistinctCount `
+        -NotePropertyValue $fallbackTailLocalYieldMissingDistinctCount `
+        -Force
+    $fallbackTailProof | Add-Member `
+        -NotePropertyName LocalYieldMissingRecoveredCount `
+        -NotePropertyValue $fallbackTailLocalYieldMissingRecoveredCount `
+        -Force
+    $fallbackTailProof | Add-Member `
+        -NotePropertyName LocalYieldMissingUnresolvedCount `
+        -NotePropertyValue $fallbackTailLocalYieldMissingUnresolvedCount `
+        -Force
+    $fallbackTailProof | Add-Member `
+        -NotePropertyName LocalYieldMissingUnresolvedCandidateRecords `
+        -NotePropertyValue $fallbackTailLocalYieldMissingUnresolvedCandidateRecords `
+        -Force
+
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
@@ -69826,6 +69884,15 @@ function Get-FileTransferRecoveryFailureClassification {
             -UseDefaultReason
     }
 
+    foreach ($candidateRecord in @($fallbackTailLocalYieldMissingUnresolvedCandidateRecords)) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class ([string]$candidateRecord.Class) `
+            -Events @($candidateRecord.Event) `
+            -DefaultReason ([string]$candidateRecord.Reason) `
+            -Variant ([string]$candidateRecord.Variant) `
+            -UseDefaultReason
+    }
     # Fallback symptoms are proof-chain candidates only after the retained slice
     # contains an actual fallback route or fallback-owner tuple. This prevents a
     # route-less downstream diagnostic from manufacturing fallback authority.
@@ -69855,10 +69922,13 @@ function Get-FileTransferRecoveryFailureClassification {
         elseif ($fallbackTailProof.ProofReplayLocalYieldBlockedCount -gt 0 -and $fallbackTailProof.PairedYieldVerdict -eq 'fail') {
             'post_fallback_frontier_replay_unsettled'
         }
-        elseif ($fallbackTailProof.LocalYieldBlockedCount -gt 0 -and $fallbackTailProof.PairedYieldVerdict -eq 'fail') {
+        elseif ($fallbackTailProof.LocalYieldMissingUnresolvedCount -eq 0 -and
+            $fallbackTailProof.LocalYieldBlockedCount -gt 0 -and
+            $fallbackTailProof.PairedYieldVerdict -eq 'fail') {
             'fallback_tail_local_yield_missing'
         }
-        elseif ($fallbackTailProof.QuiescenceVerdict -eq 'fail' -and
+        elseif ($fallbackTailProof.LocalYieldMissingUnresolvedCount -eq 0 -and
+            $fallbackTailProof.QuiescenceVerdict -eq 'fail' -and
             $fallbackTailProof.BridgeRecoveryGenerationMismatchUnresolvedCount -eq 0) {
             'fallback_tail_quiescence_missing'
         }
@@ -70305,7 +70375,8 @@ function Get-FileTransferRecoveryFailureClassification {
         $hasPostTunaFallbackEvidence) {
         $class = 'post_fallback_frontier_replay_unsettled'
     }
-    elseif ($fallbackTailProof.LocalYieldBlockedCount -gt 0 -and
+    elseif ($fallbackTailProof.LocalYieldMissingUnresolvedCount -eq 0 -and
+        $fallbackTailProof.LocalYieldBlockedCount -gt 0 -and
         $fallbackTailProof.PairedYieldVerdict -eq 'fail' -and
         $hasPostTunaFallbackEvidence) {
         $class = 'fallback_tail_local_yield_missing'
@@ -70320,7 +70391,8 @@ function Get-FileTransferRecoveryFailureClassification {
         $hasPostTunaFallbackEvidence) {
         $class = 'paired_fallback_tail_yield_missing'
     }
-    elseif ($fallbackTailProof.QuiescenceVerdict -eq 'fail' -and
+    elseif ($fallbackTailProof.LocalYieldMissingUnresolvedCount -eq 0 -and
+        $fallbackTailProof.QuiescenceVerdict -eq 'fail' -and
         $hasPostTunaFallbackEvidence) {
         $class = 'fallback_tail_quiescence_missing'
     }
@@ -70615,6 +70687,12 @@ function Get-FileTransferRecoveryFailureClassification {
             'runtime_unlock_transaction_path_probe_failed') {
         $failureVariant =
             'dispatch_observed_probe_close_left_consumed_pair_and_draining_transition_current'
+    }
+    elseif ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq 'fallback_tail_local_yield_missing' -and
+        $null -ne $firstProofChainFailure.PSObject.Properties['Variant'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$firstProofChainFailure.Variant)) {
+        $failureVariant = [string]$firstProofChainFailure.Variant
     }
     elseif ($null -ne $firstProofChainFailure -and
         [string]$firstProofChainFailure.Class -eq
@@ -71598,6 +71676,10 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackTailTransportEpochReauthorizationDistinctCount = $fallbackTailProof.TransportEpochReauthorizationDistinctCount
         FallbackTailTransportEpochReauthorizationRecoveredCount = $fallbackTailProof.TransportEpochReauthorizationRecoveredCount
         FallbackTailTransportEpochReauthorizationUnresolvedCount = $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount
+        FallbackTailLocalYieldMissingRawCount = $fallbackTailProof.LocalYieldMissingRawCount
+        FallbackTailLocalYieldMissingDistinctCount = $fallbackTailProof.LocalYieldMissingDistinctCount
+        FallbackTailLocalYieldMissingRecoveredCount = $fallbackTailProof.LocalYieldMissingRecoveredCount
+        FallbackTailLocalYieldMissingUnresolvedCount = $fallbackTailProof.LocalYieldMissingUnresolvedCount
         FallbackTailLocalYieldBlockedCount = $fallbackTailProof.LocalYieldBlockedCount
         FallbackTailProofReplayLocalYieldBlockedCount = $fallbackTailProof.ProofReplayLocalYieldBlockedCount
         FallbackTailStaleYieldProofIgnoredCount = $fallbackTailProof.StaleYieldProofIgnoredCount
@@ -72327,6 +72409,10 @@ function New-FileTransferInvariantLedgerObject {
         post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationDistinctCount
         post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationRecoveredCount
         post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count = [string]$recoveryClassification.FallbackTailTransportEpochReauthorizationUnresolvedCount
+        fallback_tail_local_yield_missing_raw_count = [string]$recoveryClassification.FallbackTailLocalYieldMissingRawCount
+        fallback_tail_local_yield_missing_distinct_count = [string]$recoveryClassification.FallbackTailLocalYieldMissingDistinctCount
+        fallback_tail_local_yield_missing_recovered_count = [string]$recoveryClassification.FallbackTailLocalYieldMissingRecoveredCount
+        fallback_tail_local_yield_missing_unresolved_count = [string]$recoveryClassification.FallbackTailLocalYieldMissingUnresolvedCount
         runtime_unlock_probe_recovery_trigger_count = [string]$recoveryClassification.RuntimeUnlockProbeRecoveryTriggerCount
         runtime_unlock_probe_recovery_authority_lost_raw_count = [string]$recoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRawCount
         runtime_unlock_probe_recovery_authority_lost_distinct_count = [string]$recoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount
@@ -73613,6 +73699,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
         ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
         ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
+        ("classification_fallback_tail_local_yield_missing_raw_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRawCount),
+        ("classification_fallback_tail_local_yield_missing_distinct_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingDistinctCount),
+        ("classification_fallback_tail_local_yield_missing_recovered_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRecoveredCount),
+        ("classification_fallback_tail_local_yield_missing_unresolved_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingUnresolvedCount),
         ("classification_fallback_tail_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailLocalYieldBlockedCount),
         ("classification_fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailProofReplayLocalYieldBlockedCount),
         ("classification_fallback_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityGrantedCount),
@@ -73738,6 +73828,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_distinct_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationDistinctCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_recovered_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationRecoveredCount),
         ("post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing_unresolved_count={0}" -f $fallbackTailProof.TransportEpochReauthorizationUnresolvedCount),
+        ("fallback_tail_local_yield_missing_raw_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRawCount),
+        ("fallback_tail_local_yield_missing_distinct_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingDistinctCount),
+        ("fallback_tail_local_yield_missing_recovered_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingRecoveredCount),
+        ("fallback_tail_local_yield_missing_unresolved_count={0}" -f $recoveryClassification.FallbackTailLocalYieldMissingUnresolvedCount),
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
         ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
@@ -73836,7 +73930,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         & $StageObserver -Name 'full_writer_operator_and_snapshot_artifacts' -Status Started -InputCount $writerAllEventCount
     }
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
-    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-coordinator-snapshot-summary.txt' -Lines @(
         ("mode={0}" -f $snapshotEvaluation.Mode),
         ("contract_version={0}" -f $snapshotEvaluation.ContractVersion),

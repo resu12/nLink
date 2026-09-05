@@ -10,6 +10,1512 @@ $fileTransferSoakRoot = Join-Path $fileTransferOpsRoot 'FileTransferSoak'
 . (Join-Path $fileTransferSoakRoot 'FrontierGraceCorrelationIndex.ps1')
 . (Join-Path $fileTransferSoakRoot 'BaselineComparison.ps1')
 
+function Get-FileTransferFallbackTailLocalYieldScopeKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    [string[]]$fields = @(
+        'log_writer_id',
+        'session_id',
+        'transfer_id',
+        'direction',
+        'route',
+        'protocol_version',
+        'live_route_epoch',
+        'leg_generation',
+        'transport_epoch',
+        'bridge_recovery_generation',
+        'checkpoint_request_id')
+    [string[]]$values = @(
+        foreach ($field in $fields) {
+            Get-FileTransferEventField -Event $Event -Name $field -Default ''
+        })
+    return $values -join ([char]0x1f)
+}
+
+function Get-FileTransferFallbackTailLocalYieldTransferKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    [string[]]$values = @(
+        foreach ($field in @(
+                'log_writer_id',
+                'session_id',
+                'transfer_id',
+                'direction')) {
+            Get-FileTransferEventField -Event $Event -Name $field -Default ''
+        })
+    return $values -join ([char]0x1f)
+}
+
+function Test-FileTransferFallbackTailLocalYieldScopeMutation {
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    if ((Get-FileTransferFallbackTailLocalYieldTransferKey -Event $Pending) -cne
+        (Get-FileTransferFallbackTailLocalYieldTransferKey -Event $Event)) {
+        return $false
+    }
+
+    $eventName = [string]$Event.EventName
+    if ($eventName -ceq 'filetransfer_data_session_recreated') {
+        $previous = Get-FileTransferEventInt64Field `
+            -Event $Event `
+            -Name 'previous_data_session_generation' `
+            -Default 0
+        $current = Get-FileTransferEventInt64Field `
+            -Event $Event `
+            -Name 'data_session_generation' `
+            -Default 0
+        $expected = Get-FileTransferEventInt64Field `
+            -Event $Pending `
+            -Name 'data_session_generation' `
+            -Default 0
+        return $expected -gt 0 -and $previous -eq $expected -and $current -gt 0 -and
+            $current -ne $expected
+    }
+
+    if ($eventName -ceq 'filetransfer_fallback_tail_peer_proof_pending_decided' -and
+        (Get-FileTransferEventField -Event $Event -Name 'decision_status' -Default '') -ceq 'Accepted' -and
+        (Get-FileTransferEventField -Event $Event -Name 'decision_reason' -Default '') -ceq
+            'fallback_tail_initial_peer_proof_receipt_superseded_after_checkpoint_advance') {
+        foreach ($field in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'data_session_identity',
+                'data_session_generation',
+                'peer_authority_id',
+                'peer_predecessor_authority_id',
+                'peer_yield_generation',
+                'peer_direction',
+                'peer_owner_key',
+                'peer_pair_key',
+                'peer_observation_identity',
+                'peer_frame_fingerprint')) {
+            if ((Get-FileTransferEventField -Event $Pending -Name $field -Default '') -cne
+                (Get-FileTransferEventField -Event $Event -Name $field -Default '')) {
+                return $false
+            }
+        }
+
+        $oldCheckpoint = Get-FileTransferEventInt64Field `
+            -Event $Pending `
+            -Name 'checkpoint_generation' `
+            -Default 0
+        $newCheckpoint = Get-FileTransferEventInt64Field `
+            -Event $Event `
+            -Name 'checkpoint_generation' `
+            -Default 0
+        return $oldCheckpoint -gt 0 -and $newCheckpoint -gt $oldCheckpoint -and
+            (Get-FileTransferEventField -Event $Pending -Name 'checkpoint_request_id' -Default '') -ceq '(none)' -and
+            (Get-FileTransferEventField -Event $Event -Name 'checkpoint_request_id' -Default '') -ceq '(none)'
+    }
+
+    if ($eventName -in @(
+            'filetransfer_fallback_leg_transport_epoch_adopted',
+            'filetransfer_fallback_transport_epoch_adopted')) {
+        foreach ($field in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'bridge_recovery_generation')) {
+            $actual = Get-FileTransferEventField -Event $Event -Name $field -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($actual) -and
+                $actual -cne (Get-FileTransferEventField -Event $Pending -Name $field -Default '')) {
+                return $false
+            }
+        }
+
+        $previous = Get-FileTransferEventInt64Field -Event $Event -Name 'previous_transport_epoch' -Default 0
+        $current = Get-FileTransferEventInt64Field -Event $Event -Name 'transport_epoch' -Default 0
+        $expected = Get-FileTransferEventInt64Field -Event $Pending -Name 'transport_epoch' -Default 0
+        return $expected -gt 0 -and $previous -eq $expected -and $current -gt 0 -and
+            $current -ne $expected
+    }
+
+    if ($eventName -in @(
+            'filetransfer_leg_started',
+            'filetransfer_fallback_leg_authority_started')) {
+        $different = $false
+        foreach ($field in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation')) {
+            $actual = Get-FileTransferEventField -Event $Event -Name $field -Default ''
+            if ([string]::IsNullOrWhiteSpace($actual)) {
+                return $false
+            }
+            if ($actual -cne (Get-FileTransferEventField -Event $Pending -Name $field -Default '')) {
+                $different = $true
+            }
+        }
+        return $different
+    }
+
+    if ($eventName -ceq 'filetransfer_live_route_epoch_started') {
+        $previousRoute = Get-FileTransferEventField -Event $Event -Name 'previous_route' -Default ''
+        $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+        $protocol = Get-FileTransferEventInt64Field -Event $Event -Name 'protocol_version' -Default 0
+        $epoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+        return $previousRoute -ceq
+                (Get-FileTransferEventField -Event $Pending -Name 'route' -Default '') -and
+            -not [string]::IsNullOrWhiteSpace($route) -and $protocol -gt 0 -and $epoch -gt 0 -and
+            ($route -cne $previousRoute -or
+             $protocol -ne (Get-FileTransferEventInt64Field -Event $Pending -Name 'protocol_version' -Default 0) -or
+             $epoch -ne (Get-FileTransferEventInt64Field -Event $Pending -Name 'live_route_epoch' -Default 0))
+    }
+
+    if ($eventName -ceq 'filetransfer_live_route_epoch_terminal') {
+        foreach ($field in @('route', 'protocol_version', 'live_route_epoch')) {
+            if ((Get-FileTransferEventField -Event $Event -Name $field -Default '') -cne
+                (Get-FileTransferEventField -Event $Pending -Name $field -Default '')) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    if ($eventName -in @(
+            'filetransfer_fallback_leg_authority_completed',
+            'filetransfer_fallback_leg_authority_superseded_by_route_hint',
+            'filetransfer_leg_frozen')) {
+        foreach ($field in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'transport_epoch')) {
+            if ((Get-FileTransferEventField -Event $Event -Name $field -Default '') -cne
+                (Get-FileTransferEventField -Event $Pending -Name $field -Default '')) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    if ($eventName -ceq 'filetransfer_v6_epoch_terminal') {
+        return (Get-FileTransferEventInt64Field -Event $Event -Name 'transport_epoch' -Default 0) -eq
+            (Get-FileTransferEventInt64Field -Event $Pending -Name 'transport_epoch' -Default 0)
+    }
+
+    if ($eventName -ceq 'filetransfer_runtime_owner_workers_retired') {
+        return (Get-FileTransferEventField -Event $Event -Name 'retired_route' -Default '') -ceq
+                (Get-FileTransferEventField -Event $Pending -Name 'route' -Default '') -and
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'retired_runtime_generation' -Default 0) -eq
+                (Get-FileTransferEventInt64Field -Event $Pending -Name 'runtime_generation' -Default 0)
+    }
+
+    return $false
+}
+
+function Test-FileTransferFallbackTailPeerProofReceiptMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)]$Receipt
+    )
+
+    if ((Get-FileTransferFallbackTailLocalYieldScopeKey -Event $Pending) -cne
+        (Get-FileTransferFallbackTailLocalYieldScopeKey -Event $Receipt)) {
+        return $false
+    }
+
+    $pendingPeerAuthority =
+        Get-FileTransferEventField -Event $Pending -Name 'peer_authority_id' -Default ''
+    $receiptAuthority =
+        Get-FileTransferEventField -Event $Receipt -Name 'authority_id' -Default ''
+    if ([string]::IsNullOrWhiteSpace($pendingPeerAuthority) -or
+        $pendingPeerAuthority -cne $receiptAuthority) {
+        return $false
+    }
+
+    foreach ($fieldPair in @(
+            @('peer_predecessor_authority_id', 'predecessor_authority_id'),
+            @('peer_direction', 'peer_direction'),
+            @('peer_yield_generation', 'yield_generation'),
+            @('peer_owner_key', 'owner_key'),
+            @('peer_pair_key', 'canonical_pair_key'),
+            @('peer_live_route_epoch', 'peer_live_route_epoch'),
+            @('peer_leg_generation', 'peer_leg_generation'),
+            @('peer_bridge_recovery_generation', 'peer_bridge_recovery_generation'),
+            @('peer_transport_epoch', 'peer_transport_epoch'),
+            @('peer_checkpoint_request_id', 'peer_checkpoint_request_id'))) {
+        $expected = Get-FileTransferEventField -Event $Pending -Name $fieldPair[0] -Default ''
+        $actual = Get-FileTransferEventField -Event $Receipt -Name $fieldPair[1] -Default ''
+        if ([string]::IsNullOrWhiteSpace($expected) -or
+            [string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferFallbackTailPeerProofLineageMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    if ((Get-FileTransferFallbackTailLocalYieldScopeKey -Event $Pending) -cne
+        (Get-FileTransferFallbackTailLocalYieldScopeKey -Event $Event)) {
+        return $false
+    }
+
+    foreach ($field in @(
+            'peer_authority_id',
+            'peer_predecessor_authority_id',
+            'peer_yield_generation',
+            'peer_direction',
+            'peer_owner_key',
+            'peer_pair_key',
+            'peer_live_route_epoch',
+            'peer_leg_generation',
+            'peer_bridge_recovery_generation',
+            'peer_transport_epoch',
+            'peer_checkpoint_request_id',
+            'peer_observation_identity',
+            'peer_frame_fingerprint')) {
+        $expected = Get-FileTransferEventField -Event $Pending -Name $field -Default ''
+        $actual = Get-FileTransferEventField -Event $Event -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($expected) -or
+            [string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    foreach ($field in @('log_writer_id', 'session_id', 'transfer_id')) {
+        $expected = Get-FileTransferEventField -Event $Pending -Name $field -Default ''
+        $actual = Get-FileTransferEventField -Event $Event -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($expected) -or
+            [string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    $expectedDirection = Get-FileTransferEventField -Event $Pending -Name 'direction' -Default ''
+    $actualDirection = Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''
+    if ([string]::IsNullOrWhiteSpace($actualDirection)) {
+        if ([string]$Event.EventName -ceq 'file_transfer_inbound_terminal') {
+            $actualDirection = 'inbound'
+        }
+        elseif ([string]$Event.EventName -ceq 'file_transfer_outbound_terminal') {
+            $actualDirection = 'outbound'
+        }
+    }
+
+    return [string]::IsNullOrWhiteSpace($actualDirection) -or
+        [string]::Equals($expectedDirection, $actualDirection, [System.StringComparison]::Ordinal)
+}
+
+function Get-FileTransferFallbackTailPeerProofPendingFingerprint {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    [string[]]$fields = @(
+        'authority_id',
+        'yield_generation',
+        'owner_key',
+        'pair_key',
+        'peer_authority_id',
+        'peer_predecessor_authority_id',
+        'peer_yield_generation',
+        'peer_direction',
+        'peer_owner_key',
+        'peer_pair_key',
+        'peer_live_route_epoch',
+        'peer_leg_generation',
+        'peer_bridge_recovery_generation',
+        'peer_transport_epoch',
+        'peer_checkpoint_request_id',
+        'peer_observation_identity',
+        'peer_frame_fingerprint',
+        'observed_utc_ms',
+        'route_publication_generation',
+        'route_commit_generation',
+        'runtime_generation',
+        'terminal_generation',
+        'data_session_identity',
+        'data_session_generation',
+        'decision_status',
+        'decision_reason')
+    return (@($fields | ForEach-Object {
+                Get-FileTransferEventField -Event $Event -Name $_ -Default ''
+            })) -join ([char]0x1f)
+}
+
+function Test-FileTransferFallbackTailPeerProofPairingMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)]$Pairing
+    )
+
+    if ((Get-FileTransferFallbackTailLocalYieldScopeKey -Event $Pending) -cne
+        (Get-FileTransferFallbackTailLocalYieldScopeKey -Event $Pairing) -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'decision_status' -Default '') -cne 'Accepted' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'pairing_state' -Default '') -cne 'Paired' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'yield_kind' -Default '') -cne 'Quiescent' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'release_kind' -Default '') -cne 'FallbackPairedTailYield' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'release_outcome' -Default '') -cne 'Quiescent' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'predecessor_authority_id' -Default '') -cne '(none)' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'failed_predecessor_authority_id' -Default '') -cne '(none)' -or
+        (Get-FileTransferEventField -Event $Pairing -Name 'failed_successor_authority_id' -Default '') -cne '(none)' -or
+        (Get-FileTransferEventInt64Field -Event $Pairing -Name 'failed_predecessor_yield_generation' -Default -1) -ne 0 -or
+        (Get-FileTransferEventInt64Field -Event $Pairing -Name 'failed_successor_yield_generation' -Default -1) -ne 0 -or
+        (Get-FileTransferEventInt64Field -Event $Pairing -Name 'failed_supersession_carried_peer_proof' -Default -1) -ne 0 -or
+        (Get-FileTransferEventInt64Field -Event $Pairing -Name 'yield_generation' -Default 0) -le 0 -or
+        (Get-FileTransferEventInt64Field -Event $Pairing -Name 'pairing_generation' -Default 0) -le 0) {
+        return $false
+    }
+
+    foreach ($field in @(
+            'authority_id',
+            'owner_key',
+            'pair_key',
+            'local_proof_identity',
+            'local_frame_fingerprint')) {
+        $value = Get-FileTransferEventField -Event $Pairing -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -ceq '(none)') {
+            return $false
+        }
+    }
+
+    if ((Get-FileTransferEventField -Event $Pairing -Name 'authority_id' -Default '') -ceq
+        (Get-FileTransferEventField -Event $Pending -Name 'peer_authority_id' -Default '')) {
+        return $false
+    }
+
+    foreach ($field in @(
+            'owner_key',
+            'pair_key',
+            'route_publication_generation',
+            'route_commit_generation',
+            'runtime_generation',
+            'terminal_generation',
+            'checkpoint_generation',
+            'data_session_identity',
+            'data_session_generation')) {
+        $expected = Get-FileTransferEventField -Event $Pending -Name $field -Default ''
+        $actual = Get-FileTransferEventField -Event $Pairing -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($expected) -or
+            [string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    foreach ($field in @(
+            'peer_authority_id',
+            'peer_predecessor_authority_id',
+            'peer_yield_generation',
+            'peer_direction',
+            'peer_owner_key',
+            'peer_pair_key',
+            'peer_live_route_epoch',
+            'peer_leg_generation',
+            'peer_bridge_recovery_generation',
+            'peer_transport_epoch',
+            'peer_checkpoint_request_id',
+            'peer_observation_identity',
+            'peer_frame_fingerprint')) {
+        $expected = Get-FileTransferEventField -Event $Pending -Name $field -Default ''
+        $actual = Get-FileTransferEventField -Event $Pairing -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($expected) -or
+            [string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-FileTransferFallbackTailEventWriterSequence {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $value = Get-FileTransferEventInt64Field `
+        -Event $Event `
+        -Name 'log_writer_sequence' `
+        -Default -1
+    if ($value -gt 0) {
+        return $value
+    }
+    return -1L
+}
+
+function Test-FileTransferFallbackTailExactRawJoinValue {
+    param([string]$Value)
+
+    return -not [string]::IsNullOrWhiteSpace($Value) -and
+        $Value -cne '(none)'
+}
+
+function Test-FileTransferFallbackTailExactRawJoinToken {
+    param(
+        [string]$Value,
+        [string]$EvidenceToken
+    )
+
+    if (-not (Test-FileTransferFallbackTailExactRawJoinValue -Value $Value) -or
+        [string]::IsNullOrWhiteSpace($EvidenceToken) -or
+        $EvidenceToken -ceq '(none)') {
+        return $false
+    }
+
+    # Retained operational logs redact these values after the snapshot payload
+    # is authored. Only the frozen scalar and canonical owner/pair projections
+    # are admitted here; uniqueness is established against the active snapshot
+    # binding before a physical receipt can be consumed.
+    if ($Value -match '\[redacted\]') {
+        return $Value -in @('[redacted]', 'sess_[redacted]') -or
+            $Value -match '^sess_\[redacted\]\|\[redacted\]\|post_tuna_fallback_v6\|6\|\d+\|\d+\|\d+\|\d+\|(?:\(none\)|[^|]+)$' -or
+            $Value -match '^sess_\[redacted\]\|\[redacted\]\|post_tuna_fallback_v6\|6\|\d+\|\d+\|(?:\(none\)|[^|]+)$'
+    }
+
+    return (ConvertTo-FileTransferCoordinatorEvidenceToken $Value) -ceq
+        $EvidenceToken
+}
+
+function Test-FileTransferFallbackTailRawOwnerAndPairTuple {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$OwnerKey,
+        [Parameter(Mandatory = $true)][string]$PairKey
+    )
+
+    [string[]]$owner = $OwnerKey.Split('|')
+    [string[]]$pair = $PairKey.Split('|')
+    if ($owner.Count -ne 9 -or $pair.Count -ne 7) {
+        return $false
+    }
+
+    $sessionId = Get-FileTransferEventField -Event $Event -Name 'session_id' -Default ''
+    $transferId = Get-FileTransferEventField -Event $Event -Name 'transfer_id' -Default ''
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $protocol = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    $liveRouteEpoch = Get-FileTransferEventField -Event $Event -Name 'peer_live_route_epoch' -Default ''
+    $legGeneration = Get-FileTransferEventField -Event $Event -Name 'peer_leg_generation' -Default ''
+    $bridgeGeneration = Get-FileTransferEventField -Event $Event -Name 'peer_bridge_recovery_generation' -Default ''
+    $transportEpoch = Get-FileTransferEventField -Event $Event -Name 'peer_transport_epoch' -Default ''
+    $checkpointRequestId = Get-FileTransferEventField -Event $Event -Name 'peer_checkpoint_request_id' -Default ''
+    [string[]]$required = @(
+        $sessionId, $transferId, $route, $protocol, $liveRouteEpoch,
+        $legGeneration, $bridgeGeneration, $transportEpoch,
+        $checkpointRequestId)
+    if (@($required | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+        return $false
+    }
+
+    return $owner[0] -ceq $sessionId -and
+        $owner[1] -ceq $transferId -and
+        $owner[2] -ceq $route -and
+        $owner[3] -ceq $protocol -and
+        $owner[4] -ceq $liveRouteEpoch -and
+        $owner[5] -ceq $legGeneration -and
+        $owner[6] -ceq $bridgeGeneration -and
+        $owner[7] -ceq $transportEpoch -and
+        $owner[8] -ceq $checkpointRequestId -and
+        $pair[0] -ceq $sessionId -and
+        $pair[1] -ceq $transferId -and
+        $pair[2] -ceq $route -and
+        $pair[3] -ceq $protocol -and
+        $pair[4] -ceq $liveRouteEpoch -and
+        $pair[5] -ceq $transportEpoch -and
+        $pair[6] -ceq $checkpointRequestId
+}
+
+function Test-FileTransferFallbackTailSnapshotScopeEventMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Binding,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    if ((Get-FileTransferFallbackTailEventWriterSequence -Event $Event) -le 0 -or
+        (Get-FileTransferEventField -Event $Event -Name 'log_writer_id' -Default '') -cne
+            [string]$Binding.Writer -or
+        (Get-FileTransferEventField -Event $Event -Name 'direction' -Default '') -cne
+            [string]$Binding.Direction) {
+        return $false
+    }
+
+    foreach ($join in @(
+            @('session_id', [string]$Binding.SessionId),
+            @('transfer_id', [string]$Binding.TransferId))) {
+        if (-not (Test-FileTransferFallbackTailExactRawJoinToken `
+                -Value (Get-FileTransferEventField `
+                    -Event $Event `
+                    -Name $join[0] `
+                    -Default '') `
+                -EvidenceToken $join[1])) {
+            return $false
+        }
+    }
+
+    # The frozen physical-proof schema carries this boundary subset. The
+    # transition-bound snapshot operation retains the remaining publication,
+    # runtime, terminal, checkpoint-generation, and data-session scope.
+    $scope = $Binding.SourceBoundary
+    foreach ($binding in @(
+            @('route', 'route'),
+            @('protocol_version', 'protocolVersion'),
+            @('live_route_epoch', 'liveRouteEpoch'),
+            @('leg_generation', 'legGeneration'),
+            @('transport_epoch', 'transportEpoch'),
+            @('bridge_recovery_generation', 'bridgeRecoveryGeneration'),
+            @('checkpoint_request_id', 'checkpointRequestId'))) {
+        $actual = Get-FileTransferEventField -Event $Event -Name $binding[0] -Default ''
+        $expected = [string]$Scope.($binding[1])
+        if ([string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($actual, $expected, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferFallbackTailSnapshotReceiptMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Binding,
+        [Parameter(Mandatory = $true)]$Event
+    )
+
+    $eventSequence = Get-FileTransferFallbackTailEventWriterSequence -Event $Event
+    if ([string]$Event.EventName -cne 'filetransfer_fallback_tail_yield_proof_received' -or
+        $eventSequence -le 0 -or
+        [long]$Binding.TransitionSequence -le 0 -or
+        [long]$Binding.StateGeneration -le 0 -or
+        [long]$Binding.PeerProofEffect.WriterSequence -le 0 -or
+        -not (Test-FileTransferFallbackTailSnapshotScopeEventMatch `
+            -Binding $Binding `
+            -Event $Event)) {
+        return $false
+    }
+
+    $peerDirection = if ([string]$Binding.Direction -ceq 'outbound') {
+        'inbound'
+    }
+    else {
+        'outbound'
+    }
+    if ((Get-FileTransferEventInt64Field -Event $Event -Name 'authority_schema' -Default 0) -ne 2 -or
+        (Get-FileTransferEventField -Event $Event -Name 'authority_id' -Default '') -cne
+            [string]$Binding.PeerProofAuthorityId -or
+        (ConvertTo-FileTransferCoordinatorEvidenceToken `
+            (Get-FileTransferEventField -Event $Event -Name 'authority_id' -Default '')) -cne
+            [string]$Binding.OperationAuthorityId -or
+        (Get-FileTransferEventField -Event $Event -Name 'predecessor_authority_id' -Default '') -cne
+            '(none)' -or
+        (Get-FileTransferEventInt64Field -Event $Event -Name 'yield_generation' -Default 0) -ne
+            [long]$Binding.PeerProofYieldGeneration -or
+        (Get-FileTransferEventField -Event $Event -Name 'peer_direction' -Default '') -cne
+            $peerDirection -or
+        $eventSequence -le [long]$Binding.TransitionSequence -or
+        [long]$Binding.PeerProofEffect.WriterSequence -le
+            [long]$Binding.TransitionSequence -or
+        [long]$Binding.PeerProofEffect.WriterSequence -ge $eventSequence) {
+        return $false
+    }
+
+    $ownerKey = Get-FileTransferEventField -Event $Event -Name 'owner_key' -Default ''
+    if (-not (Test-FileTransferFallbackTailExactRawJoinToken `
+            -Value $ownerKey `
+            -EvidenceToken ([string]$Binding.OwnerKey))) {
+        return $false
+    }
+
+    $pairKey = Get-FileTransferEventField -Event $Event -Name 'pair_key' -Default ''
+    $rawPairKey = Get-FileTransferEventField -Event $Event -Name 'raw_pair_key' -Default ''
+    $canonicalPairKey =
+        Get-FileTransferEventField -Event $Event -Name 'canonical_pair_key' -Default ''
+    if (-not (Test-FileTransferFallbackTailExactRawJoinToken `
+            -Value $pairKey `
+            -EvidenceToken ([string]$Binding.PairKey)) -or
+        -not (Test-FileTransferFallbackTailExactRawJoinValue -Value $rawPairKey) -or
+        -not (Test-FileTransferFallbackTailExactRawJoinValue -Value $canonicalPairKey) -or
+        $pairKey -cne $rawPairKey -or
+        $pairKey -cne $canonicalPairKey -or
+        (Get-FileTransferEventField -Event $Event -Name 'pair_key_format' -Default '') -cne
+            'canonical_7' -or
+        -not (Test-FileTransferFallbackTailRawOwnerAndPairTuple `
+            -Event $Event `
+            -OwnerKey $ownerKey `
+            -PairKey $pairKey)) {
+        return $false
+    }
+
+    $scope = $Binding.SourceBoundary
+    foreach ($field in @(
+            @('peer_live_route_epoch', 'liveRouteEpoch'),
+            @('peer_leg_generation', 'legGeneration'),
+            @('peer_transport_epoch', 'transportEpoch'),
+            @('peer_bridge_recovery_generation', 'bridgeRecoveryGeneration'),
+            @('peer_checkpoint_request_id', 'checkpointRequestId'))) {
+        $actual = Get-FileTransferEventField -Event $Event -Name $field[0] -Default ''
+        $expected = [string]$scope.($field[1])
+        if ([string]::IsNullOrWhiteSpace($actual) -or
+            -not [string]::Equals($actual, $expected, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferFallbackTailRawScopeEqual {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    foreach ($field in @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction', 'route',
+            'protocol_version', 'live_route_epoch', 'leg_generation',
+            'transport_epoch', 'bridge_recovery_generation',
+            'checkpoint_request_id')) {
+        $leftValue = Get-FileTransferEventField -Event $Left -Name $field -Default ''
+        $rightValue = Get-FileTransferEventField -Event $Right -Name $field -Default ''
+        if ([string]::IsNullOrWhiteSpace($leftValue) -or
+            -not [string]::Equals(
+                $leftValue,
+                $rightValue,
+                [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-FileTransferFallbackTailSnapshotPairingRecovery {
+    param(
+        [Parameter(Mandatory = $true)]$PendingBinding,
+        [Parameter(Mandatory = $true)]$PairedBinding
+    )
+
+    if ([string]$PendingBinding.BindingKind -cne 'pending_peer_proof' -or
+        [string]$PairedBinding.BindingKind -cne 'paired_yield' -or
+        [long]$PendingBinding.TransitionSequence -le 0 -or
+        [long]$PendingBinding.StateGeneration -le 0 -or
+        [long]$PendingBinding.PeerProofEffect.WriterSequence -le 0 -or
+        [long]$PairedBinding.TransitionSequence -le 0 -or
+        [long]$PairedBinding.StateGeneration -le 0 -or
+        [long]$PairedBinding.PeerProofEffect.WriterSequence -le 0 -or
+        [string]$PairedBinding.CoordinatorInstanceId -cne
+            [string]$PendingBinding.CoordinatorInstanceId -or
+        [string]$PairedBinding.Writer -cne [string]$PendingBinding.Writer -or
+        [string]$PairedBinding.SessionId -cne [string]$PendingBinding.SessionId -or
+        [string]$PairedBinding.TransferId -cne [string]$PendingBinding.TransferId -or
+        [string]$PairedBinding.Direction -cne [string]$PendingBinding.Direction -or
+        [string]$PairedBinding.OperationRole -cne 'yield_current' -or
+        [string]$PairedBinding.BeforeState -cne 'PeerProofObserved' -or
+        [string]$PairedBinding.AfterState -cne 'Paired' -or
+        [string]$PairedBinding.PairingState -cne 'Paired' -or
+        [long]$PairedBinding.PairingGeneration -le 0 -or
+        [string]$PairedBinding.OwnerKey -cne [string]$PendingBinding.OwnerKey -or
+        [string]$PairedBinding.PairKey -cne [string]$PendingBinding.PairKey -or
+        [string]$PairedBinding.PeerProofAuthorityId -cne
+            [string]$PendingBinding.PeerProofAuthorityId -or
+        [long]$PairedBinding.PeerProofYieldGeneration -ne
+            [long]$PendingBinding.PeerProofYieldGeneration -or
+        [string]$PairedBinding.PeerProofIdentity -cne
+            [string]$PendingBinding.PeerProofIdentity -or
+        [string]$PairedBinding.PeerProofFingerprint -cne
+            [string]$PendingBinding.PeerProofFingerprint -or
+        [string]$PairedBinding.LocalProofIdentity -in @('', '(none)') -or
+        [string]$PairedBinding.LocalProofFingerprint -in @('', '(none)') -or
+        [string]$PairedBinding.PairedReleaseAuthorityId -in @('', '(none)') -or
+        [long]$PairedBinding.PairedReleaseGeneration -le 0 -or
+        [string]$PairedBinding.PairedReleaseOutcome -cne 'Quiescent' -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $PairedBinding.SourceBoundary `
+            -Right $PendingBinding.SourceBoundary)) {
+        return $false
+    }
+
+    if ($null -eq $PairedBinding.PeerProofReceipt -or
+        $null -eq $PairedBinding.PeerProofEffect -or
+        $null -eq $PendingBinding.PeerProofReceipt -or
+        $null -eq $PendingBinding.PeerProofEffect -or
+        $null -eq $PairedBinding.PairedReleaseEffect -or
+        [long]$PairedBinding.PairedReleaseEffect.WriterSequence -le 0 -or
+        @($PairedBinding.LocalProofEffects | Where-Object {
+                [long]$_.WriterSequence -le 0
+            }).Count -gt 0) {
+        return $false
+    }
+
+    foreach ($field in @(
+            'commandIdentity', 'commandGeneration', 'commandFingerprint',
+            'receiptIdentity', 'receiptGeneration', 'receiptStatus',
+            'receiptFingerprint')) {
+        if ([string]$PairedBinding.PeerProofReceipt.$field -cne
+            [string]$PendingBinding.PeerProofReceipt.$field) {
+            return $false
+        }
+    }
+    if ([string]$PendingBinding.PeerProofReceipt.receiptReason -cne
+            'fallback_tail_peer_proof_retained' -or
+        [string]$PairedBinding.PeerProofReceipt.receiptReason -cne
+            'fallback_tail_peer_proof_observed') {
+        return $false
+    }
+    foreach ($field in @(
+            'Writer', 'WriterSequence', 'TransitionId', 'StateGeneration',
+            'OperationKey', 'AuthorityId',
+            'OperationGeneration', 'EffectKind', 'ReceiptIdentity',
+            'ReceiptGeneration', 'ReceiptStatus', 'ReceiptFingerprint')) {
+        if ([string]$PairedBinding.PeerProofEffect.$field -cne
+            [string]$PendingBinding.PeerProofEffect.$field) {
+            return $false
+        }
+    }
+
+    return $null -ne $PairedBinding.PeerProofReceipt -and
+        $null -ne $PairedBinding.PeerProofEffect -and
+        $null -ne $PairedBinding.LocalProofReceipt -and
+        @($PairedBinding.LocalProofEffects).Count -eq 2 -and
+        $null -ne $PairedBinding.PairedReleaseReceipt -and
+        $null -ne $PairedBinding.PairedReleaseEffect
+}
+
+function Test-FileTransferFallbackTailSnapshotPeerFirstYieldCarry {
+    param(
+        [Parameter(Mandatory = $true)]$PendingBinding,
+        [Parameter(Mandatory = $true)]$PendingRetirement,
+        [Parameter(Mandatory = $true)]$CurrentEntry
+    )
+
+    $retired = $PendingRetirement.Operation
+    $current = $CurrentEntry.Operation
+    $typed = $current.fallbackTailYield
+    if ($null -eq $typed -or
+        [string]$PendingBinding.BindingKind -cne 'pending_peer_proof' -or
+        [string]$PendingRetirement.Boundary.boundaryId -cne
+            [string]$CurrentEntry.Boundary.boundaryId -or
+        [long]$PendingRetirement.Boundary.writerSequence -ne
+            [long]$CurrentEntry.Boundary.writerSequence -or
+        [string]$retired.operationKey -cne [string]$PendingBinding.OperationKey -or
+        [string]$retired.operationRole -cne 'peer_proof_pending_initial' -or
+        [string]$retired.beforeState -cne 'Pending' -or
+        [string]$retired.afterState -cne 'None' -or
+        [string]$current.operationRole -cne 'yield_current' -or
+        [string]$current.operationKind -cne 'Quiescent' -or
+        [string]$current.beforeState -cne 'None' -or
+        [string]$current.afterState -cne 'PeerProofObserved' -or
+        -not [bool]$current.stateApplied -or
+        [string]$typed.pairingState -cne 'PeerProofObserved' -or
+        [string]$typed.ownerKey -cne [string]$PendingBinding.OwnerKey -or
+        [string]$typed.pairKey -cne [string]$PendingBinding.PairKey -or
+        [string]$typed.peerProofAuthorityId -cne
+            [string]$PendingBinding.PeerProofAuthorityId -or
+        [long]$typed.peerProofYieldGeneration -ne
+            [long]$PendingBinding.PeerProofYieldGeneration -or
+        [string]$typed.peerProofIdentity -cne
+            [string]$PendingBinding.PeerProofIdentity -or
+        [string]$typed.peerProofFingerprint -cne
+            [string]$PendingBinding.PeerProofFingerprint -or
+        [string]$typed.localProofIdentity -notin @('', '(none)') -or
+        [string]$typed.pairedReleaseAuthorityId -notin @('', '(none)') -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $typed.sourceBoundary `
+            -Right $PendingBinding.SourceBoundary)) {
+        return $false
+    }
+
+    [object[]]$peerReceipts = @($typed.receipts | Where-Object {
+            [string]$_.stage -ceq 'peer_proof' -and
+            [string]$_.receiptStatus -ceq 'Observed' -and
+            [bool]$_.receiptValidated
+        })
+    if ($peerReceipts.Count -ne 1) {
+        return $false
+    }
+    $peerReceipt = $peerReceipts[0]
+    foreach ($field in @(
+            'commandIdentity', 'commandGeneration', 'commandFingerprint',
+            'receiptIdentity', 'receiptGeneration', 'receiptStatus',
+            'receiptFingerprint')) {
+        if ([string]$peerReceipt.$field -cne
+            [string]$PendingBinding.PeerProofReceipt.$field) {
+            return $false
+        }
+    }
+
+    return [string]$PendingBinding.PeerProofReceipt.receiptReason -ceq
+            'fallback_tail_peer_proof_retained' -and
+        [string]$peerReceipt.receiptReason -ceq
+            'fallback_tail_peer_proof_observed'
+}
+
+function Test-FileTransferFallbackTailSnapshotLineageBoundary {
+    param(
+        [Parameter(Mandatory = $true)]$PendingBinding,
+        [Parameter(Mandatory = $true)]$Boundary
+    )
+
+    return [string]$Boundary.coordinatorInstanceId -ceq
+            [string]$PendingBinding.CoordinatorInstanceId -and
+        [string]$Boundary.writer -ceq [string]$PendingBinding.Writer -and
+        [string]$Boundary.sessionId -ceq [string]$PendingBinding.SessionId -and
+        [string]$Boundary.transferId -ceq [string]$PendingBinding.TransferId -and
+        [string]$Boundary.direction -ceq [string]$PendingBinding.Direction -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $Boundary.beforeBoundary `
+            -Right $PendingBinding.AggregateBoundary) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryEqual `
+            -Left $Boundary.afterBoundary `
+            -Right $PendingBinding.AggregateBoundary)
+}
+
+function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
+    param(
+        [object[]]$Events,
+        [Parameter(Mandatory = $true)]$SnapshotEvaluation
+    )
+
+    $empty = {
+        [pscustomobject]@{
+            RawCount = 0
+            DistinctCount = 0
+            RecoveredCount = 0
+            UnresolvedCount = 0
+            Verdict = 'pass'
+            UnresolvedCandidateRecords = @()
+        }
+    }
+    if ([string]$SnapshotEvaluation.Mode -cne 'SnapshotV1Authoritative' -or
+        [string]$SnapshotEvaluation.ArtifactEvidenceVerdict -cne 'pass' -or
+        -not [bool]$SnapshotEvaluation.StreamComplete -or
+        @($SnapshotEvaluation.AuthoritativeFamilies) -notcontains 'fallback_tail_yield') {
+        return & $empty
+    }
+
+    [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    [object[]]$entries = @(
+        foreach ($boundary in @($SnapshotEvaluation.Boundaries)) {
+            if ([string]$boundary.verdict -cne 'pass') {
+                continue
+            }
+            foreach ($operation in @($boundary.operations)) {
+                if ([string]$operation.family -ceq 'fallback_tail_yield') {
+                    [pscustomobject]@{ Boundary = $boundary; Operation = $operation }
+                }
+            }
+        })
+    [object[]]$bindings = if (
+        $null -ne $SnapshotEvaluation.PSObject.Properties[
+            '__FallbackTailPeerProofBindings']) {
+        @($SnapshotEvaluation.__FallbackTailPeerProofBindings)
+    }
+    else {
+        @()
+    }
+    [object[]]$starts = @($bindings | Where-Object {
+            [string]$_.BindingKind -ceq 'pending_peer_proof' -and
+            [string]$_.OperationRole -ceq 'peer_proof_pending_initial' -and
+            [string]$_.BeforeState -ceq 'None' -and
+            [string]$_.AfterState -ceq 'Pending' -and
+            [string]$_.PairingState -ceq 'Pending' -and
+            [long]$_.TransitionSequence -gt 0 -and
+            [long]$_.StateGeneration -gt 0 -and
+            [long]$_.OperationGeneration -gt 0 -and
+            [long]$_.OperationGeneration -eq [long]$_.PeerProofYieldGeneration -and
+            [string]$_.PeerProofAuthorityId -match
+                '^fta2-fallback_tail_yield-[0-9a-f]{24}$' -and
+            (ConvertTo-FileTransferCoordinatorEvidenceToken `
+                ([string]$_.PeerProofAuthorityId)) -ceq
+                [string]$_.OperationAuthorityId -and
+            $null -ne $_.PeerProofReceipt -and
+            $null -ne $_.PeerProofEffect -and
+            [long]$_.PeerProofEffect.WriterSequence -gt
+                [long]$_.TransitionSequence
+        })
+
+    $incidents = [System.Collections.Generic.List[object]]::new()
+    foreach ($start in $starts) {
+        $startSequence = [long]$start.TransitionSequence
+        [object[]]$retirements = @($entries | Where-Object {
+                [string]$_.Boundary.coordinatorInstanceId -ceq
+                    [string]$start.CoordinatorInstanceId -and
+                [string]$_.Boundary.writer -ceq [string]$start.Writer -and
+                [string]$_.Boundary.sessionId -ceq [string]$start.SessionId -and
+                [string]$_.Boundary.transferId -ceq [string]$start.TransferId -and
+                [string]$_.Boundary.direction -ceq [string]$start.Direction -and
+                [long]$_.Boundary.writerSequence -gt $startSequence -and
+                [string]$_.Operation.operationKey -ceq
+                    [string]$start.OperationKey -and
+                [string]$_.Operation.authorityId -ceq
+                    [string]$start.OperationAuthorityId -and
+                [long]$_.Operation.operationGeneration -eq
+                    [long]$start.OperationGeneration -and
+                [string]$_.Operation.beforeState -ceq 'Pending' -and
+                [string]$_.Operation.afterState -ceq 'None' -and
+                (Test-FileTransferFallbackTailSnapshotLineageBoundary `
+                    -PendingBinding $start `
+                    -Boundary $_.Boundary)
+            } | Sort-Object { [long]$_.Boundary.writerSequence })
+        $firstRetirement = @($retirements | Select-Object -First 1)
+        $retirementBound = if ($firstRetirement.Count -eq 1) {
+            [long]$firstRetirement[0].Boundary.writerSequence
+        }
+        else {
+            [long]::MaxValue
+        }
+
+        [object[]]$receipts = @($orderedEvents | Where-Object {
+                $writerSequence = Get-FileTransferFallbackTailEventWriterSequence `
+                    -Event $_
+                $writerSequence -gt $startSequence -and
+                $writerSequence -lt $retirementBound -and
+                (Test-FileTransferFallbackTailSnapshotReceiptMatch `
+                    -Binding $start `
+                    -Event $_)
+            })
+        if ($receipts.Count -ne 1) {
+            continue
+        }
+        $receipt = $receipts[0]
+        [object[]]$receiptOwners = @($starts | Where-Object {
+                Test-FileTransferFallbackTailSnapshotReceiptMatch `
+                    -Binding $_ `
+                    -Event $receipt
+            })
+        if ($receiptOwners.Count -ne 1 -or
+            [string]$receiptOwners[0].TransitionId -cne
+                [string]$start.TransitionId -or
+            [string]$receiptOwners[0].OperationKey -cne
+                [string]$start.OperationKey) {
+            continue
+        }
+        $receiptSequence = Get-FileTransferFallbackTailEventWriterSequence -Event $receipt
+
+        [object[]]$preReceiptPoisonEvents = @($orderedEvents | Where-Object {
+                $writerSequence = Get-FileTransferFallbackTailEventWriterSequence `
+                    -Event $_
+                $writerSequence -gt $startSequence -and
+                $writerSequence -lt $receiptSequence -and
+                (([string]$_.EventName -in @(
+                            'filetransfer_runtime_terminalized',
+                            'filetransfer_terminalized_by_peer_down',
+                            'filetransfer_terminalized_by_peer_session_end',
+                            'filetransfer_terminalized_by_peer_disconnect',
+                            'filetransfer_terminalized_by_session_end',
+                            'filetransfer_session_replaced',
+                            'filetransfer_data_session_recreated',
+                            'filetransfer_data_session_removed',
+                            'file_transfer_inbound_terminal',
+                            'file_transfer_outbound_terminal',
+                            'transfer_terminal') -and
+                        (Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch `
+                            -Pending $receipt `
+                            -Event $_)) -or
+                    (Test-FileTransferFallbackTailLocalYieldScopeMutation `
+                        -Pending $receipt `
+                        -Event $_))
+            })
+        if ($preReceiptPoisonEvents.Count -gt 0) {
+            continue
+        }
+
+        $retirement = if ($retirements.Count -eq 1) { $retirements[0] } else { $null }
+        [object[]]$peerFirstYieldEntries = @()
+        if ($null -ne $retirement) {
+            $peerFirstYieldEntries = @($entries | Where-Object {
+                    [string]$_.Boundary.boundaryId -ceq
+                        [string]$retirement.Boundary.boundaryId -and
+                    [long]$_.Boundary.writerSequence -eq
+                        [long]$retirement.Boundary.writerSequence -and
+                    (Test-FileTransferFallbackTailSnapshotPeerFirstYieldCarry `
+                        -PendingBinding $start `
+                        -PendingRetirement $retirement `
+                        -CurrentEntry $_)
+                })
+        }
+        $peerFirstYield = if ($peerFirstYieldEntries.Count -eq 1) {
+            $peerFirstYieldEntries[0]
+        }
+        else {
+            $null
+        }
+
+        [object[]]$recoveryBindings = @()
+        if ($null -ne $peerFirstYield) {
+            $recoveryBindings = @($bindings | Where-Object {
+                    [string]$_.BindingKind -ceq 'paired_yield' -and
+                    [long]$_.TransitionSequence -gt
+                        [long]$retirement.Boundary.writerSequence -and
+                    [string]$_.OperationKey -ceq
+                        [string]$peerFirstYield.Operation.operationKey -and
+                    (Test-FileTransferFallbackTailSnapshotPairingRecovery `
+                        -PendingBinding $start `
+                        -PairedBinding $_)
+                })
+        }
+        $recovery = if ($recoveryBindings.Count -eq 1) {
+            $recoveryBindings[0]
+        }
+        else {
+            $null
+        }
+        $retirementSequence = if ($null -ne $retirement) {
+            [long]$retirement.Boundary.writerSequence
+        }
+        else {
+            [long]::MaxValue
+        }
+        if ($null -ne $recovery) {
+            $recoverySequence = [long]$recovery.TransitionSequence
+            [object[]]$lineageBoundaries = @(
+                $SnapshotEvaluation.Boundaries | Where-Object {
+                    [long]$_.writerSequence -gt $startSequence -and
+                    [long]$_.writerSequence -le $recoverySequence -and
+                    [string]$_.writer -ceq [string]$start.Writer -and
+                    [string]$_.coordinatorInstanceId -ceq
+                        [string]$start.CoordinatorInstanceId
+                })
+            [object[]]$pendingHistory = @($entries | Where-Object {
+                    [string]$_.Boundary.coordinatorInstanceId -ceq
+                        [string]$start.CoordinatorInstanceId -and
+                    [string]$_.Boundary.writer -ceq [string]$start.Writer -and
+                    [long]$_.Boundary.writerSequence -ge $startSequence -and
+                    [long]$_.Boundary.writerSequence -le $retirementSequence -and
+                    [string]$_.Operation.operationKey -ceq
+                        [string]$start.OperationKey
+                })
+            [object[]]$currentHistory = @($entries | Where-Object {
+                    [string]$_.Boundary.coordinatorInstanceId -ceq
+                        [string]$start.CoordinatorInstanceId -and
+                    [string]$_.Boundary.writer -ceq [string]$start.Writer -and
+                    [long]$_.Boundary.writerSequence -ge $retirementSequence -and
+                    [long]$_.Boundary.writerSequence -le $recoverySequence -and
+                    [string]$_.Operation.operationKey -ceq
+                        [string]$peerFirstYield.Operation.operationKey
+                })
+            $lineageValid = $lineageBoundaries.Count -gt 0 -and
+                @($lineageBoundaries | Where-Object {
+                        -not (Test-FileTransferFallbackTailSnapshotLineageBoundary `
+                            -PendingBinding $start `
+                            -Boundary $_)
+                    }).Count -eq 0 -and
+                @($pendingHistory | Where-Object {
+                        $sequence = [long]$_.Boundary.writerSequence
+                        ($sequence -eq $startSequence -and
+                            [string]$_.Operation.beforeState -ceq 'None' -and
+                            [string]$_.Operation.afterState -ceq 'Pending') -or
+                        ($sequence -eq $retirementSequence -and
+                            [string]$_.Operation.beforeState -ceq 'Pending' -and
+                            [string]$_.Operation.afterState -ceq 'None') -or
+                        ($sequence -gt $startSequence -and
+                            $sequence -lt $retirementSequence -and
+                            [string]$_.Operation.beforeState -ceq 'Pending' -and
+                            [string]$_.Operation.afterState -ceq 'Pending')
+                    }).Count -eq $pendingHistory.Count -and
+                @($pendingHistory | Where-Object {
+                        [long]$_.Boundary.writerSequence -eq $startSequence
+                    }).Count -eq 1 -and
+                @($pendingHistory | Where-Object {
+                        [long]$_.Boundary.writerSequence -eq $retirementSequence
+                    }).Count -eq 1 -and
+                @($currentHistory | Where-Object {
+                        $sequence = [long]$_.Boundary.writerSequence
+                        ($sequence -eq $retirementSequence -and
+                            [string]$_.Operation.beforeState -ceq 'None' -and
+                            [string]$_.Operation.afterState -ceq 'PeerProofObserved') -or
+                        ($sequence -eq $recoverySequence -and
+                            [string]$_.Operation.beforeState -ceq 'PeerProofObserved' -and
+                            [string]$_.Operation.afterState -ceq 'Paired') -or
+                        ($sequence -gt $retirementSequence -and
+                            $sequence -lt $recoverySequence -and
+                            [string]$_.Operation.beforeState -ceq 'PeerProofObserved' -and
+                            [string]$_.Operation.afterState -ceq 'PeerProofObserved')
+                    }).Count -eq $currentHistory.Count -and
+                @($currentHistory | Where-Object {
+                        [long]$_.Boundary.writerSequence -eq $retirementSequence
+                    }).Count -eq 1 -and
+                @($currentHistory | Where-Object {
+                        [long]$_.Boundary.writerSequence -eq $recoverySequence
+                    }).Count -eq 1
+            if (-not $lineageValid) {
+                $recovery = $null
+            }
+        }
+        $poisonUpperBound = if ($null -ne $recovery) {
+            [long]$recovery.TransitionSequence
+        }
+        else {
+            $retirementSequence
+        }
+        [object[]]$poisonEvents = @($orderedEvents | Where-Object {
+                $writerSequence = Get-FileTransferFallbackTailEventWriterSequence `
+                    -Event $_
+                $writerSequence -gt $receiptSequence -and
+                $writerSequence -lt $poisonUpperBound -and
+                (([string]$_.EventName -in @(
+                            'filetransfer_runtime_terminalized',
+                            'filetransfer_terminalized_by_peer_down',
+                            'filetransfer_terminalized_by_peer_session_end',
+                            'filetransfer_terminalized_by_peer_disconnect',
+                            'filetransfer_terminalized_by_session_end',
+                            'filetransfer_session_replaced',
+                            'filetransfer_data_session_recreated',
+                            'filetransfer_data_session_removed',
+                            'file_transfer_inbound_terminal',
+                            'file_transfer_outbound_terminal',
+                            'transfer_terminal') -and
+                        (Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch `
+                            -Pending $receipt `
+                            -Event $_)) -or
+                    (Test-FileTransferFallbackTailLocalYieldScopeMutation `
+                        -Pending $receipt `
+                        -Event $_))
+            } | Sort-Object {
+                Get-FileTransferFallbackTailEventWriterSequence -Event $_
+            })
+        $poisonSequence = if ($poisonEvents.Count -gt 0) {
+            Get-FileTransferFallbackTailEventWriterSequence -Event $poisonEvents[0]
+        }
+        else {
+            [long]::MaxValue
+        }
+        $endSequence = [Math]::Min($retirementSequence, $poisonSequence)
+        [object[]]$blocked = @($orderedEvents | Where-Object {
+                [string]$_.EventName -ceq 'filetransfer_fallback_tail_local_yield_blocked' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -ceq
+                    'fallback_tail_peer_yield' -and
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -ceq
+                    'fallback_tail_local_owner_work_pending' -and
+                (Get-FileTransferFallbackTailEventWriterSequence -Event $_) -gt $receiptSequence -and
+                (Get-FileTransferFallbackTailEventWriterSequence -Event $_) -lt $endSequence -and
+                (Test-FileTransferFallbackTailRawScopeEqual -Left $receipt -Right $_) -and
+                (Test-FileTransferFallbackTailSnapshotScopeEventMatch `
+                    -Binding $start `
+                    -Event $_)
+            })
+        if ($blocked.Count -gt 0) {
+            $firstBlockedSequence = Get-FileTransferFallbackTailEventWriterSequence `
+                -Event ($blocked | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            $incidents.Add([pscustomobject]@{
+                    Start = $start
+                    BlockedEvents = $blocked
+                    Ambiguous = $false
+                    Recovered = $null -ne $recovery -and
+                        [long]$recovery.TransitionSequence -gt $firstBlockedSequence -and
+                        [long]$recovery.TransitionSequence -lt $poisonSequence
+                }) | Out-Null
+        }
+    }
+
+    $blockedOwners = [System.Collections.Generic.Dictionary[string, int]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($incident in $incidents) {
+        foreach ($blockedEvent in @($incident.BlockedEvents)) {
+            $blockedKey = '{0}|{1}' -f
+                (Get-FileTransferEventField `
+                    -Event $blockedEvent `
+                    -Name 'log_writer_id' `
+                    -Default ''),
+                (Get-FileTransferFallbackTailEventWriterSequence `
+                    -Event $blockedEvent)
+            $blockedOwners[$blockedKey] = if ($blockedOwners.ContainsKey($blockedKey)) {
+                $blockedOwners[$blockedKey] + 1
+            }
+            else {
+                1
+            }
+        }
+    }
+    foreach ($incident in $incidents) {
+        $incident.Ambiguous = @($incident.BlockedEvents | Where-Object {
+                $blockedKey = '{0}|{1}' -f
+                    (Get-FileTransferEventField `
+                        -Event $_ `
+                        -Name 'log_writer_id' `
+                        -Default ''),
+                    (Get-FileTransferFallbackTailEventWriterSequence -Event $_)
+                $blockedOwners[$blockedKey] -ne 1
+            }).Count -gt 0
+        if ($incident.Ambiguous) {
+            $incident.Recovered = $false
+        }
+    }
+
+    [object[]]$unresolved = @($incidents | Where-Object { -not $_.Recovered })
+    [object[]]$candidateRecords = @(
+        foreach ($incident in $unresolved) {
+            $first = @($incident.BlockedEvents | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($first.Count -eq 1) {
+                [pscustomobject]@{
+                    Class = 'fallback_tail_local_yield_missing'
+                    Event = $first[0]
+                    Reason = 'fallback_tail_local_owner_work_pending'
+                    Variant = 'route_transition_checkpoint_progress_left_transport_handoff_current'
+                    RawCopyCount = [int]$incident.BlockedEvents.Count
+                }
+            }
+        })
+    $rawCount = [int](@($incidents | ForEach-Object {
+                $_.BlockedEvents.Count
+            } | Measure-Object -Sum).Sum)
+    return [pscustomobject]@{
+        RawCount = $rawCount
+        DistinctCount = [int]$incidents.Count
+        RecoveredCount = [int]@($incidents | Where-Object { $_.Recovered }).Count
+        UnresolvedCount = [int]$unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } else { 'pass' }
+        UnresolvedCandidateRecords = $candidateRecords
+    }
+}
+
+function Get-FileTransferFallbackTailLocalYieldMissingCorrelation {
+    param(
+        [object[]]$Events,
+        $SnapshotEvaluation = $null
+    )
+
+    if ($null -ne $SnapshotEvaluation -and
+        [string]$SnapshotEvaluation.Mode -ceq 'SnapshotV1Authoritative' -and
+        @($SnapshotEvaluation.AuthoritativeFamilies) -contains
+            'fallback_tail_yield') {
+        return Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation `
+            -Events $Events `
+            -SnapshotEvaluation $SnapshotEvaluation
+    }
+
+    [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
+    $lineagesByScope = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::Ordinal)
+    $lineagesByKey = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::Ordinal)
+    $lineagesByTransfer = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::Ordinal)
+    $lineages = New-Object System.Collections.Generic.List[object]
+
+    foreach ($event in $orderedEvents) {
+        if ($null -eq $event) {
+            continue
+        }
+
+        $eventName = [string]$event.EventName
+        $scopeKey = Get-FileTransferFallbackTailLocalYieldScopeKey -Event $event
+        if ($eventName -eq 'filetransfer_fallback_tail_peer_proof_pending_decided' -and
+            (Get-FileTransferEventField -Event $event -Name 'decision_status' -Default '') -ceq 'Accepted' -and
+            (Get-FileTransferEventField -Event $event -Name 'decision_reason' -Default '') -ceq
+                'fallback_tail_initial_peer_proof_receipt_retained' -and
+            (Get-FileTransferEventField -Event $event -Name 'route' -Default '') -ceq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default '') -ceq '6') {
+            [string[]]$requiredFields = @(
+                'owner_key',
+                'pair_key',
+                'peer_authority_id',
+                'peer_yield_generation',
+                'peer_direction',
+                'peer_owner_key',
+                'peer_pair_key',
+                'peer_observation_identity',
+                'peer_frame_fingerprint')
+            $complete = $true
+            foreach ($field in $requiredFields) {
+                $value = Get-FileTransferEventField -Event $event -Name $field -Default ''
+                if ([string]::IsNullOrWhiteSpace($value) -or $value -ceq '(none)') {
+                    $complete = $false
+                    break
+                }
+            }
+            if (-not $complete) {
+                continue
+            }
+
+            $lineageKey = $scopeKey + ([char]0x1f) +
+                ((@($requiredFields | ForEach-Object {
+                            Get-FileTransferEventField -Event $event -Name $_ -Default ''
+                        })) -join ([char]0x1f))
+            $pendingFingerprint =
+                Get-FileTransferFallbackTailPeerProofPendingFingerprint -Event $event
+            if ($lineagesByKey.ContainsKey($lineageKey)) {
+                $existing = $lineagesByKey[$lineageKey]
+                if ($existing.PendingFingerprint -cne $pendingFingerprint) {
+                    $existing.Poisoned = $true
+                    $existing.Conflicted = $true
+                }
+                continue
+            }
+
+            $lineage = [pscustomobject]@{
+                Key = $lineageKey
+                ScopeKey = $scopeKey
+                TransferKey = (Get-FileTransferFallbackTailLocalYieldTransferKey -Event $event)
+                PendingEvent = $event
+                PendingFingerprint = $pendingFingerprint
+                ReceiptEvent = $null
+                BlockedEvents = New-Object System.Collections.Generic.List[object]
+                Recovered = $false
+                Poisoned = $false
+                Conflicted = $false
+            }
+            if (-not $lineagesByScope.ContainsKey($scopeKey)) {
+                $lineagesByScope[$scopeKey] = New-Object System.Collections.Generic.List[object]
+            }
+            $lineagesByScope[$scopeKey].Add($lineage) | Out-Null
+            if (-not $lineagesByTransfer.ContainsKey($lineage.TransferKey)) {
+                $lineagesByTransfer[$lineage.TransferKey] =
+                    New-Object System.Collections.Generic.List[object]
+            }
+            $lineagesByTransfer[$lineage.TransferKey].Add($lineage) | Out-Null
+            $lineagesByKey[$lineageKey] = $lineage
+            $lineages.Add($lineage) | Out-Null
+            continue
+        }
+
+        if ($eventName -in @(
+                'filetransfer_runtime_terminalized',
+                'filetransfer_terminalized_by_peer_down',
+                'filetransfer_terminalized_by_peer_session_end',
+                'filetransfer_terminalized_by_session_end',
+                'filetransfer_session_replaced',
+                'filetransfer_data_session_recreated',
+                'filetransfer_data_session_removed',
+                'file_transfer_inbound_terminal',
+                'file_transfer_outbound_terminal',
+                'transfer_terminal')) {
+            foreach ($lineage in $lineages.ToArray()) {
+                if (-not $lineage.Recovered -and
+                    (Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch `
+                        -Pending $lineage.PendingEvent `
+                        -Event $event)) {
+                    $lineage.Poisoned = $true
+                }
+            }
+            continue
+        }
+
+        $transferKey =
+            Get-FileTransferFallbackTailLocalYieldTransferKey -Event $event
+        if ($lineagesByTransfer.ContainsKey($transferKey)) {
+            foreach ($lineage in $lineagesByTransfer[$transferKey].ToArray()) {
+                if (-not $lineage.Recovered -and
+                    (Test-FileTransferFallbackTailLocalYieldScopeMutation `
+                        -Pending $lineage.PendingEvent `
+                        -Event $event)) {
+                    $lineage.Poisoned = $true
+                }
+            }
+        }
+
+        if (-not $lineagesByScope.ContainsKey($scopeKey)) {
+            continue
+        }
+
+        [object[]]$scopeLineages = @($lineagesByScope[$scopeKey].ToArray())
+        if ($eventName -eq 'filetransfer_fallback_tail_peer_proof_pending_invalidated') {
+            [object[]]$matches = @(
+                $scopeLineages |
+                    Where-Object {
+                        -not $_.Recovered -and
+                        (Test-FileTransferFallbackTailPeerProofLineageMatch `
+                            -Pending $_.PendingEvent `
+                            -Event $event)
+                    })
+            if ($matches.Count -eq 1) {
+                $matches[0].Poisoned = $true
+            }
+            continue
+        }
+
+        if ($eventName -eq 'filetransfer_fallback_tail_yield_proof_received') {
+            [object[]]$matches = @(
+                $scopeLineages |
+                    Where-Object {
+                        $null -eq $_.ReceiptEvent -and
+                        (Test-FileTransferFallbackTailPeerProofReceiptMatch `
+                            -Pending $_.PendingEvent `
+                            -Receipt $event)
+                    })
+            if ($matches.Count -eq 1) {
+                $matches[0].ReceiptEvent = $event
+            }
+            continue
+        }
+
+        if ($eventName -eq 'filetransfer_fallback_tail_local_yield_blocked' -and
+            (Get-FileTransferEventField -Event $event -Name 'source' -Default '') -ceq 'fallback_tail_peer_yield' -and
+            (Get-FileTransferEventField -Event $event -Name 'decision_reason' -Default '') -ceq
+                'fallback_tail_local_owner_work_pending') {
+            [object[]]$matches = @(
+                $scopeLineages |
+                    Where-Object {
+                        $null -ne $_.ReceiptEvent -and
+                        -not $_.Recovered
+                    })
+            if ($matches.Count -eq 1) {
+                $matches[0].BlockedEvents.Add($event) | Out-Null
+            }
+            continue
+        }
+
+        if ($eventName -eq 'filetransfer_fallback_tail_pairing_committed') {
+            [object[]]$matches = @(
+                $scopeLineages |
+                    Where-Object {
+                        $_.BlockedEvents.Count -gt 0 -and
+                        -not $_.Recovered -and
+                        -not $_.Poisoned -and
+                        (Test-FileTransferFallbackTailPeerProofPairingMatch `
+                            -Pending $_.PendingEvent `
+                            -Pairing $event)
+                    })
+            if ($matches.Count -eq 1) {
+                $matches[0].Recovered = $true
+            }
+            continue
+        }
+
+    }
+
+    [object[]]$incidents = @($lineages.ToArray() | Where-Object { $_.BlockedEvents.Count -gt 0 })
+    [object[]]$unresolved = @($incidents | Where-Object { -not $_.Recovered })
+    [object[]]$candidateRecords = @(
+        foreach ($incident in $unresolved) {
+            $firstBlock = @($incident.BlockedEvents.ToArray() | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+            if ($firstBlock.Count -eq 1) {
+                [pscustomobject]@{
+                    Class = 'fallback_tail_local_yield_missing'
+                    Event = $firstBlock[0]
+                    Reason = 'fallback_tail_local_owner_work_pending'
+                    Variant =
+                        'route_transition_checkpoint_progress_left_transport_handoff_current'
+                    RawCopyCount = [int]$incident.BlockedEvents.Count
+                }
+            }
+        })
+
+    return [pscustomobject]@{
+        RawCount = [int](@($incidents | ForEach-Object { $_.BlockedEvents.Count } | Measure-Object -Sum).Sum)
+        DistinctCount = [int]$incidents.Count
+        RecoveredCount = [int]@($incidents | Where-Object { $_.Recovered }).Count
+        UnresolvedCount = [int]$unresolved.Count
+        Verdict = if ($unresolved.Count -gt 0) { 'fail' } else { 'pass' }
+        UnresolvedCandidateRecords = $candidateRecords
+    }
+}
+
 function Add-FileTransferLiveHarnessEvidence {
     param(
         [object[]]$Events,
@@ -3006,6 +4512,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_frozen') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_recreated') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_data_session_removed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_replaced') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_epoch_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_epoch_reopened') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_handoff_epoch_reused') +
@@ -3077,6 +4584,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
         $runtimeUnlockRetryDispatchInstallEvents +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_peer_down') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_peer_session_end') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_peer_disconnect') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_terminalized_by_session_end') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_end_cancel_started') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_session_end_notice_started') +
@@ -3084,6 +4593,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
     )
+    $fallbackTailLocalYieldMissingProof =
+        Get-FileTransferFallbackTailLocalYieldMissingCorrelation `
+            -Events $fallbackTailPairingEvents `
+            -SnapshotEvaluation $snapshotEvaluation
     $fallbackTailFailedYieldQuiescentSuccessorProof =
         Get-FileTransferFallbackTailFailedYieldQuiescentSuccessorCorrelation `
             -Events $fallbackTailPairingEvents
@@ -4374,6 +5887,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Variant = $candidateRecord.Variant
         }) | Out-Null
     }
+    foreach ($candidateRecord in @($fallbackTailLocalYieldMissingProof.UnresolvedCandidateRecords)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = [string]$candidateRecord.Class
+            Event = $candidateRecord.Event
+            Reason = [string]$candidateRecord.Reason
+            Variant = [string]$candidateRecord.Variant
+        }) | Out-Null
+    }
     foreach ($candidateEvent in @($fallbackTailRetryCycleSuccessorProof.UnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback'
@@ -4615,6 +6136,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'regular_v4_peer_silence_replay_installed_authority_not_carried_to_dispatch',
                 'runtime_unlock_post_tuna_fallback_transport_proof_handoff_missing',
                 'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
+                'fallback_tail_local_yield_missing',
                 'fallback_tail_yield_authority_invalid',
                 'paired_fallback_tail_yield_missing',
                 'filetransfer_route_transition_draining_transport_grace_terminalization',
@@ -4676,6 +6198,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $failureVariant = if ($null -ne $firstCompactProofChainFailure -and
         [string]$firstCompactProofChainFailure.Class -in @(
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
+            'fallback_tail_local_yield_missing',
             'paired_fallback_tail_yield_missing',
             'runtime_unlock_retry_dispatch_paired_yield_successor_missing_after_probe_rollback',
             'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing',
@@ -4756,6 +6279,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_uncommitted_tuna_fallback_handoff_precommit_authority_misbound',
             'runtime_unlock_retry_dispatch_fallback_paired_yield_successor_release_invalid',
             'post_tuna_fallback_paired_yield_transport_epoch_reauthorization_missing',
+            'fallback_tail_local_yield_missing',
             'fallback_tail_yield_authority_invalid',
             'paired_fallback_tail_yield_missing',
             'regular_v4_frontier_tail_repair_state_publication_missing',
@@ -4770,8 +6294,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
 
     $runtimeUnlockProbeCommitVerdict = if ($probeAckCount -gt 0 -and $pairedCommitCount -gt 0) { 'pass' } else { 'none' }
-    $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
-    $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } else { 'none' }
+    $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackTailLocalYieldMissingProof.UnresolvedCount -gt 0 -or $fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
+    $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackTailLocalYieldMissingProof.UnresolvedCount -gt 0 -or $fallbackYieldCount -gt 0 -or $fallbackTailCoordinatorAggregateProof.YieldIssuedCount -gt 0) { 'fail' } else { 'none' }
     $liveRouteProofVerdict = [string]$compactLiveRouteProof.Verdict
     $warningCapPolicy = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.Policy } else { 'strict_small' }
     $warningCapCountLimit = if ($null -ne $compactWarningCap) { [int]$compactWarningCap.CountLimit } else { 3 }
@@ -4842,6 +6366,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("first_proof_chain_failure_writer_sequence={0}" -f $firstProofChainFailureWriterSequence),
         ("semantic_failure_domain={0}" -f $semanticFailureDomain),
+        ("fallback_tail_local_yield_missing_raw_count={0}" -f $fallbackTailLocalYieldMissingProof.RawCount),
+        ("fallback_tail_local_yield_missing_distinct_count={0}" -f $fallbackTailLocalYieldMissingProof.DistinctCount),
+        ("fallback_tail_local_yield_missing_recovered_count={0}" -f $fallbackTailLocalYieldMissingProof.RecoveredCount),
+        ("fallback_tail_local_yield_missing_unresolved_count={0}" -f $fallbackTailLocalYieldMissingProof.UnresolvedCount),
         ("runtime_unlock_probe_recovery_authority_lost_raw_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRawCount),
         ("runtime_unlock_probe_recovery_authority_lost_distinct_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount),
         ("runtime_unlock_probe_recovery_authority_lost_recovered_count={0}" -f $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRecoveredCount),
@@ -5844,6 +7372,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("clean_fallback_leg_proof_verdict={0}" -f $compactFallbackAuthorityProof.Verdict),
         ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailQuiescenceVerdict),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailPairedYieldVerdict),
+        ("fallback_tail_local_yield_missing_raw_count={0}" -f $fallbackTailLocalYieldMissingProof.RawCount),
+        ("fallback_tail_local_yield_missing_distinct_count={0}" -f $fallbackTailLocalYieldMissingProof.DistinctCount),
+        ("fallback_tail_local_yield_missing_recovered_count={0}" -f $fallbackTailLocalYieldMissingProof.RecoveredCount),
+        ("fallback_tail_local_yield_missing_unresolved_count={0}" -f $fallbackTailLocalYieldMissingProof.UnresolvedCount),
         'control_plane_isolation_verdict=pass',
         ("bridge_liveness_integration_verdict={0}" -f $compactBridgeLivenessProof.Verdict),
         ("bridge_liveness_stale_deferral_count={0}" -f $compactBridgeLivenessProof.StaleDeferralCount),
@@ -6806,6 +8338,10 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
         first_proof_chain_failure_writer_sequence = $firstProofChainFailureWriterSequence
         semantic_failure_domain = $semanticFailureDomain
+        fallback_tail_local_yield_missing_raw_count = $fallbackTailLocalYieldMissingProof.RawCount
+        fallback_tail_local_yield_missing_distinct_count = $fallbackTailLocalYieldMissingProof.DistinctCount
+        fallback_tail_local_yield_missing_recovered_count = $fallbackTailLocalYieldMissingProof.RecoveredCount
+        fallback_tail_local_yield_missing_unresolved_count = $fallbackTailLocalYieldMissingProof.UnresolvedCount
         runtime_unlock_probe_recovery_authority_lost_raw_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRawCount
         runtime_unlock_probe_recovery_authority_lost_distinct_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount
         runtime_unlock_probe_recovery_authority_lost_recovered_count = $postFallbackProbeSidecarRecoveryClassification.RuntimeUnlockProbeRecoveryAuthorityLostRecoveredCount
@@ -7343,8 +8879,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [string]$routeConsistencyState.Parity.FailureReason
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
-    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
-    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
     $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
     return [pscustomobject]@{
@@ -10745,9 +12281,9 @@ function Invoke-FileTransferRetainedAnalysis {
         $artifactStopwatch.Start()
         & $fullReportStageObserver -Name 'full_snapshot_summary_publication' -Status Started -InputCount $fullSnapshotLines.Count
         Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
-            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
+            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
-            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
+            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
             $snapshotParity | ConvertTo-Json -Depth 8 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8

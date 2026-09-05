@@ -8759,6 +8759,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 }
                 $effect = [pscustomobject]@{
                         LineIndex = $record.LineIndex
+                        Writer = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'log_writer_id'
+                        WriterSequence = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'log_writer_sequence'
                         CoordinatorInstanceId = $instanceId
                         TransitionId = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'transition_id'
                         StateGeneration = $stateGeneration
@@ -10472,6 +10474,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $fallbackTailPeerProofBindings =
+        [Collections.Generic.List[object]]::new()
     $fallbackTailEntries = @($operationHistory | Where-Object {
             [string]$_.Operation.family -ceq 'fallback_tail_yield'
         })
@@ -10599,6 +10603,164 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         [bool]$_.Operation.receiptValidated -and
                         [long]$_.Operation.fallbackTailYield.consumingInstallGeneration -gt 0
                     }).Count -eq 1
+            }
+            if ($valid -and
+                [string]$operation.operationRole -ceq 'yield_current' -and
+                [string]$operation.afterState -ceq 'Paired' -and
+                [string]$operation.beforeState -cne 'Paired' -and
+                [bool]$operation.stateApplied) {
+                $peerReceipt = @($typed.receipts | Where-Object {
+                        [string]$_.stage -ceq 'peer_proof' -and
+                        [string]$_.receiptStatus -ceq 'Observed' -and
+                        [bool]$_.receiptValidated
+                    })
+                $localReceipt = @($typed.receipts | Where-Object {
+                        [string]$_.stage -ceq 'local_proof' -and
+                        [bool]$_.receiptValidated
+                    })
+                $releaseReceipt = @($typed.receipts | Where-Object {
+                        [string]$_.stage -ceq 'paired_release' -and
+                        [bool]$_.receiptValidated
+                    })
+                $peerEffects = @($effects | Where-Object {
+                        [string]$_.CoordinatorInstanceId -ceq
+                            [string]$entry.Boundary.coordinatorInstanceId -and
+                        [string]$_.Family -ceq 'fallback_tail_yield' -and
+                        [string]$_.EffectKind -ceq 'peer_proof_observed' -and
+                        $peerReceipt.Count -eq 1 -and
+                        [string]$_.ReceiptIdentity -ceq
+                            [string]$peerReceipt[0].receiptIdentity -and
+                        [long]$_.ReceiptGeneration -eq
+                            [long]$peerReceipt[0].receiptGeneration -and
+                        [string]$_.ReceiptStatus -ceq
+                            [string]$peerReceipt[0].receiptStatus -and
+                        [string]$_.ReceiptFingerprint -ceq
+                            [string]$peerReceipt[0].receiptFingerprint
+                    })
+                $localEffects = @($effects | Where-Object {
+                        [string]$_.CoordinatorInstanceId -ceq
+                            [string]$entry.Boundary.coordinatorInstanceId -and
+                        [string]$_.Family -ceq 'fallback_tail_yield' -and
+                        [string]$_.OperationKey -ceq
+                            [string]$operation.operationKey -and
+                        [string]$_.AuthorityId -ceq
+                            [string]$operation.authorityId -and
+                        [long]$_.OperationGeneration -eq
+                            [long]$operation.operationGeneration -and
+                        [string]$_.EffectKind -in @(
+                            'local_proof_sent', 'local_proof_applied') -and
+                        $localReceipt.Count -eq 1 -and
+                        [string]$_.ReceiptIdentity -ceq
+                            [string]$localReceipt[0].receiptIdentity -and
+                        [long]$_.ReceiptGeneration -eq
+                            [long]$localReceipt[0].receiptGeneration -and
+                        [string]$_.ReceiptStatus -ceq
+                            [string]$localReceipt[0].receiptStatus -and
+                        [string]$_.ReceiptFingerprint -ceq
+                            [string]$localReceipt[0].receiptFingerprint
+                    })
+                $releaseEffects = @($effects | Where-Object {
+                        [string]$_.CoordinatorInstanceId -ceq
+                            [string]$entry.Boundary.coordinatorInstanceId -and
+                        [string]$_.Family -ceq 'fallback_tail_yield' -and
+                        [string]$_.OperationKey -ceq
+                            [string]$operation.operationKey -and
+                        [string]$_.AuthorityId -ceq
+                            [string]$operation.authorityId -and
+                        [long]$_.OperationGeneration -eq
+                            [long]$operation.operationGeneration -and
+                        [string]$_.EffectKind -ceq
+                            'paired_release_published' -and
+                        $releaseReceipt.Count -eq 1 -and
+                        [string]$_.ReceiptIdentity -ceq
+                            [string]$releaseReceipt[0].receiptIdentity -and
+                        [long]$_.ReceiptGeneration -eq
+                            [long]$releaseReceipt[0].receiptGeneration -and
+                        [string]$_.ReceiptStatus -ceq
+                            [string]$releaseReceipt[0].receiptStatus -and
+                        [string]$_.ReceiptFingerprint -ceq
+                            [string]$releaseReceipt[0].receiptFingerprint
+                    })
+                if ($peerReceipt.Count -eq 1 -and
+                    $localReceipt.Count -eq 1 -and
+                    $releaseReceipt.Count -eq 1 -and
+                    $peerEffects.Count -eq 1 -and
+                    @($localEffects | Where-Object {
+                            [string]$_.EffectKind -ceq 'local_proof_sent'
+                        }).Count -eq 1 -and
+                    @($localEffects | Where-Object {
+                            [string]$_.EffectKind -ceq 'local_proof_applied'
+                        }).Count -eq 1 -and
+                    $releaseEffects.Count -eq 1 -and
+                    [string]$typed.peerProofAuthorityId -match
+                        '^fta2-fallback_tail_yield-[0-9a-f]{24}$') {
+                    $fallbackTailPeerProofBindings.Add([pscustomobject]@{
+                            BindingKind = 'paired_yield'
+                            CoordinatorInstanceId =
+                                [string]$entry.Boundary.coordinatorInstanceId
+                            Writer = [string]$entry.Boundary.writer
+                            TransitionId = [string]$entry.Boundary.boundaryId
+                            TransitionSequence =
+                                [long]$entry.Boundary.writerSequence
+                            StateGeneration =
+                                [long]$entry.Boundary.afterStateGeneration
+                            SessionId = [string]$entry.Boundary.sessionId
+                            TransferId = [string]$entry.Boundary.transferId
+                            Direction = [string]$entry.Boundary.direction
+                            OperationKey = [string]$operation.operationKey
+                            OperationAuthorityId =
+                                [string]$operation.authorityId
+                            OperationGeneration =
+                                [long]$operation.operationGeneration
+                            OperationRole =
+                                [string]$operation.operationRole
+                            BeforeState = [string]$operation.beforeState
+                            AfterState = [string]$operation.afterState
+                            OwnerKey = [string]$typed.ownerKey
+                            PairKey = [string]$typed.pairKey
+                            PeerProofAuthorityId =
+                                [string]$typed.peerProofAuthorityId
+                            PeerProofGeneration = [long](
+                                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                                    -InputObject $typed `
+                                    -Name 'peerProofGeneration' `
+                                    -Default 0L)
+                            PeerProofYieldGeneration =
+                                [long]$typed.peerProofYieldGeneration
+                            PeerProofIdentity =
+                                [string]$typed.peerProofIdentity
+                            PeerProofFingerprint =
+                                [string]$typed.peerProofFingerprint
+                            PairingState = [string]$typed.pairingState
+                            PairingGeneration = [long]$typed.pairingGeneration
+                            LocalProofIdentity =
+                                [string]$typed.localProofIdentity
+                            LocalProofFingerprint =
+                                [string]$typed.localProofFingerprint
+                            PairedReleaseAuthorityId =
+                                [string]$typed.pairedReleaseAuthorityId
+                            PairedReleaseGeneration =
+                                [long]$typed.pairedReleaseGeneration
+                            PairedReleaseOutcome =
+                                [string]$typed.pairedReleaseOutcome
+                            AggregateBoundary = $entry.Boundary.afterBoundary
+                            SourceBoundary = $typed.sourceBoundary
+                            EffectiveBoundary = $typed.effectiveBoundary
+                            TargetBoundary = $typed.targetBoundary
+                            PeerProofReceipt = $peerReceipt[0]
+                            PeerProofEffect = $peerEffects[0]
+                            LocalProofReceipt = $localReceipt[0]
+                            LocalProofEffects = @($localEffects | Sort-Object {
+                                    [string]$_.EffectKind
+                                }, {
+                                    [string]$_.EffectIdentity
+                                }, {
+                                    [string]$_.ReceiptIdentity
+                                })
+                            PairedReleaseReceipt = $releaseReceipt[0]
+                            PairedReleaseEffect = $releaseEffects[0]
+                        }) | Out-Null
+                }
             }
             if (-not $valid) {
                 $entry.Boundary.taxonomyClass =
@@ -11696,6 +11858,161 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    foreach ($entry in @($aggregateEntries | Where-Object {
+                [string]$_.Boundary.decisionKind -ceq
+                    'ApplyFallbackTailPeerProofReceipt' -and
+                [string]$_.Boundary.decisionStatus -ceq 'Accepted' -and
+                [string]$_.Boundary.decisionReason -ceq
+                    'fallback_tail_initial_peer_proof_receipt_retained'
+            })) {
+        $pending = @($entry.Boundary.operations | Where-Object {
+                [string]$_.family -ceq 'fallback_tail_yield' -and
+                [string]$_.operationRole -ceq
+                    'peer_proof_pending_initial' -and
+                [string]$_.operationKind -ceq 'PeerProof' -and
+                [string]$_.beforeState -ceq 'None' -and
+                [string]$_.afterState -ceq 'Pending' -and
+                [bool]$_.stateApplied
+            })
+        if ($pending.Count -ne 1) {
+            continue
+        }
+
+        $operation = $pending[0]
+        $typed = $operation.fallbackTailYield
+        $receipts = @($typed.receipts | Where-Object {
+                [string]$_.stage -ceq 'peer_proof' -and
+                [string]$_.receiptStatus -ceq 'Observed' -and
+                [bool]$_.receiptValidated
+            })
+        $expectedOperationKey = @(
+            'fallback_tail_yield',
+            'peer_proof_pending_initial',
+            [string]$operation.authorityId,
+            ([long]$operation.operationGeneration).ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            'PeerProof') -join '|'
+        $rawPeerAuthority = [string](
+            Get-FileTransferCoordinatorSnapshotObjectProperty `
+                -InputObject $typed `
+                -Name 'peerProofAuthorityId' `
+                -Default '(none)')
+        $scopeEnvelope = [pscustomobject]@{
+            aggregate = [pscustomobject]@{
+                afterBoundary = $entry.AfterBoundary
+            }
+        }
+        if ($null -eq $typed -or
+            $receipts.Count -ne 1 -or
+            [string]$operation.operationKey -cne $expectedOperationKey -or
+            [string]$operation.predecessorAuthorityId -cne '(none)' -or
+            [long]$operation.operationGeneration -le 0L -or
+            $rawPeerAuthority -notmatch
+                '^fta2-fallback_tail_yield-[0-9a-f]{24}$' -or
+            (ConvertTo-FileTransferCoordinatorEvidenceToken `
+                $rawPeerAuthority) -cne [string]$operation.authorityId -or
+            [string]$typed.role -cne 'peer_proof_pending_initial' -or
+            [string]$typed.yieldKind -cne 'PeerProof' -or
+            [string]$typed.pairingState -cne 'Pending' -or
+            [long]$typed.peerProofYieldGeneration -ne
+                [long]$operation.operationGeneration -or
+            [string]$typed.peerProofIdentity -in @('', '(none)') -or
+            [string]$typed.peerProofFingerprint -in @('', '(none)') -or
+            [string]$typed.ownerKey -in @('', '(none)') -or
+            [string]$typed.pairKey -in @('', '(none)') -or
+            -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+                -Operation $operation) -or
+            -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
+                -Envelope $scopeEnvelope `
+                -Operation $operation)) {
+            continue
+        }
+
+        $receipt = $receipts[0]
+        if ([string]$operation.commandIdentity -cne
+                [string]$receipt.commandIdentity -or
+            [long]$operation.commandGeneration -ne
+                [long]$receipt.commandGeneration -or
+            [string]$operation.commandFingerprint -cne
+                [string]$receipt.commandFingerprint -or
+            [string]$operation.receiptIdentity -cne
+                [string]$receipt.receiptIdentity -or
+            [long]$operation.receiptGeneration -ne
+                [long]$receipt.receiptGeneration -or
+            [string]$operation.receiptStatus -cne
+                [string]$receipt.receiptStatus -or
+            [string]$operation.receiptFingerprint -cne
+                [string]$receipt.receiptFingerprint -or
+            -not [bool]$operation.receiptValidated) {
+            continue
+        }
+
+        $matchingEffects = @($effects | Where-Object {
+                [string]$_.EffectKind -ceq 'peer_proof_observed' -and
+                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                    -Boundary $entry.Boundary `
+                    -Operation $operation `
+                    -Effect $_)
+            })
+        if ($matchingEffects.Count -ne 1 -or
+            [string]$matchingEffects[0].Writer -cne
+                [string]$entry.Boundary.writer) {
+            continue
+        }
+
+        $effect = $matchingEffects[0]
+        $fallbackTailPeerProofBindings.Add([pscustomobject]@{
+                BindingKind = 'pending_peer_proof'
+                CoordinatorInstanceId =
+                    [string]$entry.Boundary.coordinatorInstanceId
+                Writer = [string]$entry.Boundary.writer
+                TransitionId = [string]$entry.Boundary.boundaryId
+                TransitionSequence = [long]$entry.Boundary.writerSequence
+                StateGeneration = [long]$entry.Boundary.afterStateGeneration
+                SessionId = [string]$entry.SessionId
+                TransferId = [string]$entry.TransferId
+                Direction = [string]$entry.Direction
+                OperationKey = [string]$operation.operationKey
+                OperationAuthorityId = [string]$operation.authorityId
+                OperationGeneration = [long]$operation.operationGeneration
+                OperationRole = [string]$operation.operationRole
+                BeforeState = [string]$operation.beforeState
+                AfterState = [string]$operation.afterState
+                OwnerKey = [string]$typed.ownerKey
+                PairKey = [string]$typed.pairKey
+                PeerProofAuthorityId = $rawPeerAuthority
+                PeerProofGeneration = [long](
+                    Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $typed `
+                        -Name 'peerProofGeneration' `
+                        -Default 0L)
+                PeerProofYieldGeneration =
+                    [long]$typed.peerProofYieldGeneration
+                PeerProofIdentity = [string]$typed.peerProofIdentity
+                PeerProofFingerprint = [string]$typed.peerProofFingerprint
+                PairingState = [string]$typed.pairingState
+                PairingGeneration = [long]$typed.pairingGeneration
+                LocalProofIdentity = [string]$typed.localProofIdentity
+                LocalProofFingerprint = [string]$typed.localProofFingerprint
+                PairedReleaseAuthorityId =
+                    [string]$typed.pairedReleaseAuthorityId
+                PairedReleaseGeneration =
+                    [long]$typed.pairedReleaseGeneration
+                PairedReleaseOutcome =
+                    [string]$typed.pairedReleaseOutcome
+                AggregateBoundary = $entry.AfterBoundary
+                SourceBoundary = $typed.sourceBoundary
+                EffectiveBoundary = $typed.effectiveBoundary
+                TargetBoundary = $typed.targetBoundary
+                PeerProofReceipt = $receipt
+                PeerProofEffect = $effect
+                LocalProofReceipt = $null
+                LocalProofEffects = @()
+                PairedReleaseReceipt = $null
+                PairedReleaseEffect = $null
+            }) | Out-Null
+    }
+
     if ($selectionModes.Count -ne 1) {
         $errors.Add('snapshot_selection_mode_conflict')
     }
@@ -11888,6 +12205,32 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $normalizedBoundaryJson = ConvertTo-Json -InputObject $normalizedBoundaries -Depth 64 -Compress
     $boundaryHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes ([System.Text.UTF8Encoding]::new($false).GetBytes($normalizedBoundaryJson))
     $artifactVerdict = if ($errors.Count -eq 0) { 'pass' } else { 'fail' }
+    $orderedFallbackTailPeerProofBindings = @(
+        $fallbackTailPeerProofBindings.ToArray() |
+            Where-Object { $artifactVerdict -ceq 'pass' } |
+            Sort-Object {
+                [string]$_.BindingKind
+            }, {
+                [string]$_.CoordinatorInstanceId
+            }, {
+                [string]$_.Writer
+            }, {
+                [string]$_.SessionId
+            }, {
+                [string]$_.TransferId
+            }, {
+                [string]$_.Direction
+            }, {
+                [long]$_.StateGeneration
+            }, {
+                [string]$_.TransitionId
+            }, {
+                [string]$_.OperationKey
+            }, {
+                [string]$_.PeerProofAuthorityId
+            }, {
+                [long]$_.PeerProofGeneration
+            })
     [pscustomobject]@{
         Mode = $mode
         ContractVersion = $script:FileTransferCoordinatorSnapshotContractVersion
@@ -11903,6 +12246,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         Boundaries = @($boundaries)
         # Internal correlation evidence; excluded from normalized boundary JSON/hash.
         __HeldPublicationProofClosures = @($heldPublicationProofClosures.ToArray() | Where-Object { $artifactVerdict -ceq 'pass' })
+        __FallbackTailPeerProofBindings =
+            @($orderedFallbackTailPeerProofBindings)
         FirstUnresolvedBoundary = $firstUnresolvedBoundary
         AuthoritativeFamilies = @($streams.Values | ForEach-Object { $_.AuthoritativeFamilies } | Sort-Object -Unique)
         ShadowFamilies = @($streams.Values | ForEach-Object { $_.ShadowFamilies } | Sort-Object -Unique)
@@ -13429,6 +13774,91 @@ function Get-FileTransferCoordinatorSnapshotCorrelationResult {
     }
 }
 
+function ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue {
+    param($Value)
+
+    if ($null -eq $Value -or $Value -is [string] -or
+        $Value.GetType().IsValueType) {
+        return $Value
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        $result = [ordered]@{}
+        foreach ($key in @($Value.Keys | Sort-Object)) {
+            if ([string]$key -in @('LineIndex', 'EvidenceLineIndex')) {
+                continue
+            }
+            $result[[string]$key] =
+                ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue `
+                    -Value $Value[$key]
+        }
+        return $result
+    }
+    if ($Value -is [Collections.IEnumerable]) {
+        $items = @($Value | ForEach-Object {
+                ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue `
+                    -Value $_
+            })
+        Write-Output -NoEnumerate $items
+        return
+    }
+
+    $result = [ordered]@{}
+    foreach ($property in @($Value.PSObject.Properties | Sort-Object Name)) {
+        if ([string]$property.Name -in @('LineIndex', 'EvidenceLineIndex')) {
+            continue
+        }
+        $result[[string]$property.Name] =
+            ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue `
+                -Value $property.Value
+    }
+    return $result
+}
+
+function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofBindingSemanticSummary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Evaluation)
+
+    $bindings = if ($null -ne $Evaluation.PSObject.Properties[
+            '__FallbackTailPeerProofBindings']) {
+        @($Evaluation.__FallbackTailPeerProofBindings)
+    }
+    else {
+        @()
+    }
+    $normalized = @($bindings | Sort-Object {
+                [string]$_.BindingKind
+            }, {
+                [string]$_.CoordinatorInstanceId
+            }, {
+                [string]$_.Writer
+            }, {
+                [string]$_.SessionId
+            }, {
+                [string]$_.TransferId
+            }, {
+                [string]$_.Direction
+            }, {
+                [long]$_.StateGeneration
+            }, {
+                [string]$_.TransitionId
+            }, {
+                [string]$_.OperationKey
+            }, {
+                [string]$_.PeerProofAuthorityId
+            }, {
+                [long]$_.PeerProofGeneration
+            } | ForEach-Object {
+                ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue `
+                    -Value $_
+            })
+    $json = ConvertTo-Json -InputObject $normalized -Depth 32 -Compress
+    [pscustomobject]@{
+        Count = $normalized.Count
+        Hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
+            [Text.UTF8Encoding]::new($false).GetBytes($json))
+    }
+}
+
 function Compare-FileTransferCoordinatorSnapshotEvaluations {
     [CmdletBinding()]
     param(
@@ -13437,6 +13867,12 @@ function Compare-FileTransferCoordinatorSnapshotEvaluations {
     )
 
     $reasons = [System.Collections.Generic.List[string]]::new()
+    $fullFallbackTailBindingSummary =
+        Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofBindingSemanticSummary `
+            -Evaluation $Full
+    $compactFallbackTailBindingSummary =
+        Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofBindingSemanticSummary `
+            -Evaluation $Compact
     foreach ($field in @(
             'Mode',
             'ContractVersion',
@@ -13459,6 +13895,16 @@ function Compare-FileTransferCoordinatorSnapshotEvaluations {
             $reasons.Add("snapshot_full_compact_$($field.ToLowerInvariant())_mismatch")
         }
     }
+    if ([long]$fullFallbackTailBindingSummary.Count -ne
+        [long]$compactFallbackTailBindingSummary.Count) {
+        $reasons.Add(
+            'snapshot_full_compact_fallback_tail_peer_proof_binding_count_mismatch')
+    }
+    elseif ([string]$fullFallbackTailBindingSummary.Hash -cne
+        [string]$compactFallbackTailBindingSummary.Hash) {
+        $reasons.Add(
+            'snapshot_full_compact_fallback_tail_peer_proof_binding_hash_mismatch')
+    }
 
     [pscustomobject]@{
         Verdict = if ($reasons.Count -eq 0) { 'pass' } else { 'fail' }
@@ -13473,5 +13919,13 @@ function Compare-FileTransferCoordinatorSnapshotEvaluations {
         CompactTransitionCount = $Compact.TransitionCount
         FullEffectCount = $Full.EffectCount
         CompactEffectCount = $Compact.EffectCount
+        FullFallbackTailPeerProofBindingCount =
+            [long]$fullFallbackTailBindingSummary.Count
+        CompactFallbackTailPeerProofBindingCount =
+            [long]$compactFallbackTailBindingSummary.Count
+        FullFallbackTailPeerProofBindingHash =
+            [string]$fullFallbackTailBindingSummary.Hash
+        CompactFallbackTailPeerProofBindingHash =
+            [string]$compactFallbackTailBindingSummary.Hash
     }
 }

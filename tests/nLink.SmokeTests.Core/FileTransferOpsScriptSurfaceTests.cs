@@ -1821,6 +1821,518 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FileTransferOps_FallbackTailSnapshotLocalYieldMissingReducerIsExactAndModeStable()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+            $orchestrationPath = Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1'
+            $parseErrors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                $orchestrationPath, [ref]$null, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors -join ';') }
+            foreach ($name in @(
+                    'Get-FileTransferFallbackTailLocalYieldTransferKey',
+                    'Test-FileTransferFallbackTailLocalYieldScopeMutation',
+                    'Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch',
+                    'Get-FileTransferFallbackTailEventWriterSequence',
+                    'Test-FileTransferFallbackTailExactRawJoinValue',
+                    'Test-FileTransferFallbackTailExactRawJoinToken',
+                    'Test-FileTransferFallbackTailRawOwnerAndPairTuple',
+                    'Test-FileTransferFallbackTailSnapshotScopeEventMatch',
+                    'Test-FileTransferFallbackTailSnapshotReceiptMatch',
+                    'Test-FileTransferFallbackTailRawScopeEqual',
+                    'Test-FileTransferFallbackTailSnapshotPairingRecovery',
+                    'Test-FileTransferFallbackTailSnapshotPeerFirstYieldCarry',
+                    'Test-FileTransferFallbackTailSnapshotLineageBoundary',
+                    'Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation')) {
+                $definitions = @($ast.FindAll({ param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq $name
+                }, $true))
+                if ($definitions.Count -ne 1) { throw "Function not unique: $name" }
+                . ([scriptblock]::Create($definitions[0].Extent.Text))
+            }
+
+            function Copy-Value($value) {
+                $value | ConvertTo-Json -Depth 24 | ConvertFrom-Json
+            }
+            $rawSession = 'session-raw'
+            $rawTransfer = 'transfer-raw'
+            $rawPeerAuthority = 'fta2-fallback_tail_yield-0123456789abcdef01234567'
+            $rawOwner = "$rawSession|$rawTransfer|post_tuna_fallback_v6|6|2|3|1|1|(none)"
+            $rawPair = "$rawSession|$rawTransfer|post_tuna_fallback_v6|6|2|1|(none)"
+            $sessionToken = ConvertTo-FileTransferCoordinatorEvidenceToken $rawSession
+            $transferToken = ConvertTo-FileTransferCoordinatorEvidenceToken $rawTransfer
+            $peerAuthorityToken = ConvertTo-FileTransferCoordinatorEvidenceToken $rawPeerAuthority
+            $ownerToken = ConvertTo-FileTransferCoordinatorEvidenceToken $rawOwner
+            $pairToken = ConvertTo-FileTransferCoordinatorEvidenceToken $rawPair
+            $source = [pscustomobject][ordered]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6L; liveRouteEpoch=2L
+                routePublicationGeneration=4L; routeCommitGeneration=2L
+                runtimeGeneration=3L; terminalGeneration=0L; legGeneration=3L
+                transportEpoch=1L; bridgeRecoveryGeneration=1L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session'; dataSessionGeneration=1L
+            }
+            $aggregate = Copy-Value $source
+            $aggregate.transportEpoch = 0L
+            $aggregate.bridgeRecoveryGeneration = 0L
+            function New-PeerReceipt([string]$reason) {
+                [pscustomobject][ordered]@{
+                    stage='peer_proof'; commandIdentity='peer-command'; commandGeneration=1L
+                    commandFingerprint='peer-command-fingerprint'; receiptIdentity='peer-receipt'
+                    receiptGeneration=1L; receiptStatus='Observed'; receiptReason=$reason
+                    receiptFingerprint='peer-receipt-fingerprint'; receiptValidated=$true
+                }
+            }
+            $pendingReceipt = New-PeerReceipt 'fallback_tail_peer_proof_retained'
+            $observedReceipt = New-PeerReceipt 'fallback_tail_peer_proof_observed'
+            $peerEffect = [pscustomobject][ordered]@{
+                LineIndex=20L; Writer='writer'; WriterSequence=20L
+                CoordinatorInstanceId='coordinator'; TransitionId='pending'; StateGeneration=1L
+                Family='fallback_tail_yield'; OperationKey='pending-key'
+                AuthorityId=$peerAuthorityToken; OperationGeneration=1L
+                EffectKind='peer_proof_observed'; EffectIdentity='peer-effect'
+                ReceiptIdentity='peer-receipt'; ReceiptGeneration=1L
+                ReceiptStatus='Observed'; ReceiptFingerprint='peer-receipt-fingerprint'
+            }
+            $pendingBinding = [pscustomobject][ordered]@{
+                BindingKind='pending_peer_proof'; CoordinatorInstanceId='coordinator'; Writer='writer'
+                TransitionId='pending'; TransitionSequence=10L; StateGeneration=1L
+                SessionId=$sessionToken; TransferId=$transferToken; Direction='outbound'
+                OperationKey='pending-key'; OperationAuthorityId=$peerAuthorityToken
+                OperationGeneration=1L; OperationRole='peer_proof_pending_initial'
+                BeforeState='None'; AfterState='Pending'; OwnerKey=$ownerToken; PairKey=$pairToken
+                PeerProofAuthorityId=$rawPeerAuthority; PeerProofGeneration=1L
+                PeerProofYieldGeneration=1L; PeerProofIdentity='peer-proof'
+                PeerProofFingerprint='peer-proof-fingerprint'; PairingState='Pending'
+                PairingGeneration=0L; LocalProofIdentity='(none)'
+                LocalProofFingerprint='(none)'; PairedReleaseAuthorityId='(none)'
+                PairedReleaseGeneration=0L; PairedReleaseOutcome='(none)'
+                AggregateBoundary=$aggregate; SourceBoundary=$source
+                EffectiveBoundary=$source; TargetBoundary=$source
+                PeerProofReceipt=$pendingReceipt; PeerProofEffect=$peerEffect
+                LocalProofReceipt=$null; LocalProofEffects=@()
+                PairedReleaseReceipt=$null; PairedReleaseEffect=$null
+            }
+            function New-YieldOperation(
+                [string]$role,
+                [string]$key,
+                [string]$authority,
+                [long]$generation,
+                [string]$before,
+                [string]$after,
+                $typed = $null) {
+                [pscustomobject][ordered]@{
+                    family='fallback_tail_yield'; operationRole=$role
+                    operationKind=if ($role -eq 'peer_proof_pending_initial') { 'PeerProof' } else { 'Quiescent' }
+                    operationKey=$key; authorityId=$authority
+                    operationGeneration=$generation; beforeState=$before; afterState=$after
+                    stateApplied=$true; fallbackTailYield=$typed
+                }
+            }
+            function New-Boundary([string]$id, [long]$sequence, [long]$generation, [object[]]$operations) {
+                [pscustomobject][ordered]@{
+                    boundaryId=$id; coordinatorInstanceId='coordinator'; writer='writer'
+                    writerSequence=$sequence; sessionId=$sessionToken; transferId=$transferToken
+                    direction='outbound'; beforeStateGeneration=($generation - 1L)
+                    afterStateGeneration=$generation; beforeBoundary=$aggregate; afterBoundary=$aggregate
+                    operations=$operations; verdict='pass'
+                }
+            }
+            $pendingOperation = New-YieldOperation `
+                'peer_proof_pending_initial' 'pending-key' $peerAuthorityToken 1L 'None' 'Pending'
+            $pendingBoundary = New-Boundary 'pending' 10L 1L @($pendingOperation)
+            $currentAuthority = ConvertTo-FileTransferCoordinatorEvidenceToken `
+                'fta2-fallback_tail_yield-aaaaaaaaaaaaaaaaaaaaaaaa'
+            $currentKey = "fallback_tail_yield|yield_current|$currentAuthority|2|Quiescent"
+            $carriedTyped = [pscustomobject][ordered]@{
+                role='yield_current'; pairingState='PeerProofObserved'; ownerKey=$ownerToken
+                pairKey=$pairToken; peerProofAuthorityId=$rawPeerAuthority
+                peerProofYieldGeneration=1L; peerProofIdentity='peer-proof'
+                peerProofFingerprint='peer-proof-fingerprint'; localProofIdentity='(none)'
+                pairedReleaseAuthorityId='(none)'; sourceBoundary=$source
+                receipts=@($observedReceipt)
+            }
+            $retiredOperation = New-YieldOperation `
+                'peer_proof_pending_initial' 'pending-key' $peerAuthorityToken 1L 'Pending' 'None'
+            $carriedOperation = New-YieldOperation `
+                'yield_current' $currentKey $currentAuthority 2L 'None' 'PeerProofObserved' $carriedTyped
+            $carryBoundary = New-Boundary 'carry' 50L 2L @($retiredOperation,$carriedOperation)
+            $pairedOperation = New-YieldOperation `
+                'yield_current' $currentKey $currentAuthority 2L 'PeerProofObserved' 'Paired'
+            $pairedBoundary = New-Boundary 'paired' 60L 3L @($pairedOperation)
+            $pairedBinding = [pscustomobject][ordered]@{
+                BindingKind='paired_yield'; CoordinatorInstanceId='coordinator'; Writer='writer'
+                TransitionId='paired'; TransitionSequence=60L; StateGeneration=3L
+                SessionId=$sessionToken; TransferId=$transferToken; Direction='outbound'
+                OperationKey=$currentKey; OperationAuthorityId=$currentAuthority
+                OperationGeneration=2L; OperationRole='yield_current'
+                BeforeState='PeerProofObserved'; AfterState='Paired'; OwnerKey=$ownerToken
+                PairKey=$pairToken; PeerProofAuthorityId=$rawPeerAuthority
+                PeerProofGeneration=1L; PeerProofYieldGeneration=1L
+                PeerProofIdentity='peer-proof'; PeerProofFingerprint='peer-proof-fingerprint'
+                PairingState='Paired'; PairingGeneration=1L
+                LocalProofIdentity='local-proof'; LocalProofFingerprint='local-proof-fingerprint'
+                PairedReleaseAuthorityId='release'; PairedReleaseGeneration=1L
+                PairedReleaseOutcome='Quiescent'; AggregateBoundary=$aggregate
+                SourceBoundary=$source
+                EffectiveBoundary=$source; TargetBoundary=$source
+                PeerProofReceipt=$observedReceipt; PeerProofEffect=$peerEffect
+                LocalProofReceipt=[pscustomobject]@{ receiptIdentity='local-receipt' }
+                LocalProofEffects=@(
+                    [pscustomobject]@{ WriterSequence=61L; EffectKind='local_proof_sent' },
+                    [pscustomobject]@{ WriterSequence=62L; EffectKind='local_proof_applied' })
+                PairedReleaseReceipt=[pscustomobject]@{ receiptIdentity='release-receipt' }
+                PairedReleaseEffect=[pscustomobject]@{ WriterSequence=63L }
+            }
+            function New-Evaluation([object[]]$boundaries, [object[]]$bindings) {
+                [pscustomobject]@{
+                    Mode='SnapshotV1Authoritative'; ArtifactEvidenceVerdict='pass'
+                    StreamComplete=$true; AuthoritativeFamilies=@('fallback_tail_yield')
+                    Boundaries=$boundaries; __FallbackTailPeerProofBindings=$bindings
+                }
+            }
+            function New-Event([string]$name, [long]$sequence, [hashtable]$extra = @{}) {
+                $fields=[ordered]@{
+                    log_writer_id='writer'; log_writer_sequence=[string]$sequence
+                    session_id=$rawSession; transfer_id=$rawTransfer; direction='outbound'
+                    route='post_tuna_fallback_v6'; protocol_version='6'; live_route_epoch='2'
+                    leg_generation='3'; transport_epoch='1'; bridge_recovery_generation='1'
+                    checkpoint_request_id='(none)'
+                    data_session_identity='data-session'; data_session_generation='1'
+                }
+                foreach ($key in $extra.Keys) { $fields[$key]=[string]$extra[$key] }
+                [pscustomobject]@{
+                    EventName=$name; Sequence=$sequence; LineNumber=$sequence
+                    FileName='synthetic.log'; Message=$name; Fields=$fields
+                }
+            }
+            $receipt = New-Event 'filetransfer_fallback_tail_yield_proof_received' 30L @{
+                authority_schema=2; authority_id=$rawPeerAuthority
+                predecessor_authority_id='(none)'; yield_generation=1
+                peer_direction='inbound'; owner_key=$rawOwner; pair_key=$rawPair
+                raw_pair_key=$rawPair; canonical_pair_key=$rawPair; pair_key_format='canonical_7'
+                peer_live_route_epoch=2; peer_leg_generation=3; peer_transport_epoch=1
+                peer_bridge_recovery_generation=1; peer_checkpoint_request_id='(none)'
+            }
+            $blocked = @(40L..43L | ForEach-Object {
+                    New-Event 'filetransfer_fallback_tail_local_yield_blocked' $_ @{
+                        source='fallback_tail_peer_yield'
+                        decision_reason='fallback_tail_local_owner_work_pending'
+                    }
+                })
+            $unrelated = New-Event 'unrelated' 35L
+
+            function Assert-Result(
+                [string]$name,
+                $evaluation,
+                [object[]]$fullEvents,
+                [object[]]$compactEvents,
+                [int]$recovered,
+                [int]$unresolved) {
+                $full = Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation `
+                    -Events $fullEvents -SnapshotEvaluation $evaluation
+                $compact = Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation `
+                    -Events $compactEvents -SnapshotEvaluation (Copy-Value $evaluation)
+                foreach ($result in @($full,$compact)) {
+                    if ($result.RawCount -ne 4 -or $result.DistinctCount -ne 1 -or
+                        $result.RecoveredCount -ne $recovered -or
+                        $result.UnresolvedCount -ne $unresolved) {
+                        throw "$name returned the wrong quartet: $($result | ConvertTo-Json -Depth 8 -Compress)"
+                    }
+                }
+                if (($full | Select-Object RawCount,DistinctCount,RecoveredCount,UnresolvedCount,Verdict |
+                        ConvertTo-Json -Compress) -cne
+                    ($compact | Select-Object RawCount,DistinctCount,RecoveredCount,UnresolvedCount,Verdict |
+                        ConvertTo-Json -Compress)) {
+                    throw "$name full/compact result diverged."
+                }
+                if ($unresolved -eq 1 -and
+                    ($full.UnresolvedCandidateRecords.Count -ne 1 -or
+                     $full.UnresolvedCandidateRecords[0].Variant -cne
+                        'route_transition_checkpoint_progress_left_transport_handoff_current')) {
+                    throw "$name did not retain the exact unresolved candidate."
+                }
+            }
+
+            $unresolvedEvaluation = New-Evaluation @($pendingBoundary) @($pendingBinding)
+            Assert-Result -name 'unresolved' -evaluation $unresolvedEvaluation `
+                -fullEvents (@($receipt,$unrelated)+$blocked) `
+                -compactEvents (@($receipt)+$blocked) -recovered 0 -unresolved 1
+
+            $recoveredEvaluation = New-Evaluation `
+                @($pendingBoundary,$carryBoundary,$pairedBoundary) `
+                @($pendingBinding,$pairedBinding)
+            Assert-Result -name 'recovered' -evaluation $recoveredEvaluation `
+                -fullEvents (@($receipt,$unrelated)+$blocked) `
+                -compactEvents (@($receipt)+$blocked) -recovered 1 -unresolved 0
+
+            $competing = Copy-Value $pairedBinding
+            $competing.TransitionId='paired-competing'
+            $competing.TransitionSequence=61L
+            $ambiguousEvaluation = New-Evaluation `
+                @($pendingBoundary,$carryBoundary,$pairedBoundary) `
+                @($pendingBinding,$pairedBinding,$competing)
+            Assert-Result -name 'ambiguous' -evaluation $ambiguousEvaluation `
+                -fullEvents (@($receipt,$unrelated)+$blocked) `
+                -compactEvents (@($receipt)+$blocked) -recovered 0 -unresolved 1
+
+            $poison = New-Event 'filetransfer_data_session_recreated' 45L @{
+                previous_data_session_generation=1; data_session_generation=2
+            }
+            Assert-Result -name 'mutation-poison' -evaluation $recoveredEvaluation `
+                -fullEvents (@($receipt,$unrelated)+$blocked+@($poison)) `
+                -compactEvents (@($receipt)+$blocked+@($poison)) `
+                -recovered 0 -unresolved 1
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Fallback-tail Snapshot V1 local-yield reducer regression failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
+    public async Task FileTransferOps_FallbackTailPeerProofBindingsAreBuiltAndComparedSemantically()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        const string script = """
+            param([string]$RepoRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+            $coverage = $catalog.RequiredFamilies -join ','
+            $rawPeerAuthority = 'fta2-fallback_tail_yield-0123456789abcdef01234567'
+            $peerAuthority = ConvertTo-FileTransferCoordinatorEvidenceToken $rawPeerAuthority
+            $childScope = [ordered]@{
+                route='post_tuna_fallback_v6'; protocolVersion=6L; liveRouteEpoch=2L
+                routePublicationGeneration=4L; routeCommitGeneration=2L
+                runtimeGeneration=3L; terminalGeneration=0L; legGeneration=3L
+                transportEpoch=1L; bridgeRecoveryGeneration=1L
+                checkpointGeneration=0L; checkpointRequestId='(none)'
+                dataSessionIdentity='data-session'; dataSessionGeneration=1L
+            }
+            $aggregateScope = $childScope | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+            $aggregateScope.transportEpoch = 0L
+            $aggregateScope.bridgeRecoveryGeneration = 0L
+
+            function New-Receipt(
+                [string]$stage,
+                [string]$status,
+                [string]$reason) {
+                [ordered]@{
+                    stage=$stage; commandIdentity="$stage-command"; commandGeneration=1L
+                    commandFingerprint="$stage-command-fingerprint"
+                    receiptIdentity="$stage-receipt"; receiptGeneration=1L
+                    receiptStatus=$status; receiptReason=$reason
+                    receiptFingerprint="$stage-receipt-fingerprint"
+                    receiptValidated=$true
+                }
+            }
+
+            function New-EnvelopeLine(
+                [string]$coordinator,
+                [string]$transition,
+                [string]$beforeHash,
+                [string]$afterHash,
+                [string]$reason,
+                $operation) {
+                $aggregate = [ordered]@{
+                    beforeStateGeneration=0L; afterStateGeneration=1L
+                    beforeStateFingerprint=$beforeHash; afterStateFingerprint=$afterHash
+                    beforeBoundary=$aggregateScope; afterBoundary=$aggregateScope
+                    changedFamilies=@('fallback_tail_yield'); operations=@($operation)
+                }
+                $envelope = [ordered]@{
+                    snapshotContractVersion=1
+                    snapshotSelectionMode='SnapshotV1Authoritative'
+                    coordinatorInstanceId=$coordinator; sessionId='session'; transferId='transfer'
+                    direction='outbound'; decisionUtcMilliseconds=1000L
+                    transitionId=$transition; decisionKind='ApplyFallbackTailPeerProofReceipt'
+                    decisionStatus='Accepted'; decisionReason=$reason; aggregate=$aggregate
+                }
+                $json = $envelope | ConvertTo-Json -Depth 32 -Compress
+                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+                $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+                $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+                "event=filetransfer_coordinator_transition_snapshot; snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$coordinator; session_id=session; transfer_id=transfer; direction=outbound; log_writer_id=writer; log_writer_sequence=2; transition_id=$transition; before_state_generation=0; after_state_generation=1; snapshot_sha256=$hash; snapshot_payload=$payload; authority_effect=none"
+            }
+
+            function New-EffectLine(
+                [string]$coordinator,
+                [string]$transition,
+                [string]$operationKey,
+                [string]$authority,
+                [string]$kind,
+                $receipt,
+                [long]$sequence) {
+                "event=filetransfer_coordinator_authority_effect; snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$coordinator; session_id=session; transfer_id=transfer; direction=outbound; log_writer_id=writer; log_writer_sequence=$sequence; transition_id=$transition; coordinator_state_generation=1; operation_family=fallback_tail_yield; operation_key=$operationKey; operation_authority_id=$authority; operation_generation=1; effect_kind=$kind; effect_identity=$kind-effect; effect_generation=1; receipt_identity=$($receipt.receiptIdentity); receipt_generation=1; receipt_status=$($receipt.receiptStatus); receipt_fingerprint=$($receipt.receiptFingerprint); route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; route_publication_generation=4; route_commit_generation=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; checkpoint_generation=0; checkpoint_request_id=(none); data_session_identity=data-session; data_session_generation=1; authority_effect=applied"
+            }
+
+            function New-EvaluationLines([string]$kind) {
+                $coordinator = "coordinator-$kind"
+                $transition = "transition-$kind"
+                $beforeHash = "before-$kind"
+                $afterHash = "after-$kind"
+                $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$coordinator; session_id=session; transfer_id=transfer; direction=outbound; log_writer_id=writer"
+                if ($kind -ceq 'pending') {
+                    $receipt = New-Receipt 'peer_proof' 'Observed' `
+                        'fallback_tail_peer_proof_retained'
+                    $operationKey = "fallback_tail_yield|peer_proof_pending_initial|$peerAuthority|1|PeerProof"
+                    $operation = [ordered]@{
+                        family='fallback_tail_yield'; operationRole='peer_proof_pending_initial'
+                        operationKey=$operationKey; operationKind='PeerProof'
+                        authorityId=$peerAuthority; predecessorAuthorityId='(none)'
+                        operationGeneration=1L; beforeState='None'; afterState='Pending'
+                        commandIdentity=$receipt.commandIdentity; commandGeneration=1L
+                        commandFingerprint=$receipt.commandFingerprint
+                        receiptIdentity=$receipt.receiptIdentity; receiptGeneration=1L
+                        receiptStatus='Observed'; receiptFingerprint=$receipt.receiptFingerprint
+                        receiptValidated=$true; stateApplied=$true
+                        fallbackTailYield=[ordered]@{
+                            role='peer_proof_pending_initial'; sourceBoundary=$childScope
+                            effectiveBoundary=$childScope; targetBoundary=$childScope
+                            yieldKind='PeerProof'; pairingState='Pending'
+                            ownerKey='owner-key'; pairKey='pair-key'
+                            localProofIdentity='(none)'; localProofFingerprint='(none)'
+                            peerProofAuthorityId=$rawPeerAuthority; peerProofGeneration=1L
+                            peerProofYieldGeneration=1L; peerProofIdentity='peer-proof'
+                            peerProofFingerprint='peer-proof-fingerprint'; pairingGeneration=0L
+                            pairedReleaseAuthorityId='(none)'; pairedReleaseGeneration=0L
+                            pairedReleaseOutcome='(none)'; failedPredecessorAuthorityId='(none)'
+                            failedSupersessionCarriedPeerProof=$false
+                            reauthorizationGeneration=0L; reauthorizationSourceTransportEpoch=0L
+                            reauthorizationTargetTransportEpoch=0L; reservationGeneration=0L
+                            reservedRetryAuthorityId='(none)'; consumingInstallGeneration=0L
+                            retryHoldGeneration=0L; retryRecheckGeneration=0L
+                            invalidationReason='(none)'; receipts=@($receipt)
+                        }
+                    }
+                    $effects = @(New-EffectLine $coordinator $transition $operationKey `
+                        $peerAuthority 'peer_proof_observed' $receipt 3L)
+                    $reason = 'fallback_tail_initial_peer_proof_receipt_retained'
+                }
+                else {
+                    $yieldReceipt = New-Receipt 'yield' 'Accepted' 'accepted'
+                    $localReceipt = New-Receipt 'local_proof' 'Accepted' 'accepted'
+                    $peerReceipt = New-Receipt 'peer_proof' 'Observed' `
+                        'fallback_tail_peer_proof_observed'
+                    $releaseReceipt = New-Receipt 'paired_release' 'Accepted' 'accepted'
+                    $localAuthority = 'fte1-aaaaaaaaaaaaaaaaaaaaaaaa'
+                    $operationKey = "fallback_tail_yield|yield_current|$localAuthority|1|Quiescent"
+                    $operation = [ordered]@{
+                        family='fallback_tail_yield'; operationRole='yield_current'
+                        operationKey=$operationKey; operationKind='Quiescent'
+                        authorityId=$localAuthority; predecessorAuthorityId='(none)'
+                        operationGeneration=1L; beforeState='PeerProofObserved'; afterState='Paired'
+                        commandIdentity=$peerReceipt.commandIdentity; commandGeneration=1L
+                        commandFingerprint=$peerReceipt.commandFingerprint
+                        receiptIdentity=$peerReceipt.receiptIdentity; receiptGeneration=1L
+                        receiptStatus='Observed'; receiptFingerprint=$peerReceipt.receiptFingerprint
+                        receiptValidated=$true; stateApplied=$true
+                        fallbackTailYield=[ordered]@{
+                            role='yield_current'; sourceBoundary=$childScope
+                            effectiveBoundary=$childScope; targetBoundary=$childScope
+                            yieldKind='Quiescent'; pairingState='Paired'
+                            ownerKey='owner-key'; pairKey='pair-key'
+                            localProofIdentity='local-proof'; localProofFingerprint='local-fingerprint'
+                            peerProofAuthorityId=$rawPeerAuthority; peerProofGeneration=1L
+                            peerProofYieldGeneration=1L; peerProofIdentity='peer-proof'
+                            peerProofFingerprint='peer-proof-fingerprint'; pairingGeneration=1L
+                            pairedReleaseAuthorityId='release'; pairedReleaseGeneration=1L
+                            pairedReleaseOutcome='Quiescent'; failedPredecessorAuthorityId='(none)'
+                            failedSupersessionCarriedPeerProof=$false
+                            reauthorizationGeneration=0L; reauthorizationSourceTransportEpoch=0L
+                            reauthorizationTargetTransportEpoch=0L; reservationGeneration=0L
+                            reservedRetryAuthorityId='(none)'; consumingInstallGeneration=0L
+                            retryHoldGeneration=0L; retryRecheckGeneration=0L
+                            invalidationReason='(none)'
+                            receipts=@($yieldReceipt,$localReceipt,$peerReceipt,$releaseReceipt)
+                        }
+                    }
+                    $effects = @(
+                        (New-EffectLine $coordinator $transition $operationKey $localAuthority `
+                            'recovery_owner_retired_after_yield' $yieldReceipt 3L),
+                        (New-EffectLine $coordinator $transition $operationKey $localAuthority `
+                            'local_proof_sent' $localReceipt 4L),
+                        (New-EffectLine $coordinator $transition $operationKey $localAuthority `
+                            'local_proof_applied' $localReceipt 5L),
+                        (New-EffectLine $coordinator $transition $operationKey $localAuthority `
+                            'peer_proof_observed' $peerReceipt 6L),
+                        (New-EffectLine $coordinator $transition $operationKey $localAuthority `
+                            'paired_release_published' $releaseReceipt 7L))
+                    $reason = 'fallback_tail_peer_proof_receipt_applied'
+                }
+                $start = "event=filetransfer_coordinator_snapshot_stream_started; $prefix; log_writer_sequence=1; initial_state_generation=0; initial_state_hash=$beforeHash; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none"
+                $transitionLine = New-EnvelopeLine $coordinator $transition $beforeHash `
+                    $afterHash $reason $operation
+                $endSequence = 3L + $effects.Count
+                $end = "event=filetransfer_coordinator_snapshot_stream_completed; $prefix; log_writer_sequence=$endSequence; final_state_generation=1; final_state_hash=$afterHash; transition_count=1; emitted_family_coverage=$coverage; shadow_family_coverage=; authoritative_family_coverage=$coverage; authority_effect=none"
+                return @($start,$transitionLine) + $effects + @($end)
+            }
+
+            foreach ($kind in @('pending','paired')) {
+                $compactLines = @(New-EvaluationLines $kind)
+                $fullLines = @('event=unrelated') + $compactLines[0..1] +
+                    @('event=another_unrelated') + $compactLines[2..($compactLines.Count - 1)]
+                $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $fullLines
+                $compact = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $compactLines
+                $bindings = @($full.__FallbackTailPeerProofBindings)
+                if ($full.ArtifactEvidenceVerdict -cne 'pass' -or
+                    $compact.ArtifactEvidenceVerdict -cne 'pass' -or
+                    $bindings.Count -ne 1 -or
+                    [string]$bindings[0].BindingKind -cne "$(if ($kind -ceq 'pending') { 'pending_peer_proof' } else { 'paired_yield' })" -or
+                    [long]$bindings[0].AggregateBoundary.transportEpoch -ne 0L -or
+                    [long]$bindings[0].SourceBoundary.transportEpoch -ne 1L) {
+                    throw "$kind binding was not built from exact child/aggregate scopes: $($full | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                $parity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+                    -Full $full -Compact $compact
+                if ($parity.Verdict -cne 'pass' -or
+                    $parity.FullFallbackTailPeerProofBindingCount -ne 1L -or
+                    $parity.CompactFallbackTailPeerProofBindingCount -ne 1L -or
+                    $parity.FullFallbackTailPeerProofBindingHash -cne
+                        $parity.CompactFallbackTailPeerProofBindingHash) {
+                    throw "$kind semantic binding parity failed: $($parity | ConvertTo-Json -Compress)"
+                }
+
+                $compact.__FallbackTailPeerProofBindings[0].PeerProofFingerprint =
+                    'mutated-peer-proof-fingerprint'
+                $mismatch = Compare-FileTransferCoordinatorSnapshotEvaluations `
+                    -Full $full -Compact $compact
+                if ($mismatch.Verdict -cne 'fail' -or
+                    $mismatch.FailureReason -cne
+                        'snapshot_full_compact_fallback_tail_peer_proof_binding_hash_mismatch') {
+                    throw "$kind semantic binding mismatch did not fail deterministically: $($mismatch | ConvertTo-Json -Compress)"
+                }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot]);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Fallback-tail binding builder/parity regression failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    [Fact]
     public async Task FileTransferOps_CoordinatorSnapshotEvaluatorHasExactFullCompactParityAndFailsClosed()
     {
         if (!OperatingSystem.IsWindows())

@@ -2133,9 +2133,23 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("2", route["runtime_unlock_probe_rejected_by_inbound_fallback_owner_count"]);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false, "unresolved")]
+    [InlineData(true, "unresolved")]
+    [InlineData(false, "duplicate_unresolved")]
+    [InlineData(true, "duplicate_unresolved")]
+    [InlineData(false, "recovered")]
+    [InlineData(true, "recovered")]
+    [InlineData(false, "wrong_pairing")]
+    [InlineData(true, "wrong_pairing")]
+    [InlineData(false, "redacted_without_snapshot")]
+    [InlineData(true, "redacted_without_snapshot")]
+    [InlineData(true, "terminal_poison")]
+    [InlineData(true, "conflicting_duplicate")]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_PeerYieldAcceptedButLocalYieldBlocked_ClassifiesLocalYieldMissing()
+    public async Task AnalyzeRetained_PeerYieldAcceptedButLocalYieldBlocked_ClassifiesOneExactIncident(
+        bool compact,
+        string outcome)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2144,28 +2158,133 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
 
         const string transferId = "[redacted]";
         var pairKey = $"sess_redacted|{transferId}|post_tuna_fallback_v6|6|4|2|9|(none)";
-        var lines = new[]
+        var peerOwnerKey = $"sess_redacted|{transferId}|post_tuna_fallback_v6|6|4|4|2|9|(none)";
+        const string peerAuthority = "fta2-fallback_tail_yield-peer000000000000000001";
+        const string peerObservation = "peer-observation-1";
+        const string peerFingerprint = "peer-fingerprint-1";
+        const string localScope = "direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; " +
+            "leg_id=leg:5; leg_generation=5; route=post_tuna_fallback_v6; protocol_version=6; " +
+            "live_route_epoch=4; transport_epoch=9; bridge_recovery_generation=2; " +
+            "checkpoint_generation=1; checkpoint_request_id=(none); route_publication_generation=3; " +
+            "route_commit_generation=0; runtime_generation=3; terminal_generation=0; " +
+            "data_session_identity=data-session-1; data_session_generation=1; log_writer_id=writer-a";
+        var pendingLine = LogLine($"event=filetransfer_fallback_tail_peer_proof_pending_decided; {localScope}; authority_id=(none); yield_generation=0; owner_key=local-owner; pair_key={pairKey}; peer_authority_id={peerAuthority}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key={peerOwnerKey}; peer_pair_key={pairKey}; peer_live_route_epoch=4; peer_leg_generation=4; peer_bridge_recovery_generation=2; peer_transport_epoch=9; peer_checkpoint_request_id=(none); peer_observation_identity={peerObservation}; peer_frame_fingerprint={peerFingerprint}; observed_utc_ms=1000; decision_status=Accepted; reason=fallback_tail_initial_peer_proof_receipt_retained; decision_reason=fallback_tail_initial_peer_proof_receipt_retained");
+        var pairingLine = LogLine($"event=filetransfer_fallback_tail_pairing_committed; {localScope}; authority_id=fta2-fallback-tail-yield-local00000000000000001; predecessor_authority_id=(none); yield_generation=1; yield_kind=Quiescent; owner_key=local-owner; pair_key={pairKey}; pairing_state=Paired; pairing_generation=1; local_proof_identity=local-proof-1; local_frame_fingerprint=local-fingerprint-1; peer_authority_id={peerAuthority}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_direction=inbound; peer_owner_key={peerOwnerKey}; peer_pair_key={pairKey}; peer_live_route_epoch=4; peer_leg_generation=4; peer_bridge_recovery_generation=2; peer_transport_epoch=9; peer_checkpoint_request_id=(none); peer_observation_identity={peerObservation}; peer_frame_fingerprint={peerFingerprint}; failed_predecessor_authority_id=(none); failed_predecessor_yield_generation=0; failed_successor_authority_id=(none); failed_successor_yield_generation=0; failed_supersession_carried_peer_proof=0; release_kind=FallbackPairedTailYield; release_outcome=Quiescent; decision_status=Accepted");
+        var lines = new List<string>
         {
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=4"),
             LogLine($"event=filetransfer_fallback_leg_authority_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=5; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; transport_epoch=9; bridge_recovery_generation=2; checkpoint_request_id=(none); authority_reason=post_tuna_fallback_tail_reconciliation_failed"),
-            LogLine($"event=filetransfer_fallback_tail_yield_proof_received; direction=outbound; peer_direction=inbound; transfer_id={transferId}; session_id=sess_redacted; leg_id=leg:5; leg_generation=5; peer_leg_generation=4; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; transport_epoch=9; bridge_recovery_generation=2; checkpoint_request_id=(none); owner_key=sess_redacted|{transferId}|post_tuna_fallback_v6|6|4|4|2|9|(none); pair_key={pairKey}; peer_owner_key=sess_redacted|{transferId}|post_tuna_fallback_v6|6|4|4|2|9|(none); peer_pair_key={pairKey}; yield_generation=1"),
-            LogLine($"event=filetransfer_fallback_tail_local_yield_blocked; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_id=leg:5; leg_generation=5; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; transport_epoch=9; bridge_recovery_generation=2; checkpoint_request_id=(none); checkpoint_request_id_snapshot=(none); canonical_owner_key=sess_redacted|{transferId}|post_tuna_fallback_v6|6|4|5|2|9|(none); canonical_pair_key={pairKey}; local_owner_key=(none); peer_owner_key=sess_redacted|{transferId}|post_tuna_fallback_v6|6|4|4|2|9|(none); local_pair_key=(none); peer_pair_key={pairKey}; decision_reason=fallback_frontier_state_missing; source=fallback_tail_peer_yield"),
-            LogLine($"event=filetransfer_gui_progress_timeout; transfer_id={transferId}; session_id=sess_redacted; reason=normal_to_tuna_live_epoch_missing"),
-            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Failed; error_code=peer_disconnected"),
-            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; saved_path=(none)")
+            pendingLine,
+            LogLine($"event=filetransfer_fallback_tail_yield_proof_received; {localScope}; authority_schema=2; authority_id={peerAuthority}; predecessor_authority_id=(none); peer_direction=inbound; peer_leg_generation=4; peer_live_route_epoch=4; peer_transport_epoch=9; peer_bridge_recovery_generation=2; peer_checkpoint_request_id=(none); owner_key={peerOwnerKey}; pair_key={pairKey}; canonical_pair_key={pairKey}; yield_generation=1"),
+            LogLine($"event=filetransfer_fallback_tail_local_yield_blocked; {localScope}; checkpoint_request_id_snapshot=(none); canonical_owner_key=(none); canonical_pair_key=(none); local_owner_key=(none); peer_owner_key=(none); local_pair_key=(none); peer_pair_key=(none); decision_reason=fallback_tail_local_owner_work_pending; source=fallback_tail_peer_yield"),
+            LogLine($"event=filetransfer_fallback_tail_local_yield_blocked; {localScope}; checkpoint_request_id_snapshot=(none); canonical_owner_key=(none); canonical_pair_key=(none); local_owner_key=(none); peer_owner_key=(none); local_pair_key=(none); peer_pair_key=(none); decision_reason=fallback_tail_local_owner_work_pending; source=fallback_tail_peer_yield"),
+            LogLine($"event=filetransfer_fallback_tail_local_yield_blocked; {localScope}; checkpoint_request_id_snapshot=(none); canonical_owner_key=(none); canonical_pair_key=(none); local_owner_key=(none); peer_owner_key=(none); local_pair_key=(none); peer_pair_key=(none); decision_reason=fallback_tail_local_owner_work_pending; source=fallback_tail_peer_yield"),
+            LogLine($"event=filetransfer_fallback_tail_local_yield_blocked; {localScope}; checkpoint_request_id_snapshot=(none); canonical_owner_key=(none); canonical_pair_key=(none); local_owner_key=(none); peer_owner_key=(none); local_pair_key=(none); peer_pair_key=(none); decision_reason=fallback_tail_local_owner_work_pending; source=fallback_tail_peer_yield")
         };
+        if (outcome == "redacted_without_snapshot")
+        {
+            lines[2] = pendingLine.Replace(
+                $"peer_authority_id={peerAuthority}",
+                "peer_authority_id=[redacted]",
+                StringComparison.Ordinal);
+        }
+        else if (outcome == "duplicate_unresolved")
+        {
+            lines.Insert(3, pendingLine);
+        }
+        else if (outcome == "conflicting_duplicate")
+        {
+            lines.Insert(
+                3,
+                pendingLine.Replace(
+                    "observed_utc_ms=1000",
+                    "observed_utc_ms=1001",
+                    StringComparison.Ordinal));
+            lines.Add(pairingLine);
+        }
+        else if (outcome == "recovered")
+        {
+            lines.Add(pairingLine);
+        }
+        else if (outcome == "wrong_pairing")
+        {
+            lines.Add(pairingLine.Replace(
+                "data_session_generation=1",
+                "data_session_generation=2",
+                StringComparison.Ordinal));
+        }
+        else if (outcome == "terminal_poison")
+        {
+            lines.Add(LogLine($"event=file_transfer_outbound_terminal; {localScope}; role=helpee; state=Failed; error_code=peer_disconnected"));
+            lines.Add(pairingLine);
+        }
+        lines.Add(LogLine($"event=filetransfer_gui_progress_timeout; transfer_id={transferId}; session_id=sess_redacted; reason=normal_to_tuna_live_epoch_missing"));
+        if (outcome != "terminal_poison")
+        {
+            lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Failed; error_code=peer_disconnected"));
+        }
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; saved_path=(none)"));
 
-        var result = await RunAnalyzeFixtureAsync(lines);
+        var result = compact
+            ? await RunAnalyzeFixtureAsync(
+                lines,
+                environment: new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                })
+            : await RunAnalyzeFixtureAsync(lines);
 
         Assert.Equal(0, result.Script.ExitCode);
         var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
-        Assert.Equal("1", route["fallback_tail_yield_proof_received_count"]);
-        Assert.Equal("1", route["fallback_tail_local_yield_blocked_count"]);
-        Assert.Equal("fail", route["fallback_tail_paired_yield_verdict"]);
+        if (!compact)
+        {
+            Assert.Equal("1", route["fallback_tail_yield_proof_received_count"]);
+            Assert.Equal("4", route["fallback_tail_local_yield_blocked_count"]);
+        }
+        var exactIncident = outcome != "redacted_without_snapshot";
+        var recovered = outcome == "recovered";
+        Assert.Equal(exactIncident ? "4" : "0", route["fallback_tail_local_yield_missing_raw_count"]);
+        Assert.Equal(exactIncident ? "1" : "0", route["fallback_tail_local_yield_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", route["fallback_tail_local_yield_missing_recovered_count"]);
+        Assert.Equal(exactIncident && !recovered ? "1" : "0", route["fallback_tail_local_yield_missing_unresolved_count"]);
+        if (exactIncident && !recovered)
+        {
+            Assert.Equal("fail", route["fallback_tail_paired_yield_verdict"]);
+        }
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("fallback_tail_local_yield_missing", verdict["recovery_failure_class"]);
-        Assert.Equal("1", verdict["classification_fallback_tail_local_yield_blocked_count"]);
+        if (recovered)
+        {
+            Assert.NotEqual("fallback_tail_local_yield_missing", verdict["recovery_failure_class"]);
+            Assert.NotEqual("fallback_tail_local_yield_missing", verdict["first_proof_chain_failure_class"]);
+        }
+        else if (exactIncident)
+        {
+            Assert.Equal("fallback_tail_local_yield_missing", verdict["recovery_failure_class"]);
+            Assert.Equal("fallback_tail_local_yield_missing", verdict["first_proof_chain_failure_class"]);
+            Assert.Equal("filetransfer_fallback_tail_local_yield_blocked", verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("fallback_tail_local_owner_work_pending", verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal(
+                "route_transition_checkpoint_progress_left_transport_handoff_current",
+                verdict["failure_variant"]);
+        }
+        Assert.Equal(exactIncident ? "4" : "0", verdict["fallback_tail_local_yield_missing_raw_count"]);
+        Assert.Equal(exactIncident ? "1" : "0", verdict["fallback_tail_local_yield_missing_distinct_count"]);
+        Assert.Equal(recovered ? "1" : "0", verdict["fallback_tail_local_yield_missing_recovered_count"]);
+        Assert.Equal(exactIncident && !recovered ? "1" : "0", verdict["fallback_tail_local_yield_missing_unresolved_count"]);
+        if (compact)
+        {
+            if (exactIncident && !recovered)
+            {
+                Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+                Assert.Equal("route_runtime", verdict["semantic_failure_domain"]);
+                Assert.Equal("fail", verdict["runtime_correctness_verdict"]);
+            }
+        }
+        else if (!recovered)
+        {
+            Assert.Equal("4", verdict["classification_fallback_tail_local_yield_blocked_count"]);
+        }
     }
 
     [Fact]
