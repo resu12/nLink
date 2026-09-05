@@ -1266,7 +1266,9 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
                     Class = 'fallback_tail_local_yield_missing'
                     Event = $first[0]
                     Reason = 'fallback_tail_local_owner_work_pending'
-                    Variant = 'route_transition_checkpoint_progress_left_transport_handoff_current'
+                    # The generic owner-work observation does not identify which
+                    # service execution or transport obligation is holding it.
+                    Variant = 'peer_first_local_quiescent_proof_pairing_missing'
                     RawCopyCount = [int]$incident.BlockedEvents.Count
                 }
             }

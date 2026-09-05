@@ -2061,7 +2061,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 if ($unresolved -eq 1 -and
                     ($full.UnresolvedCandidateRecords.Count -ne 1 -or
                      $full.UnresolvedCandidateRecords[0].Variant -cne
-                        'route_transition_checkpoint_progress_left_transport_handoff_current')) {
+                        'peer_first_local_quiescent_proof_pairing_missing')) {
                     throw "$name did not retain the exact unresolved candidate."
                 }
             }
@@ -2077,6 +2077,22 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             Assert-Result -name 'recovered' -evaluation $recoveredEvaluation `
                 -fullEvents (@($receipt,$unrelated)+$blocked) `
                 -compactEvents (@($receipt)+$blocked) -recovered 1 -unresolved 0
+
+            # Failed issuance retains peer evidence but supplies neither a local
+            # proof nor pairing. Terminal completion cannot close that obligation.
+            $failedCarry = Copy-Value $carryBoundary
+            $failed = $failedCarry.operations[1]
+            $failed.operationKind = 'Failed'
+            $failed.operationKey = "fallback_tail_yield|yield_current|$currentAuthority|2|Failed"
+            $failed.fallbackTailYield | Add-Member -NotePropertyName yieldKind -NotePropertyValue 'Failed'
+            $terminalFailed = Copy-Value $failed
+            $terminalFailed.beforeState = 'PeerProofObserved'
+            $terminalFailed.afterState = 'None'
+            $failedTerminal = New-Boundary 'terminal' 70L 3L @($terminalFailed)
+            $failedEvaluation = New-Evaluation @($pendingBoundary,$failedCarry,$failedTerminal) @($pendingBinding)
+            Assert-Result -name 'failed-peer-carry-terminal-is-not-recovery' -evaluation $failedEvaluation `
+                -fullEvents (@($receipt,$unrelated)+$blocked) `
+                -compactEvents (@($receipt)+$blocked) -recovered 0 -unresolved 1
 
             $competing = Copy-Value $pairedBinding
             $competing.TransitionId='paired-competing'
@@ -6348,6 +6364,15 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             function Test-FileTransferCoordinatorSnapshotFamilyAuthoritative {
                 param($Evaluation, [string]$Family)
                 return $Family -in @('route_runtime', 'route_transition')
+            }
+            # This fixture isolates shared-boundary forwarding, not route-consistency evaluation.
+            function Get-FileTransferCoordinatorSnapshotRouteConsistency {
+                param($Evaluation)
+                return [pscustomobject]@{ Verdict = 'pass' }
+            }
+            function Compare-FileTransferCoordinatorSnapshotRouteConsistency {
+                param($Full, $Compact)
+                return [pscustomobject]@{ Verdict = 'pass' }
             }
 
             $root = Join-Path ([IO.Path]::GetTempPath()) (

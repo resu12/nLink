@@ -91,8 +91,9 @@ public sealed partial class SessionFileTransferService
         }
 
         var current = context.FileTransferRouteTransitionExecution;
+        var coordinatorState = CreateCoordinatorStateLocked(context);
         if (TryGetConsumedFallbackRouteTransitionPeerProofAuthority(
-                CreateCoordinatorStateLocked(context),
+                coordinatorState,
                 evidence,
                 out var consumedAuthority))
         {
@@ -105,6 +106,16 @@ public sealed partial class SessionFileTransferService
                 consumedAuthority,
                 "Rejected",
                 "filetransfer_route_transition_peer_proof_operation_terminal");
+            return true;
+        }
+
+        if (TryGetCurrentCompletedFallbackRouteTransitionAuthority(
+                coordinatorState, evidence, out var completedAuthority))
+        {
+            LogFileTransferRouteTransitionEvidence(
+                context.SessionId, context.TransferId, FileTransferDirection.Outbound,
+                evidence, frameIdentity: null, completedAuthority, "Rejected",
+                "filetransfer_route_transition_peer_proof_target_already_current");
             return true;
         }
 
@@ -260,8 +271,9 @@ public sealed partial class SessionFileTransferService
         }
 
         var current = context.FileTransferRouteTransitionExecution;
+        var coordinatorState = CreateCoordinatorStateLocked(context);
         if (TryGetConsumedFallbackRouteTransitionPeerProofAuthority(
-                CreateCoordinatorStateLocked(context),
+                coordinatorState,
                 evidence,
                 out var consumedAuthority))
         {
@@ -274,6 +286,16 @@ public sealed partial class SessionFileTransferService
                 consumedAuthority,
                 "Rejected",
                 "filetransfer_route_transition_peer_proof_operation_terminal");
+            return true;
+        }
+
+        if (TryGetCurrentCompletedFallbackRouteTransitionAuthority(
+                coordinatorState, evidence, out var completedAuthority))
+        {
+            LogFileTransferRouteTransitionEvidence(
+                context.SessionId, context.TransferId, FileTransferDirection.Inbound,
+                evidence, frameIdentity: null, completedAuthority, "Rejected",
+                "filetransfer_route_transition_peer_proof_target_already_current");
             return true;
         }
 
@@ -543,6 +565,67 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        authority = terminalAuthority;
+        return true;
+    }
+
+    private static bool TryGetCurrentCompletedFallbackRouteTransitionAuthority(
+        FileTransferCoordinatorState state,
+        PostTunaFallbackPeerProofEvidence evidence,
+        out FileTransferRouteTransitionAuthority authority)
+    {
+        authority = default;
+        var transitions = FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(state);
+        if (state.IsTerminal || transitions.CurrentOperation is not null ||
+            transitions.PendingSupersession is not null ||
+            transitions.LastTerminalOperation is not
+            {
+                State: FileTransferRouteTransitionState.Committed,
+                Authority: var terminalAuthority,
+                RoutePublicationToken: { } publication,
+                RetainedFrameApplyCommand: { } frameCommand,
+                RetainedFrameApplyReceipt: { } frameReceipt,
+                DispositionCommand: { Kind: FileTransferRouteTransitionDispositionKind.Committed } disposition,
+                DispositionReceipt: { } dispositionReceipt,
+            } ||
+            terminalAuthority.Kind is not
+                (FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 or
+                 FileTransferRouteTransitionKind.UncommittedTunaToPostTunaFallbackV6) ||
+            terminalAuthority.ProofBoundary is not FileTransferFallbackTransitionProofBoundary boundary ||
+            terminalAuthority.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            terminalAuthority.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            terminalAuthority.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            state.CurrentDataSessionGeneration != terminalAuthority.DataSessionGeneration ||
+            !evidence.IsComplete || !evidence.IsExactFrameBound ||
+            evidence.SessionId != state.SessionId || evidence.TransferId != state.TransferId ||
+            evidence.Direction != state.Direction ||
+            evidence.TransportEpoch != boundary.TargetTransportEpoch ||
+            state.CurrentLeg is not { } leg ||
+            leg.TransportEpochId != boundary.TargetTransportEpoch ||
+            leg.BridgeRecoveryGeneration != boundary.TargetBridgeRecoveryGeneration ||
+            publication.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            publication.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            publication.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            !FileTransferCoordinator.IsRoutePublicationTokenCurrent(state, publication, out _) ||
+            frameCommand.Authority != terminalAuthority ||
+            frameCommand.TargetRoutePublication != publication ||
+            frameCommand.TargetRuntimeOwner != publication.RuntimeOwner ||
+            frameCommand.FrameIdentity != boundary.RetainedFrameIdentity ||
+            frameReceipt.Command != frameCommand ||
+            frameReceipt.Status is not (FileTransferRouteTransitionRetainedFrameApplyStatus.Applied or
+                FileTransferRouteTransitionRetainedFrameApplyStatus.Idempotent) ||
+            disposition.Authority != terminalAuthority ||
+            disposition.RoutePublicationToken != publication ||
+            dispositionReceipt.Command != disposition ||
+            dispositionReceipt.Status is not (FileTransferRouteTransitionDispositionApplyStatus.Applied or
+                FileTransferRouteTransitionDispositionApplyStatus.Idempotent))
+        {
+            return false;
+        }
+
+        // Bootstrap and transport observations have independent proof generations.
+        // The completed Coordinator target, not an alias between those counters,
+        // prevents transport evidence from reopening route-transition owner work.
         authority = terminalAuthority;
         return true;
     }

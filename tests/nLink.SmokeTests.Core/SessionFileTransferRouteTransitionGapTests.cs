@@ -3005,11 +3005,14 @@ public sealed partial class SessionFileTransferV4SenderTests
             verifyStaleBindings: true);
 
     [Theory]
-    [InlineData(FileTransferDirection.Outbound)]
-    [InlineData(FileTransferDirection.Inbound)]
+    [InlineData(FileTransferDirection.Outbound, false)]
+    [InlineData(FileTransferDirection.Inbound, false)]
+    [InlineData(FileTransferDirection.Outbound, true)]
+    [InlineData(FileTransferDirection.Inbound, true)]
     [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
     public void FileTransferRouteTransitionLatePeerProof_AfterCommittedDisposition_DoesNotRecreateShadow(
-        FileTransferDirection direction)
+        FileTransferDirection direction,
+        bool independentTransportProofGeneration)
     {
         var transferId =
             $"route_transition_late_peer_proof_{direction.ToString().ToLowerInvariant()}";
@@ -3056,7 +3059,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             state.SessionId,
             state.TransferId,
             direction,
-            ProofGeneration: 1,
+            ProofGeneration: independentTransportProofGeneration ? 2 : 1,
             TransportEpoch: targetTransportEpoch,
             ProofKind: "fallback_v6_proof_bootstrap_peer_frame",
             Reason: "coordinator_fallback_v6_proof_bootstrap_peer_frame",
@@ -3139,6 +3142,58 @@ public sealed partial class SessionFileTransferV4SenderTests
                         LastTransitionGeneration: 1),
             });
 
+        if (independentTransportProofGeneration)
+        {
+            SetPrivateProperty(context, "CoordinatorPersistentState", state.PersistentState);
+            var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
+                state,
+                new FileTransferRouteTransitionPrepareRequest(
+                    authority.Kind, sourceOwner, sourcePublication, sourceCommit,
+                    authority.SourceRoute, authority.SourceProtocolVersion, authority.SourceTransport,
+                    proofBoundary, checkpoint, authority.TargetRoute, authority.TargetProtocolVersion,
+                    authority.TargetTransport, authority.HandoffKind, null, authority.Reason));
+            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Prepared, prepared.Status);
+            AdoptFileTransferRouteTransitionDecisionForGapTest(context, prepared);
+            authority = prepared.Authority!.Value;
+            var ids = Array.Empty<long>();
+            var fingerprint = FileTransferCoordinator.CreateFileTransferRouteTransitionPhysicalDrainFingerprint(ids);
+            var draining = FileTransferCoordinator.BeginFileTransferRouteTransitionPhysicalDrain(
+                prepared.State, authority,
+                new FileTransferRouteTransitionPauseBindReceipt(prepared.PauseBindCommand!.Value,
+                    FileTransferRouteTransitionPauseBindStatus.Installed, "filetransfer_route_transition_pause_bound"),
+                0, ids, fingerprint);
+            Assert.True(draining.Status == FileTransferRouteTransitionDecisionStatus.Draining, draining.Reason);
+            AdoptFileTransferRouteTransitionDecisionForGapTest(context, draining);
+            var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
+                draining.State, authority,
+                new FileTransferRouteTransitionPhysicalDrainReceipt(draining.DrainCommand!.Value,
+                    ids, 0, fingerprint, FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
+                    "physical_drain_completed"));
+            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, committed.Status);
+            AdoptFileTransferRouteTransitionDecisionForGapTest(context, committed);
+            typeof(SessionFileTransferService).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(method => method.Name == "ApplyCoordinatorDecisionToContextLocked" &&
+                    method.GetParameters() is var parameters && parameters.Length == 4 &&
+                    parameters[0].ParameterType == context.GetType() &&
+                    parameters[1].ParameterType == typeof(FileTransferCoordinatorDecision))
+                .Invoke(null, [context, committed.RouteDecision!, false, false]);
+            var terminal = committed.State.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+            var frameApplied = FileTransferCoordinator.ApplyFileTransferRouteTransitionRetainedFrameReceipt(
+                committed.State,
+                new FileTransferRouteTransitionRetainedFrameApplyReceipt(terminal.RetainedFrameApplyCommand!.Value,
+                    FileTransferRouteTransitionRetainedFrameApplyStatus.Applied, "filetransfer_route_transition_retained_frame_applied"));
+            Assert.True(frameApplied.Status == FileTransferRouteTransitionDecisionStatus.Committed, frameApplied.Reason);
+            AdoptFileTransferRouteTransitionDecisionForGapTest(context, frameApplied);
+            var disposed = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(
+                frameApplied.State,
+                new FileTransferRouteTransitionDispositionReceipt(terminal.DispositionCommand!.Value,
+                    FileTransferRouteTransitionDispositionApplyStatus.Applied, terminal.DispositionCommand.Value.Reason));
+            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, disposed.Status);
+            AdoptFileTransferRouteTransitionDecisionForGapTest(context, disposed);
+            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, CreateCoordinatorStateForTest(context).RouteSelection.Route);
+            transportAliasProof = transportAliasProof with { ProofGeneration = peerProof.ProofGeneration + 1 };
+        }
+
         var retainMethod = typeof(SessionFileTransferService).GetMethod(
             direction == FileTransferDirection.Outbound
                 ? "TryRetainOutboundFileTransferRouteTransitionPeerProofLocked"
@@ -3155,7 +3210,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             "FileTransferRouteTransitionExecution"));
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains(
-            "decision_status=Rejected; decision_reason=filetransfer_route_transition_peer_proof_operation_terminal",
+            independentTransportProofGeneration
+                ? "decision_status=Rejected; decision_reason=filetransfer_route_transition_peer_proof_target_already_current"
+                : "decision_status=Rejected; decision_reason=filetransfer_route_transition_peer_proof_operation_terminal",
             log,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -3178,6 +3235,39 @@ public sealed partial class SessionFileTransferV4SenderTests
             "frame_fingerprint=(none)",
             log,
             StringComparison.Ordinal);
+
+        if (independentTransportProofGeneration)
+        {
+            var beforeDuplicate = CreateCoordinatorStateForTest(context);
+            arguments = [context, dataSession, transportAliasProof, "transport_recovered", null];
+            Assert.True(Assert.IsType<bool>(retainMethod.Invoke(service, arguments)));
+            Assert.Null(GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution"));
+            Assert.Equal(beforeDuplicate, CreateCoordinatorStateForTest(context));
+            var fallbackLeg = beforeDuplicate.CurrentLeg!;
+            var availability = new FileTransferDataSessionAvailabilityChangedEventArgs(
+                true, "transport_recovered", false,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.RegularNkn, null,
+                new PostTunaFallbackHandoffEvidence(
+                    state.SessionId, state.TransferId, direction,
+                    transportAliasProof.ProofGeneration,
+                    FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    FileTransferProtocol.ProtocolVersionV6,
+                    fallbackLeg.LiveRouteEpochId, fallbackLeg.Generation,
+                    fallbackLeg.BridgeRecoveryGeneration, fallbackLeg.TransportEpochId,
+                    "(none)", transportAliasProof.ProofKind, "transport_recovered", frameIdentity));
+            var callback = Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService)
+                .GetMethod("HandleDataSessionAvailabilityChangedAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [dataSession, availability]));
+            callback.GetAwaiter().GetResult();
+            Assert.Null(GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution"));
+            Assert.Equal(beforeDuplicate, CreateCoordinatorStateForTest(context));
+            for (var mutation = 0; mutation < 7; mutation++)
+            {
+                AssertCompletedFallbackProofMutationRejected(beforeDuplicate, transportAliasProof, mutation);
+            }
+            return;
+        }
 
         SetPrivateProperty(
             context,
@@ -3228,6 +3318,41 @@ public sealed partial class SessionFileTransferV4SenderTests
             GetPrivatePropertyValue(
                 context,
                 "FileTransferRouteTransitionExecution"));
+    }
+
+    private static void AssertCompletedFallbackProofMutationRejected(
+        FileTransferCoordinatorState state,
+        PostTunaFallbackPeerProofEvidence proof,
+        int mutation)
+    {
+        var changed = state with { };
+        if (mutation == 0) changed = changed with { IsTerminal = true };
+        else if (mutation == 1) changed = changed with { CurrentDataSessionGeneration = state.CurrentDataSessionGeneration + 1 };
+        else if (mutation == 2) changed = changed with { CurrentRoutePublicationToken = state.CurrentRoutePublicationToken!.Value with
+            { PublicationGeneration = state.CurrentRoutePublicationToken.Value.PublicationGeneration + 1 } };
+        else if (mutation == 3) changed = changed with { CurrentLeg = null };
+        else
+        {
+            var persistent = state.PersistentState;
+            var transitions = persistent.FileTransferRouteTransition;
+            var terminal = transitions.LastTerminalOperation!.Value;
+            if (mutation == 4) transitions = transitions with { CurrentOperation = terminal };
+            else
+            {
+                terminal = mutation == 5
+                    ? terminal with { DispositionReceipt = null }
+                    : terminal with { RetainedFrameApplyReceipt = terminal.RetainedFrameApplyReceipt!.Value with
+                        { Status = FileTransferRouteTransitionRetainedFrameApplyStatus.Rejected } };
+                transitions = transitions with { LastTerminalOperation = terminal };
+            }
+            persistent = persistent with { FileTransferRouteTransition = transitions };
+            changed = changed with { PersistentState = persistent };
+        }
+        object?[] arguments = [changed, proof, null];
+        var admission = typeof(SessionFileTransferService).GetMethod(
+            "TryGetCurrentCompletedFallbackRouteTransitionAuthority",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.False(Assert.IsType<bool>(admission.Invoke(null, arguments)));
     }
 
     private async Task
