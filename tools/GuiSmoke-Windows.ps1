@@ -23108,6 +23108,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     function Get-TunaGuiLiveReactivationActionWindowFailure {
         param([AllowEmptyCollection()][string[]]$Lines)
 
+        # The fixed on,off,on,off contract requires reactivation after epoch 2,
+        # not after the final epoch-4 fallback.
         $routeProofs = @{}
         $states = @{}
         $lineVisits = 0L
@@ -23136,7 +23138,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $direction = Get-TunaGuiLogLineFieldValue -Line $line -Name 'direction'
             if ($eventName -eq 'filetransfer_live_route_epoch_recovered') {
                 if ((Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -ne 'post_tuna_fallback_v6' -or
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -ne '6') { continue }
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -ne '6' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch') -ne '2') { continue }
                 $tuple = @(
                     $session, $transfer,
                     (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch'),
@@ -23156,6 +23159,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 if ($direction -ne 'outbound' -or
                     (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -ne 'post_tuna_fallback_v6' -or
                     (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -ne '6' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch') -ne '2' -or
                     (Get-TunaGuiLogLineFieldValue -Line $line -Name 'pairing_state') -ne 'Paired' -or
                     (Get-TunaGuiLogLineFieldValue -Line $line -Name 'decision_status') -notin @('Accepted', 'Idempotent')) { continue }
                 $tuple = @(
@@ -23311,6 +23315,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     if ($state.Ineligible -and -not $state.Woken -and
                         $direction -eq 'outbound' -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'route') -eq 'post_tuna_fallback_v6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'protocol_version') -eq '6' -and
+                        (Get-TunaGuiLogLineFieldValue -Line $line -Name 'live_route_epoch') -eq '2' -and
                         (Get-TunaGuiLogLineFieldValue -Line $line -Name 'terminal_state') -eq 'completed') {
                         return [pscustomobject]@{ Unresolved = $true; LineVisits = $lineVisits; Line = $line }
                     }

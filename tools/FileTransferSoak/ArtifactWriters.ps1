@@ -12957,13 +12957,16 @@ function Get-FileTransferGuiLiveReactivationActionWindowCorrelation {
         return $false
     }
 
+    # Only the epoch-2 fallback requires the next on in RegularActivationCycle.
     [object[]]$routeProofs = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_live_route_epoch_recovered' -and
             (Get-ReactivationField $_ 'route') -eq 'post_tuna_fallback_v6' -and
-            (Get-ReactivationField $_ 'protocol_version') -eq '6'
+            (Get-ReactivationField $_ 'protocol_version') -eq '6' -and
+            (Get-ReactivationField $_ 'live_route_epoch') -eq '2'
         })
     [object[]]$pairings = @($ordered | Where-Object {
             $_.EventName -eq 'filetransfer_fallback_tail_pairing_committed' -and
+            (Get-ReactivationField $_ 'live_route_epoch') -eq '2' -and
             (Get-ReactivationField $_ 'pairing_state') -eq 'Paired' -and
             (Get-ReactivationField $_ 'decision_status') -in @('Accepted', 'Idempotent')
         })
@@ -12982,6 +12985,7 @@ function Get-FileTransferGuiLiveReactivationActionWindowCorrelation {
             (Get-ReactivationField $_ 'direction') -eq 'outbound' -and
             (Get-ReactivationField $_ 'route') -eq 'post_tuna_fallback_v6' -and
             (Get-ReactivationField $_ 'protocol_version') -eq '6' -and
+            (Get-ReactivationField $_ 'live_route_epoch') -eq '2' -and
             (Get-ReactivationField $_ 'terminal_state') -eq 'completed'
         })
 

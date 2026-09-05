@@ -12587,6 +12587,46 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if ($onTime.Reason -eq 'fallback_reactivation_unlock_not_invoked_before_completed_transfer') {
                     throw 'matching preterminal unlock remained a harness incident'
                 }
+                foreach ($wrongUnlock in @(
+                        ($unlock -replace 'intent_generation=7', 'intent_generation=8'),
+                        ($unlock -replace 'data_session_identity=data:1', 'data_session_identity=data:2'),
+                        ($unlock -replace 'transfer_id=transfer;', 'transfer_id=other;'),
+                        ($unlock -replace 'source_live_route_epoch=2', 'source_live_route_epoch=4'))) {
+                    @($unresolved[0..6] + $wrongUnlock + $unresolved[7]) | Set-Content -LiteralPath $path
+                    $wrong = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($wrong.Reason -ne 'fallback_reactivation_unlock_not_invoked_before_completed_transfer') {
+                        throw 'wrong-scope wake suppressed the required reactivation failure'
+                    }
+                }
+                @($unresolved + $unlock) | Set-Content -LiteralPath $path
+                $late = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($late.Reason -ne 'fallback_reactivation_unlock_not_invoked_before_completed_transfer') {
+                    throw 'post-terminal wake suppressed the required reactivation failure'
+                }
+
+                $finalFallback = @($unresolved | ForEach-Object {
+                    $_ -replace 'live_route_epoch=2', 'live_route_epoch=4' `
+                        -replace 'runtime_generation=3', 'runtime_generation=5' `
+                        -replace 'leg_generation=3', 'leg_generation=5' `
+                        -replace 'publication_generation=3', 'publication_generation=5' `
+                        -replace 'yield-1', 'yield-2' -replace 'pair-1', 'pair-2' `
+                        -replace 'contract_generation=7', 'contract_generation=8' `
+                        -replace 'intent_generation=7', 'intent_generation=8'
+                })
+                foreach ($lines in @(
+                        @{ Values = $finalFallback },
+                        @{ Values = @($unresolved[0..6] + $unlock + $finalFallback) })) {
+                    $lines.Values | Set-Content -LiteralPath $path
+                    $final = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                    if ($final.Reason -eq 'fallback_reactivation_unlock_not_invoked_before_completed_transfer') {
+                        throw 'final fallback created another reactivation obligation'
+                    }
+                }
+                @($finalFallback + $unresolved) | Set-Content -LiteralPath $path
+                $mixed = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
+                if ($mixed.Reason -ne 'fallback_reactivation_unlock_not_invoked_before_completed_transfer') {
+                    throw 'final fallback globally suppressed an independent required reactivation window'
+                }
                 Write-Output 'gui-reactivation-action-window-index-ok'
             }
             finally {

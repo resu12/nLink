@@ -8359,13 +8359,16 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
     public async Task AnalyzeRetained_LiveReactivationActionWindowRequiresPreterminalUnlock(
         bool compact,
-        bool unlocked)
+        bool unlocked,
+        bool finalFallback)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -8425,6 +8428,37 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             $"event=filetransfer_live_route_epoch_terminal; {source}; direction=outbound; {sender}; " +
                 "terminal_state=completed; log_writer_sequence=46595");
 
+        if (finalFallback)
+        {
+            // The required first fallback reactivates; the final fallback is allowed
+            // to complete with a deferred retry intent and no third Tuna activation.
+            var finalEvents = messages.Select(message => message
+                .Replace("live_route_epoch=2", "live_route_epoch=4", StringComparison.Ordinal)
+                .Replace("runtime_generation=3", "runtime_generation=5", StringComparison.Ordinal)
+                .Replace("leg_generation=3", "leg_generation=5", StringComparison.Ordinal)
+                .Replace("publication_generation=3", "publication_generation=5", StringComparison.Ordinal)
+                .Replace("yield-1", "yield-2", StringComparison.Ordinal)
+                .Replace("pair-1", "pair-2", StringComparison.Ordinal)
+                .Replace("contract_generation=7", "contract_generation=8", StringComparison.Ordinal)
+                .Replace("intent_generation=7", "intent_generation=8", StringComparison.Ordinal)).ToArray();
+            messages.RemoveAt(messages.Count - 1);
+            messages.Add(messages[5].Replace("decision_status=Deferred", "decision_status=Reserved", StringComparison.Ordinal)
+                .Replace("retry_dispatch_authority_backoff_pending", "retry_dispatch_negotiation_slot_reserved", StringComparison.Ordinal));
+            foreach (var direction in new[] { "outbound", "inbound" })
+            {
+                messages.Add($"event=filetransfer_live_route_epoch_recovered; {source}; direction={direction}; " +
+                    (direction == "outbound" ? sender : "log_writer_id=writer_reactivation_helper"));
+                messages[^1] = messages[^1]
+                    .Replace("post_tuna_fallback_v6", "file_tuna_v4", StringComparison.Ordinal)
+                    .Replace("protocol_version=6", "protocol_version=4", StringComparison.Ordinal)
+                    .Replace("live_route_epoch=2", "live_route_epoch=3", StringComparison.Ordinal)
+                    .Replace("runtime_generation=3", "runtime_generation=4", StringComparison.Ordinal)
+                    .Replace("leg_generation=3", "leg_generation=4", StringComparison.Ordinal)
+                    .Replace("publication_generation=3", "publication_generation=4", StringComparison.Ordinal);
+            }
+            messages.AddRange(finalEvents);
+        }
+
         var result = await RunAnalyzeFixtureAsync(
             messages.Select(LogLine).ToArray(),
             ["-LiveRouteProofMode", "RegularActivationCycle"],
@@ -8437,9 +8471,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal(unlocked ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_raw_count"]);
-        Assert.Equal(unlocked ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_distinct_count"]);
-        Assert.Equal(unlocked ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_unresolved_count"]);
+        Assert.Equal(unlocked || finalFallback ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_raw_count"]);
+        Assert.Equal(unlocked || finalFallback ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_distinct_count"]);
+        Assert.Equal(unlocked || finalFallback ? "0" : "1", verdict["filetransfer_gui_live_reactivation_action_window_missed_unresolved_count"]);
     }
 
     [Theory]
