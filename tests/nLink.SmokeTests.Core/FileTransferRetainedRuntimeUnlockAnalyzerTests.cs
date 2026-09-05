@@ -7903,6 +7903,319 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(false, "exact", "outbound_offer_cleared", true, true)]
+    [InlineData(true, "exact", "outbound_offer_cleared", true, true)]
+    [InlineData(false, "exact", "retry_dispatch_authority_backoff_satisfied", false, true)]
+    [InlineData(true, "exact", "retry_dispatch_authority_backoff_satisfied", false, true)]
+    [InlineData(false, "operation_completion", "outbound_offer_cleared", true, false)]
+    [InlineData(true, "operation_completion", "outbound_offer_cleared", true, false)]
+    [InlineData(false, "missing", "outbound_offer_cleared", true, false)]
+    [InlineData(true, "wrong_tuple", "outbound_offer_cleared", true, false)]
+    [InlineData(false, "missing_drain", "outbound_offer_cleared", true, false)]
+    [InlineData(true, "wrong_drain", "outbound_offer_cleared", true, false)]
+    [InlineData(false, "wrong_prepared_scope", "outbound_offer_cleared", true, false)]
+    [InlineData(true, "wrong_prepared_scope", "outbound_offer_cleared", true, false)]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryDeadlineMissingDispatch_RequiresExactPhysicalCancellationAndDrain(
+        bool compact,
+        string cancellationMode,
+        string reservationReason,
+        bool cleanupBeforeReservation,
+        bool expectedRecovered)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_deadline_physical_cancel";
+        const string predecessorAuthorityId = "fta2-runtime-unlock-deadline-cancel-a";
+        const string successorAuthorityId = "fta2-runtime-unlock-deadline-cancel-b";
+        const string writer = "; log_writer_id=writer-deadline-physical-cancel";
+        string PredecessorLine(string eventName, string suffix = "", string reason = "accepted") =>
+            RuntimeUnlockFallbackPairedYieldLine(
+                    eventName,
+                    transferId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    suffix: suffix,
+                    decisionReason: reason)
+                .Replace("offer_generation=12", "offer_generation=2", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=nonce-2", StringComparison.Ordinal)
+                .Replace(
+                    "missing_dispatch_successor_limit=1;",
+                    "missing_dispatch_successor_limit=1; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped;",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "; decision_reason=",
+                    "; receive_recovery_operation_generation=0; data_session_generation=0; decision_reason=",
+                    StringComparison.Ordinal) +
+            writer;
+        string PredecessorInstallLine(string eventName, string suffix, string reason) =>
+            RuntimeUnlockFallbackPairedYieldInstallLine(
+                    eventName,
+                    transferId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    suffix: suffix,
+                    decisionReason: reason)
+                .Replace("offer_generation=12", "offer_generation=2", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=nonce-2", StringComparison.Ordinal)
+                .Replace(
+                    "missing_dispatch_successor_limit=1;",
+                    "missing_dispatch_successor_limit=1; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped;",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "; decision_reason=",
+                    "; receive_recovery_operation_generation=0; data_session_generation=0; decision_reason=",
+                    StringComparison.Ordinal) +
+            writer;
+        string SuccessorLine(string eventName, string suffix = "", string reason = "accepted") =>
+            RuntimeUnlockFallbackPairedYieldLine(
+                    eventName,
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    suffix: suffix,
+                    decisionReason: reason)
+                .Replace("offer_generation=12", "offer_generation=3", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=nonce-3", StringComparison.Ordinal)
+                .Replace(
+                    "missing_dispatch_successor_limit=1;",
+                    "missing_dispatch_successor_limit=1; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped;",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "; decision_reason=",
+                    "; receive_recovery_operation_generation=0; data_session_generation=0; decision_reason=",
+                    StringComparison.Ordinal) +
+            writer;
+        string SuccessorInstallLine(string eventName, string suffix, string reason) =>
+            RuntimeUnlockFallbackPairedYieldInstallLine(
+                    eventName,
+                    transferId,
+                    successorAuthorityId,
+                    predecessorAuthorityId,
+                    retiredGeneration: 2,
+                    dispatchAttemptGeneration: 2,
+                    missingDispatchSuccessorGeneration: 1,
+                    installGeneration: 2,
+                    suffix: suffix,
+                    decisionReason: reason)
+                .Replace("offer_generation=12", "offer_generation=3", StringComparison.Ordinal)
+                .Replace("offer_nonce=nonce-1", "offer_nonce=nonce-3", StringComparison.Ordinal)
+                .Replace(
+                    "missing_dispatch_successor_limit=1;",
+                    "missing_dispatch_successor_limit=1; listener_rearm_requirement=None; listener_execution_mode=AdoptCurrentCoordinatorScoped;",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "; decision_reason=",
+                    "; receive_recovery_operation_generation=0; data_session_generation=0; decision_reason=",
+                    StringComparison.Ordinal) +
+            writer;
+
+        var evidence = new List<string>
+        {
+            PredecessorInstallLine(
+                "runtime_unlock_retry_dispatch_decision_staged",
+                "; stage_status=Staged; decision_status=Granted",
+                "retry_dispatch_decision_staged"),
+            PredecessorInstallLine(
+                "runtime_unlock_retry_dispatch_install_receipt_issued",
+                "; decision_status=Granted",
+                "retry_dispatch_install_receipt_issued"),
+            PredecessorInstallLine(
+                "runtime_unlock_retry_dispatch_install_committed",
+                "; install_status=Installed; decision_status=Granted",
+                "retry_dispatch_install_committed"),
+            PredecessorInstallLine(
+                "runtime_unlock_retry_dispatch_authority_granted",
+                "; install_status=Installed; decision_status=Granted",
+                "runtime_unlock_retry_dispatch_authority_granted"),
+            PredecessorLine(
+                "runtime_unlock_retry_dispatch_contract_settled",
+                "; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                "retry_dispatch_deadline_elapsed"),
+            PredecessorLine(
+                "runtime_unlock_retry_dispatch_settlement_reported",
+                "; settlement_outcome=MissingDispatch; settlement_reason=retry_dispatch_deadline_elapsed; subscriber_present=1",
+                "reported_to_core"),
+            PredecessorLine(
+                "runtime_unlock_retry_dispatch_settlement_decided",
+                "; settlement_outcome=MissingDispatch; settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted",
+                "retry_dispatch_settlement_accepted")
+        };
+
+        if (!string.Equals(cancellationMode, "missing", StringComparison.Ordinal) &&
+            !string.Equals(cancellationMode, "operation_completion", StringComparison.Ordinal))
+        {
+            var operationGeneration = string.Equals(
+                cancellationMode,
+                "wrong_tuple",
+                StringComparison.Ordinal)
+                ? 7
+                : 6;
+            evidence.Add(PredecessorLine(
+                "runtime_unlock_retry_physical_send_scope_cancellation_requested",
+                $"; physical_send_scope_generation=1; operation_generation={operationGeneration}; payer_decision_id=5; " +
+                "transaction_generation=1; child_count=1; decision_status=Accepted; authority_effect=none",
+                "missing_dispatch_settlement_accepted"));
+        }
+
+        evidence.Add(PredecessorLine(
+            "runtime_unlock_retry_missing_dispatch_successor_intent_created",
+            "; predecessor_settlement_outcome=MissingDispatch; failed_offer_generation=2; " +
+            "request_active_predecessor_supersession=0; intent_disposition=Created",
+            "retry_dispatch_settlement_accepted"));
+        evidence.Add(
+            $"event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Deferred; " +
+            "intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=0; " +
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; " +
+            "contract_generation=7; retired_generation=2; source_route=post_tuna_fallback_v6; " +
+            "source_protocol_version=6; source_live_route_epoch=1; source_runtime_generation=4; " +
+            "source_terminal_generation=0; source_leg_generation=9; source_publication_generation=6; " +
+            "source_transport_epoch=2; source_bridge_recovery_generation=3; " +
+            "source_checkpoint_request_id=(none); data_session_identity=session:1; " +
+            "data_session_generation=1; authority_effect=none; " +
+            "decision_reason=retry_dispatch_negotiation_slot_busy" + writer);
+        if (string.Equals(cancellationMode, "operation_completion", StringComparison.Ordinal))
+        {
+            evidence.Add(PredecessorLine(
+                "runtime_unlock_retry_physical_send_scope_cancellation_requested",
+                "; physical_send_scope_generation=1; operation_generation=6; payer_decision_id=5; " +
+                "transaction_generation=1; child_count=1; decision_status=Accepted; authority_effect=none",
+                "operation_completion"));
+        }
+        if (!string.Equals(cancellationMode, "missing_drain", StringComparison.Ordinal))
+        {
+            var drainOperationGeneration = string.Equals(
+                cancellationMode,
+                "wrong_drain",
+                StringComparison.Ordinal)
+                ? 7
+                : 6;
+            evidence.Add(PredecessorLine(
+                "runtime_unlock_retry_physical_send_drain_decided",
+                $"; physical_send_scope_generation=1; operation_generation={drainOperationGeneration}; payer_decision_id=5; " +
+                "transaction_generation=1; child_count=1; decision_status=Drained; authority_effect=none",
+                "operation_descendants_completed"));
+        }
+        var reservation =
+            $"event=runtime_unlock_retry_negotiation_slot_decided; decision_status=Reserved; " +
+            "intent_kind=SuccessorEvaluation; intent_generation=2; slot_generation=2; " +
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; " +
+            "contract_generation=7; retired_generation=2; source_route=post_tuna_fallback_v6; " +
+            "source_protocol_version=6; source_live_route_epoch=1; source_runtime_generation=4; " +
+            "source_terminal_generation=0; source_leg_generation=9; source_publication_generation=6; " +
+            "source_transport_epoch=2; source_bridge_recovery_generation=3; " +
+            "source_checkpoint_request_id=(none); data_session_identity=session:1; " +
+            $"data_session_generation=1; authority_effect=none; decision_reason={reservationReason}" + writer;
+        var cleanup = PredecessorLine(
+            "runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided",
+            "; operation_generation=6; payer_decision_id=5; install_generation=1; " +
+            "predecessor_offer_generation=2; predecessor_offer_nonce=nonce-2; " +
+            "successor_intent_generation=2; source_transport_epoch=2; " +
+            "source_bridge_recovery_generation=3; source_checkpoint_request_id=(none); " +
+            "data_session_identity=session:1; data_session_generation=1; " +
+            "trigger=runtime_unlock_retry_operation; decision_status=Accepted; " +
+            "cleanup_effect=predecessor_offer_retired; authority_effect=none",
+            "settled_missing_dispatch_predecessor_operation_completed");
+        if (cleanupBeforeReservation)
+        {
+            evidence.Add(cleanup);
+            evidence.Add(reservation);
+        }
+        else
+        {
+            evidence.Add(reservation);
+            evidence.Add(cleanup);
+        }
+        evidence.Add(PredecessorLine(
+            "runtime_unlock_post_tuna_fallback_activation_disposition",
+            "; operation_generation=6; payer_decision_id=5; install_generation=1; disposition=completed",
+            "committed_authority_bound_to_retired_offer_proof"));
+        evidence.Add(PredecessorLine(
+            "tuna_acceleration_negotiation_scheduling_completed",
+            "; operation_generation=6; payer_decision_id=5; install_generation=1",
+            "committed_authority_bound_to_retired_offer_proof"));
+        evidence.Add(SuccessorInstallLine(
+            "runtime_unlock_retry_dispatch_decision_staged",
+            "; stage_status=Staged; decision_status=Granted",
+            "retry_dispatch_decision_staged"));
+        evidence.Add(SuccessorInstallLine(
+            "runtime_unlock_retry_dispatch_install_receipt_issued",
+            "; decision_status=Granted",
+            "retry_dispatch_install_receipt_issued"));
+        evidence.Add(SuccessorInstallLine(
+            "runtime_unlock_retry_dispatch_install_committed",
+            "; install_status=Installed; decision_status=Granted",
+            "retry_dispatch_install_committed"));
+        evidence.Add(SuccessorInstallLine(
+            "runtime_unlock_retry_dispatch_authority_granted",
+            "; install_status=Installed; decision_status=Granted",
+            "runtime_unlock_retry_dispatch_authority_granted"));
+        evidence.Add(SuccessorLine(
+            "runtime_unlock_retry_dispatch_observed",
+            "; dispatch_observed=1",
+            "runtime_unlock_retry_dispatch_observed"));
+        evidence.Add(
+            $"event=filetransfer_route_transition_prepared; log_writer_id=writer-deadline-physical-cancel; " +
+            $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; " +
+            "transition_kind=PostTunaFallbackV6ToTunaV4; transition_authority_id=fta2-route-transition-1; " +
+            "transition_generation=1; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_transport=regular_nkn; " +
+            "source_live_route_epoch=1; source_runtime_generation=4; source_route_publication_generation=6; " +
+            "source_route_commit_generation=0; source_terminal_generation=0; source_leg_generation=9; " +
+            "source_transport_epoch=2; source_bridge_recovery_generation=3; source_checkpoint_request_id=(none); " +
+            $"source_data_session_generation=1; data_session_identity={(string.Equals(cancellationMode, "wrong_prepared_scope", StringComparison.Ordinal) ? "session:other" : "session:1")}; " +
+            "target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; " +
+            "retry_install_generation=2; activation_authority_mode=initiator; decision_status=Prepared; " +
+            "decision_reason=runtime_unlock_retry_dispatch_observed");
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(transferId, evidence.ToArray()),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_distinct_count"]);
+        Assert.Equal(expectedRecovered ? "1" : "0", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_recovered_count"]);
+        Assert.Equal(expectedRecovered ? "0" : "1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_unresolved_count"]);
+        Assert.Equal(expectedRecovered ? "pass" : "fail", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_verdict"]);
+        if (expectedRecovered)
+        {
+            Assert.NotEqual(
+                "runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch",
+                verdict["recovery_failure_class"]);
+        }
+        else
+        {
+            Assert.Equal(
+                "runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch",
+                verdict["first_proof_chain_failure_class"]);
+            if (string.Equals(cancellationMode, "operation_completion", StringComparison.Ordinal))
+            {
+                Assert.Equal(
+                    "runtime_unlock_retry_dispatch_settlement_decided",
+                    verdict["first_proof_chain_failure_event"]);
+                Assert.Equal(
+                    "coordinator_deadline_missing_dispatch_settlement_not_propagated_to_physical_send_scope_cancellation",
+                    verdict["first_proof_chain_failure_reason"]);
+                Assert.Equal(
+                    "settlement_first_successor_intent_blocked_by_uncancelled_predecessor_observed_send_wait",
+                    verdict["failure_variant"]);
+            }
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnalyzeRetained_ZeroOfferMissingDispatchSuccessorGranted_IsValidLifecycle(bool compact)

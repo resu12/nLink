@@ -19338,6 +19338,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'runtime_unlock_retry_dispatch_contract_settled',
             'runtime_unlock_retry_dispatch_settlement_decided',
             'runtime_unlock_retry_missing_dispatch_successor_intent_created',
+            'runtime_unlock_retry_physical_send_scope_cancellation_requested',
+            'runtime_unlock_retry_physical_send_drain_decided',
             'runtime_unlock_retry_negotiation_slot_decided',
             'runtime_unlock_retry_dispatch_stale_callback_ignored',
             'runtime_unlock_post_tuna_fallback_activation_disposition',
@@ -21477,7 +21479,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     @('log_writer_id', 'log_writer_id'),
                     @('session_id', 'session_id'),
                     @('transfer_id', 'transfer_id'),
+                    @('direction', 'direction'),
                     @('contract_generation', 'contract_generation'),
+                    @('route', 'source_route'),
+                    @('protocol_version', 'source_protocol_version'),
+                    @('live_route_epoch', 'source_live_route_epoch'),
+                    @('runtime_generation', 'source_runtime_generation'),
+                    @('terminal_generation', 'source_terminal_generation'),
+                    @('leg_generation', 'source_leg_generation'),
                     @('route_publication_generation', 'source_publication_generation'),
                     @('transport_epoch', 'source_transport_epoch'),
                     @('bridge_recovery_generation', 'source_bridge_recovery_generation'))) {
@@ -21491,13 +21500,151 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
             return $true
         }
+        $physicalSendAuthorityFields = @(
+            $fullFields + @(
+                'authority_schema', 'predecessor_authority_id', 'route_kind',
+                'retired_generation', 'missing_dispatch_successor_limit',
+                'listener_rearm_requirement', 'listener_execution_mode',
+                'retry_reason', 'recovery_reason',
+                'receive_recovery_operation_generation', 'data_session_generation',
+                'target_route', 'target_route_kind', 'target_protocol_version',
+                'target_transport', 'runtime_owner_session_id',
+                'runtime_owner_transfer_id', 'runtime_owner_direction',
+                'runtime_owner_route', 'runtime_owner_route_kind',
+                'runtime_owner_protocol_version', 'runtime_owner_live_route_epoch',
+                'runtime_owner_runtime_generation', 'runtime_owner_terminal_generation',
+                'runtime_owner_family', 'runtime_owner_created_reason',
+                'source_publication_session_id', 'source_publication_transfer_id',
+                'source_publication_direction', 'source_publication_route',
+                'source_publication_route_kind', 'source_publication_protocol_version',
+                'source_publication_live_route_epoch',
+                'source_publication_runtime_generation',
+                'source_publication_terminal_generation',
+                'source_publication_leg_generation',
+                'source_publication_route_commit_generation',
+                'source_publication_target_route',
+                'source_publication_target_route_kind',
+                'source_publication_target_protocol_version',
+                'source_publication_target_transport',
+                'source_publication_generation', 'source_publication_action_kind',
+                'source_publication_reason',
+                'source_publication_runtime_owner_session_id',
+                'source_publication_runtime_owner_transfer_id',
+                'source_publication_runtime_owner_direction',
+                'source_publication_runtime_owner_route',
+                'source_publication_runtime_owner_route_kind',
+                'source_publication_runtime_owner_protocol_version',
+                'source_publication_runtime_owner_live_route_epoch',
+                'source_publication_runtime_owner_runtime_generation',
+                'source_publication_runtime_owner_terminal_generation',
+                'source_publication_runtime_owner_family',
+                'source_publication_runtime_owner_created_reason'))
+        $physicalSendScopeFields = @(
+            $physicalSendAuthorityFields + @(
+                'offer_generation', 'transaction_generation', 'offer_nonce',
+                'physical_send_scope_generation', 'operation_generation',
+                'payer_decision_id'))
+        $slotSourceFields = @(
+            'log_writer_id', 'session_id', 'transfer_id', 'direction',
+            'contract_generation', 'source_route',
+            'source_protocol_version', 'source_live_route_epoch',
+            'source_runtime_generation', 'source_terminal_generation',
+            'source_leg_generation', 'source_publication_generation',
+            'source_transport_epoch', 'source_bridge_recovery_generation',
+            'source_checkpoint_request_id', 'data_session_identity',
+            'data_session_generation', 'intent_kind', 'intent_generation')
+        $successorSourceFields = @($physicalSendAuthorityFields | Where-Object {
+            $_ -notin @(
+                'authority_id', 'authority_generation', 'predecessor_authority_id',
+                'retired_generation', 'dispatch_attempt_generation',
+                'missing_dispatch_successor_generation')
+        })
+        $preparedSlotScopeFields = @(
+            @('log_writer_id', 'log_writer_id'),
+            @('session_id', 'session_id'),
+            @('transfer_id', 'transfer_id'),
+            @('direction', 'direction'),
+            @('source_route', 'source_route'),
+            @('source_protocol_version', 'source_protocol_version'),
+            @('source_live_route_epoch', 'source_live_route_epoch'),
+            @('source_runtime_generation', 'source_runtime_generation'),
+            @('source_terminal_generation', 'source_terminal_generation'),
+            @('source_leg_generation', 'source_leg_generation'),
+            @('source_publication_generation', 'source_route_publication_generation'),
+            @('source_transport_epoch', 'source_transport_epoch'),
+            @('source_bridge_recovery_generation', 'source_bridge_recovery_generation'),
+            @('source_checkpoint_request_id', 'source_checkpoint_request_id'),
+            @('data_session_identity', 'data_session_identity'),
+            @('data_session_generation', 'source_data_session_generation'))
+        $preparedGrantScopeFields = @(
+            @('log_writer_id', 'log_writer_id'),
+            @('session_id', 'session_id'),
+            @('transfer_id', 'transfer_id'),
+            @('direction', 'direction'),
+            @('route', 'source_route'),
+            @('protocol_version', 'source_protocol_version'),
+            @('live_route_epoch', 'source_live_route_epoch'),
+            @('runtime_generation', 'source_runtime_generation'),
+            @('terminal_generation', 'source_terminal_generation'),
+            @('leg_generation', 'source_leg_generation'),
+            @('route_publication_generation', 'source_route_publication_generation'),
+            @('route_commit_generation', 'source_route_commit_generation'),
+            @('transport_epoch', 'source_transport_epoch'),
+            @('bridge_recovery_generation', 'source_bridge_recovery_generation'),
+            @('source_publication_target_route', 'source_route'),
+            @('source_publication_target_protocol_version', 'source_protocol_version'),
+            @('source_publication_target_transport', 'source_transport'),
+            @('target_route', 'target_route'),
+            @('target_protocol_version', 'target_protocol_version'),
+            @('target_transport', 'target_transport'),
+            @('release_authority_id', 'fallback_yield_authority_id'),
+            @('release_generation', 'fallback_yield_generation'),
+            @('install_generation', 'retry_install_generation'))
+        $sameFields = {
+            param($Left, $Right, [string[]]$Fields)
+            foreach ($field in $Fields) {
+                $leftValue = Get-TunaGuiLogLineFieldValue -Line $Left.Line -Name $field
+                $rightValue = Get-TunaGuiLogLineFieldValue -Line $Right.Line -Name $field
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    $leftValue -ne $rightValue) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $sameMappedFields = {
+            param($Left, $Right, [object[]]$FieldPairs)
+            foreach ($pair in $FieldPairs) {
+                $leftValue = Get-TunaGuiLogLineFieldValue -Line $Left.Line -Name $pair[0]
+                $rightValue = Get-TunaGuiLogLineFieldValue -Line $Right.Line -Name $pair[1]
+                if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                    [string]::IsNullOrWhiteSpace($rightValue) -or
+                    $leftValue -ne $rightValue) {
+                    return $false
+                }
+            }
+            return $true
+        }
+        $lastFieldValue = {
+            param([string]$Line, [string]$Name)
+            if ([string]::IsNullOrWhiteSpace($Line) -or
+                [string]::IsNullOrWhiteSpace($Name)) {
+                return ''
+            }
+            $pattern = "(?i)(?:^|;\s*)$([regex]::Escape($Name))=([^;`r`n]+)"
+            $matches = [regex]::Matches($Line, $pattern)
+            if ($matches.Count -eq 0) { return '' }
+            return $matches[$matches.Count - 1].Groups[1].Value.Trim()
+        }
 
         [object[]]$completions = @($records | Where-Object {
             (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                 'runtime_unlock_post_tuna_fallback_activation_disposition' -and
             (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'disposition') -eq 'completed' -and
-            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
-                'committed_authority_bound_to_current_offer'
+            (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -in @(
+                'committed_authority_bound_to_current_offer',
+                'committed_authority_bound_to_retired_offer_proof')
         })
         foreach ($completion in $completions) {
             $lookupCount++
@@ -21532,6 +21679,29 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (& $sameFullTuple $settlement[0] $_)
             } | Select-Object -First 1)
             if ($decision.Count -ne 1 -or $intent.Count -ne 1) { continue }
+            [object[]]$physicalSendCancellation = @($records | Where-Object {
+                $_.Index -gt $decision[0].Index -and $_.Index -lt $intent[0].Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_physical_send_scope_cancellation_requested' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                    'missing_dispatch_settlement_accepted' -and
+                (& $sameFullTuple $settlement[0] $_) -and
+                (& $sameFields $settlement[0] $_ $physicalSendAuthorityFields) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    $offerGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_nonce') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'offer_nonce') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -gt 0 -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'physical_send_scope_generation') -gt 0 -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'operation_generation') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'payer_decision_id')
+            })
             [object[]]$busyBeforeCompletion = @($records | Where-Object {
                 $_.Index -gt $intent[0].Index -and $_.Index -lt $completion.Index -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
@@ -21600,33 +21770,89 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
 
             [object[]]$cleanup = @($records | Where-Object {
-                $_.Index -gt $completion.Index -and
+                $_.Index -gt $intent[0].Index -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'cleanup_effect') -eq
+                    'predecessor_offer_retired' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq $authority -and
-                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_id') -eq
-                    (Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'log_writer_id') -and
+                (& $sameFullTuple $settlement[0] $_) -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'data_session_identity') -eq
                     (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'data_session_identity') -and
-                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'data_session_generation') -eq
-                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'data_session_generation')
+                (& $lastFieldValue $_.Line 'data_session_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'data_session_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_publication_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'source_publication_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_transport_epoch') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'source_transport_epoch') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_bridge_recovery_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'source_bridge_recovery_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'source_checkpoint_request_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'source_checkpoint_request_id') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_offer_generation') -eq
+                    $offerGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_offer_nonce') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'offer_nonce') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'successor_intent_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $busyEvidence.Line -Name 'intent_generation') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'operation_generation') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'payer_decision_id')
             } | Select-Object -First 1)
+            [object[]]$physicalSendDrain = @($records | Where-Object {
+                $physicalSendCancellation.Count -eq 1 -and $cleanup.Count -eq 1 -and
+                $_.Index -gt $decision[0].Index -and
+                $_.Index -lt $cleanup[0].Index -and
+                $_.Index -lt $completion.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_physical_send_drain_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Drained' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                    'operation_descendants_completed' -and
+                (& $sameFields $physicalSendCancellation[0] $_ $physicalSendScopeFields)
+            })
             [object[]]$reserved = @($records | Where-Object {
-                $cleanup.Count -eq 1 -and $_.Index -gt $cleanup[0].Index -and
+                $cleanup.Count -eq 1 -and $physicalSendDrain.Count -eq 1 -and
+                $_.Index -gt $intent[0].Index -and
+                $_.Index -gt $busyEvidence.Index -and
+                $_.Index -gt $physicalSendDrain[0].Index -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'runtime_unlock_retry_negotiation_slot_decided' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'intent_kind') -eq
                     'SuccessorEvaluation' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
                     'Reserved' -and
-                (& $sameSlotScope $settlement[0] $_)
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -in @(
+                    'outbound_offer_cleared',
+                    'retry_dispatch_authority_backoff_satisfied') -and
+                (& $sameSlotScope $settlement[0] $_) -and
+                (& $sameFields $busyEvidence $_ $slotSourceFields)
             } | Select-Object -First 1)
             [object[]]$grant = @($records | Where-Object {
                 $reserved.Count -eq 1 -and $_.Index -gt $reserved[0].Index -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'runtime_unlock_retry_dispatch_authority_granted' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'predecessor_authority_id') -eq
-                    $authority
+                    $authority -and
+                (& $sameFields $settlement[0] $_ $successorSourceFields) -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_generation') -eq
+                    ([int64](Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'authority_generation') + 1) -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'dispatch_attempt_generation') -eq
+                    ([int64](Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'dispatch_attempt_generation') + 1) -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'missing_dispatch_successor_generation') -eq
+                    ([int64](Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'missing_dispatch_successor_generation') + 1) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'retired_generation') -eq
+                    $offerGeneration -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'install_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $reserved[0].Line -Name 'slot_generation') -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'request_active_predecessor_supersession') -eq '0'
             } | Select-Object -First 1)
             $successorAuthority = if ($grant.Count -eq 1) {
                 Get-TunaGuiLogLineFieldValue -Line $grant[0].Line -Name 'authority_id'
@@ -21636,30 +21862,107 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'runtime_unlock_retry_dispatch_observed' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'authority_id') -eq
-                    $successorAuthority
+                    $successorAuthority -and
+                (& $sameFields $grant[0] $_ $physicalSendAuthorityFields) -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -gt 0 -and
+                -not [string]::IsNullOrWhiteSpace(
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_nonce')) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_nonce') -ne '(none)'
             } | Select-Object -First 1)
             [object[]]$prepared = @($records | Where-Object {
                 $observed.Count -eq 1 -and $_.Index -gt $observed[0].Index -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
                     'filetransfer_route_transition_prepared' -and
                 (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transition_kind') -eq
-                    'PostTunaFallbackV6ToTunaV4'
+                    'PostTunaFallbackV6ToTunaV4' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -in
+                    @('Prepared', 'Idempotent') -and
+                (& $sameMappedFields $reserved[0] $_ $preparedSlotScopeFields) -and
+                (& $sameMappedFields $grant[0] $_ $preparedGrantScopeFields) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $observed[0].Line -Name 'offer_generation') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -gt 0
             } | Select-Object -First 1)
-            if ($cleanup.Count -eq 1 -and $reserved.Count -eq 1 -and
+            if ($physicalSendCancellation.Count -eq 1 -and
+                $physicalSendDrain.Count -eq 1 -and
+                $cleanup.Count -eq 1 -and $reserved.Count -eq 1 -and
                 $grant.Count -eq 1 -and $observed.Count -eq 1 -and
                 $prepared.Count -eq 1) {
                 continue
             }
 
+            [object[]]$latePhysicalSendCancellation = @($records | Where-Object {
+                $cleanup.Count -eq 1 -and
+                $_.Index -gt $busyEvidence.Index -and
+                $_.Index -lt $cleanup[0].Index -and
+                $_.Index -lt $completion.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_physical_send_scope_cancellation_requested' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Accepted' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                    'operation_completion' -and
+                (& $sameFullTuple $settlement[0] $_) -and
+                (& $sameFields $settlement[0] $_ $physicalSendAuthorityFields) -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_generation') -eq
+                    $offerGeneration -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'offer_nonce') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $settlement[0].Line -Name 'offer_nonce') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transaction_generation') -gt 0 -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'physical_send_scope_generation') -gt 0 -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'operation_generation') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'operation_generation') -and
+                [int64](Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -gt 0 -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'payer_decision_id') -eq
+                    (Get-TunaGuiLogLineFieldValue -Line $completion.Line -Name 'payer_decision_id')
+            })
+            [object[]]$latePhysicalSendDrain = @($records | Where-Object {
+                $latePhysicalSendCancellation.Count -eq 1 -and $cleanup.Count -eq 1 -and
+                $_.Index -gt $decision[0].Index -and
+                $_.Index -lt $cleanup[0].Index -and
+                $_.Index -lt $completion.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'event') -eq
+                    'runtime_unlock_retry_physical_send_drain_decided' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_status') -eq
+                    'Drained' -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'decision_reason') -eq
+                    'operation_descendants_completed' -and
+                (& $sameFields $latePhysicalSendCancellation[0] $_ $physicalSendScopeFields)
+            })
+            $deadlinePhysicalCancellationMissing =
+                $existingOrdering -and
+                (Get-TunaGuiLogLineFieldValue -Line $decision[0].Line -Name 'settlement_reason') -eq
+                    'retry_dispatch_deadline_elapsed' -and
+                $physicalSendCancellation.Count -eq 0 -and
+                $latePhysicalSendCancellation.Count -eq 1 -and
+                $latePhysicalSendDrain.Count -eq 1 -and
+                $cleanup.Count -eq 1
+            $failureRecord = if ($deadlinePhysicalCancellationMissing) {
+                $decision[0]
+            }
+            else {
+                $completion
+            }
             $sequenceText = Get-TunaGuiLogLineFieldValue `
-                -Line $completion.Line -Name 'gui_evidence_sequence'
+                -Line $failureRecord.Line -Name 'gui_evidence_sequence'
             return [pscustomobject]@{
                 Unresolved = $true
                 FirstSequence = if ($sequenceText -match '^[1-9][0-9]*$') {
                     [long]$sequenceText
-                } else { [long]($completion.Index + 1) }
+                } else { [long]($failureRecord.Index + 1) }
                 ParsedRecords = [long]$records.Count
                 LookupCount = [long]$lookupCount
+                Reason = if ($deadlinePhysicalCancellationMissing) {
+                    'coordinator_deadline_missing_dispatch_settlement_not_propagated_to_physical_send_scope_cancellation'
+                }
+                else {
+                    'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor'
+                }
+                Variant = if ($deadlinePhysicalCancellationMissing) {
+                    'settlement_first_successor_intent_blocked_by_uncancelled_predecessor_observed_send_wait'
+                }
+                else { '(none)' }
             }
         }
 
@@ -21668,6 +21971,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             FirstSequence = [long]::MaxValue
             ParsedRecords = [long]$records.Count
             LookupCount = [long]$lookupCount
+            Reason = '(none)'
+            Variant = '(none)'
         }
     }
 
@@ -22159,12 +22464,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
         return New-TunaGuiFileTransferFailureClassificationResult `
             -Phase 'runtime_unlock_retry' `
-            -Reason 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor' `
+            -Reason ([string]$missingDispatchCompletionFastPath.Reason) `
             -RouteMode $RouteMode `
             -ClassificationSource "${classificationSource}_missing_dispatch_completion_index" `
             -EvidenceLineVisitCount $earlyEvidenceLineVisitCount `
             -EvidenceParsedRecordCount ([long]$missingDispatchCompletionFastPath.ParsedRecords) `
             -EvidenceLookupCount ([long]$missingDispatchCompletionFastPath.LookupCount) `
+            -FailureVariant ([string]$missingDispatchCompletionFastPath.Variant) `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
     }
 

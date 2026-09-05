@@ -4258,6 +4258,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_reported') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_settlement_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_successor_intent_created') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_physical_send_scope_cancellation_requested') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_physical_send_drain_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_successor_evaluation_suppressed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_negotiation_slot_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_stale_callback_ignored') +
@@ -4266,6 +4268,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_recheck_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'tuna_acceleration_outbound_offer_retired') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_observed') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transition_prepared') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal') +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
@@ -5246,7 +5249,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Reason = 'live_coordinator_scoped_initial_activation_listener_reported_missing_for_fallback_paired_retry'
         }) | Out-Null
     }
-    foreach ($candidateEvent in @($runtimeUnlockRetryMissingDispatchOfferCompletionProof.UnresolvedCandidateEvents)) {
+    foreach ($candidateEvent in @(
+            $runtimeUnlockRetryMissingDispatchOfferCompletionProof.DeadlinePhysicalCancellationUnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
+            Event = $candidateEvent
+            Reason = 'coordinator_deadline_missing_dispatch_settlement_not_propagated_to_physical_send_scope_cancellation'
+            Variant = 'settlement_first_successor_intent_blocked_by_uncancelled_predecessor_observed_send_wait'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @(
+            $runtimeUnlockRetryMissingDispatchOfferCompletionProof.GenericUnresolvedCandidateEvents)) {
         $compactProofChainCandidates.Add([pscustomobject]@{
             Class = 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
             Event = $candidateEvent
@@ -6208,6 +6221,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'filetransfer_post_tuna_fallback_duplicate_state_replay_amplification',
             'filetransfer_post_tuna_fallback_exact_frontier_repair_preempted_by_sender_liveness_replay',
             'filetransfer_gui_live_reactivation_action_window_missed',
+            'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
             'runtime_unlock_tuna_probe_recovery_authority_lost') -and
         $null -ne $firstCompactProofChainFailure.PSObject.Properties['Variant'] -and
         -not [string]::IsNullOrWhiteSpace([string]$firstCompactProofChainFailure.Variant)) {

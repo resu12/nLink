@@ -10,7 +10,9 @@ $script:GuiSmokeLegacyV0EvidenceCatalog = $null
 $script:GuiSmokeLiveDiagnosticEvidenceEventNames = @(
     'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
     'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
-    'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided'
+    'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided',
+    'runtime_unlock_retry_physical_send_scope_cancellation_requested',
+    'runtime_unlock_retry_physical_send_drain_decided'
 )
 
 function Get-GuiSmokeLegacyV0EvidenceCatalog {

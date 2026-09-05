@@ -23813,6 +23813,22 @@ public sealed partial class NknSignalingTransport
 
         if (successorEvaluation is { } evaluation && predecessor is not null)
         {
+            if (accepted &&
+                decision.Status is (
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted or
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent) &&
+                decision.Report.Outcome ==
+                    RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch &&
+                string.Equals(
+                    decision.Report.Reason,
+                    "retry_dispatch_deadline_elapsed",
+                    StringComparison.Ordinal))
+            {
+                CancelRuntimeUnlockRetryPhysicalSendScopeIfCurrent(
+                    predecessor.Authority,
+                    evaluation.PredecessorOfferGeneration,
+                    "missing_dispatch_settlement_accepted");
+            }
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=runtime_unlock_retry_missing_dispatch_successor_intent_created; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(predecessor.Authority)}; predecessor_settlement_outcome=MissingDispatch; failed_offer_generation={evaluation.RetiredOfferGeneration}; request_active_predecessor_supersession=0; intent_disposition=Created; decision_reason={SanitizeLogToken(decision.Report.Reason)}");

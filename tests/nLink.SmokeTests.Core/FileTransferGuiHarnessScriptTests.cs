@@ -27,7 +27,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 'temp_finalize_succeeded',
                 'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
                 'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
-                'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided')) {
+                'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided',
+                'runtime_unlock_retry_physical_send_scope_cancellation_requested',
+                'runtime_unlock_retry_physical_send_drain_decided')) {
                 if ($required -notin $names) { throw "semantic event missing: $required" }
             }
             Write-Output 'terminal-frontier-semantic-catalog-ok'
@@ -3789,11 +3791,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             try {
                 $path = Join-Path $tempRoot 'evidence.log'
                 $tuple = 'log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; authority_id=retry-a; authority_generation=1; contract_generation=7; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; release_kind=FallbackPairedTailYield; release_authority_id=pair-a; release_generation=1; release_outcome=paired; offer_generation=2; offer_nonce=nonce-2'
+                $slotTuple = 'log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; contract_generation=7; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); data_session_identity=session:1; data_session_generation=1'
                 @(
                     "event=runtime_unlock_retry_dispatch_contract_settled; $tuple; settlement_outcome=MissingDispatch; dispatch_observed=0",
                     "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; settlement_outcome=MissingDispatch; decision_status=Accepted",
                     "event=runtime_unlock_retry_missing_dispatch_successor_intent_created; $tuple; failed_offer_generation=2; intent_disposition=Created",
-                    'event=runtime_unlock_retry_negotiation_slot_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; contract_generation=7; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy',
+                    "event=runtime_unlock_retry_negotiation_slot_decided; $slotTuple; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy",
                     "event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer",
                     "event=tuna_acceleration_negotiation_scheduling_completed; $tuple; operation_generation=5; decision_reason=committed_authority_bound_to_current_offer",
                     'event=file_transfer_outbound_terminal; log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; state=Failed; error_code=peer_disconnected'
@@ -3814,9 +3817,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     "event=runtime_unlock_retry_dispatch_settlement_decided; $tuple; settlement_outcome=MissingDispatch; decision_status=Accepted",
                     "event=runtime_unlock_retry_missing_dispatch_successor_intent_created; $tuple; failed_offer_generation=2; intent_disposition=Created",
                     "event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer",
-                    'event=runtime_unlock_retry_negotiation_slot_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; contract_generation=7; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; data_session_identity=session:1; data_session_generation=1; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_authority_backoff_pending',
+                    "event=runtime_unlock_retry_negotiation_slot_decided; $slotTuple; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_authority_backoff_pending",
                     "event=tuna_acceleration_negotiation_scheduling_completed; $tuple; operation_generation=5; decision_reason=committed_authority_bound_to_current_offer",
-                    'event=runtime_unlock_retry_negotiation_slot_decided; log_writer_id=writer; session_id=sess; transfer_id=transfer; contract_generation=7; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; data_session_identity=session:1; data_session_generation=1; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy',
+                    "event=runtime_unlock_retry_negotiation_slot_decided; $slotTuple; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy",
                     'event=file_transfer_outbound_terminal; log_writer_id=writer; session_id=sess; transfer_id=transfer; direction=outbound; state=Failed; error_code=peer_disconnected'
                 ) | Set-Content -LiteralPath $path
                 $completionFirst = Get-TunaGuiFileTransferSetupFailureClassification `
@@ -3828,6 +3831,197 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $completionFirst.Reason -ne 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor' -or
                     $completionFirst.ClassificationSource -ne 'immutable_evidence_missing_dispatch_completion_index') {
                     throw "completion-first MissingDispatch fast path mismatch: $($completionFirst | ConvertTo-Json -Compress)"
+                }
+
+                $physicalFields = [ordered]@{}
+                foreach ($name in @(
+                        'log_writer_id', 'session_id', 'transfer_id', 'direction',
+                        'authority_id', 'authority_generation', 'contract_generation',
+                        'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                        'terminal_generation', 'leg_generation', 'transport_epoch',
+                        'bridge_recovery_generation', 'bridge_decision_generation',
+                        'route_publication_generation', 'route_commit_generation',
+                        'dispatch_attempt_generation', 'missing_dispatch_successor_generation',
+                        'release_kind', 'release_authority_id', 'release_generation',
+                        'release_outcome', 'authority_schema', 'predecessor_authority_id',
+                        'route_kind', 'retired_generation', 'missing_dispatch_successor_limit',
+                        'listener_rearm_requirement', 'listener_execution_mode', 'retry_reason',
+                        'recovery_reason', 'receive_recovery_operation_generation',
+                        'data_session_generation', 'target_route', 'target_route_kind',
+                        'target_protocol_version', 'target_transport', 'runtime_owner_session_id',
+                        'runtime_owner_transfer_id', 'runtime_owner_direction', 'runtime_owner_route',
+                        'runtime_owner_route_kind', 'runtime_owner_protocol_version',
+                        'runtime_owner_live_route_epoch', 'runtime_owner_runtime_generation',
+                        'runtime_owner_terminal_generation', 'runtime_owner_family',
+                        'runtime_owner_created_reason', 'source_publication_session_id',
+                        'source_publication_transfer_id', 'source_publication_direction',
+                        'source_publication_route', 'source_publication_route_kind',
+                        'source_publication_protocol_version', 'source_publication_live_route_epoch',
+                        'source_publication_runtime_generation',
+                        'source_publication_terminal_generation',
+                        'source_publication_leg_generation',
+                        'source_publication_route_commit_generation',
+                        'source_publication_target_route',
+                        'source_publication_target_route_kind',
+                        'source_publication_target_protocol_version',
+                        'source_publication_target_transport', 'source_publication_generation',
+                        'source_publication_action_kind', 'source_publication_reason',
+                        'source_publication_runtime_owner_session_id',
+                        'source_publication_runtime_owner_transfer_id',
+                        'source_publication_runtime_owner_direction',
+                        'source_publication_runtime_owner_route',
+                        'source_publication_runtime_owner_route_kind',
+                        'source_publication_runtime_owner_protocol_version',
+                        'source_publication_runtime_owner_live_route_epoch',
+                        'source_publication_runtime_owner_runtime_generation',
+                        'source_publication_runtime_owner_terminal_generation',
+                        'source_publication_runtime_owner_family',
+                        'source_publication_runtime_owner_created_reason')) {
+                    $physicalFields[$name] = "value_$name"
+                }
+                foreach ($entry in @{
+                        log_writer_id = 'writer-physical'; session_id = 'session-physical';
+                        transfer_id = 'transfer-physical'; direction = 'outbound';
+                        authority_id = 'retry-physical-a'; authority_generation = '1';
+                        contract_generation = '7'; route = 'post_tuna_fallback_v6';
+                        route_kind = 'PostTunaFallbackV6';
+                        protocol_version = '6'; live_route_epoch = '2'; runtime_generation = '3';
+                        terminal_generation = '0'; leg_generation = '3'; transport_epoch = '1';
+                        bridge_recovery_generation = '1'; bridge_decision_generation = '1';
+                        route_publication_generation = '3'; route_commit_generation = '0';
+                        dispatch_attempt_generation = '1'; missing_dispatch_successor_generation = '0';
+                        release_kind = 'FallbackPairedTailYield';
+                        release_authority_id = 'pair-physical'; release_generation = '1';
+                        release_outcome = 'paired'; authority_schema = '2'; retired_generation = '0';
+                        missing_dispatch_successor_limit = '1';
+                        listener_rearm_requirement = 'None'; listener_execution_mode = 'None';
+                        retry_reason = 'fallback_paired_tail_yield'; recovery_reason = 'none';
+                        receive_recovery_operation_generation = '0'; data_session_generation = '0';
+                        target_route = 'file_tuna_v4'; target_route_kind = 'FileTunaV4';
+                        target_protocol_version = '4'; target_transport = 'tuna';
+                        runtime_owner_live_route_epoch = '2';
+                        runtime_owner_runtime_generation = '3'; runtime_owner_terminal_generation = '0';
+                        source_publication_protocol_version = '6';
+                        source_publication_live_route_epoch = '2';
+                        source_publication_runtime_generation = '3';
+                        source_publication_terminal_generation = '0';
+                        source_publication_leg_generation = '3';
+                        source_publication_route_commit_generation = '0';
+                        source_publication_target_route = 'post_tuna_fallback_v6';
+                        source_publication_target_route_kind = 'PostTunaFallbackV6';
+                        source_publication_target_protocol_version = '6';
+                        source_publication_target_transport = 'regular_nkn';
+                        source_publication_generation = '3';
+                        source_publication_runtime_owner_protocol_version = '6';
+                        source_publication_runtime_owner_live_route_epoch = '2';
+                        source_publication_runtime_owner_runtime_generation = '3';
+                        source_publication_runtime_owner_terminal_generation = '0'
+                    }.GetEnumerator()) {
+                    $physicalFields[$entry.Key] = [string]$entry.Value
+                }
+                $physicalTuple = ($physicalFields.GetEnumerator() | ForEach-Object {
+                        "$($_.Key)=$($_.Value)"
+                    }) -join '; '
+                $successorFields = [ordered]@{}
+                foreach ($entry in $physicalFields.GetEnumerator()) {
+                    $successorFields[$entry.Key] = [string]$entry.Value
+                }
+                foreach ($entry in @{
+                        authority_id = 'retry-physical-b'; authority_generation = '2';
+                        predecessor_authority_id = 'retry-physical-a'; retired_generation = '2';
+                        dispatch_attempt_generation = '2'; missing_dispatch_successor_generation = '1'
+                    }.GetEnumerator()) {
+                    $successorFields[$entry.Key] = [string]$entry.Value
+                }
+                $successorTuple = ($successorFields.GetEnumerator() | ForEach-Object {
+                        "$($_.Key)=$($_.Value)"
+                    }) -join '; '
+                $physicalScope = 'offer_generation=2; transaction_generation=1; offer_nonce=nonce-2; physical_send_scope_generation=1; operation_generation=6; payer_decision_id=5'
+                $slotScope = 'log_writer_id=writer-physical; session_id=session-physical; transfer_id=transfer-physical; direction=outbound; contract_generation=7; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); data_session_identity=session:1; data_session_generation=1'
+                $cleanupScope = 'operation_generation=6; payer_decision_id=5; predecessor_offer_generation=2; predecessor_offer_nonce=nonce-2; successor_intent_generation=2; source_publication_generation=3; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); data_session_identity=session:1; data_session_generation=1'
+                $preparedScope = 'log_writer_id=writer-physical; session_id=session-physical; transfer_id=transfer-physical; direction=outbound; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_transport=regular_nkn; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=3; source_route_commit_generation=0; source_transport_epoch=1; source_bridge_recovery_generation=1; source_checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=session:1; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; retry_install_generation=2; fallback_yield_authority_id=pair-physical; fallback_yield_generation=1; transaction_generation=2; offer_generation=3; decision_status=Prepared'
+                $lateCancellation = @(
+                    "event=runtime_unlock_retry_dispatch_contract_settled; $physicalTuple; offer_generation=2; offer_nonce=nonce-2; settlement_outcome=MissingDispatch; dispatch_observed=0",
+                    "event=runtime_unlock_retry_dispatch_settlement_decided; $physicalTuple; offer_generation=2; offer_nonce=nonce-2; settlement_outcome=MissingDispatch; settlement_reason=retry_dispatch_deadline_elapsed; decision_status=Accepted",
+                    "event=runtime_unlock_retry_missing_dispatch_successor_intent_created; $physicalTuple; offer_generation=2; offer_nonce=nonce-2; failed_offer_generation=2; intent_disposition=Created",
+                    "event=runtime_unlock_retry_negotiation_slot_decided; $slotScope; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Deferred; slot_generation=0; decision_reason=retry_dispatch_negotiation_slot_busy",
+                    "event=runtime_unlock_retry_physical_send_scope_cancellation_requested; $physicalTuple; $physicalScope; decision_status=Accepted; decision_reason=operation_completion",
+                    "event=runtime_unlock_retry_physical_send_drain_decided; $physicalTuple; $physicalScope; decision_status=Drained; decision_reason=operation_descendants_completed",
+                    "event=runtime_unlock_retry_missing_dispatch_predecessor_cleanup_decided; $physicalTuple; $cleanupScope; decision_status=Accepted; cleanup_effect=predecessor_offer_retired; decision_reason=settled_missing_dispatch_predecessor_operation_completed",
+                    "event=runtime_unlock_post_tuna_fallback_activation_disposition; $physicalTuple; offer_generation=2; offer_nonce=nonce-2; operation_generation=6; payer_decision_id=5; disposition=completed; decision_reason=committed_authority_bound_to_retired_offer_proof",
+                    "event=tuna_acceleration_negotiation_scheduling_completed; $physicalTuple; offer_generation=2; offer_nonce=nonce-2; operation_generation=6; payer_decision_id=5; decision_reason=committed_authority_bound_to_retired_offer_proof"
+                )
+                $lateCancellation | Set-Content -LiteralPath $path
+                $deadlineCancellation = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark 0 `
+                    -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                    -RouteMode 'live-regular-activation-cycle' `
+                    -ImmutableEvidencePaths @($path)
+                if ($deadlineCancellation.Phase -ne 'runtime_unlock_retry' -or
+                    $deadlineCancellation.Reason -ne 'coordinator_deadline_missing_dispatch_settlement_not_propagated_to_physical_send_scope_cancellation' -or
+                    $deadlineCancellation.FailureVariant -ne 'settlement_first_successor_intent_blocked_by_uncancelled_predecessor_observed_send_wait') {
+                    throw "deadline MissingDispatch physical cancellation mismatch: $($deadlineCancellation | ConvertTo-Json -Compress)"
+                }
+
+                $exactRecoveryPrefix = @(
+                    $lateCancellation[0],
+                    $lateCancellation[1],
+                    "event=runtime_unlock_retry_physical_send_scope_cancellation_requested; $physicalTuple; $physicalScope; decision_status=Accepted; decision_reason=missing_dispatch_settlement_accepted",
+                    $lateCancellation[2],
+                    $lateCancellation[3],
+                    $lateCancellation[5]
+                )
+                $exactRecoverySuffix = @(
+                    $lateCancellation[6],
+                    $lateCancellation[7],
+                    $lateCancellation[8],
+                    "event=runtime_unlock_retry_dispatch_authority_granted; $successorTuple; request_active_predecessor_supersession=0; install_generation=2; offer_generation=0; offer_nonce=(none)",
+                    "event=runtime_unlock_retry_dispatch_observed; $successorTuple; offer_generation=3; offer_nonce=nonce-3",
+                    "event=filetransfer_route_transition_prepared; $preparedScope"
+                )
+                foreach ($reservationReason in @(
+                        'outbound_offer_cleared',
+                        'retry_dispatch_authority_backoff_satisfied')) {
+                    @($exactRecoveryPrefix + @(
+                            "event=runtime_unlock_retry_negotiation_slot_decided; $slotScope; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Reserved; slot_generation=2; decision_reason=$reservationReason"
+                        ) + $exactRecoverySuffix) | Set-Content -LiteralPath $path
+                    $exactRecovery = Get-TunaGuiFileTransferSetupFailureClassification `
+                        -Bookmark 0 `
+                        -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                        -RouteMode 'live-regular-activation-cycle' `
+                        -ImmutableEvidencePaths @($path)
+                    if ($exactRecovery.Reason -in @(
+                            'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor',
+                            'coordinator_deadline_missing_dispatch_settlement_not_propagated_to_physical_send_scope_cancellation')) {
+                        throw "exact cancellation and drain did not recover MissingDispatch for ${reservationReason}: $($exactRecovery | ConvertTo-Json -Compress)"
+                    }
+                }
+
+                $validReservation = "event=runtime_unlock_retry_negotiation_slot_decided; $slotScope; intent_kind=SuccessorEvaluation; intent_generation=2; decision_status=Reserved; slot_generation=2; decision_reason=outbound_offer_cleared"
+                $validGrant = "event=runtime_unlock_retry_dispatch_authority_granted; $successorTuple; request_active_predecessor_supersession=0; install_generation=2; offer_generation=0; offer_nonce=(none)"
+                $validObserved = "event=runtime_unlock_retry_dispatch_observed; $successorTuple; offer_generation=3; offer_nonce=nonce-3"
+                $validPrepared = "event=filetransfer_route_transition_prepared; $preparedScope"
+                foreach ($wrongLineageKind in @('grant', 'observed', 'prepared')) {
+                    $wrongGrant = if ($wrongLineageKind -eq 'grant') {
+                        $validGrant -replace 'session_id=session-physical', 'session_id=session-other'
+                    } else { $validGrant }
+                    $wrongObserved = if ($wrongLineageKind -eq 'observed') {
+                        $validObserved -replace 'log_writer_id=writer-physical', 'log_writer_id=writer-other'
+                    } else { $validObserved }
+                    $wrongPrepared = if ($wrongLineageKind -eq 'prepared') {
+                        $validPrepared -replace 'data_session_identity=session:1', 'data_session_identity=session:other'
+                    } else { $validPrepared }
+                    $wrongLineage = @($wrongGrant, $wrongObserved, $wrongPrepared)
+                    @($exactRecoveryPrefix + @($validReservation) + $exactRecoverySuffix[0..2] + $wrongLineage) |
+                        Set-Content -LiteralPath $path
+                    $wrongLineageResult = Get-TunaGuiFileTransferSetupFailureClassification `
+                        -Bookmark 0 `
+                        -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                        -RouteMode 'live-regular-activation-cycle' `
+                        -ImmutableEvidencePaths @($path)
+                    if ($wrongLineageResult.Reason -ne 'settled_missing_dispatch_predecessor_offer_not_retired_to_wake_exact_successor') {
+                        throw "wrong-lineage successor evidence recovered MissingDispatch: $($wrongLineageResult | ConvertTo-Json -Compress)"
+                    }
                 }
 
                 @("event=runtime_unlock_post_tuna_fallback_activation_disposition; $tuple; operation_generation=5; disposition=completed; decision_reason=committed_authority_bound_to_current_offer") |
