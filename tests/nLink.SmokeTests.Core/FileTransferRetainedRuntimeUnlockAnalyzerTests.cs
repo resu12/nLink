@@ -8775,6 +8775,117 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     [Theory]
+    [InlineData("report_first_accepted", "1", "0", "0", "-1", "(none)")]
+    [InlineData("settlement_first_accepted", "1", "0", "0", "-1", "(none)")]
+    [InlineData("report_first_rejected", "0", "1", "1", "6", "runtime_unlock_retry_dispatch_contract_settled")]
+    [InlineData("report_first_missing_decision", "0", "0", "1", "6", "runtime_unlock_retry_dispatch_contract_settled")]
+    [InlineData("decision_before_settlement", "1", "0", "1", "7", "runtime_unlock_retry_dispatch_contract_settled")]
+    [InlineData("completed_cycle_report_not_reused", "1", "0", "1", "8", "runtime_unlock_retry_dispatch_contract_settled")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetrySettlementReportOrdering_HasFullCompactParity(
+        string scenario,
+        string acceptedCount,
+        string rejectedCount,
+        string acceptanceMissingCount,
+        string expectedFailureSequence,
+        string expectedFailureEvent)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var transferId = $"transfer_runtime_unlock_settlement_{scenario}";
+        var settlement = RuntimeUnlockRetrySchema2Line(
+            "runtime_unlock_retry_dispatch_contract_settled",
+            transferId,
+            suffix: "; settlement_outcome=DispatchObserved; dispatch_observed=1");
+        var report = RuntimeUnlockRetrySettlementReportedLine(transferId, "DispatchObserved");
+        var accepted = RuntimeUnlockRetrySettlementDecidedLine(transferId, "DispatchObserved");
+        var rejected = RuntimeUnlockRetrySettlementDecidedLine(
+            transferId,
+            "DispatchObserved",
+            decisionStatus: "Rejected");
+        string[] settlementEvents = scenario switch
+        {
+            "report_first_accepted" => [report, settlement, accepted],
+            "settlement_first_accepted" => [settlement, report, accepted],
+            "report_first_rejected" => [report, settlement, rejected],
+            "report_first_missing_decision" => [report, settlement],
+            "decision_before_settlement" => [report, accepted, settlement],
+            "completed_cycle_report_not_reused" => [settlement, report, accepted, settlement],
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null)
+        };
+        var lines = BuildRuntimeUnlockRetryDispatchProofFixture(
+            transferId,
+            [
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_granted",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_released_after_regular_v4_receive_recovery",
+                    transferId),
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_observed",
+                    transferId),
+                .. settlementEvents
+            ]);
+
+        var full = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            ["-LiveRouteProofMode", "None"],
+            new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.True(full.Script.ExitCode == 0, full.Script.Stdout + Environment.NewLine + full.Script.Stderr);
+        Assert.True(compact.Script.ExitCode == 0, compact.Script.Stdout + Environment.NewLine + compact.Script.Stderr);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "runtime_unlock_retry_dispatch_settlement_reported_count",
+                     "runtime_unlock_retry_dispatch_settlement_accepted_count",
+                     "runtime_unlock_retry_dispatch_settlement_idempotent_count",
+                     "runtime_unlock_retry_dispatch_settlement_rejected_count",
+                     "runtime_unlock_retry_dispatch_settlement_acceptance_missing_count",
+                     "runtime_unlock_retry_dispatch_proof_verdict",
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_sequence"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("1", fullVerdict["runtime_unlock_retry_dispatch_settlement_reported_count"]);
+        Assert.Equal(acceptedCount, fullVerdict["runtime_unlock_retry_dispatch_settlement_accepted_count"]);
+        Assert.Equal("0", fullVerdict["runtime_unlock_retry_dispatch_settlement_idempotent_count"]);
+        Assert.Equal(rejectedCount, fullVerdict["runtime_unlock_retry_dispatch_settlement_rejected_count"]);
+        Assert.Equal(acceptanceMissingCount, fullVerdict["runtime_unlock_retry_dispatch_settlement_acceptance_missing_count"]);
+        Assert.Equal(expectedFailureEvent, fullVerdict["first_proof_chain_failure_event"]);
+        Assert.Equal(expectedFailureSequence, fullVerdict["first_proof_chain_failure_sequence"]);
+        if (acceptanceMissingCount == "0")
+        {
+            Assert.Equal("(none)", fullVerdict["recovery_failure_class"]);
+            Assert.Equal("pass", fullVerdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        }
+        else
+        {
+            Assert.Equal(
+                "runtime_unlock_retry_dispatch_settlement_unaccepted",
+                fullVerdict["recovery_failure_class"]);
+            Assert.Equal(
+                "runtime_unlock_retry_dispatch_settlement_unaccepted",
+                fullVerdict["first_proof_chain_failure_class"]);
+            Assert.Equal("fail", fullVerdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "Smoke")]

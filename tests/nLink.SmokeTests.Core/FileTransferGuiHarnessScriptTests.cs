@@ -11474,6 +11474,23 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                         -LiveRouteProofMode RegularActivationCycle -CompactRequired $true)) {
                     throw 'valid exact receipt was rejected'
                 }
+                $stagePath = Join-Path $root 'filetransfer-retained-analysis-stage-diagnostics.json'
+                $stageBytes = [IO.File]::ReadAllBytes($stagePath)
+                [IO.File]::Delete($stagePath)
+                if (Test-FileTransferRetainedAnalysisAttemptReceipt `
+                        -Receipt $receipt -ArtifactDir $root -ExpectedOwner RouteAcceptance `
+                        -AcceptanceRunId run-a -ScenarioRunId scenario-a -LogPath $log `
+                        -LiveRouteProofMode RegularActivationCycle -CompactRequired $true) {
+                    throw 'missing required stage diagnostics retained authority'
+                }
+                [IO.File]::WriteAllText($stagePath, '{}', [Text.UTF8Encoding]::new($false))
+                if (Test-FileTransferRetainedAnalysisAttemptReceipt `
+                        -Receipt $receipt -ArtifactDir $root -ExpectedOwner RouteAcceptance `
+                        -AcceptanceRunId run-a -ScenarioRunId scenario-a -LogPath $log `
+                        -LiveRouteProofMode RegularActivationCycle -CompactRequired $true) {
+                    throw 'mutated required stage diagnostics retained authority'
+                }
+                [IO.File]::WriteAllBytes($stagePath, $stageBytes)
                 $duplicateRejected = $false
                 try {
                     Write-FileTransferRetainedAnalysisAttemptReceipt `
@@ -12107,6 +12124,49 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
             }
             function Test-FileTransferCoordinatorSnapshotFamilyAuthoritative { return $true }
+            $script:snapshotRouteVerdict = 'pass'
+            $script:snapshotRouteParityMismatch = $false
+            $script:snapshotRouteInvocation = 0
+            function Get-FileTransferCoordinatorSnapshotRouteConsistency {
+                $script:snapshotRouteInvocation++
+                if ($script:snapshotRouteVerdict -ceq 'pass') {
+                    $projection = if ($script:snapshotRouteParityMismatch -and
+                        ($script:snapshotRouteInvocation % 2) -eq 0) {
+                        'compact'
+                    }
+                    else {
+                        'pass'
+                    }
+                    return [pscustomobject]@{
+                        Verdict = 'pass'
+                        NormalizedJson = "{`"verdict`":`"$projection`"}"
+                        NormalizedHash = "route-$projection-hash"
+                        BoundaryHash = "route-$projection-hash"
+                    }
+                }
+                $boundary = [pscustomobject]@{
+                    boundaryId = 'route-boundary'
+                    boundaryHash = 'route-boundary-hash'
+                    taxonomyClass = 'route-taxonomy'
+                    decisionReason = 'route-reason'
+                    variant = 'route-variant'
+                    rawCount = 3
+                    distinctCount = 2
+                    recoveredCount = 1
+                    unresolvedCount = 1
+                    writer = 'route-writer'
+                    writerSequence = 321L
+                }
+                return [pscustomobject]@{
+                    Verdict = 'fail'
+                    FirstUnresolvedBoundary = $boundary
+                    Findings = @('route finding')
+                    EvidenceEvents = @()
+                    BoundaryHash = 'normalized-route-hash'
+                    NormalizedHash = 'normalized-route-hash'
+                    NormalizedJson = '{"verdict":"fail"}'
+                }
+            }
             function Get-AppLogLinesAfterBookmark { throw 'live evidence was read' }
             function Read-GuiSmokeProcessOutputLinesSnapshot { throw 'process output was read' }
 
@@ -12163,6 +12223,36 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     throw "harness classification overrode invalid snapshot evidence: $($invalidSnapshot | ConvertTo-Json -Depth 8 -Compress)"
                 }
                 $script:snapshotArtifactVerdict = 'pass'
+
+                $script:snapshotRouteParityMismatch = $true
+                $script:snapshotRouteInvocation = 0
+                $routeParityInvalid = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($routeParityInvalid.FailureClass -cne 'filetransfer_route_consistency_analysis_parity_invalid' -or
+                    $routeParityInvalid.Reason -cne 'snapshot_route_consistency_full_compact_mismatch' -or
+                    $routeParityInvalid.FailureVariant -cne 'snapshot_authoritative_route_consistency_full_compact_normalized_mismatch' -or
+                    $routeParityInvalid.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency') {
+                    throw "full/compact route parity mismatch classification failed: $($routeParityInvalid | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                $script:snapshotRouteParityMismatch = $false
+                $script:snapshotRouteInvocation = 0
+
+                $script:snapshotRouteVerdict = 'fail'
+                $routeInvalid = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification
+                if ($routeInvalid.FailureClass -cne 'route-taxonomy' -or
+                    $routeInvalid.Reason -cne 'route-reason' -or
+                    $routeInvalid.FailureVariant -cne 'route-variant' -or
+                    $routeInvalid.CoordinatorBoundaryId -cne 'route-boundary' -or
+                    $routeInvalid.CoordinatorBoundaryHash -cne 'route-boundary-hash' -or
+                    $routeInvalid.CoordinatorRawCount -ne 3 -or
+                    $routeInvalid.CoordinatorDistinctCount -ne 2 -or
+                    $routeInvalid.CoordinatorRecoveredCount -ne 1 -or
+                    $routeInvalid.CoordinatorUnresolvedCount -ne 1 -or
+                    $routeInvalid.CoordinatorWriter -cne 'route-writer' -or
+                    $routeInvalid.CoordinatorWriterSequence -ne 321L -or
+                    $routeInvalid.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency') {
+                    throw "shared route classification metadata mismatch: $($routeInvalid | ConvertTo-Json -Depth 8 -Compress)"
+                }
+                $script:snapshotRouteVerdict = 'pass'
 
                 [IO.File]::WriteAllLines($path, (New-RouteLines -LastEpoch 4), [Text.UTF8Encoding]::new($false))
                 $contradiction = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage $errorMessage -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path) -RequireCompletedClassification

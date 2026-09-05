@@ -1749,12 +1749,25 @@ function Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof {
     $peerFirstCorrelation =
         Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $lines
     $eventsByWriterSequence = @{}
+    # Keep the raw-field accessor's first-match and trimming rules while
+    # reusing these two fixed patterns for this projection only.
+    $writerPattern = [regex]::new(
+        '(?:^|;\s*)log_writer_id=([^;]*)',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $writerSequencePattern = [regex]::new(
+        '(?:^|;\s*)log_writer_sequence=([^;]*)',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     foreach ($event in $Events) {
-        $writer = Get-FileTransferAuthorityLogField -Line ([string]$event.RawLine) -Name 'log_writer_id'
-        $writerSequence = Get-FileTransferAuthorityLogField -Line ([string]$event.RawLine) -Name 'log_writer_sequence'
-        if (-not [string]::IsNullOrWhiteSpace($writer) -and
-            -not [string]::IsNullOrWhiteSpace($writerSequence)) {
-            $eventsByWriterSequence["$writer|$writerSequence".ToLowerInvariant()] = $event
+        $rawLine = [string]$event.RawLine
+        $writerMatch = $writerPattern.Match($rawLine)
+        $writerSequenceMatch = $writerSequencePattern.Match($rawLine)
+        if ($writerMatch.Success -and $writerSequenceMatch.Success) {
+            $writer = $writerMatch.Groups[1].Value.Trim()
+            $writerSequence = $writerSequenceMatch.Groups[1].Value.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($writer) -and
+                -not [string]::IsNullOrWhiteSpace($writerSequence)) {
+                $eventsByWriterSequence["$writer|$writerSequence".ToLowerInvariant()] = $event
+            }
         }
     }
 

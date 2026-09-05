@@ -1222,6 +1222,11 @@ function Get-FileTransferRouteConsistency {
         }
     }
 
+    # The selector depends on sequence only through the eligible selection prefix.
+    # Keep both the prefix and query cache local; the original selector owns misses.
+    $routeEligibilityEvents = @($routeStateEvents | Sort-Object Sequence)
+    $routeEligibilityCount = 0
+    $routeSelectionCache = [System.Collections.Generic.Dictionary[object, object]]::new()
     foreach ($event in @($routeAwareEvents)) {
         if ($event.EventName -eq 'filetransfer_route_selected') {
             continue
@@ -1252,7 +1257,24 @@ function Get-FileTransferRouteConsistency {
             continue
         }
 
-        $selected = Get-FileTransferSelectedRouteForEvent -Event $event -RouteSelectedEvents $routeStateEvents
+        while ($routeEligibilityCount -lt $routeEligibilityEvents.Count -and
+            $routeEligibilityEvents[$routeEligibilityCount].Sequence -le $event.Sequence) {
+            $routeEligibilityCount++
+        }
+        $routeSelectionKey = [System.Tuple[int, string, string, string, long, long]]::new(
+            $routeEligibilityCount,
+            (Get-FileTransferRouteEventKey -Event $event),
+            (Get-FileTransferRouteEventDirection -Event $event),
+            (Get-FileTransferEventField -Event $event -Name 'route' -Default ''),
+            (Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0),
+            (Get-FileTransferEventInt64Field -Event $event -Name 'route_publication_generation' -Default 0))
+        if ($routeSelectionCache.ContainsKey($routeSelectionKey)) {
+            $selected = $routeSelectionCache[$routeSelectionKey]
+        }
+        else {
+            $selected = Get-FileTransferSelectedRouteForEvent -Event $event -RouteSelectedEvents $routeStateEvents
+            $routeSelectionCache[$routeSelectionKey] = $selected
+        }
         if ($null -eq $selected) {
             Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route-aware event has no selected route: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
             continue

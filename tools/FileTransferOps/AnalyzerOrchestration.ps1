@@ -97,6 +97,92 @@ function Add-FileTransferLiveHarnessEvidence {
     return $augmented.ToArray()
 }
 
+function Write-FileTransferRetainedAnalysisStageJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Diagnostics
+    )
+
+    $json = $Diagnostics | ConvertTo-Json -Depth 4
+    $isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    if ($isWindows -and $null -eq ('NLink.FileTransferStageDiagnosticsNative' -as [type])) {
+        # Match the existing evidence publisher's atomic Windows rename. File.Replace
+        # can expose a transient missing destination to concurrent readers.
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+namespace NLink
+{
+    public static class FileTransferStageDiagnosticsNative
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+    }
+}
+'@
+    }
+    $bytes = [System.Text.UTF8Encoding]::new($true).GetBytes($json)
+    $temporaryPath = '{0}.{1}.tmp' -f $Path, [guid]::NewGuid().ToString('N')
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $preamble = [System.Text.UTF8Encoding]::new($true).GetPreamble()
+        $stream.Write($preamble, 0, $preamble.Length)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+
+        for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            try {
+                if ($isWindows) {
+                    if (-not [NLink.FileTransferStageDiagnosticsNative]::MoveFileEx($temporaryPath, $Path, 0x9)) {
+                        $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        throw [System.IO.IOException]::new(
+                            "Atomic diagnostics replacement failed: $Path (win32=$nativeError)",
+                            (-2147024896 -bor $nativeError))
+                    }
+                }
+                elseif ([System.IO.File]::Exists($Path)) {
+                    [System.IO.File]::Replace(
+                        $temporaryPath, $Path, [System.Management.Automation.Language.NullString]::Value)
+                }
+                else {
+                    [System.IO.File]::Move($temporaryPath, $Path)
+                }
+                break
+            }
+            catch [System.IO.IOException] {
+                $nativeError = $_.Exception.GetBaseException().HResult -band 0xffff
+                # MoveFileEx reports ERROR_ACCESS_DENIED for an open destination
+                # without delete sharing, as well as sharing/lock violations.
+                $retryable = $nativeError -in @(32, 33) -or ($isWindows -and $nativeError -eq 5)
+                if (-not $retryable -or $attempt -eq 39) {
+                    throw
+                }
+                [System.Threading.Thread]::Sleep(5)
+            }
+        }
+    }
+    catch [System.IO.IOException] {
+        $failure = $_.Exception.GetBaseException()
+        throw [System.IO.IOException]::new(
+            "retained_analysis_diagnostics_write_failed: required JSON publication failed: $Path (hresult=$($failure.HResult); $($failure.Message))",
+            $_.Exception)
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        if ([System.IO.File]::Exists($temporaryPath)) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Write-FileTransferRetainedAnalysisStageDiagnostics {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -110,14 +196,131 @@ function Write-FileTransferRetainedAnalysisStageDiagnostics {
         $textLines.Add(('{0}={1}' -f $key, $Diagnostics[$key])) | Out-Null
     }
 
-    Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-analysis-stage-diagnostics.txt') -Value $textLines.ToArray() -Encoding UTF8
+    $textPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-stage-diagnostics.txt'
+    try {
+        Set-Content -LiteralPath $textPath -Value $textLines.ToArray() -Encoding UTF8 -ErrorAction Stop
+    }
+    catch [System.IO.IOException] {
+        # The human-readable mirror is not receipt evidence. Its failure must
+        # neither prevent required JSON publication nor alter the action result.
+        $exception = $_.Exception.GetBaseException()
+        [Console]::Error.WriteLine(
+            ('event=filetransfer_retained_analysis_diagnostics_publish_failed; artifact={0}; stage={1}; exception={2}; hresult={3}; required=false' -f
+                $textPath, $Diagnostics['current_correlator'], $exception.GetType().FullName, $exception.HResult))
+    }
 
     $jsonPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
     $jsonStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $Diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+    Write-FileTransferRetainedAnalysisStageJson -Path $jsonPath -Diagnostics $Diagnostics
     $jsonStopwatch.Stop()
     $Diagnostics['json_write_ms'] = $jsonStopwatch.ElapsedMilliseconds
-    $Diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+    Write-FileTransferRetainedAnalysisStageJson -Path $jsonPath -Diagnostics $Diagnostics
+}
+
+function New-FileTransferFullReportStageObserver {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$Diagnostics
+    )
+
+    $state = @{ Entry = $null; Stopwatch = $null }
+    $observer = {
+        param(
+            [string]$Name = '',
+            [ValidateSet('Started', 'Completed', 'Failed')][string]$Status = 'Started',
+            [int64]$InputCount = 0,
+            [int64]$ReuseCount = 0,
+            [int64]$MissCount = 0
+        )
+
+        if ($null -ne $state.Entry) {
+            $state.Stopwatch.Stop()
+            $completedUtc = [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+            $completedStatus = if ($Status -eq 'Failed') { 'failed' } else { 'completed' }
+            $state.Entry['completed_utc'] = $completedUtc
+            $state.Entry['elapsed_ms'] = $state.Stopwatch.ElapsedMilliseconds
+            $state.Entry['status'] = $completedStatus
+            $Diagnostics['correlator_status'] = $completedStatus
+            $Diagnostics['correlator_completed_utc'] = $completedUtc
+            $Diagnostics['correlator_elapsed_ms'] = $state.Stopwatch.ElapsedMilliseconds
+        }
+
+        if ($Status -eq 'Started') {
+            $history = $Diagnostics['correlator_history']
+            if ($history -isnot [System.Collections.Generic.List[object]]) {
+                $newHistory = New-Object System.Collections.Generic.List[object]
+                foreach ($entry in @($history)) {
+                    if ($null -ne $entry) { $newHistory.Add($entry) | Out-Null }
+                }
+                $history = $newHistory
+                $Diagnostics['correlator_history'] = $history
+            }
+            $startedUtc = [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+            $state.Entry = [ordered]@{
+                name = $Name
+                input_count = $InputCount
+                visit_count = 'unavailable'
+                lookup_count = 'unavailable'
+                started_utc = $startedUtc
+                completed_utc = ''
+                elapsed_ms = 0
+                status = 'started'
+                snapshot_evaluation_reuse_count = 0
+                snapshot_evaluation_miss_count = 0
+            }
+            $history.Add($state.Entry) | Out-Null
+            $state.Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $Diagnostics['current_correlator'] = $Name
+            $Diagnostics['correlator_status'] = 'started'
+            $Diagnostics['correlator_input_count'] = $InputCount
+            $Diagnostics['correlator_visit_count'] = 'unavailable'
+            $Diagnostics['correlator_lookup_count'] = 'unavailable'
+            $Diagnostics['correlator_started_utc'] = $startedUtc
+            $Diagnostics['correlator_completed_utc'] = ''
+            $Diagnostics['correlator_elapsed_ms'] = 0
+        }
+
+        if ($null -ne $state.Entry) {
+            $state.Entry['snapshot_evaluation_reuse_count'] += $ReuseCount
+            $state.Entry['snapshot_evaluation_miss_count'] += $MissCount
+        }
+        $Diagnostics['snapshot_evaluation_reuse_count'] = [int64]$Diagnostics['snapshot_evaluation_reuse_count'] + $ReuseCount
+        $Diagnostics['snapshot_evaluation_miss_count'] = [int64]$Diagnostics['snapshot_evaluation_miss_count'] + $MissCount
+        if ($Status -ne 'Started') {
+            $state.Entry = $null
+            $state.Stopwatch = $null
+        }
+        Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $ArtifactDir -Diagnostics $Diagnostics
+    }.GetNewClosure()
+    return $observer
+}
+
+function Invoke-FileTransferFullReportAction {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$StageObserver,
+        [Parameter(Mandatory = $true)][scriptblock]$Action
+    )
+
+    try {
+        $result = & $Action
+    }
+    catch {
+        $actionError = $_
+        # A required diagnostics publication is not a failed analyzer action.
+        if ($actionError.Exception.Message -notlike '*retained_analysis_diagnostics_write_failed*') {
+            try { & $StageObserver -Status Failed }
+            catch {
+                [Console]::Error.WriteLine(
+                    ('event=filetransfer_retained_analysis_diagnostics_publish_failed; exception={0}; hresult={1}; original_action_error_preserved=true' -f
+                        $_.Exception.GetType().FullName, $_.Exception.HResult))
+            }
+        }
+        throw $actionError
+    }
+
+    # Reporting a successful action must not enter the action-failure path.
+    & $StageObserver -Status Completed
+    return $result
 }
 
 function Write-FileTransferIndexedRawEvidenceArtifact {
@@ -994,6 +1197,16 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         -Full $fullSnapshotEvaluation `
         -Compact $compactSnapshotEvaluation
     $snapshotEvaluation = $compactSnapshotEvaluation
+    $routeConsistencyState =
+        Get-FileTransferCoordinatorSnapshotRouteConsistencyParityState `
+            -FullEvaluation $fullSnapshotEvaluation `
+            -CompactEvaluation $compactSnapshotEvaluation `
+            -Preferred Compact
+    $routeConsistency = $routeConsistencyState.EffectiveResult
+    if ($null -eq $routeConsistency) {
+        $routeConsistency =
+            Get-FileTransferRouteConsistency -TransferEvents @($Index.AllEvents)
+    }
     $snapshotRouteRuntimeAuthoritative =
         Test-FileTransferCoordinatorSnapshotFamilyAuthoritative `
             -Evaluation $snapshotEvaluation `
@@ -1096,35 +1309,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
 
         try {
             $result = & $Action
-            $stopwatch.Stop()
-            if ($null -ne $StageDiagnostics) {
-                $completedUtc =
-                    [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
-                $StageDiagnostics['correlator_status'] = 'completed'
-                $StageDiagnostics['correlator_completed_utc'] = $completedUtc
-                $StageDiagnostics['correlator_elapsed_ms'] = $stopwatch.ElapsedMilliseconds
-                if ($null -ne $result -and
-                    $null -ne $result.PSObject.Properties['IndexBuildVisitCount']) {
-                    $StageDiagnostics['correlator_visit_count'] =
-                        $result.PSObject.Properties['IndexBuildVisitCount'].Value
-                }
-                if ($null -ne $result -and
-                    $null -ne $result.PSObject.Properties['BoundedLookupVisitCount']) {
-                    $StageDiagnostics['correlator_lookup_count'] =
-                        $result.PSObject.Properties['BoundedLookupVisitCount'].Value
-                }
-                $historyEntry['visit_count'] = $StageDiagnostics['correlator_visit_count']
-                $historyEntry['lookup_count'] = $StageDiagnostics['correlator_lookup_count']
-                $historyEntry['completed_utc'] = $completedUtc
-                $historyEntry['elapsed_ms'] = $stopwatch.ElapsedMilliseconds
-                $historyEntry['status'] = 'completed'
-                Write-FileTransferRetainedAnalysisStageDiagnostics `
-                    -ArtifactDir $ArtifactDir `
-                    -Diagnostics $StageDiagnostics
-            }
-            return $result
         }
         catch {
+            $actionError = $_
             $stopwatch.Stop()
             if ($null -ne $StageDiagnostics) {
                 $completedUtc =
@@ -1135,12 +1322,48 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 $historyEntry['completed_utc'] = $completedUtc
                 $historyEntry['elapsed_ms'] = $stopwatch.ElapsedMilliseconds
                 $historyEntry['status'] = 'failed'
-                Write-FileTransferRetainedAnalysisStageDiagnostics `
-                    -ArtifactDir $ArtifactDir `
-                    -Diagnostics $StageDiagnostics
+                try {
+                    Write-FileTransferRetainedAnalysisStageDiagnostics `
+                        -ArtifactDir $ArtifactDir `
+                        -Diagnostics $StageDiagnostics
+                }
+                catch {
+                    # Reporting must not replace the original action exception.
+                    [Console]::Error.WriteLine(
+                        ('event=filetransfer_retained_analysis_diagnostics_publish_failed; stage={0}; exception={1}; hresult={2}; original_action_error_preserved=true' -f
+                            $Name, $_.Exception.GetType().FullName, $_.Exception.HResult))
+                }
             }
-            throw
+            throw $actionError
         }
+
+        $stopwatch.Stop()
+        if ($null -ne $StageDiagnostics) {
+            $completedUtc =
+                [datetime]::UtcNow.ToString('O', [System.Globalization.CultureInfo]::InvariantCulture)
+            $StageDiagnostics['correlator_status'] = 'completed'
+            $StageDiagnostics['correlator_completed_utc'] = $completedUtc
+            $StageDiagnostics['correlator_elapsed_ms'] = $stopwatch.ElapsedMilliseconds
+            if ($null -ne $result -and
+                $null -ne $result.PSObject.Properties['IndexBuildVisitCount']) {
+                $StageDiagnostics['correlator_visit_count'] =
+                    $result.PSObject.Properties['IndexBuildVisitCount'].Value
+            }
+            if ($null -ne $result -and
+                $null -ne $result.PSObject.Properties['BoundedLookupVisitCount']) {
+                $StageDiagnostics['correlator_lookup_count'] =
+                    $result.PSObject.Properties['BoundedLookupVisitCount'].Value
+            }
+            $historyEntry['visit_count'] = $StageDiagnostics['correlator_visit_count']
+            $historyEntry['lookup_count'] = $StageDiagnostics['correlator_lookup_count']
+            $historyEntry['completed_utc'] = $completedUtc
+            $historyEntry['elapsed_ms'] = $stopwatch.ElapsedMilliseconds
+            $historyEntry['status'] = 'completed'
+            Write-FileTransferRetainedAnalysisStageDiagnostics `
+                -ArtifactDir $ArtifactDir `
+                -Diagnostics $StageDiagnostics
+        }
+        return $result
     }
 
     $gui = Read-FileTransferCompactGuiSummary -ArtifactDir $ArtifactDir
@@ -1217,9 +1440,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') |
             Sort-Object Sequence, LineNumber
     )
-    $routeEvents = @(
-        Get-FileTransferCanonicalRouteSelectionEvents -Events $routeChronologyEvents
-    )
+    $routeEvents = @($routeConsistency.RouteSelectedEvents)
     $compactLiveRouteProof =
         Get-FileTransferLiveRouteEpochProof `
             -TransferEvents $routeChronologyEvents `
@@ -1234,9 +1455,24 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 GlobalEvents = @()
                 TransferEvents = @()
             })
-    $selectedRouteChanges = @(Get-FileTransferCompactRouteChanges -Events $routeEvents)
+    [object[]]$selectedRouteChanges = @(
+        if ($null -ne $routeConsistency.PSObject.Properties['SelectedRouteChanges']) {
+            @($routeConsistency.SelectedRouteChanges)
+        }
+        else {
+            @(Get-FileTransferCompactRouteChanges -Events $routeEvents)
+        })
     $liveRouteChanges = @($compactLiveRouteProof.RouteChanges)
 
+    [object[]]$selectedRouteSequence = @(
+        $routeEvents |
+            ForEach-Object {
+                Get-FileTransferEventField -Event $_ -Name 'route' -Default ''
+            } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    [object[]]$selectedRoutes = @($selectedRouteSequence | Select-Object -Unique)
+    [object[]]$routeConsistencyFindings = @($routeConsistency.Findings)
+    [object[]]$routeAwareEvents = @($routeConsistency.RouteAwareEvents)
     $selectedRouteText = if ($selectedRouteChanges.Count -gt 0) { $selectedRouteChanges -join ',' } else { '(none)' }
     $liveRouteText = if ($liveRouteChanges.Count -gt 0) { $liveRouteChanges -join ',' } else { '(none)' }
     $finalRoute = if ($selectedRouteChanges.Count -gt 0) { [string]$selectedRouteChanges[-1] } else { '(unknown)' }
@@ -1391,6 +1627,61 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     [object[]]$runtimeUnlockRetryDispatchEffectiveGrantEvents = @(
         $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents
     )
+    [object[]]$runtimeUnlockRetryDispatchContractSettledEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_dispatch_contract_settled'
+    )
+    [object[]]$runtimeUnlockRetryDispatchSettlementReportedEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_dispatch_settlement_reported'
+    )
+    [object[]]$runtimeUnlockRetryDispatchSettlementDecidedEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_dispatch_settlement_decided'
+    )
+    [object[]]$runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_dispatch_settlement_decision_ignored'
+    )
+    [object[]]$runtimeUnlockRetryDispatchDeadlineEvaluationRequestedEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_dispatch_deadline_evaluation_requested'
+    )
+    [object[]]$runtimeUnlockRetryLifecycleDeadlineDecidedEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_lifecycle_deadline_decided'
+    )
+    [object[]]$runtimeUnlockRetryDispatchChainClosedEvents = @(
+        Get-FileTransferCompactIndexEventsByName `
+            -Index $Index `
+            -Name 'runtime_unlock_retry_dispatch_chain_closed'
+    )
+    $runtimeUnlockRetryDispatchSettlementAcceptanceProof =
+        Get-FileTransferRuntimeUnlockRetryDispatchSettlementAcceptanceCorrelation `
+            -ContractSettledEvents $runtimeUnlockRetryDispatchContractSettledEvents `
+            -SettlementReportedEvents $runtimeUnlockRetryDispatchSettlementReportedEvents `
+            -SettlementDecidedEvents $runtimeUnlockRetryDispatchSettlementDecidedEvents `
+            -SettlementDecisionIgnoredEvents $runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents `
+            -DeadlineEvaluationRequestedEvents $runtimeUnlockRetryDispatchDeadlineEvaluationRequestedEvents `
+            -LifecycleDeadlineDecidedEvents $runtimeUnlockRetryLifecycleDeadlineDecidedEvents `
+            -DispatchChainClosedEvents $runtimeUnlockRetryDispatchChainClosedEvents `
+            -EffectiveGrantEvents $runtimeUnlockRetryDispatchEffectiveGrantEvents
+    $runtimeUnlockRetryDispatchChainClosureProofVerdict = if (
+        $runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptanceMissingEvents.Count -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRetryDispatchSettlementAcceptanceProof.ProtocolObserved) {
+        'pass'
+    }
+    else {
+        'none'
+    }
     [object[]]$runtimeUnlockRetryDispatchObservedEvents = @(
         Get-FileTransferCompactIndexEventsByName `
             -Index $Index `
@@ -1524,11 +1815,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $runtimeUnlockRetryDispatchProofVerdict = if (
         $runtimeUnlockRetryDispatchEffectiveGrantEvents.Count -gt 0 -and
         $runtimeUnlockRetryDispatchUnobservedGrantEvents.Count -eq 0 -and
-        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -eq 0) {
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -eq 0 -and
+        $runtimeUnlockRetryDispatchChainClosureProofVerdict -ne 'fail') {
         'pass'
     }
     elseif ($runtimeUnlockRetryDispatchEffectiveGrantEvents.Count -gt 0 -or
-        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -gt 0) {
+        $runtimeUnlockRetryDispatchPostGrantHoldProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockRetryDispatchChainClosureProofVerdict -eq 'fail') {
         'fail'
     }
     else {
@@ -3299,6 +3592,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 -Event $candidateEvent `
                 -Name 'decision_reason' `
                 -Default 'retry_dispatch_grant_install_chain_incomplete'
+            }) | Out-Null
+    }
+    foreach ($candidateEvent in @(
+            $runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptanceMissingEvents.ToArray())) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_retry_dispatch_settlement_unaccepted'
+            Event = $candidateEvent
+            Reason = 'runtime_unlock_retry_dispatch_settlement_unaccepted'
         }) | Out-Null
     }
     foreach ($candidateEvent in @(
@@ -4159,6 +4460,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     elseif (-not $guiIntegrityOk -or
         $hardFailureCount -gt 0 -or
         $activeFileTunaV6Count -gt 0 -or
+        $routeConsistency.Verdict -eq 'fail' -or
         $compactLiveRouteProof.Verdict -eq 'fail') {
         $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $gateStatus = 'fail'
@@ -4300,6 +4602,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
                 'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
                 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
+                'runtime_unlock_retry_dispatch_settlement_unaccepted',
                 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
                 'runtime_unlock_retry_dispatch_zero_offer_successor_rejected',
                 'runtime_unlock_retry_dispatch_held_after_authority_granted',
@@ -4341,7 +4644,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         [string]$firstCompactProofChainFailure.Class
     }
     elseif ($verdict -eq 'PASS') {
-        'none'
+        '(none)'
     }
     else {
         $acceptanceFailureClass
@@ -4442,6 +4745,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             'runtime_unlock_initial_activation_receive_recovery_hold_released_path_lease_expired',
             'runtime_unlock_initial_activation_receive_recovery_hold_released_offer_expired',
             'runtime_unlock_retry_dispatch_held_after_authority_granted',
+            'runtime_unlock_retry_dispatch_settlement_unaccepted',
             'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing',
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
             'runtime_fallback_separation_violation',
@@ -4480,16 +4784,22 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $warningCapExceededContexts = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.ExceededContextsText } else { '(none)' }
     $warningCapExemptedKinds = if ($null -ne $compactWarningCap) { [string]$compactWarningCap.ExemptedKindsText } else { '(none)' }
     $selectedRouteDetailLines = New-Object System.Collections.Generic.List[string]
-    $selectedRouteDetailLines.Add(("route_selected_count={0}" -f $selectedRouteChanges.Count)) | Out-Null
-    for ($i = 0; $i -lt $selectedRouteChanges.Count; $i++) {
-        $route = [string]$selectedRouteChanges[$i]
+    for ($i = 0; $i -lt $routeEvents.Count; $i++) {
+        $routeEvent = $routeEvents[$i]
+        $route = Get-FileTransferEventField -Event $routeEvent -Name 'route' -Default ''
         $metadata = Get-FileTransferCompactRouteMetadata -Route $route
         $routeIndex = $i + 1
-        $selectedRouteDetailLines.Add(("selected.{0}.direction=unknown" -f $routeIndex)) | Out-Null
+        $direction = Get-FileTransferEventField -Event $routeEvent -Name 'direction' -Default '(none)'
+        $protocol = Get-FileTransferEventField -Event $routeEvent -Name 'protocol_version' -Default $metadata.Protocol
+        $runtime = Get-FileTransferEventField -Event $routeEvent -Name 'runtime_profile' -Default $metadata.Runtime
+        $bridge = Get-FileTransferEventField -Event $routeEvent -Name 'bridge_recovery_policy' -Default $metadata.Bridge
+        $selectionReason = Get-FileTransferEventField -Event $routeEvent -Name 'selection_reason' -Default '(none)'
+        $selectedRouteDetailLines.Add(("selected.{0}.direction={1}" -f $routeIndex, $direction)) | Out-Null
         $selectedRouteDetailLines.Add(("selected.{0}.route={1}" -f $routeIndex, $route)) | Out-Null
-        $selectedRouteDetailLines.Add(("selected.{0}.protocol_version={1}" -f $routeIndex, $metadata.Protocol)) | Out-Null
-        $selectedRouteDetailLines.Add(("selected.{0}.runtime_profile={1}" -f $routeIndex, $metadata.Runtime)) | Out-Null
-        $selectedRouteDetailLines.Add(("selected.{0}.bridge_recovery_policy={1}" -f $routeIndex, $metadata.Bridge)) | Out-Null
+        $selectedRouteDetailLines.Add(("selected.{0}.protocol_version={1}" -f $routeIndex, $protocol)) | Out-Null
+        $selectedRouteDetailLines.Add(("selected.{0}.runtime_profile={1}" -f $routeIndex, $runtime)) | Out-Null
+        $selectedRouteDetailLines.Add(("selected.{0}.bridge_recovery_policy={1}" -f $routeIndex, $bridge)) | Out-Null
+        $selectedRouteDetailLines.Add(("selected.{0}.selection_reason={1}" -f $routeIndex, $selectionReason)) | Out-Null
     }
 
     $totalIndexedEventCount = Get-FileTransferCompactIndexTotalEventCount -Index $Index
@@ -4583,6 +4893,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("runtime_unlock_retry_dispatch_install_rejected_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.RejectedCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $runtimeUnlockRetryDispatchObservedCount),
+        ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $runtimeUnlockRetryDispatchContractSettledEvents.Count),
+        ("runtime_unlock_retry_dispatch_settlement_reported_count={0}" -f $runtimeUnlockRetryDispatchSettlementReportedEvents.Count),
+        ("runtime_unlock_retry_dispatch_settlement_accepted_count={0}" -f @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptedEvents).Count),
+        ("runtime_unlock_retry_dispatch_settlement_idempotent_count={0}" -f @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.IdempotentEvents).Count),
+        ("runtime_unlock_retry_dispatch_settlement_rejected_count={0}" -f @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.RejectedEvents).Count),
+        ("runtime_unlock_retry_dispatch_settlement_decision_ignored_count={0}" -f $runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents.Count),
+        ("runtime_unlock_retry_dispatch_settlement_acceptance_missing_count={0}" -f $runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptanceMissingEvents.Count),
+        ("runtime_unlock_retry_dispatch_chain_closure_proof_verdict={0}" -f $runtimeUnlockRetryDispatchChainClosureProofVerdict),
         ("runtime_unlock_retry_dispatch_install_verdict={0}" -f $runtimeUnlockRetryDispatchInstallProof.Verdict),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount),
@@ -5055,8 +5373,25 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     )
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Value $operatorLines -Encoding UTF8
 
+    $routeMismatchLines = New-Object System.Collections.Generic.List[string]
+    $routeMismatchLines.Add('') | Out-Null
+    $routeMismatchLines.Add('mismatches:') | Out-Null
+    if ($routeConsistencyFindings.Count -eq 0) {
+        $routeMismatchLines.Add('(none)') | Out-Null
+    }
+    else {
+        for ($i = 0; $i -lt $routeConsistencyFindings.Count; $i++) {
+            $routeMismatchLines.Add(("mismatch.{0}={1}" -f ($i + 1), $routeConsistencyFindings[$i])) | Out-Null
+        }
+    }
     $routeLines = @(
-        'route_consistency_verdict=pass',
+        ("route_consistency_verdict={0}" -f $routeConsistency.Verdict),
+        ("route_selected_count={0}" -f $routeEvents.Count),
+        ("route_aware_event_count={0}" -f $routeAwareEvents.Count),
+        ("route_mismatch_count={0}" -f $routeConsistencyFindings.Count),
+        ("selected_routes={0}" -f ($(if ($selectedRoutes.Count -gt 0) { $selectedRoutes -join ',' } else { '(none)' }))),
+        ("selected_route_sequence={0}" -f ($(if ($selectedRouteSequence.Count -gt 0) { $selectedRouteSequence -join ',' } else { '(none)' }))),
+        ("selected_route_changes={0}" -f $selectedRouteText),
         ("coordinator_snapshot_mode={0}" -f $snapshotEvaluation.Mode),
         ("coordinator_snapshot_contract_version={0}" -f $snapshotEvaluation.ContractVersion),
         ("coordinator_snapshot_catalog_version={0}" -f $snapshotEvaluation.CatalogVersion),
@@ -5075,9 +5410,6 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count={0}" -f $snapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount),
         ("coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count={0}" -f $snapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount),
         ("coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count={0}" -f $snapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount),
-        ("selected_routes={0}" -f $selectedRouteText),
-        ("selected_route_sequence={0}" -f $selectedRouteText),
-        ("selected_route_changes={0}" -f $selectedRouteText),
         ("route_sequence={0}" -f $selectedRouteText),
         ("live_route_epoch_route_changes={0}" -f $liveRouteText),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProofVerdict),
@@ -5127,6 +5459,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("file_tuna_v4_data_path_mismatch_unresolved_count={0}" -f $fileTunaV4DataPathMismatchProof.UnresolvedCount),
         ("runtime_unlock_retry_dispatch_authority_granted_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.AuthorityGrantedRawCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count),
+        ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $runtimeUnlockRetryDispatchContractSettledEvents.Count),
+        ("runtime_unlock_retry_dispatch_settlement_reported_count={0}" -f $runtimeUnlockRetryDispatchSettlementReportedEvents.Count),
+        ("runtime_unlock_retry_dispatch_settlement_accepted_count={0}" -f @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptedEvents).Count),
+        ("runtime_unlock_retry_dispatch_settlement_idempotent_count={0}" -f @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.IdempotentEvents).Count),
+        ("runtime_unlock_retry_dispatch_settlement_rejected_count={0}" -f @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.RejectedEvents).Count),
+        ("runtime_unlock_retry_dispatch_settlement_decision_ignored_count={0}" -f $runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents.Count),
+        ("runtime_unlock_retry_dispatch_settlement_acceptance_missing_count={0}" -f $runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptanceMissingEvents.Count),
+        ("runtime_unlock_retry_dispatch_chain_closure_proof_verdict={0}" -f $runtimeUnlockRetryDispatchChainClosureProofVerdict),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount),
         ("runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_recovered_count={0}" -f $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRecoveredCount),
@@ -5514,7 +5854,23 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("file_tuna_v6_count={0}" -f $activeFileTunaV6Count),
         ("data_protocol_version={0}" -f $protocolVersion),
         ("final_route={0}" -f $finalRoute)
-    ) + @($selectedRouteDetailLines.ToArray())
+    ) + @($selectedRouteDetailLines.ToArray()) + @($routeMismatchLines.ToArray())
+    if ($routeConsistencyState.SnapshotAuthoritySelected) {
+        $fullRouteNormalizedJson = [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $routeConsistencyState.FullResult -Name 'NormalizedJson' -Default '')
+        $compactRouteNormalizedJson = [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $routeConsistencyState.CompactResult -Name 'NormalizedJson' -Default '')
+        $routeLines = @($routeLines + @(
+            ("coordinator_snapshot_route_consistency_boundary_hash={0}" -f $routeConsistency.BoundaryHash),
+            ("coordinator_snapshot_route_consistency_normalized_json={0}" -f $routeConsistency.NormalizedJson),
+            ("coordinator_snapshot_route_consistency_full_boundary_hash={0}" -f $routeConsistencyState.Parity.FullBoundaryHash),
+            ("coordinator_snapshot_route_consistency_compact_boundary_hash={0}" -f $routeConsistencyState.Parity.CompactBoundaryHash),
+            ("coordinator_snapshot_route_consistency_full_normalized_json={0}" -f $fullRouteNormalizedJson),
+            ("coordinator_snapshot_route_consistency_compact_normalized_json={0}" -f $compactRouteNormalizedJson),
+            ("coordinator_snapshot_route_consistency_full_compact_parity_verdict={0}" -f $routeConsistencyState.Parity.Verdict),
+            ("coordinator_snapshot_route_consistency_full_compact_parity_failure_reason={0}" -f $routeConsistencyState.Parity.FailureReason)
+        ))
+    }
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt') -Value $routeLines -Encoding UTF8
 
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'transfer-terminal-summary.txt') -Value @(
@@ -5947,7 +6303,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     ) -Encoding UTF8
 
     $invariantLines = @(
-        'release_route_law_verdict=pass',
+        ("release_route_law_verdict={0}" -f $routeConsistency.Verdict),
         'terminal_lifecycle_invariant_verdict=pass',
         'control_priority_invariant_verdict=pass',
         ("final_route={0}" -f $finalRoute),
@@ -6501,6 +6857,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         runtime_unlock_retry_dispatch_install_rejected_count = $runtimeUnlockRetryDispatchInstallProof.RejectedCount
         runtime_unlock_retry_dispatch_authority_granted_count = $runtimeUnlockRetryDispatchInstallProof.EffectiveGrantEvents.Count
         runtime_unlock_retry_dispatch_observed_count = $runtimeUnlockRetryDispatchObservedCount
+        runtime_unlock_retry_dispatch_contract_settled_count = $runtimeUnlockRetryDispatchContractSettledEvents.Count
+        runtime_unlock_retry_dispatch_settlement_reported_count = $runtimeUnlockRetryDispatchSettlementReportedEvents.Count
+        runtime_unlock_retry_dispatch_settlement_accepted_count = @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptedEvents).Count
+        runtime_unlock_retry_dispatch_settlement_idempotent_count = @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.IdempotentEvents).Count
+        runtime_unlock_retry_dispatch_settlement_rejected_count = @($runtimeUnlockRetryDispatchSettlementAcceptanceProof.RejectedEvents).Count
+        runtime_unlock_retry_dispatch_settlement_decision_ignored_count = $runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents.Count
+        runtime_unlock_retry_dispatch_settlement_acceptance_missing_count = $runtimeUnlockRetryDispatchSettlementAcceptanceProof.AcceptanceMissingEvents.Count
+        runtime_unlock_retry_dispatch_chain_closure_proof_verdict = $runtimeUnlockRetryDispatchChainClosureProofVerdict
         runtime_unlock_retry_dispatch_install_verdict = $runtimeUnlockRetryDispatchInstallProof.Verdict
         runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_raw_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteRawCount
         runtime_unlock_retry_dispatch_install_grant_evidence_incomplete_distinct_count = $runtimeUnlockRetryDispatchInstallProof.GrantEvidenceIncompleteDistinctCount
@@ -6957,6 +7321,26 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.RetirementIndexBuildVisitCount
         bridge_recovery_submission_barrier_drain_bounded_lookup_visit_count =
             [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.BoundedLookupVisitCount
+    }
+    if ($routeConsistencyState.SnapshotAuthoritySelected) {
+        $compactDto['coordinator_snapshot_route_consistency_boundary_hash'] =
+            [string]$routeConsistency.BoundaryHash
+        $compactDto['coordinator_snapshot_route_consistency_normalized_json'] =
+            [string]$routeConsistency.NormalizedJson
+        $compactDto['coordinator_snapshot_route_consistency_full_boundary_hash'] =
+            [string]$routeConsistencyState.Parity.FullBoundaryHash
+        $compactDto['coordinator_snapshot_route_consistency_compact_boundary_hash'] =
+            [string]$routeConsistencyState.Parity.CompactBoundaryHash
+        $compactDto['coordinator_snapshot_route_consistency_full_normalized_json'] =
+            [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                -InputObject $routeConsistencyState.FullResult -Name 'NormalizedJson' -Default '')
+        $compactDto['coordinator_snapshot_route_consistency_compact_normalized_json'] =
+            [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                -InputObject $routeConsistencyState.CompactResult -Name 'NormalizedJson' -Default '')
+        $compactDto['coordinator_snapshot_route_consistency_full_compact_parity_verdict'] =
+            [string]$routeConsistencyState.Parity.Verdict
+        $compactDto['coordinator_snapshot_route_consistency_full_compact_parity_failure_reason'] =
+            [string]$routeConsistencyState.Parity.FailureReason
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
     $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
@@ -10301,6 +10685,56 @@ function Invoke-FileTransferRetainedAnalysis {
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
         Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
+        $artifactStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $fullReportStageObserver = New-FileTransferFullReportStageObserver `
+            -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
+        [string[]]$fullSnapshotLines = @(
+            $eventsForArtifacts | ForEach-Object { [string]$_.RawLine })
+        & $fullReportStageObserver -Name 'full_snapshot_evaluation' -Status Started -InputCount $fullSnapshotLines.Count -MissCount 1
+        $fullSnapshotEvaluation = Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
+            Get-FileTransferCoordinatorSnapshotEvaluation -Lines $fullSnapshotLines
+        }
+        $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+        [string[]]$fullCompactSnapshotLines = @(
+            $eventsForArtifacts |
+                Where-Object {
+                    $snapshotCatalog.SnapshotAuthorityV1 -contains $_.EventName -or
+                    $snapshotCatalog.GenerationStampedEffects -contains $_.EventName
+                } |
+                ForEach-Object { [string]$_.RawLine })
+        & $fullReportStageObserver -Name 'full_compact_snapshot_evaluation' -Status Started -InputCount $fullCompactSnapshotLines.Count -MissCount 1
+        $compactSnapshotEvaluation = Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
+            Get-FileTransferCoordinatorSnapshotEvaluation -Lines $fullCompactSnapshotLines
+        }
+        $snapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+            -Full $fullSnapshotEvaluation `
+            -Compact $compactSnapshotEvaluation
+        & $fullReportStageObserver -Name 'full_route_consistency' -Status Started -InputCount $fullSnapshotLines.Count
+        $fullRouteConsistencyState = Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
+            Get-FileTransferCoordinatorSnapshotRouteConsistencyParityState `
+                -FullEvaluation $fullSnapshotEvaluation `
+                -CompactEvaluation $compactSnapshotEvaluation `
+                -Preferred Full
+        }
+        $fullSnapshotEvaluationHandoff = [pscustomobject]@{
+            Lines = $fullSnapshotLines
+            Evaluation = $fullSnapshotEvaluation
+            CompactLines = $fullCompactSnapshotLines
+            CompactEvaluation = $compactSnapshotEvaluation
+            FullRouteConsistency = $fullRouteConsistencyState.FullResult
+            CompactRouteConsistency = $fullRouteConsistencyState.CompactResult
+            RouteConsistencyParity = $fullRouteConsistencyState.Parity
+            EffectiveRouteConsistency = $fullRouteConsistencyState.EffectiveResult
+        }
+        $fullRouteConsistency = $fullRouteConsistencyState.EffectiveResult
+        if ($null -ne $fullRouteConsistency) {
+            $summary | Add-Member `
+                -NotePropertyName RouteConsistency `
+                -NotePropertyValue $fullRouteConsistency `
+                -Force
+        }
+        $artifactStopwatch.Stop()
+
         $gateStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $gate = Get-FileTransferStabilizationGateResult -Summary $summary -LiveRouteProofMode $LiveRouteProofMode
         $gateStopwatch.Stop()
@@ -10308,59 +10742,75 @@ function Invoke-FileTransferRetainedAnalysis {
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
         Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
-        $artifactStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $fullSnapshotEvaluation =
-            Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
-                $eventsForArtifacts | ForEach-Object { [string]$_.RawLine })
-        $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
-        $compactSnapshotEvaluation =
-            Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
-                $eventsForArtifacts |
-                    Where-Object {
-                        $snapshotCatalog.SnapshotAuthorityV1 -contains $_.EventName -or
-                        $snapshotCatalog.GenerationStampedEffects -contains $_.EventName
-                    } |
-                    ForEach-Object { [string]$_.RawLine })
-        $snapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
-            -Full $fullSnapshotEvaluation `
-            -Compact $compactSnapshotEvaluation
-        $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
-            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
-        $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
-            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
-        $snapshotParity | ConvertTo-Json -Depth 8 |
-            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
-        [ordered]@{
-            retained_analysis_mode = 'full'
-            verdict = [string]$gate.Verdict
-            gate_status = [string]$gate.GateStatus
-            event_count = [long]$eventsForArtifacts.Count
-            coordinator_snapshot_mode = $fullSnapshotEvaluation.Mode
-            coordinator_snapshot_contract_version = $fullSnapshotEvaluation.ContractVersion
-            coordinator_snapshot_catalog_version = $fullSnapshotEvaluation.CatalogVersion
-            coordinator_snapshot_catalog_hash = $fullSnapshotEvaluation.CatalogHash
-            coordinator_snapshot_stream_complete = $fullSnapshotEvaluation.StreamComplete
-            coordinator_snapshot_artifact_evidence_verdict = $fullSnapshotEvaluation.ArtifactEvidenceVerdict
-            coordinator_snapshot_artifact_evidence_failure_reason = $fullSnapshotEvaluation.ArtifactEvidenceFailureReason
-            coordinator_snapshot_transition_count = $fullSnapshotEvaluation.TransitionCount
-            coordinator_snapshot_effect_count = $fullSnapshotEvaluation.EffectCount
-            coordinator_snapshot_boundary_count = $fullSnapshotEvaluation.BoundaryCount
-            coordinator_snapshot_boundary_hash = $fullSnapshotEvaluation.BoundaryHash
-            coordinator_snapshot_legacy_selection_count = $fullSnapshotEvaluation.LegacySelectionCount
-            coordinator_snapshot_route_family_legacy_selection_count = $fullSnapshotEvaluation.RouteFamilyLegacySelectionCount
-            coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $fullSnapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
-            coordinator_snapshot_receive_recovery_family_legacy_selection_count = $fullSnapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
-            coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $fullSnapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
-            coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count = $fullSnapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount
-            coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count = $fullSnapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount
-            coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
-            coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
-            coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
-            coordinator_snapshot_compact_boundary_hash = $snapshotParity.CompactBoundaryHash
-        } | ConvertTo-Json -Depth 8 |
-            Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-retained-full-summary.json') -Encoding UTF8
-        Write-FileTransferDiagnosticsArtifacts -ArtifactDir $resolvedArtifactDir -Summary $summary -GateResult $gate -LiveRouteProofMode $LiveRouteProofMode -IncludeRawSlices:$IncludeRawSlices
-        Write-FileTransferEfficiencySummaryArtifacts -ArtifactDir $resolvedArtifactDir -Index $index -Events $eventsForArtifacts -Summary $summary -GateResult $gate -StageDiagnostics $stageDiagnostics
+        $artifactStopwatch.Start()
+        & $fullReportStageObserver -Name 'full_snapshot_summary_publication' -Status Started -InputCount $fullSnapshotLines.Count
+        Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
+            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
+                Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures | ConvertTo-Json -Depth 64 |
+                Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+            $snapshotParity | ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
+            $fullRetainedSummary = [ordered]@{
+                retained_analysis_mode = 'full'
+                verdict = [string]$gate.Verdict
+                gate_status = [string]$gate.GateStatus
+                event_count = [long]$eventsForArtifacts.Count
+                coordinator_snapshot_mode = $fullSnapshotEvaluation.Mode
+                coordinator_snapshot_contract_version = $fullSnapshotEvaluation.ContractVersion
+                coordinator_snapshot_catalog_version = $fullSnapshotEvaluation.CatalogVersion
+                coordinator_snapshot_catalog_hash = $fullSnapshotEvaluation.CatalogHash
+                coordinator_snapshot_stream_complete = $fullSnapshotEvaluation.StreamComplete
+                coordinator_snapshot_artifact_evidence_verdict = $fullSnapshotEvaluation.ArtifactEvidenceVerdict
+                coordinator_snapshot_artifact_evidence_failure_reason = $fullSnapshotEvaluation.ArtifactEvidenceFailureReason
+                coordinator_snapshot_transition_count = $fullSnapshotEvaluation.TransitionCount
+                coordinator_snapshot_effect_count = $fullSnapshotEvaluation.EffectCount
+                coordinator_snapshot_boundary_count = $fullSnapshotEvaluation.BoundaryCount
+                coordinator_snapshot_boundary_hash = $fullSnapshotEvaluation.BoundaryHash
+                coordinator_snapshot_legacy_selection_count = $fullSnapshotEvaluation.LegacySelectionCount
+                coordinator_snapshot_route_family_legacy_selection_count = $fullSnapshotEvaluation.RouteFamilyLegacySelectionCount
+                coordinator_snapshot_runtime_unlock_retry_family_legacy_selection_count = $fullSnapshotEvaluation.RuntimeUnlockRetryFamilyLegacySelectionCount
+                coordinator_snapshot_receive_recovery_family_legacy_selection_count = $fullSnapshotEvaluation.ReceiveRecoveryFamilyLegacySelectionCount
+                coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count = $fullSnapshotEvaluation.FallbackTailYieldFamilyLegacySelectionCount
+                coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count = $fullSnapshotEvaluation.RegularV4FrontierRepairPressureFamilyLegacySelectionCount
+                coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count = $fullSnapshotEvaluation.ResponderProbeHandoffFamilyLegacySelectionCount
+                coordinator_snapshot_full_compact_parity_verdict = $snapshotParity.Verdict
+                coordinator_snapshot_full_compact_parity_failure_reason = $snapshotParity.FailureReason
+                coordinator_snapshot_full_boundary_hash = $snapshotParity.FullBoundaryHash
+                coordinator_snapshot_compact_boundary_hash = $snapshotParity.CompactBoundaryHash
+            }
+            if ($fullRouteConsistencyState.SnapshotAuthoritySelected) {
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_boundary_hash'] =
+                    [string]$fullRouteConsistency.BoundaryHash
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_normalized_json'] =
+                    [string]$fullRouteConsistency.NormalizedJson
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_full_boundary_hash'] =
+                    [string]$fullRouteConsistencyState.Parity.FullBoundaryHash
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_compact_boundary_hash'] =
+                    [string]$fullRouteConsistencyState.Parity.CompactBoundaryHash
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_full_normalized_json'] =
+                    [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $fullRouteConsistencyState.FullResult -Name 'NormalizedJson' -Default '')
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_compact_normalized_json'] =
+                    [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $fullRouteConsistencyState.CompactResult -Name 'NormalizedJson' -Default '')
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_full_compact_parity_verdict'] =
+                    [string]$fullRouteConsistencyState.Parity.Verdict
+                $fullRetainedSummary['coordinator_snapshot_route_consistency_full_compact_parity_failure_reason'] =
+                    [string]$fullRouteConsistencyState.Parity.FailureReason
+            }
+            $fullRetainedSummary | ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-retained-full-summary.json') -Encoding UTF8
+        }
+        Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
+            Write-FileTransferDiagnosticsArtifacts -ArtifactDir $resolvedArtifactDir -Summary $summary -GateResult $gate `
+                -LiveRouteProofMode $LiveRouteProofMode -IncludeRawSlices:$IncludeRawSlices `
+                -CoordinatorSnapshotEvaluationHandoff $fullSnapshotEvaluationHandoff -StageObserver $fullReportStageObserver
+        }
+        & $fullReportStageObserver -Name 'full_efficiency_summary' -Status Started -InputCount $eventsForArtifacts.Count
+        Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
+            Write-FileTransferEfficiencySummaryArtifacts -ArtifactDir $resolvedArtifactDir -Index $index -Events $eventsForArtifacts -Summary $summary -GateResult $gate -StageDiagnostics $stageDiagnostics
+        }
         $artifactStopwatch.Stop()
         $stageDiagnostics['artifact_write_ms'] = $artifactStopwatch.ElapsedMilliseconds
         $stageDiagnostics['artifact_write_started'] = 0

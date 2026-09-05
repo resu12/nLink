@@ -6055,6 +6055,40 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [switch]$RequireCompletedClassification
     )
 
+    # The focused GUI classifier fixtures execute this function body without
+    # loading the full retained-analysis module. Keep the two line parsers
+    # local so indexed Snapshot V1 ingestion has the same exact grammar in
+    # both the production script and those isolated consumers.
+    function Get-FileTransferCoordinatorSnapshotLineField {
+        param(
+            [Parameter(Mandatory = $true)][string]$Line,
+            [Parameter(Mandatory = $true)][string]$Name,
+            [string]$Default = ''
+        )
+
+        $match = [regex]::Match(
+            $Line,
+            '(?:^|;\s*)' + [regex]::Escape($Name) + '=([^;\r\n]*)',
+            [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if (-not $match.Success) {
+            return $Default
+        }
+        return $match.Groups[1].Value.Trim()
+    }
+
+    function Get-FileTransferCoordinatorSnapshotEventName {
+        param([Parameter(Mandatory = $true)][string]$Line)
+
+        $match = [regex]::Match(
+            $Line,
+            '(?:^|[;\s])event=([a-z0-9_]+)',
+            [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if (-not $match.Success) {
+            return ''
+        }
+        return $match.Groups[1].Value
+    }
+
     $classificationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $explicitClassification =
         Get-TunaGuiExplicitFailureClassification -ErrorMessage $ErrorMessage
@@ -6304,23 +6338,46 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $snapshotIngestionStopwatch.Stop()
     $snapshotEvaluationStopwatch =
         [System.Diagnostics.Stopwatch]::StartNew()
-    $coordinatorSnapshotEvaluation = if ($snapshotEvaluatorAvailable) {
+    if ($snapshotEvaluatorAvailable) {
         if ($ImmutableEvidencePaths.Count -gt 0) {
-            Get-FileTransferCoordinatorSnapshotEvaluation `
-                -SnapshotRecords ([object[]]$snapshotRecords.ToArray())
+            $coordinatorSnapshotFullEvaluation =
+                Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines ([string[]]$lines)
+            $coordinatorSnapshotCompactEvaluation =
+                Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -SnapshotRecords ([object[]]$snapshotRecords.ToArray())
+            # Preserve compact snapshot evaluation as the existing indexed GUI
+            # authority input; route parity below independently validates full.
+            $coordinatorSnapshotEvaluation = $coordinatorSnapshotCompactEvaluation
         }
         else {
-            Get-FileTransferCoordinatorSnapshotEvaluation `
-                -Lines ([string[]]$evidenceLines)
+            $coordinatorSnapshotFullEvaluation =
+                Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines ([string[]]$evidenceLines)
+            $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+            [string[]]$compactSnapshotLines = @(
+                $evidenceLines | Where-Object {
+                    $eventName = Get-FileTransferCoordinatorSnapshotEventName `
+                        -Line ([string]$_)
+                    $snapshotCatalog.SnapshotAuthorityV1 -contains $eventName -or
+                    $snapshotCatalog.GenerationStampedEffects -contains $eventName
+                })
+            $coordinatorSnapshotCompactEvaluation =
+                Get-FileTransferCoordinatorSnapshotEvaluation `
+                    -Lines $compactSnapshotLines
+            # Preserve full snapshot evaluation as the existing live GUI input.
+            $coordinatorSnapshotEvaluation = $coordinatorSnapshotFullEvaluation
         }
     }
     else {
-        [pscustomobject]@{
+        $coordinatorSnapshotEvaluation = [pscustomobject]@{
             Mode = 'LegacyV0'
             ArtifactEvidenceVerdict = 'pass'
             TransitionCount = 0
             FirstUnresolvedBoundary = $null
         }
+        $coordinatorSnapshotFullEvaluation = $coordinatorSnapshotEvaluation
+        $coordinatorSnapshotCompactEvaluation = $coordinatorSnapshotEvaluation
     }
     $snapshotEvaluationStopwatch.Stop()
     $snapshotEvaluationLineVisitCount = if (
@@ -6859,6 +6916,202 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     -InputObject $coordinatorSnapshotEvaluation `
                     -Name 'ResponderProbeHandoffFamilyLegacySelectionCount' `
                     -Default 1L))
+    }
+    $snapshotRouteFamiliesAuthoritative =
+        $snapshotRouteRuntimeAuthoritative -and
+        $snapshotRouteTransitionAuthoritative
+    if ($snapshotRouteFamiliesAuthoritative) {
+        $snapshotRouteConsistencyCommand = Get-Command `
+            Get-FileTransferCoordinatorSnapshotRouteConsistency `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $snapshotRouteConsistencyCommand) {
+            $snapshotRouteConsistency = [pscustomobject]@{
+                Verdict = 'fail'
+                FailureClass =
+                    'filetransfer_route_consistency_analysis_parity_invalid'
+                Reason =
+                    'snapshot_authoritative_route_consistency_evaluator_unavailable'
+                Variant =
+                    'snapshot_authoritative_route_consistency_shared_evaluator_unavailable'
+                Findings = @('shared Snapshot V1 route evaluator unavailable')
+                EvidenceEvents = @()
+                FirstUnresolvedBoundary = $null
+            }
+            $compactSnapshotRouteConsistency = $snapshotRouteConsistency
+            $snapshotRouteConsistencyParity = [pscustomobject]@{
+                Verdict = 'fail'
+                FailureReason =
+                    'snapshot_authoritative_route_consistency_shared_evaluator_unavailable'
+                FullBoundaryHash = '(none)'
+                CompactBoundaryHash = '(none)'
+            }
+        }
+        else {
+            $snapshotRouteConsistency =
+                Get-FileTransferCoordinatorSnapshotRouteConsistency `
+                    -Evaluation $coordinatorSnapshotFullEvaluation
+            $compactSnapshotRouteConsistency =
+                Get-FileTransferCoordinatorSnapshotRouteConsistency `
+                    -Evaluation $coordinatorSnapshotCompactEvaluation
+            $snapshotRouteConsistencyParity =
+                Compare-FileTransferCoordinatorSnapshotRouteConsistency `
+                    -Full $snapshotRouteConsistency `
+                    -Compact $compactSnapshotRouteConsistency
+        }
+        $routeParityInvalid =
+            [string]$snapshotRouteConsistencyParity.Verdict -cne 'pass'
+        if ($routeParityInvalid -or
+            $null -eq $snapshotRouteConsistency -or
+            [string]$snapshotRouteConsistency.Verdict -cne 'pass') {
+            $routeNormalizedBoundary =
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $snapshotRouteConsistency `
+                    -Name 'FirstUnresolvedBoundary' `
+                    -Default (Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $compactSnapshotRouteConsistency `
+                        -Name 'FirstUnresolvedBoundary' `
+                        -Default $null)
+            $routeUsesCoordinatorBoundary = $false
+            $routeEvidence = @(
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $snapshotRouteConsistency `
+                    -Name 'EvidenceEvents' `
+                    -Default @())
+            $routeFindings = @(
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $snapshotRouteConsistency `
+                    -Name 'Findings' `
+                    -Default @())
+            $routeBoundary = $routeNormalizedBoundary
+            $routeBoundaryId = [string](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'boundaryId' `
+                    -Default '(none)')
+            $routeBoundaryHash = [string](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'boundaryHash' `
+                    -Default (Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $snapshotRouteConsistency `
+                        -Name 'BoundaryHash' `
+                        -Default ([string]$snapshotRouteConsistencyParity.FullBoundaryHash)))
+            $routeWriter = [string](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'writer' `
+                    -Default '(none)')
+            $routeWriterSequence = [long](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'writerSequence' `
+                    -Default 0L)
+            $routeFailureClass = [string](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'taxonomyClass' `
+                    -Default (Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $snapshotRouteConsistency `
+                        -Name 'FailureClass' `
+                        -Default 'filetransfer_route_consistency_analysis_parity_invalid'))
+            $routeFailurePhase = [string](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'phase' `
+                    -Default 'evidence_finalization')
+            $routeFailureReason = if ($routeParityInvalid) {
+                [string]$snapshotRouteConsistencyParity.FailureReason
+            }
+            else {
+                [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'decisionReason' `
+                    -Default (Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $snapshotRouteConsistency `
+                        -Name 'Reason' `
+                        -Default 'snapshot_authoritative_route_consistency_invalid'))
+            }
+            $routeFailureVariant = if ($routeParityInvalid) {
+                'snapshot_authoritative_route_consistency_full_compact_normalized_mismatch'
+            }
+            else {
+                [string](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'variant' `
+                    -Default (Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $snapshotRouteConsistency `
+                        -Name 'Variant' `
+                        -Default 'snapshot_authoritative_route_boundary_invalid'))
+            }
+            $routeRawCount = [int](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'rawCount' `
+                    -Default ([Math]::Max($routeFindings.Count, 1)))
+            $routeDistinctCount = [int](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'distinctCount' `
+                    -Default $routeRawCount)
+            $routeRecoveredCount = [int](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'recoveredCount' `
+                    -Default 0)
+            $routeUnresolvedCount = [int](
+                Get-FileTransferCoordinatorSnapshotObjectProperty `
+                    -InputObject $routeBoundary `
+                    -Name 'unresolvedCount' `
+                    -Default $routeDistinctCount)
+            if ($null -ne $TestMetrics) {
+                $TestMetrics.evidenceLineVisitCount =
+                    $snapshotEvaluationLineVisitCount
+                $TestMetrics.evidenceLookupCount =
+                    $snapshotEvaluationLookupCount + [long]$routeEvidence.Count
+                $TestMetrics.classificationSource =
+                    'coordinator_snapshot_authority_v1_route_consistency'
+            }
+            $routeClassificationSource = if ($routeUsesCoordinatorBoundary) {
+                'coordinator_snapshot_authority_v1'
+            }
+            else {
+                'coordinator_snapshot_authority_v1_route_consistency'
+            }
+            return New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase $routeFailurePhase `
+                -Reason $routeFailureReason `
+                -RouteMode $RouteMode `
+                -ClassificationSource $routeClassificationSource `
+                -EvidenceLineVisitCount $snapshotEvaluationLineVisitCount `
+                -EvidenceParsedRecordCount ([long]$coordinatorSnapshotEvaluation.TransitionCount) `
+                -EvidenceLookupCount ($snapshotEvaluationLookupCount + [long]$routeEvidence.Count) `
+                -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds `
+                -FailureClass $routeFailureClass `
+                -FailureVariant $routeFailureVariant `
+                -CoordinatorBoundaryId $routeBoundaryId `
+                -CoordinatorBoundaryHash $routeBoundaryHash `
+                -CoordinatorRawCount $routeRawCount `
+                -CoordinatorDistinctCount $routeDistinctCount `
+                -CoordinatorRecoveredCount $routeRecoveredCount `
+                -CoordinatorUnresolvedCount $routeUnresolvedCount `
+                -CoordinatorWriter $routeWriter `
+                -CoordinatorWriterSequence $routeWriterSequence `
+                -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount `
+                    ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $coordinatorSnapshotEvaluation `
+                        -Name 'FallbackTailYieldFamilyLegacySelectionCount' `
+                        -Default 1L)) `
+                -CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount `
+                    ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $coordinatorSnapshotEvaluation `
+                        -Name 'RegularV4FrontierRepairPressureFamilyLegacySelectionCount' `
+                        -Default 1L)) `
+                -CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount `
+                    ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $coordinatorSnapshotEvaluation `
+                        -Name 'ResponderProbeHandoffFamilyLegacySelectionCount' `
+                        -Default 1L))
+        }
     }
     $boundary = $coordinatorSnapshotEvaluation.FirstUnresolvedBoundary
     $boundaryFamilies = if ($null -eq $boundary) {
