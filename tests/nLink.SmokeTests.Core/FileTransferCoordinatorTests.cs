@@ -19836,6 +19836,27 @@ public sealed partial class FileTransferCoordinatorTests
             epoch,
             6,
             6);
+        var yieldedEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            yielded.SnapshotEnvelope);
+        var yieldedOperations = yieldedEnvelope.Aggregate.Operations
+            .Where(candidate => candidate.Family == "fallback_tail_yield")
+            .ToArray();
+        var consumedSuccessor = Assert.Single(
+            yieldedOperations,
+            candidate =>
+                candidate.OperationRole == "peer_proof_pending_initial" &&
+                candidate.AuthorityId == successorProof.AuthorityId.ToString());
+        var yieldedCurrent = Assert.Single(
+            yieldedOperations,
+            candidate => candidate.OperationRole == "yield_current");
+        Assert.Equal(entered.OperationKey, consumedSuccessor.OperationKey);
+        Assert.Equal("Pending", consumedSuccessor.BeforeState);
+        Assert.Equal("None", consumedSuccessor.AfterState);
+        Assert.Equal("None", yieldedCurrent.BeforeState);
+        Assert.Equal("PeerProofObserved", yieldedCurrent.AfterState);
+        Assert.Equal(
+            successorReceipt.ObservationIdentity,
+            yieldedCurrent.FallbackTailYield!.PeerProofIdentity);
         var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
             FileTransferCoordinator.GetFallbackTailYieldSubstate(yielded.State)
                 .CurrentOperation);
@@ -19852,6 +19873,15 @@ public sealed partial class FileTransferCoordinatorTests
         var paired = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(
             yielded.State,
             localProof);
+        var pairedEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            paired.SnapshotEnvelope);
+        var pairedCurrent = Assert.Single(
+            pairedEnvelope.Aggregate.Operations,
+            candidate =>
+                candidate.Family == "fallback_tail_yield" &&
+                candidate.OperationRole == "yield_current");
+        Assert.Equal("PeerProofObserved", pairedCurrent.BeforeState);
+        Assert.Equal("Paired", pairedCurrent.AfterState);
         Assert.Equal(
             FileTransferFallbackTailYieldPairingState.Paired,
             FileTransferCoordinator.GetFallbackTailYieldSubstate(paired.State)
@@ -19867,6 +19897,8 @@ public sealed partial class FileTransferCoordinatorTests
             Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
                 successorAcceptance.SnapshotEnvelope),
             envelope,
+            yieldedEnvelope,
+            pairedEnvelope,
         ];
     }
 

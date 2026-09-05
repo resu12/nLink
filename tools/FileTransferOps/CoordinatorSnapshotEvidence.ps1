@@ -6446,44 +6446,66 @@ function Resolve-FileTransferCoordinatorCheckpointPeerProofSuccessors {
         [object[]]$Effects)
 
     $operationIndex = @{}
+    $operationBoundaryIndex = @{}
     foreach ($entry in $OperationHistory) {
-        $key = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Operation.operationKey)"
+        $key = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$($entry.Operation.operationKey)"
         if (-not $operationIndex.ContainsKey($key)) {
             $operationIndex[$key] = [Collections.Generic.List[object]]::new()
         }
         $operationIndex[$key].Add($entry)
+        $boundaryKey = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)"
+        if (-not $operationBoundaryIndex.ContainsKey($boundaryKey)) {
+            $operationBoundaryIndex[$boundaryKey] = [Collections.Generic.List[object]]::new()
+        }
+        $operationBoundaryIndex[$boundaryKey].Add($entry)
     }
     $effectIndex = @{}
     foreach ($effect in $Effects) {
-        $key = "$($effect.CoordinatorInstanceId)|$($effect.TransitionId)|$($effect.OperationKey)"
+        $key = "$($effect.CoordinatorInstanceId)|$($effect.Writer)|$($effect.TransitionId)|$($effect.OperationKey)"
         if (-not $effectIndex.ContainsKey($key)) {
             $effectIndex[$key] = [Collections.Generic.List[object]]::new()
         }
         $effectIndex[$key].Add($effect)
     }
 
+    $candidateEntries = [Collections.Generic.List[object]]::new()
     foreach ($candidateId in @($Candidates.Keys)) {
         $candidate = $Candidates[$candidateId]
-        $candidateEntry = @($OperationHistory | Where-Object {
-                [string]$_.Boundary.boundaryId -ceq [string]$candidateId -and
-                [string]$_.Operation.operationKey -ceq
-                    [string]$candidate.Entered.operationKey
-            })
+        $boundaryKey = "$($candidate.CoordinatorInstanceId)|$($candidate.Writer)|$candidateId|$($candidate.Entered.operationKey)"
+        $candidateEntry = @(if ($operationBoundaryIndex.ContainsKey($boundaryKey)) {
+            @($operationBoundaryIndex[$boundaryKey])
+        }
+        else { @() })
         $valid = $candidateEntry.Count -eq 1
         if (-not $valid) {
             "snapshot_operation_catalog_mismatch|current_checkpoint_peer_proof_successor_history_invalid:$($candidate.Line)"
             continue
         }
+        [void]$candidateEntries.Add([pscustomobject]@{
+                CandidateId = [string]$candidateId
+                Candidate = $candidate
+                Entry = $candidateEntry[0]
+            })
+    }
 
-        $entry = $candidateEntry[0]
+    foreach ($candidateEntry in @($candidateEntries | Sort-Object `
+                @{ Expression = { [string]$_.Entry.Boundary.coordinatorInstanceId } }, `
+                @{ Expression = { [string]$_.Entry.Boundary.writer } }, `
+                @{ Expression = { [long]$_.Entry.Boundary.beforeStateGeneration } }, `
+                @{ Expression = { [long]$_.Entry.Boundary.decisionUtcMilliseconds } }, `
+                @{ Expression = { [string]$_.CandidateId } })) {
+        $candidateId = [string]$candidateEntry.CandidateId
+        $candidate = $candidateEntry.Candidate
+        $entry = $candidateEntry.Entry
         $boundary = $entry.Boundary
+        $valid = $true
         $streamKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)"
         $stream = if ($AggregateIndex.ContainsKey($streamKey)) {
             $AggregateIndex[$streamKey]
         }
         else { $null }
-        $retiredKey = "$($boundary.coordinatorInstanceId)|$($candidate.Retired.operationKey)"
-        $enteredKey = "$($boundary.coordinatorInstanceId)|$($candidate.Entered.operationKey)"
+        $retiredKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($candidate.Retired.operationKey)"
+        $enteredKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($candidate.Entered.operationKey)"
         $origins = @(if ($operationIndex.ContainsKey($retiredKey)) {
             @($operationIndex[$retiredKey] | Where-Object {
                     [string]$_.Operation.beforeState -ceq 'None' -and
@@ -6493,14 +6515,16 @@ function Resolve-FileTransferCoordinatorCheckpointPeerProofSuccessors {
                 })
         }
         else { @() })
-        $priorEntered = @(if ($operationIndex.ContainsKey($enteredKey)) {
+        $preexistingEntered = @(if ($operationIndex.ContainsKey($enteredKey)) {
             @($operationIndex[$enteredKey] | Where-Object {
-                    [string]$_.Boundary.boundaryId -cne [string]$candidateId
+                    [string]$_.Boundary.boundaryId -cne [string]$candidateId -and
+                    [long]$_.Boundary.afterStateGeneration -le
+                        [long]$boundary.beforeStateGeneration
                 })
         }
         else { @() })
         $valid = $valid -and $null -ne $stream -and $origins.Count -eq 1 -and
-            $priorEntered.Count -eq 0 -and
+            $preexistingEntered.Count -eq 0 -and
             (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature `
                 $origins[0].Operation) -ceq
             (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature `
@@ -6545,9 +6569,9 @@ function Resolve-FileTransferCoordinatorCheckpointPeerProofSuccessors {
         }
 
         if ($valid) {
-            $originEffectKey = "$($boundary.coordinatorInstanceId)|$($origins[0].Boundary.boundaryId)|$($candidate.Retired.operationKey)"
-            $retiredEffectKey = "$($boundary.coordinatorInstanceId)|$candidateId|$($candidate.Retired.operationKey)"
-            $enteredEffectKey = "$($boundary.coordinatorInstanceId)|$candidateId|$($candidate.Entered.operationKey)"
+            $originEffectKey = "$($boundary.coordinatorInstanceId)|$($origins[0].Boundary.writer)|$($origins[0].Boundary.boundaryId)|$($candidate.Retired.operationKey)"
+            $retiredEffectKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$candidateId|$($candidate.Retired.operationKey)"
+            $enteredEffectKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$candidateId|$($candidate.Entered.operationKey)"
             $originEffects = @($effectIndex[$originEffectKey] | Where-Object {
                     $null -ne $_ -and [string]$_.EffectKind -ceq 'peer_proof_observed'
                 })
@@ -8349,6 +8373,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             [string]$_.operationRole -ceq 'peer_proof_pending_initial'
                         })
                     $checkpointPeerProofSuccessorCandidates[$transitionId] = @{
+                        CoordinatorInstanceId = [string]$envelope.coordinatorInstanceId
+                        Writer = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'log_writer_id'
                         Retired = @($successorOperations | Where-Object {
                                 [string]$_.beforeState -ceq 'Pending' -and
                                 [string]$_.afterState -ceq 'None'
