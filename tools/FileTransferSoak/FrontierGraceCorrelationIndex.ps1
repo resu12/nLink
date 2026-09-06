@@ -65,6 +65,8 @@ function Get-FileTransferFallbackFrontierGraceCorrelationEventNames {
         'filetransfer_terminalized_by_session_end',
         'filetransfer_route_selected',
         'filetransfer_live_route_epoch_recovered',
+        'filetransfer_route_transition_committed',
+        'filetransfer_route_transition_disposition_applied',
         'filetransfer_route_hint_authorized_publication_accepted',
         'filetransfer_data_session_recreated',
         'filetransfer_data_session_removed')
@@ -111,11 +113,16 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
     $eventsByTransferAndName = @{}
     $eventsByTransferAndFrontier = @{}
     $eventsByTransferAndAuthority = @{}
+    $eventsByWriterSequence = @{}
     foreach ($event in @($Events)) {
         if ($null -eq $event -or -not $catalog.Contains([string]$event.EventName)) { continue }
         $relevant.Add($event) | Out-Null
         $transferKey = Get-FileTransferFallbackFrontierGraceTransferKey -Event $event
         if ([string]::IsNullOrWhiteSpace($transferKey)) { continue }
+        $writerSequence = Get-FileTransferEventField -Event $event -Name 'log_writer_sequence' -Default ''
+        if ($writerSequence -match '^[1-9][0-9]*$') {
+            Add-FileTransferFallbackFrontierGraceIndexedEvent -Map $eventsByWriterSequence -Key "$transferKey|$writerSequence" -Event $event
+        }
         Add-FileTransferFallbackFrontierGraceIndexedEvent -Map $eventsByTransfer -Key $transferKey -Event $event
         Add-FileTransferFallbackFrontierGraceIndexedEvent `
             -Map $eventsByTransferAndName `
@@ -157,6 +164,7 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
         EventsByTransferAndName = $eventsByTransferAndName
         EventsByTransferAndFrontier = $eventsByTransferAndFrontier
         EventsByTransferAndAuthority = $eventsByTransferAndAuthority
+        EventsByWriterSequence = $eventsByWriterSequence
         IndexBuildVisitCount = [int64]$relevant.Count
         BoundedLookupVisitCount = 0L
     }
@@ -205,13 +213,24 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
     $selected = [ordered]@{}
     $addEvents = {
         param([object[]]$Candidates)
-        foreach ($event in @($Candidates)) {
-            $identity = '{0}|{1}|{2}|{3}' -f
-                $event.EventName,
-                [int64]$event.Sequence,
-                [int64]$event.LineNumber,
-                (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default '')
-            if (-not $selected.Contains($identity)) { $selected[$identity] = $event }
+        foreach ($candidate in @($Candidates)) {
+            $writerSequence = Get-FileTransferEventField -Event $candidate -Name 'log_writer_sequence' -Default ''
+            $copies = @($candidate)
+            $Index.BoundedLookupVisitCount++
+            if ($Index.EventsByWriterSequence.ContainsKey("$TransferKey|$writerSequence")) {
+                $copies = $Index.EventsByWriterSequence["$TransferKey|$writerSequence"].ToArray()
+            }
+            $copyIndex = 0
+            foreach ($event in $copies) {
+                $Index.BoundedLookupVisitCount++
+                $identity = '{0}|{1}|{2}|{3}|{4}' -f
+                    $event.EventName,
+                    [int64]$event.Sequence,
+                    [int64]$event.LineNumber,
+                    (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''),
+                    $copyIndex++
+                if (-not $selected.Contains($identity)) { $selected[$identity] = $event }
+            }
         }
     }
 
@@ -234,6 +253,8 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
             'filetransfer_terminalized_by_session_end',
             'filetransfer_route_selected',
             'filetransfer_live_route_epoch_recovered',
+            'filetransfer_route_transition_committed',
+            'filetransfer_route_transition_disposition_applied',
             'filetransfer_route_hint_authorized_publication_accepted',
             'filetransfer_data_session_recreated',
             'filetransfer_data_session_removed')) {
@@ -369,6 +390,45 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
                 Sort-Object Sequence, LineNumber |
                 Select-Object -First 1)
         & $addEvents $naturalProgress
+        if ($candidate.EventName -eq 'filetransfer_v6_receiver_state_deferred' -and $null -ne $sparseProgress) {
+            $nextFrontier = Get-FileTransferEventInt64Field -Event $sparseProgress -Name 'next_chunk_index' -Default -1
+            $highest = Get-FileTransferEventInt64Field -Event $sparseProgress -Name 'highest_received_chunk_index' -Default -1
+            $publishedProgress = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                -Index $Index -Events $receiverStatePool -AfterSequence ([int64]$sparseProgress.Sequence) `
+                -Predicate {
+                    param($event)
+                    (Get-FileTransferEventInt64Field -Event $event -Name 'contiguous_committed_chunk_index' -Default -1) -eq $nextFrontier -and
+                    (Get-FileTransferEventInt64Field -Event $event -Name 'durable_received_highest_chunk_index' -Default -1) -eq $highest
+                }
+            & $addEvents @($publishedProgress | Where-Object { $null -ne $_ })
+            if ($null -ne $publishedProgress) {
+                # Preserve competing publication evidence within the handed-off
+                # grace, not just the first matching publication.
+                $deadlineTicks = 0L
+                foreach ($stall in $graceCandidates) {
+                    if ($stall.EventName -ne 'filetransfer_v6_frontier_request_deferred' -or
+                        [long]$stall.Sequence -le $candidateSequence -or
+                        [long]$stall.Sequence -ge [long]$sparseProgress.Sequence -or
+                        (Get-FileTransferEventInt64Field -Event $stall -Name 'frontier_chunk_index' -Default -1) -ne $candidateFrontier) { continue }
+                    $deadline = [DateTimeOffset]::MinValue
+                    if ([DateTimeOffset]::TryParse((Get-FileTransferEventField -Event $stall -Name 'wake_deadline_utc' -Default ''), [ref]$deadline)) {
+                        $deadlineTicks = [Math]::Max($deadlineTicks, $deadline.UtcTicks)
+                    }
+                }
+                $publicationKey = "$TransferKey|$nextFrontier"
+                $Index.BoundedLookupVisitCount++
+                if ($deadlineTicks -gt 0 -and $Index.EventsByTransferAndFrontier.ContainsKey($publicationKey)) {
+                    foreach ($publication in $Index.EventsByTransferAndFrontier[$publicationKey]) {
+                        $Index.BoundedLookupVisitCount++
+                        if ($publication.EventName -eq 'filetransfer_v6_receiver_state_sent' -and
+                            [long]$publication.Sequence -gt [long]$sparseProgress.Sequence -and
+                            (Get-FileTransferEventInt64Field -Event $publication -Name 'log_writer_attempt_utc_ticks' -Default 0) -lt $deadlineTicks) {
+                            & $addEvents @($publication)
+                        }
+                    }
+                }
+            }
+        }
     }
     [object[]]$progressReferences = @($selected.Values | Where-Object {
             $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed'

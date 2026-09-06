@@ -1,5 +1,169 @@
 Set-StrictMode -Version Latest
 
+# This is consumption of an already completed episode, not recovery inferred
+# from a later route. Bulk and peer-first triggers deliberately remain distinct.
+function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
+    param($Episode, [long]$BeforeSequence)
+
+    if ($Episode.ConflictingStart) { return $false }
+    function Field($Record, [string]$Name) { return [string]$Record.Fields[$Name] }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            $value = Field $Left $name
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Right $name)) { return $false }
+        }
+        return $true
+    }
+    function Positive($Record, [string]$Name) { return (Field $Record $Name) -match '^[1-9][0-9]*$' }
+    function Present($Record, [string]$Name) {
+        $value = Field $Record $Name
+        return -not [string]::IsNullOrWhiteSpace($value) -and $value -cnotin @('(none)', 'none')
+    }
+    $buckets = @{}
+    $seen = @{}
+    foreach ($record in $Episode.CompletionRecords) {
+        if ($record.WriterSequence -le $Episode.PendingSequence -or $record.WriterSequence -ge $BeforeSequence) { continue }
+        $key = [string]$record.WriterSequence
+        if ($seen.ContainsKey($key)) {
+            if ($seen[$key].Line -cne $record.Line) { return $false }
+            continue
+        }
+        $seen[$key] = $record
+        if (-not $buckets.ContainsKey($record.EventName)) { $buckets[$record.EventName] = [Collections.Generic.List[object]]::new() }
+        $buckets[$record.EventName].Add($record)
+    }
+    function Named([string]$Name) { if ($buckets.ContainsKey($Name)) { return $buckets[$Name].ToArray() } }
+    $identity = @('session_id', 'transfer_id', 'direction')
+    $source = @('source_route', 'source_protocol_version', 'source_live_route_epoch',
+        'source_runtime_generation', 'source_route_publication_generation', 'source_route_commit_generation',
+        'source_terminal_generation', 'source_leg_generation', 'source_transport_epoch',
+        'source_bridge_recovery_generation', 'source_checkpoint_request_id', 'source_checkpoint_generation')
+    $durable = @('source_data_session_generation', 'source_durable_checkpoint_generation',
+        'source_state_epoch', 'source_contiguous_frontier', 'source_durable_highest', 'source_chunk_count')
+    $trigger = @('observation_generation', 'fallback_epoch', 'trigger_transport_epoch',
+        'trigger_bootstrap_generation', 'trigger_frame_fingerprint', 'trigger_data_session_generation')
+    $observations = @(Named 'filetransfer_fallback_v6_proof_bootstrap_observed' | Where-Object {
+        (Field $_ 'proof_kind') -ceq 'file_transfer_v6_frontier_request_frame_received' -and
+        (Field $_ 'direction') -ceq 'inbound' -and
+        (Field $_ 'fallback_epoch') -ceq [string]$Episode.FallbackEpoch -and
+        (Field $_ 'source_route') -ceq 'file_tuna_v4' -and (Field $_ 'source_protocol_version') -ceq '4' -and
+        (Field $_ 'authority_effect') -ceq 'coordinator_evaluation_only' -and
+        (Positive $_ 'observation_generation') -and (Positive $_ 'trigger_bootstrap_generation') -and
+        (Positive $_ 'trigger_data_session_generation')
+    })
+    if ($observations.Count -ne 1) { return $false }
+    $observation = $observations[0]
+    $commands = @(Named 'filetransfer_fallback_v6_proof_bootstrap_decided')
+    if ($commands.Count -ne 1) { return $false }
+    $command = $commands[0]
+    if (-not (Equal $command $observation ($identity + $source + $trigger)) -or
+        $command.WriterSequence -le $observation.WriterSequence -or
+        (Field $command 'decision_status') -cne 'Issued' -or
+        (Field $command 'authority_id') -notmatch '^fta2-filetransfer_fallback_v6_proof_bootstrap-[a-zA-Z0-9-]+$' -or
+        -not (Positive $command 'bootstrap_generation') -or
+        (Field $command 'trigger_transfer_id') -cne (Field $command 'transfer_id') -or
+        (Field $command 'source_data_session_generation') -cne (Field $command 'trigger_data_session_generation') -or
+        (Field $command 'target_route') -cne 'post_tuna_fallback_v6' -or
+        (Field $command 'target_protocol_version') -cne '6' -or
+        (Field $command 'target_transport') -cne 'regular_nkn' -or
+        (Field $command 'target_transport_epoch') -cne (Field $command 'trigger_transport_epoch') -or
+        (Field $command 'frame_kind') -cne 'ReceiverState') { return $false }
+    if (-not (Present $command 'transfer_id') -or -not (Present $command 'trigger_frame_fingerprint')) { return $false }
+
+    # Link the bulk trigger by episode ownership, never by the peer frame's
+    # fingerprint or its different transport/bootstrap generation.
+    $bulk = @(Named 'filetransfer_fallback_v6_proof_bootstrap_trigger_bound' | Where-Object { (Field $_ 'status') -ceq 'Ready' })
+    if ($bulk.Count -ne 1 -or -not (Equal $bulk[0] $command ($identity + $source + @('fallback_epoch'))) -or
+        (Field $bulk[0] 'pending_generation') -cne (Field $command 'observation_generation') -or
+        (Field $bulk[0] 'data_session_generation') -cne (Field $command 'source_data_session_generation') -or
+        -not (Present $bulk[0] 'frame_fingerprint') -or
+        (Field $bulk[0] 'bulk_seen') -cne '1' -or (Field $bulk[0] 'control_seen') -cne '1' -or
+        (Field $bulk[0] 'authority_effect') -cne 'none') { return $false }
+
+    $receiptKey = $identity + @('authority_id', 'bootstrap_generation', 'fallback_epoch', 'target_transport_epoch', 'frame_kind')
+    $executions = @(Named 'filetransfer_fallback_v6_proof_bootstrap_execution_completed')
+    $applications = @(Named 'filetransfer_fallback_v6_proof_bootstrap_receipt_applied')
+    $bindings = @(Named 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound')
+    if ($executions.Count -ne 1 -or $applications.Count -ne 1 -or $bindings.Count -ne 1) { return $false }
+    $execution = $executions[0]; $application = $applications[0]; $binding = $bindings[0]
+    if (-not (Equal $execution $command $receiptKey) -or
+        -not (Equal $application $execution ($receiptKey + @('receipt_status', 'frame_fingerprint'))) -or
+        (Field $execution 'receipt_status') -cne 'Delivered' -or
+        -not (Present $execution 'frame_fingerprint') -or
+        (Field $application 'application_status') -cne 'Applied' -or
+        $execution.WriterSequence -le $command.WriterSequence -or $application.WriterSequence -le $execution.WriterSequence -or
+        -not (Equal $binding $command ($identity + $source + $durable + @('authority_id', 'bootstrap_generation', 'fallback_epoch', 'target_route', 'target_protocol_version', 'target_transport_epoch'))) -or
+        (Field $binding 'local_receipt_status') -cne 'Delivered' -or
+        (Field $binding 'local_frame_fingerprint') -cne (Field $execution 'frame_fingerprint') -or
+        (Field $binding 'pairing_status') -cne 'Bound' -or
+        (Field $binding 'authority_effect') -cne 'peer_proof_binding_only' -or
+        (Field $binding 'peer_frame_type') -cne 'filetransfer.frontier_request.v6' -or
+        -not (Present $binding 'peer_frame_fingerprint') -or
+        (Field $binding 'proof_kind') -cne 'fallback_v6_proof_bootstrap_peer_frame' -or
+        -not (Positive $binding 'proof_generation') -or $binding.WriterSequence -le $application.WriterSequence) { return $false }
+
+    $prepared = @(Named 'filetransfer_route_transition_prepared')
+    $draining = @(Named 'filetransfer_route_transition_draining')
+    $committed = @(Named 'filetransfer_route_transition_committed')
+    $dispositions = @(Named 'filetransfer_route_transition_disposition_applied' | Where-Object { (Field $_ 'authority_schema') -ceq '2' })
+    $publications = @(Named 'filetransfer_live_route_epoch_recovered')
+    if ($prepared.Count -ne 1 -or $draining.Count -ne 1 -or $committed.Count -ne 1 -or
+        $dispositions.Count -ne 1 -or $publications.Count -ne 1) { return $false }
+    $prepare = $prepared[0]; $drain = $draining[0]; $commit = $committed[0]; $disposition = $dispositions[0]; $publication = $publications[0]
+    if (-not (Equal $prepare $command ($identity + $source + $durable + @('target_route', 'target_protocol_version', 'target_transport', 'target_transport_epoch'))) -or
+        (Field $prepare 'authority_schema') -cne '2' -or
+        (Field $prepare 'authority_id') -notmatch '^fta2-filetransfer_route_transition-[a-zA-Z0-9-]+$' -or
+        -not (Positive $prepare 'transition_generation') -or
+        (Field $prepare 'transition_kind') -cne 'TunaV4ToPostTunaFallbackV6' -or
+        (Field $prepare 'decision_status') -cne 'Prepared' -or
+        (Field $prepare 'peer_proof_generation') -cne (Field $binding 'proof_generation') -or
+        (Field $prepare 'peer_proof_kind') -cne (Field $binding 'proof_kind') -or
+        (Field $prepare 'peer_proof_transport_epoch') -cne (Field $binding 'target_transport_epoch') -or
+        (Field $prepare 'retained_frame_fingerprint') -cne (Field $binding 'peer_frame_fingerprint')) { return $false }
+    $routeKey = $identity + @('authority_schema', 'authority_id', 'transition_generation', 'transition_kind',
+        'source_route', 'source_protocol_version', 'source_transport', 'source_live_route_epoch', 'source_runtime_generation',
+        'source_route_publication_generation', 'source_route_commit_generation', 'source_terminal_generation',
+        'source_leg_generation', 'source_transport_epoch', 'source_bridge_recovery_generation', 'source_data_session_generation',
+        'target_route', 'target_protocol_version', 'target_transport', 'target_transport_epoch', 'peer_proof_generation',
+        'peer_proof_kind', 'peer_proof_transport_epoch', 'retained_frame_fingerprint', 'checkpoint_generation',
+        'checkpoint_state_epoch', 'checkpoint_contiguous_frontier', 'checkpoint_durable_highest', 'checkpoint_chunk_count')
+    if (-not (Equal $drain $prepare $routeKey) -or -not (Equal $commit $prepare $routeKey) -or
+        -not (Equal $disposition $prepare ($routeKey + $source + $durable)) -or
+        (Field $drain 'decision_status') -cne 'Draining' -or (Field $commit 'decision_status') -cne 'Committed' -or
+        (Field $disposition 'decision_status') -cne 'Applied' -or
+        (Field $disposition 'decision_reason') -cne 'filetransfer_route_transition_committed' -or
+        $prepare.WriterSequence -le $application.WriterSequence -or $drain.WriterSequence -le $prepare.WriterSequence -or
+        $commit.WriterSequence -le $drain.WriterSequence -or $commit.WriterSequence -le $binding.WriterSequence -or
+        $disposition.WriterSequence -le $commit.WriterSequence -or $publication.WriterSequence -le $disposition.WriterSequence) { return $false }
+    if (-not (Equal $publication $commit ($identity + @('transition_generation'))) -or
+        (Field $publication 'projection_source') -cne 'coordinator_route_transition' -or
+        (Field $publication 'route_publication_action_kind') -cne 'RoutePublication' -or
+        (Field $publication 'reason') -cne 'filetransfer_route_transition_committed') { return $false }
+    foreach ($name in @('route', 'protocol_version', 'live_route_epoch', 'runtime_generation', 'terminal_generation',
+            'leg_generation', 'route_commit_generation', 'route_publication_generation')) {
+        $target = Field $commit "target_$name"
+        if ([string]::IsNullOrWhiteSpace($target) -or $target -cne (Field $publication $name)) { return $false }
+        if ($name -notin @('route', 'protocol_version') -and $target -cne (Field $disposition "resulting_$name")) { return $false }
+    }
+
+    # A terminal after closure does not recover anything and cannot reopen the
+    # consumed obligation. Before closure, cancellation/mutation poisons it.
+    foreach ($record in $Episode.CompletionRecords) {
+        if ($record.WriterSequence -le $Episode.PendingSequence) { continue }
+        if ($record.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted' -and
+            $record.WriterSequence -gt $commit.WriterSequence -and
+            -not (Equal $record $publication ($identity + @('route', 'protocol_version', 'live_route_epoch',
+                'runtime_generation', 'terminal_generation', 'leg_generation', 'route_commit_generation', 'route_publication_generation')))) { return $false }
+        if ($record.EventName -in @('filetransfer_route_transition_invalidated', 'filetransfer_data_session_availability_changed') -or
+            ($record.WriterSequence -gt $publication.WriterSequence -and $record.EventName -in @(
+                'filetransfer_fallback_v6_proof_bootstrap_observed', 'filetransfer_fallback_v6_proof_bootstrap_decided',
+                'filetransfer_route_transition_prepared', 'filetransfer_route_transition_committed')) -or
+            ($record.WriterSequence -le $publication.WriterSequence -and $record.EventName -in @(
+                'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal', 'transfer_terminal', 'filetransfer_runtime_terminalized'))) { return $false }
+    }
+    return $true
+}
+
 function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
     param(
         [Parameter(Mandatory = $true)]
@@ -19,7 +183,20 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
             'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch',
             'filetransfer_fallback_v6_proof_bootstrap_trigger_bound',
             'filetransfer_fallback_v6_proof_bootstrap_observed',
-            'filetransfer_fallback_v6_proof_bootstrap_decided')) {
+            'filetransfer_fallback_v6_proof_bootstrap_decided',
+            'filetransfer_fallback_v6_proof_bootstrap_execution_completed',
+            'filetransfer_fallback_v6_proof_bootstrap_receipt_applied',
+            'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
+            'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_draining',
+            'filetransfer_route_transition_committed',
+            'filetransfer_route_transition_disposition_applied',
+            'filetransfer_live_route_epoch_recovered',
+            'filetransfer_route_hint_authorized_publication_accepted',
+            'filetransfer_route_transition_invalidated',
+            'filetransfer_data_session_availability_changed',
+            'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal',
+            'transfer_terminal', 'filetransfer_runtime_terminalized')) {
         $relevantEvents.Add($eventName) | Out-Null
     }
 
@@ -48,6 +225,11 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
             continue
         }
 
+        $fields = @{}
+        foreach ($match in [regex]::Matches($line, '(?:^|;\s*)([^=;]+)=([^;]*)')) {
+            $name = $match.Groups[1].Value.Trim()
+            if (-not $fields.ContainsKey($name)) { $fields[$name] = $match.Groups[2].Value.Trim() }
+        }
         $records.Add([pscustomobject]@{
                 EventName = $eventName
                 Writer = $writer
@@ -56,6 +238,7 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
                 InputIndex = [long]$index
                 Line = $line
                 RawLine = $rawLine
+                Fields = $fields
             }) | Out-Null
     }
 
@@ -81,6 +264,8 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
                     Session = $record.Session
                     FallbackEpoch = $fallbackEpoch
                     StartedSequence = $record.WriterSequence
+                    StartedLine = $record.Line
+                    ConflictingStart = $false
                     Pending = $false
                     PendingSequence = 0L
                     BulkFrameObserved = $false
@@ -93,7 +278,12 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
                     TriggerRecords = New-Object System.Collections.Generic.List[object]
                     ObservationRecords = New-Object System.Collections.Generic.List[object]
                     DecisionRecords = New-Object System.Collections.Generic.List[object]
+                    CompletionRecords = New-Object System.Collections.Generic.List[object]
                 }
+            }
+            elseif ($episodes[$episodeKey].StartedSequence -ne $record.WriterSequence -or
+                $episodes[$episodeKey].StartedLine -cne $record.Line) {
+                $episodes[$episodeKey].ConflictingStart = $true
             }
             $currentByWriterSession[$scopeKey] = $episodes[$episodeKey]
             continue
@@ -103,6 +293,7 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
             continue
         }
         $episode = $currentByWriterSession[$scopeKey]
+        $episode.CompletionRecords.Add($record) | Out-Null
 
         switch ($record.EventName) {
             'filetransfer_fallback_nkn_proof_pending' {
@@ -197,6 +388,9 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
 
         $expectedDirection = 'inbound'
         $firstWait = $episode.Candidates[0]
+        if (Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed -Episode $episode -BeforeSequence $firstWait.WriterSequence) {
+            continue
+        }
         $triggerIdentities = @{}
         foreach ($trigger in $episode.TriggerRecords.ToArray()) {
             $status = Get-FileTransferAuthorityLogField -Line $trigger.Line -Name 'status'

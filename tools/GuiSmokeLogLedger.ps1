@@ -8,6 +8,7 @@ if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
 
 $script:GuiSmokeLegacyV0EvidenceCatalog = $null
 $script:GuiSmokeLiveDiagnosticEvidenceEventNames = @(
+    'filetransfer_fallback_v6_proof_bootstrap_trigger_bound',
     'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
     'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
     'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided',

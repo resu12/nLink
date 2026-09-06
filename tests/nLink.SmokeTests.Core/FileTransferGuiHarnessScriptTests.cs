@@ -6569,6 +6569,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -6605,7 +6606,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 $lines | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
-                if ([bool]$result.FallbackFrontierStallGraceRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                $missing = $result.PSObject.Properties['FallbackFrontierStallGraceRecheckMissing']
+                if (($null -ne $missing -and [bool]$missing.Value) -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
                     throw "stall-grace indexed result mismatch: $($result | ConvertTo-Json -Compress)"
                 }
                 if (${{expectMissing.ToString().ToLowerInvariant()}} -and
@@ -6642,6 +6644,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -6680,7 +6683,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 $lines | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
-                if ([bool]$result.FallbackFrontierRecentProgressGraceRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                $missing = $result.PSObject.Properties['FallbackFrontierRecentProgressGraceRecheckMissing']
+                if (($null -ne $missing -and [bool]$missing.Value) -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
                     throw "recent-progress-grace indexed result mismatch: $($result | ConvertTo-Json -Compress)"
                 }
                 if (${{expectMissing.ToString().ToLowerInvariant()}} -and
@@ -6794,6 +6798,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -6840,7 +6845,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $lines += 'event=file_transfer_inbound_terminal; session_id=sess; transfer_id=transfer; state=Completed; error_code=(none); saved_path=C:\received\payload.bin; log_writer_id=writer'
                 $lines | Set-Content -LiteralPath $path
                 $result = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'scenario failed' -RouteMode 'live-regular-activation-cycle' -ImmutableEvidencePaths @($path)
-                if ([bool]$result.FallbackFrontierStallGraceRecheckMissing -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
+                $missing = $result.PSObject.Properties['FallbackFrontierStallGraceRecheckMissing']
+                if (($null -ne $missing -and [bool]$missing.Value) -ne ${{expectMissing.ToString().ToLowerInvariant()}}) {
                     throw "terminal-frontier indexed result mismatch: $($result | ConvertTo-Json -Compress)"
                 }
                 Write-Output 'gui-terminal-frontier-fast-path-ok'

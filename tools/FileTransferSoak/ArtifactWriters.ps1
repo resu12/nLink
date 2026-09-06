@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferOps\CoordinatorSnapshotEvidence.ps1')
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferFrontierGraceHandoff.ps1')
 
 $script:FileTransferRegularNknTargetGoodputBytesPerSecond = 1500000D
 $script:FileTransferExpectedBridgeControlSubClients = 4
@@ -10935,6 +10936,10 @@ function Get-FileTransferRouteTransitionCorrelation {
                 'filetransfer_fallback_v6_proof_bootstrap_pending_write_recheck_decided',
                 'filetransfer_fallback_v6_proof_bootstrap_peer_boundary_bound',
                 'filetransfer_route_transition_prepared',
+                'filetransfer_route_transition_draining',
+                'filetransfer_route_transition_committed',
+                'filetransfer_route_transition_disposition_applied',
+                'filetransfer_live_route_epoch_recovered',
                 'filetransfer_route_transition_invalidated',
                 'filetransfer_data_session_availability_changed',
                 'file_transfer_outbound_terminal',
@@ -60156,8 +60161,13 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             }
         }
 
+        $stallHandoffClosure = $null
+        if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent) {
+            $stallHandoffClosure = Get-FileTransferStallGraceTunaHandoffClosure -Events $ordered -Episode $incident
+            if ($null -ne $stallHandoffClosure) { $recoveryEvent = $stallHandoffClosure }
+        }
         $recovered = $naturalProgress.Count -eq 1 -or $null -ne $recoveryEvent
-        if ($recovered) {
+        if ($recovered -and $null -eq $stallHandoffClosure) {
             if ($naturalProgress.Count -eq 1) { $recoveryEvent = $naturalProgress[0] }
             [object[]]$poison = @($terminalEvents | Where-Object {
                     [int64]$_.Sequence -gt [int64]$candidate.Sequence -and
@@ -60602,8 +60612,16 @@ function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {
             }
         }
 
+        if ($null -eq $recoveryEvent) {
+            $recoveryEvent = Get-FileTransferRecentProgressGraceStallProgressClosure -Events $ordered -Episode $incident
+        }
+        $handoffClosure = $null
+        if ($null -eq $recoveryEvent) {
+            $handoffClosure = Get-FileTransferRecentProgressGraceTunaHandoffClosure -Events $ordered -Episode $incident
+            if ($null -ne $handoffClosure) { $recoveryEvent = $handoffClosure }
+        }
         $recovered = $null -ne $recoveryEvent -and -not ($incident.PSObject.Properties.Name -contains 'HighestRegressed')
-        if ($recovered) {
+        if ($recovered -and $null -eq $handoffClosure) {
             [object[]]$poison = @($terminalEvents | Where-Object {
                     [int64]$_.Sequence -gt $candidateSequence -and
                     [int64]$_.Sequence -lt [int64]$recoveryEvent.Sequence -and

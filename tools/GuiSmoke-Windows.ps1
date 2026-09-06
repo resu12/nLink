@@ -8,6 +8,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'FileTransferAuthorityMatching.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferFrontierGraceHandoff.ps1')
 . (Join-Path $PSScriptRoot 'GuiSmokeLogLedger.ps1')
 
 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
@@ -14908,6 +14909,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             if ($value -match '^[1-9][0-9]*$') { return [long]$value }
             return [long]::MaxValue
         }
+        $handoffEvents = @($byEvent.Values | ForEach-Object {
+            foreach ($record in $_) {
+                [pscustomobject]@{ Fields = $record.Fields; Sequence = (Get-GuiStallSequence $record) }
+            }
+        })
         function Get-GuiStallField([object]$Line, [string[]]$Names) {
             foreach ($name in $Names) {
                 $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
@@ -14956,6 +14962,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [object[]]$deferrals = @(Get-GuiStallLines 'filetransfer_v6_frontier_request_deferred')
         [object[]]$grants = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_authority_granted')
         [object[]]$settlements = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_contract_settled')
+        $hasTunaHandoffRetirement = @($settlements | Where-Object {
+                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_reason') -eq 'tuna_reactivation_replaced_fallback_owner'
+            }).Count -gt 0
         [object[]]$progresses = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_progress_observed')
         [object[]]$forcedStates = @(Get-GuiStallLines 'filetransfer_v6_fallback_frontier_repair_progress_state_forced')
         [object[]]$receiverStates = @(Get-GuiStallLines 'filetransfer_v6_receiver_state_sent')
@@ -15101,8 +15110,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     [string]::IsNullOrWhiteSpace($eventProtocol)) {
                     return $true
                 }
-                if ($eventRoute -ne (Get-TunaGuiLogLineFieldValue -Line $source.Line -Name 'route') -or
-                    $eventProtocol -ne (Get-TunaGuiLogLineFieldValue -Line $source.Line -Name 'protocol_version')) {
+                if ($eventRoute -ne (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'route') -or
+                    $eventProtocol -ne (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'protocol_version')) {
                     return $true
                 }
                 foreach ($field in @(
@@ -15110,7 +15119,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         'route_publication_generation', 'route_commit_generation')) {
                     $actual = Get-TunaGuiLogLineFieldValue -Line $line -Name $field
                     if (-not [string]::IsNullOrWhiteSpace($actual) -and
-                        $actual -ne (Get-TunaGuiLogLineFieldValue -Line $source.Line -Name $field)) {
+                        $actual -ne (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name $field)) {
                         return $true
                     }
                 }
@@ -15494,7 +15503,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     }
                 }
             }
-            if ($recovered) {
+            $stallHandoffClosure = $null
+            if (-not $recovered -and $hasTunaHandoffRetirement) {
+                $episode = [pscustomobject]@{
+                    Event = [pscustomobject]@{ Fields = $candidate.Line.Fields; Sequence = $candidate.Sequence }
+                    Progress = $candidate.Progress; Writer = $candidate.Writer; Session = $candidate.Session
+                    Transfer = $candidate.Transfer; Frontier = $candidate.Frontier
+                    DataSessionIdentity = $candidate.DataSessionIdentity; DataSessionGeneration = $candidate.DataSessionGeneration
+                }
+                $stallHandoffClosure = Get-FileTransferStallGraceTunaHandoffClosure -Events $handoffEvents -Episode $episode
+                $recovered = $null -ne $stallHandoffClosure
+            }
+            if ($recovered -and $null -eq $stallHandoffClosure) {
                 $recoverySequence = Get-GuiStallSequence $recoveryEvent
                 [object[]]$poison = @($terminals | Where-Object {
                         (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
@@ -15885,6 +15905,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $recovered = $state.Count -eq 1
                     }
                 }
+            }
+            if (-not $recovered) {
+                $recovered = $null -ne (Get-FileTransferRecentProgressGraceStallProgressClosure -Events $records.ToArray() -Episode $episode)
+            }
+            if (-not $recovered -and @($records | Where-Object {
+                    $_.Event -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+                    (Get-GuiRecentField $_ 'decision_reason') -eq 'tuna_reactivation_replaced_fallback_owner'
+                }).Count -gt 0) {
+                $recovered = $null -ne (Get-FileTransferRecentProgressGraceTunaHandoffClosure -Events $records.ToArray() -Episode $episode)
             }
             if ($episode.PSObject.Properties.Name -contains 'HighestRegressed') { $recovered = $false }
             if (-not $recovered) { $unresolved.Add($episode) }
