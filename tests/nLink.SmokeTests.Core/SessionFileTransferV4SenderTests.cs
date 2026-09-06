@@ -7437,8 +7437,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Empty(state.MissingRanges);
     }
 
-    [Fact]
-    public void PostTunaFallbackV6InboundCheckpointRequest_StartsNewLegAfterAcceptedCheckpoint()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void PostTunaFallbackV6InboundCheckpointRequest_StartsNewLegAfterAcceptedCheckpoint(int successorTransportEpoch)
     {
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport(
@@ -7476,19 +7478,17 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             RecoveryMode = "regular_nkn_state_refresh",
         };
         var markInboundCheckpoint = serviceType
-            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!;
-        Assert.True((bool)markInboundCheckpoint.Invoke(null, [context, firstRequest, "test_first_checkpoint"])!);
+            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)markInboundCheckpoint.Invoke(service, [context, firstRequest, "test_first_checkpoint"])!);
 
         var firstLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.Equal("v6-regular-nkn-state-refresh:1", firstLeg.CheckpointRequestId);
-        AcceptInboundFallbackCheckpointForTest(
-            context,
-            firstLeg,
-            transportEpoch: 1,
-            committed: 303,
-            highestObserved: 306,
-            checkpointRequestId: "v6-regular-nkn-state-refresh:1",
-            reason: "test_first_checkpoint_accepted");
+        var acceptCheckpoint = serviceType
+            .GetMethod("TryAcceptInboundFallbackCheckpointWithCoordinatorLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)acceptCheckpoint.Invoke(service,
+            [context, firstLeg, 1L, 303, 306, "v6-regular-nkn-state-refresh:1", "test_first_checkpoint_accepted"])!);
+        Assert.Equal("v6-regular-nkn-state-refresh:1", firstLeg.CheckpointRequestId);
+        firstLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.Null(firstLeg.CheckpointRequestId);
         Assert.Equal(1, firstLeg.TransportEpochId);
         while (transport.ObservedRouteHints.TryDequeue(out _))
@@ -7505,16 +7505,19 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var secondRequest = firstRequest with
         {
-            TransportEpoch = 2,
+            TransportEpoch = successorTransportEpoch,
             RepairRequestId = "v6-regular-nkn-state-refresh:2",
         };
         var logStart = GetOperationalLogLength();
-        Assert.True((bool)markInboundCheckpoint.Invoke(null, [context, secondRequest, "state_refresh_received"])!);
+        Assert.True((bool)markInboundCheckpoint.Invoke(service, [context, secondRequest, "state_refresh_received"])!);
 
         var secondLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.NotSame(firstLeg, secondLeg);
-        Assert.Equal(FileTransferLegState.Frozen, firstLeg.State);
-        Assert.Equal(2, secondLeg.TransportEpochId);
+        var retiredLeg = Assert.Single(GetPrivateProperty<List<FileTransferLeg>>(context, "TransferLegHistory"),
+            leg => leg.Generation == firstLeg.Generation);
+        Assert.Equal(FileTransferLegState.Frozen, retiredLeg.State);
+        Assert.Equal(FileTransferLegState.RecoveryActive, firstLeg.State);
+        Assert.Equal(successorTransportEpoch, secondLeg.TransportEpochId);
         Assert.True(secondLeg.Generation > firstLeg.Generation);
         Assert.Equal("v6-regular-nkn-state-refresh:2", secondLeg.CheckpointRequestId);
         Assert.False(secondLeg.CanSendData);
@@ -7557,11 +7560,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var log = scopedLog + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
         Assert.True(
             log.Contains("event=filetransfer_leg_frozen; direction=inbound;", StringComparison.Ordinal) ||
-            firstLeg.State == FileTransferLegState.Frozen,
+            retiredLeg.State == FileTransferLegState.Frozen,
             log);
         Assert.Contains("event=filetransfer_fallback_checkpoint_recovery_leg_started; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("previous_transport_epoch=1", log, StringComparison.Ordinal);
-        Assert.Contains("transport_epoch=2", log, StringComparison.Ordinal);
+        Assert.Contains($"transport_epoch={successorTransportEpoch}", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_checkpoint_requested; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("checkpoint_request_id=v6-regular-nkn-state-refresh:2", log, StringComparison.Ordinal);
         Assert.False(

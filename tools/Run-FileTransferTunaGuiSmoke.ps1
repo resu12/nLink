@@ -1168,7 +1168,8 @@ function Invoke-TunaGuiRetainedAnalysis {
     $stdoutPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stdout.txt'
     $stderrPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stderr.txt'
     $diagnosticsPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis-diagnostics.json'
-    $analysisTimeoutSeconds = 1200
+    # Offline evidence analysis budget; GUI and transfer deadlines are independent.
+    $analysisTimeoutSeconds = 1800
     $startedUtc = [DateTimeOffset]::UtcNow
     $arguments = @(
         '-NoProfile',

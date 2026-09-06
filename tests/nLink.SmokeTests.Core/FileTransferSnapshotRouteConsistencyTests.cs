@@ -54,13 +54,15 @@ public sealed class FileTransferSnapshotRouteConsistencyTests : FileTransferOpsS
                     operationKind=$kind; authorityId=$authority
                     predecessorAuthorityId='(none)'; operationGeneration=$generation
                     beforeState=$before; afterState=$after
-                    commandIdentity="$authority-command"; commandGeneration=$generation
-                    commandFingerprint="$authority-command-fingerprint"
-                    receiptIdentity="$authority-receipt"; receiptGeneration=$generation
-                    receiptStatus='Accepted'; receiptFingerprint="$authority-receipt-fingerprint"
-                    receiptValidated=$true; stateApplied=$true
+                    commandIdentity=$authority; commandGeneration=$generation
+                    commandFingerprint="$authority-fingerprint"
+                    receiptIdentity=if($role -ceq 'runtime_owner'){'(none)'}else{$authority}
+                    receiptGeneration=if($role -ceq 'runtime_owner'){0L}else{$generation}
+                    receiptStatus=if($role -ceq 'runtime_owner'){'(none)'}else{'Accepted'}
+                    receiptFingerprint=if($role -ceq 'runtime_owner'){'(none)'}else{"$authority-fingerprint"}
+                    receiptValidated=($role -cne 'runtime_owner'); stateApplied=$true
                     routeRuntime=if ($family -ceq 'route_runtime') {
-                        [pscustomobject]@{ role=$role; boundary=$scope; tokenFingerprint="$authority-receipt-fingerprint" }
+                        [pscustomobject]@{ role=$role; boundary=$scope; tokenFingerprint="$authority-fingerprint" }
                     } else { $null }
                     routeTransition=$null
                 }
@@ -127,6 +129,20 @@ public sealed class FileTransferSnapshotRouteConsistencyTests : FileTransferOpsS
                     [int]$normalizedFirst.recoveredCount -ne 0 -or
                     [int]$normalizedFirst.unresolvedCount -ne 1) {
                     throw "$name normalized JSON omitted the exact unresolved boundary/quartet"
+                }
+                $compact=$evaluation | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                foreach ($boundary in $compact.Boundaries) {
+                    $boundary.evidenceLineIndex += 1000L
+                }
+                $compactFailure=Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+                if ($compactFailure.Verdict -cne 'fail' -or
+                    $compactFailure.NormalizedJson -cne $failure.NormalizedJson -or
+                    $compactFailure.NormalizedHash -cne $failure.NormalizedHash -or
+                    $compactFailure.FirstUnresolvedBoundary.evidenceLineIndex -ne
+                        ($first.evidenceLineIndex + 1000L) -or
+                    $null -ne $normalizedFirst.PSObject.Properties['evidenceLineIndex'] -or
+                    (Compare-FileTransferCoordinatorSnapshotRouteConsistency -Full $failure -Compact $compactFailure).Verdict -cne 'pass') {
+                    throw "$name input-local offsets changed semantic failure parity or lost diagnostic location"
                 }
             }
             function New-Boundary(
@@ -224,6 +240,50 @@ public sealed class FileTransferSnapshotRouteConsistencyTests : FileTransferOpsS
                 }
                 return $boundaries.ToArray()
             }
+            function Add-OwnerRefresh($evaluation,[string]$direction) {
+                $previous=@($evaluation.Boundaries | Where-Object {$_.direction -ceq $direction -and $_.operations.Count -gt 0} |
+                    Sort-Object afterStateGeneration)[-1]
+                $aggregatePrevious=@($evaluation.Boundaries | Where-Object {$_.direction -ceq $direction -and
+                    $null -ne $_.PSObject.Properties['afterBoundary']} | Sort-Object afterStateGeneration)[-1]
+                $before=$aggregatePrevious.afterBoundary
+                $after=$before | ConvertTo-Json | ConvertFrom-Json
+                $after.routePublicationGeneration++;$after.runtimeGeneration++;$after.legGeneration++
+                $sequence=[long]$aggregatePrevious.writerSequence+1L
+                $pub=New-Operation 'route_runtime' 'route_publication' 'RoutePublication' ('fte1-{0:x24}' -f (1000L+$sequence)) $after.routePublicationGeneration 'None' 'Published' $after
+                $owner=New-Operation 'route_runtime' 'runtime_owner' 'RuntimeOwner' ('fte1-{0:x24}' -f (5000L+$sequence)) $after.runtimeGeneration 'None' 'Current' $after
+                $retired=@($previous.operations | Where-Object {$_.family -ceq 'route_runtime' -and $_.beforeState -ceq 'None'} |
+                    ForEach-Object { $_ | ConvertTo-Json -Depth 16 | ConvertFrom-Json })
+                foreach($op in $retired){$op.beforeState=$op.afterState;$op.afterState='None';$op.routeRuntime.boundary=$before}
+                $attempt=New-Operation 'route_runtime' 'runtime_owner' 'StartTransfer' $owner.authorityId $owner.operationGeneration 'Attempted' 'Attempted' $before
+                $attempt.stateApplied=$false
+                $terminal=@($previous.operations | Where-Object {$_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal'})[0] |
+                    ConvertTo-Json -Depth 16 | ConvertFrom-Json
+                $terminal.beforeState='Committed';$terminal.afterState='Committed'
+                $bootstrap=New-Operation 'route_transition' 'fallback_v6_bootstrap' 'FallbackV6ProofBootstrap' 'fte1-000000000000000000009000' 2L 'Delivered' 'Delivered' $after
+                $boundary=[pscustomobject]@{
+                    boundaryId="refresh-$direction-$sequence";boundaryHash="refresh-hash-$direction-$sequence"
+                    coordinatorInstanceId=$previous.coordinatorInstanceId;writer=$previous.writer;writerSequence=$sequence
+                    evidenceLineIndex=$sequence;decisionUtcMilliseconds=(100000L+$sequence)
+                    beforeStateGeneration=$aggregatePrevious.afterStateGeneration;afterStateGeneration=($aggregatePrevious.afterStateGeneration+1L)
+                    beforeStateHash=$aggregatePrevious.afterStateHash;afterStateHash="refresh-state-$sequence"
+                    decisionKind='StartTransfer';decisionStatus='Accepted';decisionReason='state_refresh_received'
+                    verdict='pass';taxonomyClass='(none)';domain='route_runtime';phase='route_transition'
+                    sessionId=$previous.sessionId;transferId=$previous.transferId;direction=$direction
+                    beforeBoundary=$before;afterBoundary=$after;families=@('route_runtime','route_transition')
+                    operations=@($retired)+@($pub,$owner,$attempt,$terminal,$bootstrap)
+                }
+                $effect=[ordered]@{
+                    CoordinatorInstanceId=$boundary.coordinatorInstanceId;Writer=$boundary.writer;TransitionId=$boundary.boundaryId
+                    StateGeneration=$boundary.afterStateGeneration;Family='route_runtime';OperationKey=$pub.operationKey
+                    AuthorityId=$pub.authorityId;OperationGeneration=$pub.operationGeneration;EffectKind='route_publication_forwarded'
+                    EffectIdentity="effect-$sequence";ReceiptIdentity=$pub.receiptIdentity;ReceiptGeneration=$pub.receiptGeneration
+                    ReceiptStatus=$pub.receiptStatus;ReceiptFingerprint=$pub.receiptFingerprint
+                }
+                foreach($field in $after.PSObject.Properties){$effect[$field.Name]=$field.Value}
+                $evaluation.Boundaries+=@($boundary)
+                $evaluation.__RoutePublicationEffects+=@([pscustomobject]$effect)
+                return $boundary
+            }
 
             $boundaries=@(New-FiveRouteCycle 'outbound' 'writer-sender' 0L) + @(New-FiveRouteCycle 'inbound' 'writer-helper' 100L)
             # A non-authority diagnostic with route=(none) must not become route evidence.
@@ -266,6 +326,98 @@ public sealed class FileTransferSnapshotRouteConsistencyTests : FileTransferOpsS
                 $parity.FullBoundaryHash -cne $result.BoundaryHash -or
                 $parity.CompactBoundaryHash -cne $again.BoundaryHash) {
                 throw "identical full/compact route results failed parity: $($parity | ConvertTo-Json -Compress)"
+            }
+            $refresh=$evaluation | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            $refresh | Add-Member -NotePropertyName __RoutePublicationEffects -NotePropertyValue @()
+            $firstRefresh=Add-OwnerRefresh $refresh 'inbound'
+            $secondRefresh=Add-OwnerRefresh $refresh 'inbound'
+            $refreshed=Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $refresh
+            if($refreshed.Verdict -cne 'pass' -or $refreshed.RouteSelectedEvents.Count -ne 12 -or
+                $refreshed.RouteAwareEvents.Count -ne 20 -or $refreshed.SelectedRouteChanges.Count -ne 5){
+                throw "owner refresh rejected or publications hidden: $($refreshed.Findings -join ';')"
+            }
+            $bilateral=$refresh | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            [void](Add-OwnerRefresh $bilateral 'outbound')
+            if((Get-FileTransferCoordinatorSnapshotRouteConsistency $bilateral).Verdict -cne 'pass'){
+                throw 'outbound exact fallback owner successor rejected'
+            }
+            foreach($badKind in @('missing_effect','wrong_effect','duplicate_effect','missing_owner','wrong_receipt',
+                    'wrong_attempt','wrong_scope','wrong_generation','missing_carry','wrong_prior_token','terminal_poison','authority_aba')) {
+                $bad=$refresh | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                $subject=@($bad.Boundaries | Where-Object {$_.boundaryId -ceq $firstRefresh.boundaryId})[0]
+                switch($badKind){
+                    'missing_effect' {$bad.__RoutePublicationEffects=@($bad.__RoutePublicationEffects | Where-Object {$_.TransitionId -cne $subject.boundaryId})}
+                    'wrong_effect' {$bad.__RoutePublicationEffects[0].ReceiptFingerprint='wrong'}
+                    'duplicate_effect' {$bad.__RoutePublicationEffects+=@($bad.__RoutePublicationEffects[0])}
+                    'missing_owner' {$subject.operations=@($subject.operations | Where-Object {$_.operationKind -cne 'RuntimeOwner' -or $_.beforeState -cne 'Current'})}
+                    'wrong_receipt' {@($subject.operations | Where-Object {$_.operationRole -ceq 'route_publication' -and $_.beforeState -ceq 'None'})[0].receiptFingerprint='wrong'}
+                    'wrong_attempt' {@($subject.operations | Where-Object {$_.operationKind -ceq 'StartTransfer'})[0].stateApplied=$true}
+                    'wrong_scope' {$subject.afterBoundary.dataSessionGeneration=2L}
+                    'wrong_generation' {$subject.afterStateGeneration++}
+                    'missing_carry' {$subject.operations=@($subject.operations | Where-Object {$_.operationRole -cne 'fallback_v6_bootstrap'})}
+                    'wrong_prior_token' {@($subject.operations | Where-Object {$_.operationKind -ceq 'RuntimeOwner' -and $_.beforeState -ceq 'Current'})[0].commandFingerprint='mutated'}
+                    'terminal_poison' {$subject.afterBoundary.terminalGeneration=1L}
+                    'authority_aba' {
+                        $old='fte1-0000000000000000000013ef'
+                        foreach($op in @($subject.operations | Where-Object {$_.operationRole -ceq 'runtime_owner' -and $_.afterState -ne 'None'})){
+                            $op.authorityId=$old;$op.commandIdentity=$old
+                            $op.operationKey="route_runtime|runtime_owner|$old|$($op.operationGeneration)|$($op.operationKind)"
+                        }
+                    }
+                }
+                Assert-StrictRouteFailure $bad $badKind $subject.boundaryId
+            }
+            $later=$refresh | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+            foreach($direction in @('outbound','inbound')) {
+                $prior=if($direction -ceq 'outbound'){Get-PublicationBoundary $later $direction 5L}else{Get-PublicationBoundary $later $direction 7L}
+                $s=$prior.afterBoundary
+                $target=New-Scope 'file_tuna_v4' ($s.routePublicationGeneration+1L) 5L ($s.runtimeGeneration+1L) ($s.legGeneration+1L) 6L $s.dataSessionIdentity
+                $next=New-Boundary $direction $prior.writer ($prior.writerSequence+1L) ($prior.afterStateGeneration+1L) $s $target
+                foreach($op in @($next.operations | Where-Object {$_.family -ceq 'route_transition'})) {
+                    $op.operationGeneration=5L
+                    $op.operationKey="$($op.family)|$($op.operationRole)|$($op.authorityId)|5|$($op.operationKind)"
+                    $op.commandGeneration=5L;$op.receiptGeneration=5L
+                }
+                $later.Boundaries+=@($next)
+            }
+            $afterRefresh=Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $later
+            if($afterRefresh.Verdict -cne 'pass' -or $afterRefresh.SelectedRouteChanges.Count -ne 6){
+                throw "independent publication/transition generations rejected: $($afterRefresh.Findings -join ';')"
+            }
+            $checkpointed=[pscustomobject]@{
+                Mode='SnapshotV1Authoritative';ArtifactEvidenceVerdict='pass';StreamComplete=$true
+                AuthoritativeFamilies=@('route_runtime','route_transition')
+                Boundaries=@(New-FiveRouteCycle 'outbound' 'writer-sender' 0L)+@(New-FiveRouteCycle 'inbound' 'writer-helper' 100L)
+                __RoutePublicationEffects=@()
+            }
+            $birth=Get-PublicationBoundary $checkpointed 'inbound' 5L
+            $birth.afterBoundary.checkpointGeneration=1L;$birth.afterBoundary.checkpointRequestId='fte1-00000000000000000000c001'
+            $acceptedScope=$birth.afterBoundary | ConvertTo-Json | ConvertFrom-Json
+            $acceptedScope.checkpointGeneration=0L;$acceptedScope.checkpointRequestId='(none)'
+            $accept=[pscustomobject]@{
+                boundaryId='checkpoint-accepted';boundaryHash='checkpoint-hash';coordinatorInstanceId=$birth.coordinatorInstanceId
+                writer=$birth.writer;writerSequence=106L;evidenceLineIndex=106L;decisionUtcMilliseconds=100106L
+                beforeStateGeneration=5L;afterStateGeneration=6L;beforeStateHash=$birth.afterStateHash;afterStateHash='checkpoint-state-6'
+                decisionKind='FallbackCheckpointAccepted';decisionStatus='Accepted';decisionReason='peer_current_state_superseded_checkpoint'
+                sessionId=$birth.sessionId;transferId=$birth.transferId;direction=$birth.direction
+                beforeBoundary=$birth.afterBoundary;afterBoundary=$acceptedScope;operations=@();families=@('route_runtime');verdict='pass'
+            }
+            $checkpointed.Boundaries+=@($accept)
+            $checkpointRefresh=Add-OwnerRefresh $checkpointed 'inbound'
+            $checkpointResult=Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $checkpointed
+            if($checkpointResult.Verdict -cne 'pass'){throw "exact checkpoint interval rejected: $($checkpointResult.Findings -join ';')"}
+            foreach($mutation in @('missing','hash_gap','source_mutation','untyped_scope_change','terminal_poison','token_retirement')){
+                $bad=$checkpointed | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+                $step=@($bad.Boundaries|Where-Object {$_.boundaryId -ceq 'checkpoint-accepted'})[0]
+                switch($mutation){
+                    'missing' {$bad.Boundaries=@($bad.Boundaries|Where-Object {$_.boundaryId -cne 'checkpoint-accepted'})}
+                    'hash_gap' {$step.beforeStateHash='wrong'}
+                    'source_mutation' {$step.afterBoundary.dataSessionIdentity='other'}
+                    'untyped_scope_change' {$step.decisionKind='RepairReplay'}
+                    'terminal_poison' {$step.afterBoundary.terminalGeneration=1L}
+                    'token_retirement' {$op=New-Operation 'route_runtime' 'route_publication' 'RoutePublication' 'fte1-000000000000000000000451' 5L 'Published' 'None' $step.beforeBoundary;$step.operations=@($op)}
+                }
+                Assert-StrictRouteFailure $bad "checkpoint interval $mutation" $checkpointRefresh.boundaryId
             }
             $different=$again | Select-Object *
             $different.NormalizedJson += ' '
@@ -482,6 +634,28 @@ public sealed class FileTransferSnapshotRouteConsistencyTests : FileTransferOpsS
                 [int]$malformedNormalized.firstUnresolvedBoundary.unresolvedCount -ne 1) {
                 throw 'declared malformed V1 boundary/quartet was omitted from normalized JSON'
             }
+            $shifted=New-Evaluation 'regular_nkn_v4_fast' 4 'fail'
+            $shifted.FirstUnresolvedBoundary.evidenceLineIndex=1000L
+            $shiftedResult=Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $shifted
+            if ($shiftedResult.NormalizedJson -cne $malformed.NormalizedJson -or
+                $shiftedResult.NormalizedHash -cne $malformed.NormalizedHash -or
+                $shiftedResult.FirstUnresolvedBoundary.evidenceLineIndex -ne 1000L -or
+                $null -ne $malformedNormalized.firstUnresolvedBoundary.PSObject.Properties['evidenceLineIndex'] -or
+                (Compare-FileTransferCoordinatorSnapshotRouteConsistency -Full $malformed -Compact $shiftedResult).Verdict -cne 'pass') {
+                throw 'malformed V1 location-only differences changed canonical parity'
+            }
+            foreach ($field in @('boundaryId','boundaryHash','writer','writerSequence',
+                    'sessionId','transferId','direction','taxonomyClass','decisionReason','variant',
+                    'rawCount','distinctCount','recoveredCount','unresolvedCount')) {
+                $different=New-Evaluation 'regular_nkn_v4_fast' 4 'fail'
+                if ($different.FirstUnresolvedBoundary.$field -is [string]) {
+                    $different.FirstUnresolvedBoundary.$field += '-mutated'
+                } else { $different.FirstUnresolvedBoundary.$field += 1 }
+                $differentResult=Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $different
+                if ((Compare-FileTransferCoordinatorSnapshotRouteConsistency -Full $malformed -Compact $differentResult).Verdict -cne 'fail') {
+                    throw "semantic failure difference was lost: $field"
+                }
+            }
             $legacy=[pscustomobject]@{
                 Mode='LegacyV0'; ArtifactEvidenceVerdict='pass'; StreamComplete=$true
                 AuthoritativeFamilies=@(); Boundaries=@()
@@ -524,5 +698,8 @@ public sealed class FileTransferSnapshotRouteConsistencyTests : FileTransferOpsS
         Assert.DoesNotContain("'route_consistency_verdict=pass'", orchestration, StringComparison.Ordinal);
         Assert.DoesNotContain("'release_route_law_verdict=pass'", orchestration, StringComparison.Ordinal);
         Assert.Contains("function Get-FileTransferRouteConsistency", legacy, StringComparison.Ordinal);
+        const string privateSnapshotExports = "Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects";
+        Assert.Equal(4, orchestration.Split(privateSnapshotExports, StringSplitOptions.None).Length - 1);
+        Assert.Contains(privateSnapshotExports, writers, StringComparison.Ordinal);
     }
 }

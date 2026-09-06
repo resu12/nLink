@@ -11045,6 +11045,55 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Tuna GUI semantic analysis unavailable", routeAcceptanceText, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("Run-FileTransferTunaGuiSmoke.ps1", "TunaGui", "Invoke-TunaGuiRetainedAnalysisBestEffort")]
+    [InlineData("Run-FileTransferRouteAcceptance.ps1", "RouteAcceptance", "Select-RouteAcceptanceMeasuredFallbackLogSlice")]
+    public void RetainedAnalysis_DefaultWatchdogIs1800SecondsAndTimeoutRemainsFailClosed(
+        string scriptName,
+        string scope,
+        string nextFunctionName)
+    {
+        var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", scriptName));
+        var body = ExtractPowerShellFunctionBody(scriptText, $"Invoke-{scope}RetainedAnalysis", nextFunctionName);
+
+        Assert.Contains("$analysisTimeoutSeconds = 1800", body, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(body, @"\$analysisTimeoutSeconds\s*="));
+        Assert.Contains("$deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)", body, StringComparison.Ordinal);
+        Assert.Contains("while (-not $process.WaitForExit(5000))", body, StringComparison.Ordinal);
+        Assert.Matches(@"if \(\[DateTimeOffset\]::UtcNow -lt \$deadlineUtc\)\s*\{\s*continue\s*\}", body);
+
+        var deadlineIndex = body.IndexOf("$deadlineUtc =", StringComparison.Ordinal);
+        var waitIndex = body.IndexOf("while (-not $process.WaitForExit(5000))", StringComparison.Ordinal);
+        var stopIndex = body.IndexOf($"Stop-{scope}RetainedAnalysisProcess -Process $process", StringComparison.Ordinal);
+        Assert.True(deadlineIndex >= 0 && waitIndex > deadlineIndex && stopIndex > waitIndex);
+        var timeoutReceiptIndex = body.IndexOf("Write-FileTransferRetainedAnalysisAttemptReceipt", StringComparison.Ordinal);
+        var timeoutThrowIndex = body.IndexOf("            throw \"", stopIndex, StringComparison.Ordinal);
+        var completedOutputIndex = body.IndexOf("$stdout = $stdoutTask.GetAwaiter().GetResult()", StringComparison.Ordinal);
+        Assert.True(timeoutReceiptIndex > stopIndex && timeoutThrowIndex > timeoutReceiptIndex && completedOutputIndex > timeoutThrowIndex);
+
+        var timeoutBody = body[stopIndex..timeoutThrowIndex];
+        Assert.Contains("timed_out = 1", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("timeout_seconds = $analysisTimeoutSeconds", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains($"Write-{scope}RetainedAnalysisTimeoutArtifacts", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-TimeoutSeconds $analysisTimeoutSeconds", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-InputSha256Before $inputSha256Before", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-InputLineCountBefore $inputLineCountBefore", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-TimedOut $true", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-ExitCodeAvailable $false", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-ExitCode -1", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("-CompletedProofArtifacts $false", timeoutBody, StringComparison.Ordinal);
+        Assert.Contains("timed out after ${analysisTimeoutSeconds}s", body[timeoutThrowIndex..completedOutputIndex], StringComparison.Ordinal);
+
+        var completedBody = body[completedOutputIndex..];
+        Assert.Contains($"$completedProofArtifacts = Test-{scope}RetainedAnalysisCompletedProofArtifacts", completedBody, StringComparison.Ordinal);
+        Assert.Contains("-TimedOut $false", completedBody, StringComparison.Ordinal);
+        Assert.Contains("-ExitCodeAvailable $true", completedBody, StringComparison.Ordinal);
+        Assert.Contains("-ExitCode $process.ExitCode", completedBody, StringComparison.Ordinal);
+        Assert.Contains("-CompletedProofArtifacts $completedProofArtifacts", completedBody, StringComparison.Ordinal);
+        Assert.Matches(@"if \(\$process.ExitCode -ne 0\)\s*\{\s*throw ", completedBody);
+        Assert.Matches(@"if \(-not \$completedProofArtifacts\)\s*\{\s*throw ", completedBody);
+    }
+
     [Fact]
     public void RouteAcceptance_CheckpointsEvidenceBeforeSemanticAssertionsAndEnrichment()
     {

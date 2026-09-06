@@ -4809,7 +4809,10 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
             var successorStall = closure == "late_successor"
                 ? "2026-04-26T11:17:59.8000000+00:00"
                 : "2026-04-26T11:17:59.6000000+00:00";
-            lines.Add(LogLine($"event=filetransfer_v6_frontier_request_deferred; transfer_id={transferId}; {stallScope}; frontier_chunk_index=44; highest_received_chunk_index=65; elapsed_ms=0; stall_grace_ms=750; stall_started_utc={successorStall}; wake_generation=9; wake_deadline_utc=2026-04-26T11:18:00.3500000+00:00; reason=chunk_batch_committed; authority_effect=none; log_writer_attempt_utc_ticks={successorTicks}", secondsOffset: 2));
+            var successorDeadline = closure == "late_successor"
+                ? "2026-04-26T11:18:00.5500000+00:00"
+                : "2026-04-26T11:18:00.3500000+00:00";
+            lines.Add(LogLine($"event=filetransfer_v6_frontier_request_deferred; transfer_id={transferId}; {stallScope}; frontier_chunk_index=44; highest_received_chunk_index=65; elapsed_ms=0; stall_grace_ms=750; stall_started_utc={successorStall}; wake_generation=9; wake_deadline_utc={successorDeadline}; reason=chunk_batch_committed; authority_effect=none; log_writer_attempt_utc_ticks={successorTicks}", secondsOffset: 2));
             var staleReason = closure == "unknown_stale_reason" ? "unexpected_stale_reason" : "wake_generation_replaced";
             lines.Add(LogLine($"event=filetransfer_v6_frontier_stall_grace_recheck_decided; transfer_id={transferId}; {stallScope}; frontier_chunk_index=41; highest_received_chunk_index=60; stall_started_utc=2026-04-26T11:17:59.0000000+00:00; wake_generation=8; wake_deadline_utc=2026-04-26T11:17:59.7500000+00:00; decision_status=stale; decision_reason={staleReason}; authority_effect=none; log_writer_attempt_utc_ticks=639000000010000000", secondsOffset: 3));
             lines.Add(LogLine($"event=file_transfer_inbound_terminal; direction=inbound; session_id=sess_stall; transfer_id={transferId}; state=Failed; error_code=fixture_end; saved_path=(none); log_writer_id=writer_stall; log_writer_attempt_utc_ticks=639000000011000000", secondsOffset: 4));
@@ -4833,8 +4836,10 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
             result.Script.ExitCode == 0,
             $"Superseded stall-grace analysis failed.{Environment.NewLine}{result.Script.Stdout}{Environment.NewLine}{result.Script.Stderr}");
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        // The frontier-44 deferral is recovery evidence, not a separately admitted hold:
+        // it has neither a matching repair-progress lineage nor exact published-source admission.
         Assert.Equal(
-            closure == "route_scope_recheck" ? "1" : "2",
+            "1",
             verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count"]);
         Assert.Equal("1", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count"]);
         Assert.Equal(recovered ? "1" : "0", verdict["filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count"]);

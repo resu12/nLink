@@ -12274,6 +12274,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         __HeldPublicationProofClosures = @($heldPublicationProofClosures.ToArray() | Where-Object { $artifactVerdict -ceq 'pass' })
         __FallbackTailPeerProofBindings =
             @($orderedFallbackTailPeerProofBindings)
+        __RoutePublicationEffects = @($effects | Where-Object {
+            $artifactVerdict -ceq 'pass' -and $_.EffectKind -ceq 'route_publication_forwarded'
+        })
         FirstUnresolvedBoundary = $firstUnresolvedBoundary
         AuthoritativeFamilies = @($streams.Values | ForEach-Object { $_.AuthoritativeFamilies } | Sort-Object -Unique)
         ShadowFamilies = @($streams.Values | ForEach-Object { $_.ShadowFamilies } | Sort-Object -Unique)
@@ -12604,6 +12607,160 @@ function Test-FileTransferCoordinatorSnapshotRouteTransitionTargetCurrent {
         [string]$Target.dataSessionIdentity -cne '(none)'
 }
 
+function ConvertTo-FileTransferCoordinatorSnapshotRouteFailureSemanticBoundary {
+    param($Boundary)
+
+    if ($null -eq $Boundary) { return $null }
+    $semantic = [ordered]@{}
+    foreach ($property in $Boundary.PSObject.Properties) {
+        if ($property.Name -cne 'evidenceLineIndex') {
+            $semantic[$property.Name] = $property.Value
+        }
+    }
+    return [pscustomobject]$semantic
+}
+
+function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
+    param($Entry, $Previous, [object[]]$RetiredPublications, [object[]]$RetiredOwners,
+        [object[]]$RuntimeOperations, [object[]]$PublicationOperations, [object[]]$Effects, $AggregateIndex)
+
+    $boundary = $Entry.Boundary
+    $before = $boundary.beforeBoundary
+    $after = $boundary.afterBoundary
+    if (-not $Previous.Valid -or $null -eq $Previous.LastTransition -or $null -eq $Entry.RuntimeOwner -or
+        $RetiredPublications.Count -ne 1 -or $RetiredOwners.Count -ne 1 -or
+        $RuntimeOperations.Count -ne 3 -or $PublicationOperations.Count -ne 2 -or
+        [string]$boundary.decisionKind -cne 'StartTransfer' -or
+        [string]$boundary.decisionStatus -cne 'Accepted' -or
+        [string]$boundary.decisionReason -cne 'state_refresh_received' -or
+        [long]$boundary.afterStateGeneration -ne ([long]$boundary.beforeStateGeneration + 1L) -or
+        [string]$boundary.beforeStateHash -ceq [string]$boundary.afterStateHash -or
+        [string]$before.route -cne 'post_tuna_fallback_v6' -or [long]$before.protocolVersion -ne 6L -or
+        [long]$before.terminalGeneration -ne 0L -or [long]$before.routeCommitGeneration -ne 0L) {
+        return $false
+    }
+    # The publication token stays immutable while an exact checkpoint lease may
+    # be requested/accepted. Reduce that interval, rather than equating its birth
+    # scope with the current aggregate or treating missing history as a wildcard.
+    $streamKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)"
+    if (-not $AggregateIndex.ContainsKey($streamKey)) { return $false }
+    $stream = $AggregateIndex[$streamKey]
+    $generation = [long]$Previous.Boundary.afterStateGeneration
+    $hash = [string]$Previous.Boundary.afterStateHash
+    $scope = $Previous.RouteBoundary
+    while ($generation -lt [long]$boundary.beforeStateGeneration) {
+        if (-not $stream.Mutations.ContainsKey($generation) -or $stream.Mutations[$generation].Count -ne 1) { return $false }
+        $step = $stream.Mutations[$generation][0].Boundary
+        if ([long]$step.afterStateGeneration -ne ($generation + 1L) -or $step.beforeStateHash -cne $hash -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $step.beforeBoundary $scope)) { return $false }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $step.beforeBoundary $step.afterBoundary)) {
+            $checkpoint = [pscustomobject]@{
+                decisionKind=$step.decisionKind; decisionStatus=$step.decisionStatus; decisionReason=$step.decisionReason
+                aggregate=[pscustomobject]@{
+                    beforeBoundary=$step.beforeBoundary; afterBoundary=$step.afterBoundary
+                    beforeStateGeneration=$step.beforeStateGeneration; afterStateGeneration=$step.afterStateGeneration
+                    beforeStateFingerprint=$step.beforeStateHash; afterStateFingerprint=$step.afterStateHash
+                }
+            }
+            if (-not (Test-FileTransferCoordinatorSnapshotFallbackCheckpointScopeMutation $checkpoint)) { return $false }
+        }
+        foreach ($operation in @($step.operations | Where-Object { $_.stateApplied -and $_.family -ceq 'route_runtime' })) {
+            $prior = if ($operation.operationKey -ceq $Previous.Operation.operationKey) { $Previous.Operation }
+                elseif ($operation.operationKey -ceq $Previous.RuntimeOwner.operationKey) { $Previous.RuntimeOwner } else { $null }
+            if ($null -eq $prior -or $operation.beforeState -cne $prior.afterState -or $operation.afterState -cne $prior.afterState) { return $false }
+            foreach ($field in @('authorityId','operationGeneration','commandIdentity','commandGeneration','commandFingerprint',
+                    'receiptIdentity','receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
+                if ([string]$operation.$field -cne [string]$prior.$field) { return $false }
+            }
+        }
+        $scope=$step.afterBoundary; $hash=[string]$step.afterStateHash; $generation=[long]$step.afterStateGeneration
+    }
+    if ($generation -ne [long]$boundary.beforeStateGeneration -or $hash -cne $boundary.beforeStateHash -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $scope $before)) { return $false }
+    foreach ($field in @('route', 'protocolVersion', 'liveRouteEpoch', 'routeCommitGeneration',
+            'terminalGeneration', 'transportEpoch', 'bridgeRecoveryGeneration', 'checkpointGeneration',
+            'checkpointRequestId', 'dataSessionIdentity', 'dataSessionGeneration')) {
+        if ([string]$before.$field -cne [string]$after.$field) { return $false }
+    }
+    foreach ($field in @('routePublicationGeneration', 'runtimeGeneration', 'legGeneration')) {
+        if ([long]$after.$field -ne ([long]$before.$field + 1L)) { return $false }
+    }
+    $attempts = @($RuntimeOperations | Where-Object {
+        $_.operationKind -ceq 'StartTransfer' -and $_.beforeState -ceq 'Attempted' -and
+        $_.afterState -ceq 'Attempted' -and -not $_.stateApplied -and
+        $_.authorityId -ceq $Entry.RuntimeOwner.authorityId -and
+        [long]$_.operationGeneration -eq [long]$Entry.RuntimeOwner.operationGeneration -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $_.routeRuntime.boundary -Right $before)
+    })
+    if ($attempts.Count -ne 1) { return $false }
+    foreach ($operation in $RuntimeOperations) {
+        if ([string]$operation.operationKey -cne
+                "route_runtime|runtime_owner|$($operation.authorityId)|$($operation.operationGeneration)|$($operation.operationKind)" -or
+            $operation.routeRuntime.role -cne 'runtime_owner' -or
+            $operation.receiptValidated -or [long]$operation.receiptGeneration -ne 0L -or
+            $operation.receiptIdentity -cne '(none)' -or $operation.receiptStatus -cne '(none)' -or
+            $operation.receiptFingerprint -cne '(none)' -or
+            $operation.commandIdentity -cne $operation.authorityId -or
+            [long]$operation.commandGeneration -ne [long]$operation.operationGeneration -or
+            [string]::IsNullOrWhiteSpace([string]$operation.commandFingerprint) -or
+            $operation.commandFingerprint -ceq '(none)' -or
+            $operation.routeRuntime.tokenFingerprint -cne $operation.commandFingerprint) { return $false }
+    }
+    # Retirement preserves the exact old tokens; the successor is not a repair
+    # predecessor relationship and deliberately has no predecessor authority.
+    foreach ($pair in @(@($RetiredPublications[0], $Previous.Operation), @($RetiredOwners[0], $Previous.RuntimeOwner))) {
+        foreach ($field in @('authorityId', 'operationKey', 'operationGeneration', 'commandIdentity',
+                'commandGeneration', 'commandFingerprint', 'receiptIdentity', 'receiptGeneration',
+                'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$pair[0].$field -cne [string]$pair[1].$field) { return $false }
+        }
+    }
+    foreach ($publication in $PublicationOperations) {
+        if ($publication.operationKind -cne 'RoutePublication' -or
+            $publication.predecessorAuthorityId -cne '(none)' -or -not $publication.receiptValidated -or
+            $publication.receiptStatus -cne 'Accepted' -or
+            [long]$publication.commandGeneration -ne [long]$publication.operationGeneration -or
+            [long]$publication.receiptGeneration -ne [long]$publication.operationGeneration -or
+            $publication.commandIdentity -cne $publication.authorityId -or
+            $publication.receiptIdentity -cne $publication.authorityId -or
+            $publication.commandFingerprint -cne $publication.receiptFingerprint -or
+            $publication.routeRuntime.tokenFingerprint -cne $publication.receiptFingerprint) { return $false }
+    }
+    $carries = @($boundary.operations | Where-Object { $_.family -ceq 'route_transition' })
+    $terminal = @($carries | Where-Object {
+        $_.operationRole -ceq 'terminal' -and $_.operationKind -ceq 'TunaV4ToPostTunaFallbackV6' -and
+        $_.beforeState -ceq 'Committed' -and $_.afterState -ceq 'Committed' -and $_.receiptValidated -and
+        $_.authorityId -ceq $Previous.LastTransition.authorityId -and
+        [long]$_.operationGeneration -eq [long]$Previous.LastTransition.operationGeneration
+    })
+    $bootstrap = @($carries | Where-Object {
+        $_.operationRole -ceq 'fallback_v6_bootstrap' -and $_.operationKind -ceq 'FallbackV6ProofBootstrap' -and
+        $_.beforeState -ceq 'Delivered' -and $_.afterState -ceq 'Delivered' -and $_.receiptValidated
+    })
+    if ($null -eq $Previous.LastTransition -or $carries.Count -ne 2 -or
+        $terminal.Count -ne 1 -or $bootstrap.Count -ne 1 -or
+        @($boundary.operations | Where-Object {
+            $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_commit'
+        }).Count -ne 0) { return $false }
+
+    $operation = $Entry.Operation
+    $boundEffects = @($Effects | Where-Object {
+        $_.CoordinatorInstanceId -ceq $boundary.coordinatorInstanceId -and $_.Writer -ceq $boundary.writer -and
+        $_.TransitionId -ceq $boundary.boundaryId
+    })
+    if ($boundEffects.Count -ne 1) { return $false }
+    $effect = $boundEffects[0]
+    if ($effect.EffectKind -cne 'route_publication_forwarded' -or $effect.Family -cne 'route_runtime' -or
+        $effect.OperationKey -cne $operation.operationKey -or $effect.AuthorityId -cne $operation.authorityId -or
+        [long]$effect.OperationGeneration -ne [long]$operation.operationGeneration -or
+        [long]$effect.StateGeneration -ne [long]$boundary.afterStateGeneration -or
+        $effect.ReceiptIdentity -cne $operation.receiptIdentity -or
+        [long]$effect.ReceiptGeneration -ne [long]$operation.receiptGeneration -or
+        $effect.ReceiptStatus -cne $operation.receiptStatus -or
+        $effect.ReceiptFingerprint -cne $operation.receiptFingerprint) { return $false }
+    return Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual -Left $effect -Right $after
+}
+
 function Get-FileTransferCoordinatorSnapshotRouteConsistency {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Evaluation)
@@ -12710,7 +12867,8 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
             routeSelections = @()
             selectedRouteChanges = @()
             findings = @($findings)
-            firstUnresolvedBoundary = $failure
+            firstUnresolvedBoundary =
+                ConvertTo-FileTransferCoordinatorSnapshotRouteFailureSemanticBoundary $failure
         }
         $normalizedJson = ConvertTo-Json -InputObject $normalized `
             -Depth 16 -Compress
@@ -12735,6 +12893,8 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
     $boundaries = @(
         Get-FileTransferCoordinatorSnapshotObjectProperty `
             -InputObject $Evaluation -Name 'Boundaries' -Default @())
+    $routeAggregateIndex = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries @(
+        $boundaries | ForEach-Object { [pscustomobject]@{ Boundary=$_ } })
     foreach ($boundary in @($boundaries | Where-Object {
                 [string]$_.verdict -ceq 'fail' -and
                 [string]$_.taxonomyClass -in @(
@@ -12750,6 +12910,15 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
             $event
     }
     $publicationEntries = [System.Collections.Generic.List[object]]::new()
+    $publicationEffectsByBoundary = @{}
+    foreach ($effect in @(Get-FileTransferCoordinatorSnapshotObjectProperty -InputObject $Evaluation `
+            -Name '__RoutePublicationEffects' -Default @())) {
+        $key = "$($effect.CoordinatorInstanceId)|$($effect.Writer)|$($effect.TransitionId)"
+        if (-not $publicationEffectsByBoundary.ContainsKey($key)) {
+            $publicationEffectsByBoundary[$key] = [System.Collections.Generic.List[object]]::new()
+        }
+        $publicationEffectsByBoundary[$key].Add($effect)
+    }
     $transitionEntries = [System.Collections.Generic.List[object]]::new()
     foreach ($boundary in @($boundaries | Sort-Object {
                 [long]$_.decisionUtcMilliseconds
@@ -12798,6 +12967,9 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                 Expectation = $expectation
                 RuntimeOwner = $null
                 RouteCommit = $null
+                LastTransition = $null
+                SameRouteOwnerSuccessor = $false
+                Valid = $false
             }
             $publicationEntries.Add($entry)
             $entryEvent = New-FileTransferCoordinatorSnapshotRouteProjectionEvent `
@@ -12837,6 +13009,7 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                     "snapshot route publication is invalid: route=$route; operation_key=$($operation.operationKey)" `
                     $entryEvent
             }
+            $entry.Valid = $validPublication
 
         }
     }
@@ -12871,6 +13044,8 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
     foreach ($directionGroup in @($publicationEntries | Group-Object {
                 "$($_.Boundary.coordinatorInstanceId)|$($_.Boundary.writer)|$($_.Boundary.sessionId)|$($_.Boundary.transferId)|$($_.Boundary.direction)"
             } | Sort-Object Name)) {
+        $priorPublicationAuthorities = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $priorRuntimeAuthorities = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         $ordered = @($directionGroup.Group | Sort-Object {
                 [long]$_.Operation.operationGeneration
             }, {
@@ -12966,6 +13141,7 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                         })
                 }
                 if ($runtimeEntrants.Count -ne 1) {
+                    $entry.Valid = $false
                     & $addFinding "runtime|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `
                         "snapshot route publication has no unique current runtime owner: route=$($entry.RouteBoundary.route)" `
                         $event
@@ -12980,6 +13156,7 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                 }
                 if ([string]$entry.Operation.operationKind -cne 'RoutePublication' -or
                     [string]$entry.Operation.predecessorAuthorityId -cne '(none)') {
+                    $entry.Valid = $false
                     & $addFinding "initial-publication|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `
                         'snapshot initial route publication has invalid kind or predecessor' `
                         $event
@@ -12995,6 +13172,9 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                 $entry.RuntimeOwner = $runtimeEntrants[0]
             }
             $previous = $ordered[$index - 1]
+            [void]$priorPublicationAuthorities.Add([string]$previous.Operation.authorityId)
+            if ($null -ne $previous.RuntimeOwner) { [void]$priorRuntimeAuthorities.Add([string]$previous.RuntimeOwner.authorityId) }
+            $entry.LastTransition = $previous.LastTransition
             $retiredPublications = @($entry.Boundary.operations | Where-Object {
                     [string]$_.family -ceq 'route_runtime' -and
                     [string]$_.operationRole -ceq 'route_publication' -and
@@ -13083,6 +13263,25 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                     [string]$_.family -ceq 'route_runtime' -and
                     [string]$_.operationRole -ceq 'route_commit'
                 })
+            if ([string]$previous.RouteBoundary.route -ceq [string]$entry.RouteBoundary.route) {
+                $effectKey = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$($entry.Boundary.boundaryId)"
+                $effectEvidence = @(if ($publicationEffectsByBoundary.ContainsKey($effectKey)) {
+                    $publicationEffectsByBoundary[$effectKey].ToArray()
+                })
+                $entry.SameRouteOwnerSuccessor = $entry.Valid -and $null -ne $entry.RuntimeOwner -and
+                    -not $priorPublicationAuthorities.Contains([string]$entry.Operation.authorityId) -and
+                    -not $priorRuntimeAuthorities.Contains([string]$entry.RuntimeOwner.authorityId) -and
+                    (Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication -Entry $entry -Previous $previous `
+                        -RetiredPublications $retiredPublications -RetiredOwners $retiredRuntimeOwners `
+                        -RuntimeOperations $allRuntimeOwnerOperations -PublicationOperations $allPublicationOperations `
+                        -Effects $effectEvidence -AggregateIndex $routeAggregateIndex)
+                $entry.Valid = $entry.SameRouteOwnerSuccessor
+                if (-not $entry.Valid) {
+                    & $addFinding "owner-successor|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `
+                        'snapshot same-route publication has no exact fallback owner successor contract' $event
+                }
+                continue
+            }
             $transitionExpectation =
                 Get-FileTransferCoordinatorSnapshotRouteTransitionExpectation `
                     -SourceRoute ([string]$previous.RouteBoundary.route) `
@@ -13097,8 +13296,7 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                     [string]$_.afterState -ceq 'Committed' -and
                     [bool]$_.stateApplied -and
                     [bool]$_.receiptValidated -and
-                    [long]$_.operationGeneration -eq
-                        ([long]$entry.Operation.operationGeneration - 1L) -and
+                    [long]$_.operationGeneration -gt 0L -and
                     [string]$_.routeTransition.transitionKind -ceq
                         [string]$transitionExpectation.TransitionKind -and
                     [string]$_.routeTransition.sourceTransport -ceq
@@ -13222,17 +13420,20 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                 $runtimeEntrants.Count -ne 1 -or
                 -not $routeCommitLinked -or
                 -not $targetTransportValid) {
+                $entry.Valid = $false
                 & $addFinding "transition|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `
                     "snapshot route publication has no exact committed predecessor transition: route=$($entry.RouteBoundary.route); operation_key=$($entry.Operation.operationKey)" `
                     $event
             }
             elseif ($currentTransitions.Count -ne 1 -or
                 $attemptedTransitions.Count -ne 1) {
+                $entry.Valid = $false
                 & $addFinding "transition-operations|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `
                     "snapshot route commit does not contain the exact transition retirement and attempted decision: route=$($entry.RouteBoundary.route); operation_key=$($entry.Operation.operationKey)" `
                     $event
             }
             else {
+                $entry.LastTransition = $terminalTransitions[0]
                 if ($publishesTuna) {
                     $entry.RouteCommit = $routeCommits[0]
                 }
@@ -13255,17 +13456,17 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
             } | Sort-Object Name)
         $reference = @()
         if ($directionHistories.Count -gt 0) {
-            $reference = @($directionHistories[0].Group | Sort-Object {
+            $reference = @($directionHistories[0].Group | Where-Object { -not $_.SameRouteOwnerSuccessor } | Sort-Object {
                     [long]$_.Operation.operationGeneration
                 } | ForEach-Object {
-                    "$($_.Operation.operationGeneration)|$($_.RouteBoundary.route)|$($_.RouteBoundary.protocolVersion)"
+                    "$($_.RouteBoundary.liveRouteEpoch)|$($_.RouteBoundary.route)|$($_.RouteBoundary.protocolVersion)"
                 })
         }
         foreach ($directionHistory in @($directionHistories | Select-Object -Skip 1)) {
-            $candidate = @($directionHistory.Group | Sort-Object {
+            $candidate = @($directionHistory.Group | Where-Object { -not $_.SameRouteOwnerSuccessor } | Sort-Object {
                     [long]$_.Operation.operationGeneration
                 } | ForEach-Object {
-                    "$($_.Operation.operationGeneration)|$($_.RouteBoundary.route)|$($_.RouteBoundary.protocolVersion)"
+                    "$($_.RouteBoundary.liveRouteEpoch)|$($_.RouteBoundary.route)|$($_.RouteBoundary.protocolVersion)"
                 })
             if (($reference -join ';') -cne ($candidate -join ';')) {
                 $event = @($routeSelectedEvents | Where-Object {
@@ -13417,7 +13618,8 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
         findings = @($findings)
     }
     if ($null -ne $firstUnresolvedBoundary) {
-        $normalized['firstUnresolvedBoundary'] = $firstUnresolvedBoundary
+        $normalized['firstUnresolvedBoundary'] =
+            ConvertTo-FileTransferCoordinatorSnapshotRouteFailureSemanticBoundary $firstUnresolvedBoundary
     }
     $normalizedJson = ConvertTo-Json -InputObject $normalized -Depth 32 -Compress
     $normalizedHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (

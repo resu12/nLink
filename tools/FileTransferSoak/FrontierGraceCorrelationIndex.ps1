@@ -94,9 +94,9 @@ function Add-FileTransferFallbackFrontierGraceIndexedEvent {
 
     if ([string]::IsNullOrWhiteSpace($Key)) { return }
     if (-not $Map.ContainsKey($Key)) {
-        $Map[$Key] = New-Object System.Collections.Generic.List[object]
+        $Map[$Key] = [System.Collections.Generic.List[object]]::new()
     }
-    $Map[$Key].Add($Event) | Out-Null
+    [void]$Map[$Key].Add($Event)
 }
 
 function New-FileTransferFallbackFrontierGraceCorrelationIndex {
@@ -108,19 +108,61 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
         [void]$catalog.Add($eventName)
     }
 
-    $relevant = New-Object System.Collections.Generic.List[object]
+    $relevant = [System.Collections.Generic.List[object]]::new()
     $eventsByTransfer = @{}
     $eventsByTransferAndName = @{}
     $eventsByTransferAndFrontier = @{}
     $eventsByTransferAndAuthority = @{}
     $eventsByWriterSequence = @{}
-    foreach ($event in @($Events)) {
-        if ($null -eq $event -or -not $catalog.Contains([string]$event.EventName)) { continue }
-        $relevant.Add($event) | Out-Null
-        $transferKey = Get-FileTransferFallbackFrontierGraceTransferKey -Event $event
-        if ([string]::IsNullOrWhiteSpace($transferKey)) { continue }
-        $writerSequence = Get-FileTransferEventField -Event $event -Name 'log_writer_sequence' -Default ''
-        if ($writerSequence -match '^[1-9][0-9]*$') {
+    $eventsByWriterIdentity = @{}
+    $sourceBoundariesByTransfer = @{}
+    $sourceValuesByTransfer = @{}
+    $sourceFields = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+        'bridge_decision_generation', 'checkpoint_request_id', 'checkpoint_generation',
+        'route_publication_generation', 'route_commit_generation', 'data_session_identity', 'data_session_generation')
+    # Source changes are indexed in the same ordered build pass as the evidence.
+    # Retain same-writer copies before requiring an intact session/transfer key.
+    foreach ($event in @($Events | Sort-Object Sequence, LineNumber)) {
+        if ($null -eq $event) { continue }
+        # Match Get-FileTransferEventField's dictionary/default semantics once
+        # per event. Writer copies outside the catalog must still be retained.
+        $fieldsProperty = $event.PSObject.Properties['Fields']
+        $fields = if ($null -ne $fieldsProperty -and $fieldsProperty.Value -is [System.Collections.IDictionary]) {
+            $fieldsProperty.Value
+        } else { $null }
+        $writer = if ($null -ne $fields -and $fields.Contains('log_writer_id')) { [string]$fields['log_writer_id'] } else { '' }
+        $writerSequence = if ($null -ne $fields -and $fields.Contains('log_writer_sequence')) { [string]$fields['log_writer_sequence'] } else { '' }
+        $validWriterSequence = $writerSequence -match '^[1-9][0-9]*$'
+        if (-not [string]::IsNullOrWhiteSpace($writer) -and $validWriterSequence) {
+            Add-FileTransferFallbackFrontierGraceIndexedEvent -Map $eventsByWriterIdentity `
+                -Key "$writer|$writerSequence" -Event $event
+        }
+        if (-not $catalog.Contains([string]$event.EventName)) { continue }
+        [void]$relevant.Add($event)
+        $session = if ($null -ne $fields -and $fields.Contains('session_id')) { [string]$fields['session_id'] } else { '' }
+        $transfer = if ($null -ne $fields -and $fields.Contains('transfer_id')) { [string]$fields['transfer_id'] } else { '' }
+        if ([string]::IsNullOrWhiteSpace($writer) -or [string]::IsNullOrWhiteSpace($session) -or
+            [string]::IsNullOrWhiteSpace($transfer)) { continue }
+        $transferKey = "$writer|$session|$transfer".ToLowerInvariant()
+        if (-not $sourceValuesByTransfer.ContainsKey($transferKey)) {
+            $sourceValuesByTransfer[$transferKey] = @{}
+        }
+        $sourceValues = $sourceValuesByTransfer[$transferKey]
+        $sourceBoundary = $event.EventName -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+            'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+            ($fields.Contains('transfer_paused') -and [string]$fields['transfer_paused'] -ceq '1')
+        foreach ($field in $sourceFields) {
+            if (-not $fields.ContainsKey($field)) { continue }
+            $value = [string]$fields[$field]
+            if ($sourceValues.ContainsKey($field) -and $sourceValues[$field] -cne $value) { $sourceBoundary = $true }
+            $sourceValues[$field] = $value
+        }
+        if ($sourceBoundary) {
+            Add-FileTransferFallbackFrontierGraceIndexedEvent -Map $sourceBoundariesByTransfer `
+                -Key $transferKey -Event $event
+        }
+        if ($validWriterSequence) {
             Add-FileTransferFallbackFrontierGraceIndexedEvent -Map $eventsByWriterSequence -Key "$transferKey|$writerSequence" -Event $event
         }
         Add-FileTransferFallbackFrontierGraceIndexedEvent -Map $eventsByTransfer -Key $transferKey -Event $event
@@ -134,8 +176,9 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
                 'frontier_chunk_index', 'current_frontier_chunk_index',
                 'previous_frontier_chunk_index', 'contiguous_committed_chunk_index',
                 'next_chunk_index')) {
-            $frontier = Get-FileTransferEventInt64Field -Event $event -Name $field -Default -1
-            if ($frontier -ge 0) { [void]$frontiers.Add($frontier) }
+            $frontierText = if ($fields.Contains($field)) { [string]$fields[$field] } else { '' }
+            $frontier = 0L
+            if ([long]::TryParse($frontierText, [ref]$frontier) -and $frontier -ge 0) { [void]$frontiers.Add($frontier) }
         }
         foreach ($frontier in $frontiers) {
             Add-FileTransferFallbackFrontierGraceIndexedEvent `
@@ -144,7 +187,7 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
                 -Event $event
         }
 
-        $authority = Get-FileTransferEventField -Event $event -Name 'authority_id' -Default ''
+        $authority = if ($fields.Contains('authority_id')) { [string]$fields['authority_id'] } else { '' }
         if ($authority -notin @('', '(none)', 'none')) {
             Add-FileTransferFallbackFrontierGraceIndexedEvent `
                 -Map $eventsByTransferAndAuthority `
@@ -153,7 +196,8 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
         }
     }
 
-    foreach ($map in @($eventsByTransfer, $eventsByTransferAndName, $eventsByTransferAndFrontier, $eventsByTransferAndAuthority)) {
+    foreach ($map in @($eventsByTransfer, $eventsByTransferAndName, $eventsByTransferAndFrontier,
+            $eventsByTransferAndAuthority, $sourceBoundariesByTransfer)) {
         foreach ($key in @($map.Keys)) {
             $map[$key] = @($map[$key] | Sort-Object Sequence, LineNumber)
         }
@@ -165,6 +209,8 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
         EventsByTransferAndFrontier = $eventsByTransferAndFrontier
         EventsByTransferAndAuthority = $eventsByTransferAndAuthority
         EventsByWriterSequence = $eventsByWriterSequence
+        EventsByWriterIdentity = $eventsByWriterIdentity
+        SourceBoundariesByTransfer = $sourceBoundariesByTransfer
         IndexBuildVisitCount = [int64]$relevant.Count
         BoundedLookupVisitCount = 0L
     }
@@ -187,6 +233,7 @@ function Find-FileTransferFallbackFrontierGraceEventAfterSequence {
         [Parameter(Mandatory = $true)]$Index,
         [AllowEmptyCollection()][object[]]$Events = @(),
         [Parameter(Mandatory = $true)][long]$AfterSequence,
+        [long]$ThroughSequence = [long]::MaxValue,
         [Parameter(Mandatory = $true)][scriptblock]$Predicate)
 
     $low = 0
@@ -199,9 +246,32 @@ function Find-FileTransferFallbackFrontierGraceEventAfterSequence {
     }
     for ($position = $low; $position -lt $Events.Count; $position++) {
         $Index.BoundedLookupVisitCount++
+        if ([long]$Events[$position].Sequence -gt $ThroughSequence) { break }
         if (& $Predicate $Events[$position]) { return $Events[$position] }
     }
     return $null
+}
+
+function Get-FileTransferFallbackFrontierGraceSequenceRange {
+    param(
+        [Parameter(Mandatory = $true)]$Index,
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [Parameter(Mandatory = $true)][long]$AfterSequence,
+        [Parameter(Mandatory = $true)][long]$ThroughSequence)
+
+    $low = 0
+    $high = $Events.Count
+    while ($low -lt $high) {
+        $middle = $low + [int](($high - $low) / 2)
+        $Index.BoundedLookupVisitCount++
+        if ([long]$Events[$middle].Sequence -le $AfterSequence) { $low = $middle + 1 }
+        else { $high = $middle }
+    }
+    for ($position = $low; $position -lt $Events.Count; $position++) {
+        $Index.BoundedLookupVisitCount++
+        if ([long]$Events[$position].Sequence -gt $ThroughSequence) { break }
+        $Events[$position]
+    }
 }
 
 function Get-FileTransferFallbackFrontierGracePartitionSlice {
@@ -212,22 +282,27 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
 
     $selected = [ordered]@{}
     $addEvents = {
-        param([object[]]$Candidates)
+        param([object[]]$Candidates, [switch]$IncludeWriterCopies)
         foreach ($candidate in @($Candidates)) {
             $writerSequence = Get-FileTransferEventField -Event $candidate -Name 'log_writer_sequence' -Default ''
             $copies = @($candidate)
             $Index.BoundedLookupVisitCount++
-            if ($Index.EventsByWriterSequence.ContainsKey("$TransferKey|$writerSequence")) {
+            $writer = Get-FileTransferEventField -Event $candidate -Name 'log_writer_id' -Default ''
+            if ($IncludeWriterCopies -and $Index.EventsByWriterIdentity.ContainsKey("$writer|$writerSequence")) {
+                $copies = $Index.EventsByWriterIdentity["$writer|$writerSequence"].ToArray()
+            }
+            elseif ($Index.EventsByWriterSequence.ContainsKey("$TransferKey|$writerSequence")) {
                 $copies = $Index.EventsByWriterSequence["$TransferKey|$writerSequence"].ToArray()
             }
             $copyIndex = 0
             foreach ($event in $copies) {
                 $Index.BoundedLookupVisitCount++
-                $identity = '{0}|{1}|{2}|{3}|{4}' -f
+                $identity = '{0}|{1}|{2}|{3}|{4}|{5}' -f
                     $event.EventName,
                     [int64]$event.Sequence,
                     [int64]$event.LineNumber,
                     (Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''),
+                    (Get-FileTransferEventField -Event $event -Name 'log_writer_sequence' -Default ''),
                     $copyIndex++
                 if (-not $selected.Contains($identity)) { $selected[$identity] = $event }
             }
@@ -271,6 +346,10 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
         Get-FileTransferFallbackFrontierGraceNamedEvents `
             -Index $Index -TransferKey $TransferKey `
             -EventName 'filetransfer_v6_frontier_request_deferred')
+    [object[]]$receiverStatePool = @(
+        Get-FileTransferFallbackFrontierGraceNamedEvents `
+            -Index $Index -TransferKey $TransferKey `
+            -EventName 'filetransfer_v6_receiver_state_sent')
     [object[]]$stallCandidates = @($selected.Values | Where-Object {
             $_.EventName -eq 'filetransfer_v6_frontier_request_deferred'
         })
@@ -278,6 +357,34 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
         $candidateSequence = [int64]$candidate.Sequence
         $candidateFrontier = Get-FileTransferEventInt64Field -Event $candidate -Name 'frontier_chunk_index' -Default -1
         $candidateWake = Get-FileTransferEventInt64Field -Event $candidate -Name 'wake_generation' -Default 0
+        # A current-source rebind needs the complete bounded interval from its
+        # historical progress to the first advancing state, including records
+        # whose mutated frontier would otherwise put them in another bucket.
+        $currentFrontierKey = "$TransferKey|$candidateFrontier"
+        if ($Index.EventsByTransferAndFrontier.ContainsKey($currentFrontierKey)) {
+            $historicalProgress = $null
+            foreach ($event in $Index.EventsByTransferAndFrontier[$currentFrontierKey]) {
+                $Index.BoundedLookupVisitCount++
+                if ([long]$event.Sequence -ge $candidateSequence) { break }
+                if ($event.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and
+                    (Get-FileTransferEventInt64Field -Event $event -Name 'current_frontier_chunk_index' -Default -1) -eq $candidateFrontier) {
+                    $historicalProgress = $event
+                }
+            }
+            if ($null -ne $historicalProgress -and
+                (Get-FileTransferEventField -Event $historicalProgress -Name 'runtime_generation' -Default '') -cne
+                    (Get-FileTransferEventField -Event $candidate -Name 'runtime_generation' -Default '')) {
+                $closingState = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                    -Index $Index -Events $receiverStatePool -AfterSequence $candidateSequence -Predicate {
+                        param($event)
+                        (Get-FileTransferEventInt64Field -Event $event -Name 'contiguous_committed_chunk_index' -Default -1) -gt $candidateFrontier
+                    }
+                $through = if ($null -ne $closingState) { [long]$closingState.Sequence } else { [long]::MaxValue }
+                & $addEvents @(Get-FileTransferFallbackFrontierGraceSequenceRange `
+                    -Index $Index -Events $transferEvents -AfterSequence ([long]$historicalProgress.Sequence - 1) `
+                    -ThroughSequence $through) -IncludeWriterCopies
+            }
+        }
         $candidateTicks = Get-FileTransferEventInt64Field -Event $candidate -Name 'log_writer_attempt_utc_ticks' -Default 0
         $candidateGrace = Get-FileTransferEventInt64Field -Event $candidate -Name 'stall_grace_ms' -Default 0
         $deadlineTicks = if ($candidateTicks -gt 0 -and $candidateGrace -gt 0) {
@@ -305,6 +412,93 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
                 }
         }
         & $addEvents @($successorDeferral | Where-Object { $null -ne $_ })
+
+        # A consumed exact wake can be followed by independent committed
+        # progress after its deadline. Import that proof without admitting it.
+        $frontierKey = "$TransferKey|$candidateFrontier"
+        if ($Index.EventsByTransferAndFrontier.ContainsKey($frontierKey)) {
+            foreach ($recheck in $Index.EventsByTransferAndFrontier[$frontierKey]) {
+                $Index.BoundedLookupVisitCount++
+                if ($recheck.EventName -ne 'filetransfer_v6_frontier_stall_grace_recheck_decided' -or
+                    (Get-FileTransferEventInt64Field -Event $recheck -Name 'wake_generation' -Default 0) -ne $candidateWake) { continue }
+                if ((Get-FileTransferEventField -Event $recheck -Name 'decision_status' -Default '') -ceq 'stale' -and
+                    (Get-FileTransferEventField -Event $recheck -Name 'decision_reason' -Default '') -ceq 'frontier_scope_changed') {
+                    # Import subjects and their whole proof interval, not just
+                    # favorable outcomes. The semantic helper owns validation.
+                    & $addEvents @($candidate, $recheck) -IncludeWriterCopies
+                    $lifetimeEnd = $null
+                    if ($Index.SourceBoundariesByTransfer.ContainsKey($TransferKey)) {
+                        $lifetimeEnd = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                            -Index $Index -Events $Index.SourceBoundariesByTransfer[$TransferKey] `
+                            -AfterSequence $candidateSequence -Predicate { param($event) $true }
+                    }
+                    $throughSequence = if ($null -ne $lifetimeEnd) { [long]$lifetimeEnd.Sequence } else { [long]::MaxValue }
+                    & $addEvents @($lifetimeEnd | Where-Object { $null -ne $_ }) -IncludeWriterCopies
+                    $currentSend = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                        -Index $Index -Events $Index.EventsByTransferAndFrontier[$frontierKey] `
+                        -AfterSequence ([long]$recheck.Sequence) -ThroughSequence $throughSequence `
+                        -Predicate {
+                            param($event)
+                            $event.EventName -eq 'filetransfer_v6_frontier_request_sent' -and
+                                (Get-FileTransferEventInt64Field -Event $event -Name 'frontier_chunk_index' -Default -1) -eq $candidateFrontier
+                        }
+                    if ($null -eq $currentSend) { continue }
+                    & $addEvents @($currentSend) -IncludeWriterCopies
+                    $authority = Get-FileTransferEventField -Event $currentSend -Name 'authority_id' -Default ''
+                    $authorityKey = "$TransferKey|$authority"
+                    if ($Index.EventsByTransferAndAuthority.ContainsKey($authorityKey)) {
+                        $retirement = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                            -Index $Index -Events $Index.EventsByTransferAndAuthority[$authorityKey] `
+                            -AfterSequence ([long]$currentSend.Sequence) -ThroughSequence $throughSequence `
+                            -Predicate { param($event) $event.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' }
+                        if ($null -ne $retirement) {
+                            $throughSequence = [long]$retirement.Sequence
+                            & $addEvents @($retirement) -IncludeWriterCopies
+                        }
+                    }
+                    $advance = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                        -Index $Index -Events $stallDeferredPool -AfterSequence ([long]$currentSend.Sequence) `
+                        -ThroughSequence $throughSequence -Predicate {
+                            param($event)
+                            (Get-FileTransferEventInt64Field -Event $event -Name 'frontier_chunk_index' -Default -1) -gt $candidateFrontier
+                        }
+                    if ($null -eq $advance) { continue }
+                    & $addEvents @($advance) -IncludeWriterCopies
+                    $advanceFrontier = Get-FileTransferEventInt64Field -Event $advance -Name 'frontier_chunk_index' -Default -1
+                    $state = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                        -Index $Index -Events $receiverStatePool -AfterSequence ([long]$advance.Sequence) `
+                        -ThroughSequence $throughSequence -Predicate {
+                            param($event)
+                            (Get-FileTransferEventInt64Field -Event $event -Name 'contiguous_committed_chunk_index' -Default -1) -ge $advanceFrontier
+                        }
+                    if ($null -eq $state) { continue }
+                    & $addEvents @(Get-FileTransferFallbackFrontierGraceSequenceRange `
+                        -Index $Index -Events $transferEvents -AfterSequence $candidateSequence `
+                        -ThroughSequence ([long]$state.Sequence)) -IncludeWriterCopies
+                    continue
+                }
+                if ((Get-FileTransferEventField -Event $recheck -Name 'decision_status' -Default '') -cne 'dispatched' -or
+                    (Get-FileTransferEventField -Event $recheck -Name 'decision_reason' -Default '') -cne 'exact_receiver_request_dispatched') { continue }
+                $committedAdvance = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                    -Index $Index -Events $stallDeferredPool -AfterSequence ([long]$recheck.Sequence) `
+                    -Predicate {
+                        param($event)
+                        if ((Get-FileTransferEventInt64Field -Event $event -Name 'frontier_chunk_index' -Default -1) -le $candidateFrontier -or
+                            (Get-FileTransferEventInt64Field -Event $event -Name 'wake_generation' -Default 0) -le $candidateWake -or
+                            (Get-FileTransferEventField -Event $event -Name 'reason' -Default '') -cne 'chunk_batch_committed') { return $false }
+                        foreach ($field in @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+                                'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+                                'bridge_decision_generation', 'checkpoint_request_id', 'checkpoint_generation',
+                                'route_publication_generation', 'route_commit_generation', 'data_session_identity', 'data_session_generation')) {
+                            $value = Get-FileTransferEventField -Event $candidate -Name $field -Default ''
+                            if ([string]::IsNullOrWhiteSpace($value) -or
+                                $value -cne (Get-FileTransferEventField -Event $event -Name $field -Default '')) { return $false }
+                        }
+                        return $true
+                    }
+                & $addEvents @($committedAdvance | Where-Object { $null -ne $_ })
+            }
+        }
     }
 
     $authorities = [System.Collections.Generic.HashSet[string]]::new(
@@ -349,10 +543,6 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
             ((Get-FileTransferEventField -Event $_ -Name 'transfer_paused' -Default '0') -eq '1' -or
                 (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Completed', 'Failed', 'Canceled'))
         })
-    [object[]]$receiverStatePool = @(
-        Get-FileTransferFallbackFrontierGraceNamedEvents `
-            -Index $Index -TransferKey $TransferKey `
-            -EventName 'filetransfer_v6_receiver_state_sent')
     [object[]]$sparseWritePool = @(
         Get-FileTransferFallbackFrontierGraceNamedEvents `
             -Index $Index -TransferKey $TransferKey `
@@ -456,9 +646,12 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
         [Parameter(Mandatory = $true)][long]$LookupStart)
 
     $recordsByKey = [ordered]@{}
-    $rawCountByRecordKey = @{}
+    $rawCount = 0
     foreach ($result in @($Results)) {
         if ($null -eq $result) { continue }
+        # Partitions admit disjoint candidate sets. Include raw-only obligations
+        # cancelled before their deadline, even when they produce no record.
+        $rawCount += [int]$result.RawCount
         foreach ($record in @($result.CandidateRecords)) {
             $event = $record.Event
             $key = '{0}|{1}|{2}|{3}|{4}' -f
@@ -468,14 +661,6 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
                 [string]$record.Reason,
                 [string]$record.Variant
             if (-not $recordsByKey.Contains($key)) { $recordsByKey[$key] = $record }
-            $recordRawCount = @($record.RawEvents).Count
-            if (@($result.CandidateRecords).Count -eq 1) {
-                $recordRawCount = [Math]::Max($recordRawCount, [int]$result.RawCount)
-            }
-            if (-not $rawCountByRecordKey.ContainsKey($key) -or
-                $recordRawCount -gt [int]$rawCountByRecordKey[$key]) {
-                $rawCountByRecordKey[$key] = $recordRawCount
-            }
         }
     }
     [object[]]$records = @($recordsByKey.Values | Sort-Object {
@@ -485,7 +670,7 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
         })
     [object[]]$unresolved = @($records | Where-Object { -not [bool]$_.Recovered })
     return [pscustomobject]@{
-        RawCount = [int](($rawCountByRecordKey.Values | Measure-Object -Sum).Sum)
+        RawCount = $rawCount
         DistinctCount = $records.Count
         RecoveredCount = $records.Count - $unresolved.Count
         UnresolvedCount = $unresolved.Count
@@ -572,7 +757,25 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
                 -Index $Index `
                 -TransferKey $transferKey `
                 -Frontiers $batch)
-            $results.Add((& $legacy -Events $slice)) | Out-Null
+            $ownedFrontiers = [System.Collections.Generic.HashSet[long]]::new($batch)
+            $ownedCandidates = [System.Collections.Generic.HashSet[object]]::new()
+            foreach ($event in $slice) {
+                $Index.BoundedLookupVisitCount++
+                $frontier = -1L
+                if ($Kind -eq 'stall' -and $event.EventName -eq 'filetransfer_v6_frontier_request_deferred') {
+                    $frontier = Get-FileTransferEventInt64Field -Event $event -Name 'frontier_chunk_index' -Default -1
+                }
+                elseif ($Kind -eq 'recent_progress' -and $event.EventName -eq 'filetransfer_v6_receiver_state_deferred') {
+                    $frontier = Get-FileTransferEventInt64Field -Event $event -Name 'next_chunk_index' -Default -1
+                }
+                if ($ownedFrontiers.Contains($frontier) -and
+                    (Get-FileTransferFallbackFrontierGraceTransferKey -Event $event) -eq $transferKey) {
+                    [void]$ownedCandidates.Add($event)
+                }
+            }
+            # Successor deferrals remain evidence, but only their own partition
+            # may open/count them as obligations. Do not prefer a recovered copy.
+            $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates)) | Out-Null
         }
     }
     $mergedResult = Merge-FileTransferFallbackFrontierGraceCorrelationResults `

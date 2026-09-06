@@ -188,7 +188,7 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
     }
 
     [Fact]
-    public async Task RetainedSnapshotHandoff_WritersKeepIndependentFullCompactAndTransferScopedEvaluations()
+    public async Task RetainedSnapshotHandoff_WritersKeepIndependentFullCompactAndCompleteSourceEvaluations()
     {
         if (!OperatingSystem.IsWindows()) { return; }
         await RunHarnessAsync("""
@@ -232,13 +232,13 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
             $writerEvaluations = @($writer.Body.FindAll({ param($node)
                 $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Get-FileTransferCoordinatorSnapshotEvaluation'
             }, $true))
-            if ($writerEvaluations.Count -ne 1 -or $writerEvaluations[0].Extent.Text -notmatch '\$Summary\.TransferEvents') { throw 'writer lost independent transfer-scoped snapshot input' }
+            if ($writerEvaluations.Count -ne 1 -or $writerEvaluations[0].Extent.Text -notmatch '-Lines\s+\$writerAllSnapshotLines') { throw 'writer lost complete-source snapshot input' }
             $Summary = New-TestSummary -Lines @('event=unrelated; value=all', 'event=unrelated; value=selected')
             $Summary.TransferEvents = [object[]]@($Summary.AllEvents[1])
             $before = $script:EvaluationCalls.Count
-            $null = . ([scriptblock]::Create($writerEvaluations[0].Extent.Text))
-            if ($script:EvaluationCalls.Count -ne $before + 1) { throw 'transfer-scoped writer did not independently evaluate' }
-            Assert-ExactLines @('event=unrelated; value=selected') $script:EvaluationCalls[$before].Lines
+            $null = Write-FileTransferDiagnosticsArtifacts -Summary $Summary -GateResult ([pscustomobject]@{}) -ArtifactDir $RepoRoot
+            if ($script:EvaluationCalls.Count -ne $before + 1) { throw 'writer did not independently evaluate without a handoff' }
+            Assert-ExactLines @('event=unrelated; value=all', 'event=unrelated; value=selected') $script:EvaluationCalls[$before].Lines
             $classifier = Find-TestFunction $script:ArtifactAst 'Get-FileTransferRecoveryFailureClassification'
             Assert-TestCommandArgument $classifier 'Get-FileTransferFileTunaV4DataPathProof' 'CoordinatorSnapshotEvaluation' '$coordinatorSnapshotEvaluation'
             Assert-TestCommandArgument $writer 'Get-FileTransferRecoveryFailureClassification' 'CoordinatorSnapshotEvaluationHandoff' '$CoordinatorSnapshotEvaluationHandoff'
@@ -249,6 +249,101 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
             if ($writerCalls.Count -ne 1 -or $writerCalls[0].Extent.Text -notmatch '-CoordinatorSnapshotEvaluationHandoff\b') { throw 'outer full evaluation handoff is not forwarded' }
             Write-Output 'snapshot-reuse-ok'
             """);
+    }
+
+    [Theory]
+    [InlineData("complete")]
+    [InlineData("partial")]
+    [InlineData("conflicting_duplicate")]
+    [InlineData("identical_duplicate")]
+    [InlineData("multiple_streams")]
+    [InlineData("legacy")]
+    [InlineData("empty")]
+    [InlineData("fallback_empty")]
+    [InlineData("fallback_missing")]
+    public async Task RetainedSnapshotWriter_CompleteScopeControlsPublicationAndStrictGate(string shape)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var artifactDir = Path.Combine(Path.GetTempPath(), "nlink-snapshot-writer", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(artifactDir);
+        try
+        {
+            await RunHarnessAsync($$"""
+                $shape = '{{shape}}'; $ArtifactDir = $Case
+                $catalog = Get-FileTransferCoordinatorEvidenceCatalog
+                $families = $catalog.RequiredFamilies -join ','
+                $scope = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=writer-instance-A; session_id=fte1-session; transfer_id=fte1-transfer; direction=outbound; log_writer_id=writer-A"
+                $coverage = "emitted_family_coverage=$families; shadow_family_coverage=; authoritative_family_coverage=$families; authority_effect=none"
+                $start = "event=filetransfer_coordinator_snapshot_stream_started; $scope; initial_state_generation=0; initial_state_hash=initial; $coverage"
+                $end = "event=filetransfer_coordinator_snapshot_stream_completed; $scope; final_state_generation=0; final_state_hash=initial; transition_count=0; $coverage"
+                $diagnostic = 'event=file_transfer_outbound_terminal; transfer_id=[redacted]; state=Completed'
+                [string[]]$lines = @($start, $end, $diagnostic)
+                switch ($shape) {
+                    'partial' { $lines = @($start, $diagnostic) }
+                    'conflicting_duplicate' { $lines = @($start, ($start -replace 'initial_state_hash=initial', 'initial_state_hash=conflict'), $end, $diagnostic) }
+                    'identical_duplicate' { $lines = @($start, $start, $end, $end, $diagnostic) }
+                    'multiple_streams' { $lines = @($start, $end, ($start -replace 'writer-instance-A','writer-instance-B' -replace 'writer-A','writer-B' -replace 'fte1-transfer','fte1-other-transfer'), ($end -replace 'writer-instance-A','writer-instance-B' -replace 'writer-A','writer-B' -replace 'fte1-transfer','fte1-other-transfer'), $diagnostic) }
+                    'legacy' { $lines = @($diagnostic) }
+                    'empty' { $lines = @() }
+                }
+                $summary = New-TestSummary -Lines $lines
+                $summary.TransferEvents = @($summary.AllEvents | Where-Object EventName -CEQ 'file_transfer_outbound_terminal')
+                if ($shape -in @('fallback_empty', 'fallback_missing')) {
+                    $summary.GlobalEvents = @($summary.AllEvents | Where-Object EventName -CNE 'file_transfer_outbound_terminal')
+                    $summary.AllEvents = [object[]]@()
+                    if ($shape -ceq 'fallback_missing') { $summary.PSObject.Properties.Remove('AllEvents') }
+                }
+                $expected = & $script:RealEvaluator -Lines $lines
+                $expectedMode = if ($shape -in @('legacy', 'empty')) { 'LegacyV0' } else { 'SnapshotV1Authoritative' }
+                $expectedVerdict = if ($shape -in @('partial', 'conflicting_duplicate')) { 'fail' } else { 'pass' }
+                if ($expected.Mode -cne $expectedMode -or $expected.ArtifactEvidenceVerdict -cne $expectedVerdict) { throw 'fixture does not establish its intended evidence contract' }
+                $expectedJson = $expected | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 -Compress
+                $beforeSummary = $summary | ConvertTo-Json -Depth 64 -Compress
+                foreach ($reuse in @('exact', 'absent', 'changed', 'reordered', 'truncated', 'duplicate')) {
+                    [string[]]$handoffLines = @($lines)
+                    switch ($reuse) {
+                        'changed' { if ($handoffLines.Count) { $handoffLines[0] += ' ' } else { $handoffLines = @('event=changed') } }
+                        'reordered' { if ($handoffLines.Count -gt 1) { [array]::Reverse($handoffLines) } else { $handoffLines = @($lines + 'event=other') } }
+                        'truncated' { if ($handoffLines.Count) { $handoffLines = @($handoffLines | Select-Object -Skip 1) } else { $handoffLines = @('event=other') } }
+                        'duplicate' { $handoffLines = @($lines + 'event=extra') }
+                    }
+                    $handoff = if ($reuse -ceq 'absent') { $null } else { [pscustomobject]@{ Lines = $handoffLines; Evaluation = $expected } }
+                    $stages = [Collections.Generic.List[object]]::new()
+                    $observer = { param($Name, $Status, $InputCount, $MissCount, $ReuseCount) $stages.Add([pscustomobject]@{Name=$Name;InputCount=$InputCount}) }
+                    $before = $script:EvaluationCalls.Count
+                    $snapshotEvaluation = Write-FileTransferDiagnosticsArtifacts -Summary $summary -GateResult ([pscustomobject]@{}) -ArtifactDir $ArtifactDir -CoordinatorSnapshotEvaluationHandoff $handoff -StageObserver $observer
+                    $expectedCalls = if ($reuse -ceq 'exact') { 0 } else { 1 }
+                    if ($script:EvaluationCalls.Count -ne $before + $expectedCalls) { throw "wrong writer evaluation count: $reuse" }
+                    if ($reuse -ceq 'exact' -and -not [object]::ReferenceEquals($snapshotEvaluation, $expected)) { throw 'complete handoff was not reused exactly' }
+                    if ($expectedCalls) { Assert-ExactLines $lines $script:EvaluationCalls[$before].Lines }
+                    if (@($stages | Where-Object {$_.InputCount -ne $lines.Count}).Count) { throw 'writer stage count still describes a transfer-only subset' }
+                    if (($snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 -Compress) -cne $expectedJson) { throw 'writer changed complete-source evidence' }
+
+                    $effectiveVerdict='PASS'; $effectiveGateStatus='pass'; $effectiveNextArtifact=''; $effectiveHardFailures=[Collections.Generic.List[string]]::new()
+                    . $script:WriterSnapshotGate
+                    if (($effectiveVerdict -ceq 'FAIL_ARTIFACT_EVIDENCE') -ne ($expectedVerdict -ceq 'fail')) { throw 'writer strict-invalid gate lost declared V1' }
+                    $StageObserver=$null; $verdictLines=@(); $writerAllEventCount=$lines.Count
+                    . $script:WriterSnapshotPublication
+                    $published = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Raw | ConvertFrom-Json
+                    if (($published | ConvertTo-Json -Depth 64 -Compress) -cne $expectedJson) { throw 'generic Snapshot JSON differs from complete evaluation' }
+                    Assert-NoHandoffProperties $published
+                    $operator = @(Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'))
+                    $text = @(Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.txt'))
+                    $LiveRouteProofMode='None'; $recoveryClassification=$null; $reportProofHandoff=$null
+                    function New-FileTransferRouteConsistencySummaryLines { param($Summary,$LiveRouteProofMode,$RecoveryClassification,$ReportProofHandoff) 'route-proof-fixture' }
+                    . $script:WriterSnapshotRouteMetadata
+                    foreach ($line in $text) {
+                        $pair=$line -split '=',2; $value=$pair[1]
+                        if ($pair[0] -ceq 'boundary_hash' -and $value -ceq '') { $value='(none)' }
+                        $metadata="coordinator_snapshot_$($pair[0])=$value"
+                        if ($operator -cnotcontains $metadata -or $routeConsistencyLines -cnotcontains $metadata) { throw "writer metadata disagrees: $metadata" }
+                    }
+                    if (($summary | ConvertTo-Json -Depth 64 -Compress) -cne $beforeSummary) { throw 'writer changed selected transfer metrics or input collections' }
+                }
+                Write-Output 'snapshot-reuse-ok'
+                """, artifactDir);
+        }
+        finally { TryDeleteDirectory(artifactDir); }
     }
 
     private static async Task RunHarnessAsync(string body, string argument = "")
@@ -326,6 +421,32 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
         # Execute the real selection/reuse statements, stopping before unrelated full-report proof work.
         $prefix = $classifier.Extent.Text.Substring(0, $boundary[0].Extent.StartOffset - $classifier.Extent.StartOffset)
         . ([scriptblock]::Create($prefix + "`nreturn `$coordinatorSnapshotEvaluation`n}"))
+        $writer = Find-TestFunction $script:ArtifactAst 'Write-FileTransferDiagnosticsArtifacts'
+        $statements = @($writer.Body.EndBlock.Statements)
+        $boundary = @($statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$snapshotRouteConsistency'
+        })
+        if ($boundary.Count -ne 1) { throw 'writer snapshot boundary missing' }
+        $prefix = $writer.Extent.Text.Substring(0, $boundary[0].Extent.StartOffset - $writer.Extent.StartOffset)
+        . ([scriptblock]::Create($prefix + "`nreturn `$snapshotEvaluation`n}"))
+        $gate = @($statements | Where-Object {
+            $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.Contains("`$snapshotEvaluation.Mode -ne 'LegacyV0'")
+        })
+        $metadata = @($statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$verdictLines' -and $_.Extent.Text.Contains('coordinator_snapshot_mode=')
+        })
+        $end = @($statements | Where-Object {
+            $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.Contains("-Name 'full_writer_summary_artifacts'")
+        })
+        $route = @($statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$routeConsistencyLines'
+        })
+        if ($gate.Count -ne 1 -or $metadata.Count -ne 1 -or $end.Count -ne 1 -or $route.Count -ne 1) { throw 'writer publication boundaries changed' }
+        $script:WriterSnapshotGate = [scriptblock]::Create($gate[0].Extent.Text)
+        $script:WriterSnapshotPublication = [scriptblock]::Create((@($statements | Where-Object {
+            $_.Extent.StartOffset -ge $metadata[0].Extent.StartOffset -and $_.Extent.EndOffset -le $end[0].Extent.StartOffset
+        }).Extent.Text -join "`n"))
+        $script:WriterSnapshotRouteMetadata = [scriptblock]::Create($route[0].Extent.Text)
         $script:RealEvaluator = (Get-Command Get-FileTransferCoordinatorSnapshotEvaluation -CommandType Function).ScriptBlock
         $script:EvaluationCalls = New-Object System.Collections.Generic.List[object]
         function Get-FileTransferCoordinatorSnapshotEvaluation {

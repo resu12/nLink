@@ -333,6 +333,97 @@ public sealed class FileTransferRetainedDiagnosticsTests : FileTransferOpsScript
         });
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task FullReportStages_ProductionWriterAttributesPostClassifierWork(bool cached, bool actionFails)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await WithArtifactDirectoryAsync(async artifactDir =>
+        {
+            var result = await RunDiagnosticsHarnessAsync(artifactDir, $$"""
+                $cached = ${{cached.ToString().ToLowerInvariant()}}
+                $actionFails = ${{actionFails.ToString().ToLowerInvariant()}}
+                $writerAst = [Management.Automation.Language.Parser]::ParseFile(
+                    (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1'), [ref]$tokens, [ref]$parseErrors)
+                if (@($parseErrors).Count) { throw 'writer parse failed' }
+                $writers = @($writerAst.FindAll({ param($n)
+                    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $n.Name -ceq 'Write-FileTransferDiagnosticsArtifacts'
+                }, $true))
+                if ($writers.Count -ne 1) { throw 'expected one writer' }
+                $statements = @($writers[0].Body.EndBlock.Statements)
+                $classification = @($statements | Where-Object {
+                    $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $_.Left.Extent.Text -ceq '$recoveryClassification'
+                })
+                $resolution = @($statements | Where-Object {
+                    $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $_.Left.Extent.Text -ceq '$reportProofs'
+                })
+                if ($classification.Count -ne 1 -or $resolution.Count -ne 1) { throw 'writer boundaries changed' }
+                $prefix = @($statements | Where-Object {
+                    $_.Extent.StartOffset -ge $classification[0].Extent.StartOffset -and
+                    $_.Extent.EndOffset -lt $resolution[0].Extent.StartOffset
+                })
+                if ($prefix.Count -ne 2 -or $prefix[1] -isnot [Management.Automation.Language.IfStatementAst] -or
+                    -not $prefix[1].Extent.Text.Contains("-Name 'full_writer_proofs_ledger_and_verdict' -Status Started")) {
+                    throw 'post-classifier writer work has no exact stage before proof resolution'
+                }
+                $publication = @($statements | Where-Object {
+                    $_ -is [Management.Automation.Language.IfStatementAst] -and
+                    $_.Extent.Text.Contains("-Name 'full_writer_operator_and_snapshot_artifacts' -Status Started")
+                })
+                if ($publication.Count -ne 1) { throw 'publication boundary changed' }
+                $prefixBlock = [scriptblock]::Create(($prefix.Extent.Text -join "`n"))
+                $publicationBlock = [scriptblock]::Create($publication[0].Extent.Text)
+                $Summary = [pscustomobject]@{ AllEvents = @(1, 2, 3) }
+                $writerAllEventCount = 3
+                $LiveRouteProofMode = 'None'
+                $CoordinatorSnapshotEvaluationHandoff = $null
+                $reportProofHandoff = $null
+                $StageObserver = New-FileTransferFullReportStageObserver -ArtifactDir $ArtifactDir -Diagnostics $StageDiagnostics
+                $script:expectedClassification = [pscustomobject]@{ Marker = 'exact-classification'; Quartet = '1/1/0/1' }
+                function Get-FileTransferRecoveryFailureClassification {
+                    param($Summary, $LiveRouteProofMode, $CoordinatorSnapshotEvaluationHandoff, $StageObserver, $ReportProofHandoff)
+                    if (-not $cached) {
+                        & $StageObserver -Name 'classifier-test-prefix' -Status Started -InputCount 3
+                        & $StageObserver -Status Completed
+                    }
+                    return $script:expectedClassification
+                }
+                try {
+                    $output = @(Invoke-FileTransferFullReportAction -StageObserver $StageObserver -Action {
+                        . $prefixBlock
+                        if ($actionFails) { throw [InvalidOperationException]::new('writer-proof-failed') }
+                        . $publicationBlock
+                        $recoveryClassification
+                    })
+                    if ($actionFails) { throw 'writer failure swallowed' }
+                    if ($output.Count -ne 1 -or -not [object]::ReferenceEquals($output[0], $script:expectedClassification)) {
+                        throw 'stage changed classification output'
+                    }
+                }
+                catch {
+                    if (-not $actionFails -or $_.Exception.GetBaseException().Message -cne 'writer-proof-failed') { throw }
+                }
+                $stages = @($StageDiagnostics['correlator_history'] | Where-Object {
+                    $_.name -ceq 'full_writer_proofs_ledger_and_verdict'
+                })
+                $expectedStatus = if ($actionFails) { 'failed' } else { 'completed' }
+                if ($stages.Count -ne 1 -or $stages[0].status -cne $expectedStatus -or
+                    $stages[0].input_count -ne 3 -or $stages[0].elapsed_ms -lt 0) { throw 'writer work misattributed' }
+                if ($actionFails -and $StageDiagnostics['current_correlator'] -cne 'full_writer_proofs_ledger_and_verdict') {
+                    throw 'earlier classifier blamed for writer failure'
+                }
+                Write-Output 'retained-diagnostics-ok'
+                """);
+            AssertSucceeded(result);
+        });
+    }
+
     private static Task<ScriptResult> RunDiagnosticsHarnessAsync(string artifactDir, string body) =>
         RunPowerShellScriptTextAsync(HarnessPrefix + Environment.NewLine + body, [FindRepoRoot(), artifactDir]);
 

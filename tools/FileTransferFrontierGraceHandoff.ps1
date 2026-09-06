@@ -1,5 +1,790 @@
 Set-StrictMode -Version Latest
 
+function New-FileTransferStallGracePublishedSourceIndex {
+    param([object[]]$Events)
+    $transfers = New-FileTransferStallGraceCurrentSourceIndex -Events $Events
+    $timelines = @{}
+    foreach ($key in $transfers.Keys) {
+        if ($key -ceq '__conflicts') { continue }
+        $timelines[$key] = @($transfers[$key] | Where-Object {
+            [string]$_.Fields['event'] -in @('filetransfer_route_hint_authorized_publication_accepted',
+                'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered',
+                'filetransfer_data_session_recreated', 'filetransfer_data_session_removed',
+                'file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                'filetransfer_terminalized_by_session_end') -or
+            [string]$_.Fields['transfer_paused'] -ceq '1'
+        })
+    }
+    return @{ Timelines = $timelines; Conflicts = $transfers['__conflicts'] }
+}
+
+# Current-source admission is not a synthetic predecessor repair. Authority scope
+# comes from the exact publication; execution/data-session scope stays on the hold.
+function Get-FileTransferStallGracePublishedSourceAdmission {
+    param([hashtable]$Index, $Candidate)
+    function F($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function N($Event, [string]$Name) {
+        $number = 0L
+        if (-not [long]::TryParse((F $Event $Name), [ref]$number)) { return -1L }
+        return $number
+    }
+    $complete = @('log_writer_id', 'session_id', 'transfer_id', 'direction', 'route', 'protocol_version',
+        'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
+        'transport_epoch', 'bridge_recovery_generation', 'bridge_decision_generation', 'checkpoint_request_id',
+        'checkpoint_generation', 'route_publication_generation', 'route_commit_generation',
+        'data_session_identity', 'data_session_generation')
+    foreach ($field in $complete) {
+        if ([string]::IsNullOrWhiteSpace((F $Candidate $field))) { return $null }
+    }
+    $result = [pscustomobject]@{ Admitted = $false; Source = $null; Episode = $null }
+    if ((F $Candidate 'event') -cne 'filetransfer_v6_frontier_request_deferred' -or
+        (F $Candidate 'direction') -cne 'inbound' -or (F $Candidate 'route') -cne 'post_tuna_fallback_v6' -or
+        (F $Candidate 'protocol_version') -cne '6' -or (F $Candidate 'authority_effect') -cne 'none' -or
+        (N $Candidate 'elapsed_ms') -ne 0 -or (N $Candidate 'stall_grace_ms') -ne 750 -or
+        (N $Candidate 'frontier_chunk_index') -lt 0 -or
+        (N $Candidate 'highest_received_chunk_index') -lt ((N $Candidate 'frontier_chunk_index') - 1) -or
+        (F $Candidate 'data_session_identity') -in @('(none)', 'none')) { return $result }
+    foreach ($field in @('log_writer_sequence', 'wake_generation', 'live_route_epoch', 'runtime_generation',
+            'leg_generation', 'transport_epoch', 'route_publication_generation', 'data_session_generation')) {
+        if ((N $Candidate $field) -le 0) { return $result }
+    }
+    foreach ($field in @('terminal_generation', 'bridge_recovery_generation', 'bridge_decision_generation',
+            'checkpoint_generation', 'route_commit_generation')) {
+        if ((N $Candidate $field) -lt 0) { return $result }
+    }
+    $start = [DateTimeOffset]::MinValue; $deadline = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse((F $Candidate 'stall_started_utc'), [ref]$start) -or
+        -not [DateTimeOffset]::TryParse((F $Candidate 'wake_deadline_utc'), [ref]$deadline) -or
+        $deadline.UtcTicks -ne ($start.UtcTicks + 7500000L)) { return $result }
+    $key = '{0}|{1}|{2}' -f (F $Candidate 'log_writer_id'), (F $Candidate 'session_id'), (F $Candidate 'transfer_id')
+    if (-not $Index.Timelines.ContainsKey($key) -or
+        $Index.Conflicts.ContainsKey("$(F $Candidate 'log_writer_id')|$(F $Candidate 'log_writer_sequence')")) { return $result }
+    $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'route_publication_generation', 'route_commit_generation')
+    $source = $null
+    foreach ($entry in $Index.Timelines[$key]) {
+        if ([long]$entry.Sequence -ge [long]$Candidate.Sequence) { break }
+        $name = F $entry 'event'
+        if ($name -in @('filetransfer_route_hint_authorized_publication_accepted',
+                'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered')) {
+            $same = $true
+            foreach ($field in $scope) {
+                if ((F $entry $field) -cne (F $Candidate $field)) { $same = $false; break }
+            }
+            if (-not $same) {
+                # Once this exact source has been invalidated, an ABA restoration
+                # cannot re-establish the same publication token.
+                if ($null -ne $source) { return $result }
+                continue
+            }
+            if ($name -ceq 'filetransfer_route_hint_authorized_publication_accepted') {
+                if ((F $entry 'route_publication_action_kind') -cne 'RoutePublication' -or
+                    (F $entry 'coordinator_decision_reason') -cne 'accepted' -or
+                    (F $entry 'target_route') -cne 'post_tuna_fallback_v6' -or
+                    (F $entry 'target_protocol_version') -cne '6' -or
+                    (F $entry 'target_transport') -cne 'regular_nkn' -or
+                    (F $entry 'fallback_leg_generation') -cne (F $Candidate 'leg_generation') -or
+                    (F $entry 'fallback_transport_epoch') -cne (F $Candidate 'transport_epoch') -or
+                    (F $entry 'fallback_bridge_recovery_generation') -cne (F $Candidate 'bridge_recovery_generation') -or
+                    $Index.Conflicts.ContainsKey("$(F $entry 'log_writer_id')|$(F $entry 'log_writer_sequence')")) { return $result }
+                if ($null -eq $source) { $source = $entry }
+            }
+        }
+        elseif ($null -ne $source) {
+            if ($name -ne 'filetransfer_data_session_recreated' -or
+                (F $entry 'data_session_identity') -cne (F $Candidate 'data_session_identity') -or
+                (F $entry 'data_session_generation') -cne (F $Candidate 'data_session_generation')) { return $result }
+        }
+    }
+    if ($null -eq $source) { return $result }
+    $episodeKey = @($complete | ForEach-Object { F $Candidate $_ }) + @(
+        F $Candidate 'frontier_chunk_index'; F $Candidate 'highest_received_chunk_index'
+        F $Candidate 'stall_started_utc'; F $Candidate 'wake_generation'; F $Candidate 'wake_deadline_utc')
+    $result.Admitted = $true; $result.Source = $source
+    $result.Episode = [pscustomobject]@{
+        # Progress is the legacy reducer's scope carrier here, not a repair
+        # observation. Keep the actual admission and absent predecessor explicit.
+        AdmissionKind = 'CurrentPublishedSource'; HistoricalProgress = $null; ScopeEvidence = $Candidate
+        Key = $episodeKey -join '|'; Event = $Candidate; Progress = $Candidate; ScopeFields = $complete
+        Authority = ''; Writer = F $Candidate 'log_writer_id'; Session = F $Candidate 'session_id'
+        Transfer = F $Candidate 'transfer_id'; Frontier = N $Candidate 'frontier_chunk_index'
+        Highest = N $Candidate 'highest_received_chunk_index'; GraceMs = 750L
+        DataSessionIdentity = F $Candidate 'data_session_identity'; DataSessionGeneration = F $Candidate 'data_session_generation'
+        RawEvents = [Collections.Generic.List[object]]::new()
+        PublishedSource = $source
+    }
+    return $result
+}
+
+# Private evidence-only support for a previously reached frontier under a new
+# Coordinator-published fallback source. Historical progress is never authority
+# for the current request. Callers use this branch exclusively when scope changed.
+function New-FileTransferStallGraceCurrentSourceIndex {
+    param([object[]]$Events)
+    $index = @{}; $seen = @{}; $conflicts = @{}
+    foreach ($event in $Events) {
+        $fields = $event.Fields
+        $writerKey = '{0}|{1}' -f $fields['log_writer_id'], $fields['log_writer_sequence']
+        if ($seen.ContainsKey($writerKey)) {
+            $prior = $seen[$writerKey]
+            $names = @($fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' })
+            if ($names.Count -ne @($prior.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' }).Count) { $conflicts[$writerKey] = $true }
+            foreach ($name in $names) {
+                if ([string]$fields[$name] -cne [string]$prior.Fields[$name]) { $conflicts[$writerKey] = $true; break }
+            }
+            continue
+        }
+        $seen[$writerKey] = $event
+        $key = '{0}|{1}|{2}' -f $fields['log_writer_id'], $fields['session_id'], $fields['transfer_id']
+        if (-not $index.ContainsKey($key)) { $index[$key] = [Collections.Generic.List[object]]::new() }
+        $index[$key].Add($event)
+    }
+    foreach ($key in @($index.Keys)) { $index[$key] = @($index[$key] | Sort-Object Sequence) }
+    $index['__conflicts'] = $conflicts
+    return $index
+}
+
+function Get-FileTransferStallGraceCurrentSourceRecovery {
+    param([hashtable]$Index, $Candidate, $HistoricalProgress)
+    function Field($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function Number($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((Field $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            $value = Field $Left $name
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Right $name)) { return $false }
+        }
+        return $true
+    }
+    $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+        'bridge_decision_generation', 'checkpoint_request_id', 'route_publication_generation', 'route_commit_generation')
+    $changedSource = $false
+    foreach ($name in $scope) {
+        if (-not [string]::IsNullOrWhiteSpace((Field $HistoricalProgress $name)) -and
+            -not [string]::IsNullOrWhiteSpace((Field $Candidate $name)) -and
+            (Field $HistoricalProgress $name) -cne (Field $Candidate $name)) { $changedSource = $true; break }
+    }
+    if ((Field $HistoricalProgress 'event') -cne 'filetransfer_fallback_frontier_repair_progress_observed' -or
+        -not $changedSource) { return $null }
+
+    # A non-null result owns changed-source evaluation even when proof is absent.
+    $result = [pscustomobject]@{ CurrentSource = $null; HistoricalProgress = $HistoricalProgress; RecoveryEvent = $null }
+    $complete = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation')
+    $identity = @('log_writer_id', 'session_id', 'transfer_id')
+    $stable = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'terminal_generation',
+        'transport_epoch', 'bridge_decision_generation', 'checkpoint_request_id', 'route_commit_generation')
+    if (-not (Equal $Candidate $Candidate ($complete + $identity)) -or
+        -not (Equal $Candidate $HistoricalProgress ($stable + $identity)) -or
+        (Field $Candidate 'event') -cne 'filetransfer_v6_frontier_request_deferred' -or
+        (Field $Candidate 'authority_effect') -cne 'none' -or (Number $Candidate 'elapsed_ms') -ne 0 -or
+        (Number $Candidate 'wake_generation') -le 0 -or (Number $Candidate 'frontier_chunk_index') -lt 0 -or
+        (Field $Candidate 'direction') -cne 'inbound' -or (Field $Candidate 'route') -cne 'post_tuna_fallback_v6' -or
+        (Field $Candidate 'protocol_version') -cne '6' -or (Number $Candidate 'data_session_generation') -le 0 -or
+        (Field $Candidate 'data_session_identity') -in @('', '(none)', 'none') -or
+        (Number $Candidate 'frontier_chunk_index') -ne (Number $HistoricalProgress 'current_frontier_chunk_index') -or
+        (Number $Candidate 'highest_received_chunk_index') -lt ((Number $Candidate 'frontier_chunk_index') - 1)) { return $result }
+    foreach ($name in @('runtime_generation', 'leg_generation', 'route_publication_generation', 'bridge_recovery_generation')) {
+        if ((Number $HistoricalProgress $name) -lt 0 -or
+            (Number $Candidate $name) -ne ((Number $HistoricalProgress $name) + 1)) { return $result }
+    }
+    $start = [DateTimeOffset]::MinValue; $deadline = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse((Field $Candidate 'stall_started_utc'), [ref]$start) -or
+        -not [DateTimeOffset]::TryParse((Field $Candidate 'wake_deadline_utc'), [ref]$deadline) -or
+        (Number $Candidate 'stall_grace_ms') -ne 750 -or $deadline.UtcTicks -ne ($start.UtcTicks + 7500000L)) { return $result }
+
+    $key = '{0}|{1}|{2}' -f $Candidate.Fields['log_writer_id'], $Candidate.Fields['session_id'], $Candidate.Fields['transfer_id']
+    if (-not $Index.ContainsKey($key)) { return $result }
+    $events = $Index[$key]
+    $low = 0; $high = $events.Count
+    while ($low -lt $high) {
+        $mid = $low + [int][Math]::Floor(($high - $low) / 2)
+        if ([long]$events[$mid].Sequence -lt [long]$HistoricalProgress.Sequence) { $low = $mid + 1 } else { $high = $mid }
+    }
+    $rows = [Collections.Generic.List[object]]::new(); $buckets = @{}
+    # Stop at the first advancing published state. A failed proof cannot borrow
+    # a later unrelated cycle. All intervening contradictions remain in rows.
+    for ($i = $low; $i -lt $events.Count; $i++) {
+        $event = $events[$i]; $writerSequence = Field $event 'log_writer_sequence'
+        if ($writerSequence -notmatch '^[1-9][0-9]*$' -or
+            $Index['__conflicts'].ContainsKey("$(Field $event 'log_writer_id')|$writerSequence")) { return $result }
+        $rows.Add($event)
+        $name = Field $event 'event'
+        if (-not $buckets.ContainsKey($name)) { $buckets[$name] = [Collections.Generic.List[object]]::new() }
+        $buckets[$name].Add($event)
+        if ([long]$event.Sequence -gt [long]$Candidate.Sequence -and $name -ceq 'filetransfer_v6_receiver_state_sent' -and
+            (Number $event 'contiguous_committed_chunk_index') -gt (Number $Candidate 'frontier_chunk_index')) {
+            break
+        }
+    }
+    function Named([string]$Name) { if ($buckets.ContainsKey($Name)) { return $buckets[$Name].ToArray() } }
+    function Before($Event) { return [long]$Event.Sequence -lt [long]$Candidate.Sequence }
+    function After($Event) { return [long]$Event.Sequence -gt [long]$Candidate.Sequence }
+    $publications = @(Named 'filetransfer_route_hint_authorized_publication_accepted' | Where-Object { Before $_ })
+    if ($publications.Count -eq 0) { return $result }
+    $publicationFields = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'route_publication_generation', 'route_commit_generation')
+    foreach ($publication in $publications) {
+        if (-not (Equal $publication $Candidate $publicationFields) -or
+            (Field $publication 'fallback_leg_generation') -cne (Field $Candidate 'leg_generation') -or
+            (Field $publication 'fallback_transport_epoch') -cne (Field $Candidate 'transport_epoch') -or
+            (Field $publication 'fallback_bridge_recovery_generation') -cne (Field $Candidate 'bridge_recovery_generation') -or
+            (Field $publication 'target_route') -cne 'post_tuna_fallback_v6' -or
+            (Field $publication 'target_protocol_version') -cne '6' -or (Field $publication 'target_transport') -cne 'regular_nkn' -or
+            (Field $publication 'coordinator_decision_reason') -cne 'accepted') { return $result }
+    }
+    $publication = $publications[0] # All observations above prove the same exact publication.
+    $historicalStates = @(Named 'filetransfer_v6_fallback_frontier_repair_progress_state_forced' | Where-Object {
+        (Before $_) -and (Equal $_ $HistoricalProgress ($scope + @('authority_id', 'repair_generation', 'repair_request_key', 'range_fingerprint'))) -and
+        (Equal $_ $Candidate @('data_session_identity', 'data_session_generation'))
+    })
+    if ($historicalStates.Count -ne 1) { return $result }
+    $currentStates = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
+        [long]$_.Sequence -gt [long]$publication.Sequence -and (Before $_)
+    })
+    if ($currentStates.Count -eq 0) { return $result }
+    foreach ($state in $currentStates) {
+        if ((Number $state 'contiguous_committed_chunk_index') -ne (Number $Candidate 'frontier_chunk_index') -or
+            (Number $state 'durable_received_highest_chunk_index') -ne (Number $Candidate 'highest_received_chunk_index') -or
+            (Field $state 'transport_epoch') -cne (Field $Candidate 'transport_epoch') -or
+            (Field $state 'transfer_paused') -cne '0' -or (Number $state 'epoch') -le 0) { return $result }
+    }
+    $result.CurrentSource = $Candidate
+    $grants = @(Named 'filetransfer_fallback_frontier_repair_authority_granted' | Where-Object {
+        (After $_) -and (Number $_ 'frontier_chunk_index') -eq (Number $Candidate 'frontier_chunk_index')
+    })
+    if ($grants.Count -ne 1) { return $result }
+    $grant = $grants[0]
+    if (-not (Equal $grant $Candidate $scope) -or (Number $grant 'log_writer_attempt_utc_ticks') -lt $deadline.UtcTicks -or
+        (Field $grant 'source_kind') -cne 'ReceiverRequest' -or (Field $grant 'target_transport') -cne 'regular_nkn' -or
+        (Field $grant 'authority_id') -ceq (Field $HistoricalProgress 'authority_id') -or
+        (Number $grant 'repair_generation') -le (Number $HistoricalProgress 'repair_generation') -or
+        (Field $grant 'authority_schema') -cne '2' -or (Number $grant 'range_count') -ne 1 -or
+        (Number $grant 'requested_chunk_count') -ne 1 -or
+        (Field $grant 'repair_request_key') -cne "fallback-frontier:$(Field $Candidate 'frontier_chunk_index'):1:$(Field $grant 'range_fingerprint')" -or
+        (Number $grant 'repair_generation') -le 0 -or
+        (Number $grant 'durable_received_highest_chunk_index') -ne (Number $Candidate 'highest_received_chunk_index')) { return $result }
+    foreach ($name in @('authority_id', 'repair_request_key', 'range_fingerprint', 'primary_protocol_repair_request_id', 'primary_request_correlation_id')) {
+        if ((Field $grant $name) -in @('', '(none)', 'none')) { return $result }
+    }
+    $repair = $scope + @('authority_schema', 'authority_id', 'repair_generation', 'repair_request_key', 'range_fingerprint', 'predecessor_authority_id',
+        'primary_protocol_repair_request_id', 'primary_request_correlation_id', 'frontier_chunk_index', 'durable_received_highest_chunk_index', 'source_kind', 'target_transport')
+    $stages = @{}
+    foreach ($name in @('filetransfer_control_plane_delivery_observed', 'filetransfer_fallback_frontier_repair_dispatched',
+            'filetransfer_v6_frontier_request_sent', 'filetransfer_fallback_frontier_repair_contract_settled',
+            'filetransfer_fallback_frontier_repair_progress_observed', 'filetransfer_v6_fallback_frontier_repair_progress_state_forced')) {
+        $matches = @(Named $name | Where-Object {
+            (After $_) -and $(if ($name -ceq 'filetransfer_control_plane_delivery_observed') {
+                (Field $_ 'repair_request_id') -ceq (Field $grant 'primary_protocol_repair_request_id') -or
+                    (Field $_ 'request_correlation_id') -ceq (Field $grant 'primary_request_correlation_id')
+            } else { (Field $_ 'authority_id') -ceq (Field $grant 'authority_id') })
+        })
+        if ($matches.Count -ne 1) { return $result }
+        $stages[$name] = $matches[0]
+        if ($name -cne 'filetransfer_control_plane_delivery_observed' -and -not (Equal $matches[0] $grant $repair)) { return $result }
+    }
+    $delivery = $stages['filetransfer_control_plane_delivery_observed']; $dispatch = $stages['filetransfer_fallback_frontier_repair_dispatched']
+    $send = $stages['filetransfer_v6_frontier_request_sent']; $settlement = $stages['filetransfer_fallback_frontier_repair_contract_settled']
+    $progress = $stages['filetransfer_fallback_frontier_repair_progress_observed']; $forced = $stages['filetransfer_v6_fallback_frontier_repair_progress_state_forced']
+    if (-not (Equal $delivery $grant @('direction', 'route', 'protocol_version', 'live_route_epoch', 'leg_generation', 'transport_epoch',
+            'bridge_recovery_generation', 'checkpoint_request_id', 'repair_request_key', 'range_fingerprint')) -or
+        (Field $delivery 'repair_request_id') -cne (Field $grant 'primary_protocol_repair_request_id') -or
+        (Field $delivery 'request_correlation_id') -cne (Field $grant 'primary_request_correlation_id') -or
+        (Field $delivery 'kind') -cne 'frontier_request' -or (Field $delivery 'frame_type') -cne 'filetransfer.frontier_request.v6' -or
+        (Field $delivery 'authority_schema') -cne '2' -or (Number $delivery 'control_plane_generation') -le 0 -or
+        (Number $delivery 'first_start_chunk_index') -ne (Number $Candidate 'frontier_chunk_index') -or
+        (Number $delivery 'first_chunk_count') -ne 1 -or
+        (Field $delivery 'accepted_any') -cne '1' -or (Field $delivery 'peer_visible_any') -cne '1' -or
+        (Field $dispatch 'dispatch_observed') -cne '1' -or (Field $settlement 'dispatch_observed') -cne '1' -or
+        (Field $settlement 'settlement_outcome') -cne 'ProgressObserved' -or
+        (Field $send 'repair_request_id') -cne (Field $grant 'primary_protocol_repair_request_id') -or
+        (Field $send 'request_correlation_id') -cne (Field $grant 'primary_request_correlation_id') -or
+        (Number $progress 'previous_frontier_chunk_index') -ne (Number $Candidate 'frontier_chunk_index') -or
+        (Number $progress 'current_frontier_chunk_index') -le (Number $Candidate 'frontier_chunk_index') -or
+        -not (Equal $forced $progress @('previous_frontier_chunk_index', 'current_frontier_chunk_index')) -or
+        -not (Equal $forced $Candidate @('data_session_identity', 'data_session_generation')) -or
+        (Field $forced 'decision_status') -cne 'Accepted' -or (Number $forced 'receiver_state_epoch') -le 0) { return $result }
+    $states = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object { After $_ })
+    $states = @($states | Where-Object { (Field $_ 'epoch') -ceq (Field $forced 'receiver_state_epoch') })
+    if ($states.Count -ne 1) { return $result }
+    $state = $states[0]
+    if ((Number $state 'contiguous_committed_chunk_index') -ne (Number $progress 'current_frontier_chunk_index') -or
+        (Number $state 'durable_received_highest_chunk_index') -lt (Number $Candidate 'highest_received_chunk_index') -or
+        (Field $state 'transport_epoch') -cne (Field $Candidate 'transport_epoch') -or (Field $state 'transfer_paused') -cne '0') { return $result }
+    $prior = $grant
+    foreach ($event in @($delivery, $dispatch, $send, $settlement, $progress, $forced, $state)) {
+        if ([long]$event.Sequence -le [long]$prior.Sequence -or
+            (Number $event 'log_writer_attempt_utc_ticks') -lt (Number $prior 'log_writer_attempt_utc_ticks')) { return $result }
+        $prior = $event
+    }
+    foreach ($event in $rows) {
+        if ((Field $event 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+            (Field $event 'transfer_paused') -ceq '1') { return $result }
+        $expected = if ([long]$event.Sequence -lt [long]$publication.Sequence) { $HistoricalProgress } else { $Candidate }
+        foreach ($name in $scope) {
+            # A checkpoint-proof delivery carries the proof request ID, not
+            # the current frontier authority's checkpoint binding.
+            if ($name -ceq 'checkpoint_request_id' -and (Field $event 'event') -ceq 'filetransfer_control_plane_delivery_observed' -and
+                (Field $event 'kind') -ceq 'fallback_checkpoint_proof') { continue }
+            if ($event.Fields.ContainsKey($name) -and (Field $event $name) -cne (Field $expected $name)) { return $result }
+        }
+        foreach ($name in @('data_session_identity', 'data_session_generation')) {
+            if ($event.Fields.ContainsKey($name) -and (Field $event $name) -cne (Field $Candidate $name)) { return $result }
+        }
+        if ([long]$event.Sequence -ge [long]$Candidate.Sequence -and $event.Fields.ContainsKey('checkpoint_generation') -and
+            (Field $event 'checkpoint_generation') -cne (Field $Candidate 'checkpoint_generation')) { return $result }
+    }
+    $result.RecoveryEvent = $state
+    return $result
+}
+
+# Highest-only growth can obsolete a wake before a normal request entry wins.
+# The stale callback is evidence only; a new exact grant and committed progress
+# close the obligation without manufacturing a repair ProgressObserved receipt.
+function Get-FileTransferStallGraceStaleHighestProgressClosure {
+    param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode)
+
+    function Field($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function Number($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((Field $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function Ticks($Event, [string]$Name) {
+        $value = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse((Field $Event $Name), [ref]$value)) { return 0L }
+        return $value.UtcTicks
+    }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            $value = Field $Left $name
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Right $name)) { return $false }
+        }
+        return $true
+    }
+    $stall = $Episode.Event
+    $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+        'bridge_decision_generation', 'checkpoint_request_id', 'route_publication_generation', 'route_commit_generation')
+    $completeScope = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation')
+    $wake = @('frontier_chunk_index', 'highest_received_chunk_index', 'wake_generation', 'stall_started_utc', 'wake_deadline_utc')
+    $deadline = Ticks $stall 'wake_deadline_utc'
+    $frontier = Number $stall 'frontier_chunk_index'
+    $highest = Number $stall 'highest_received_chunk_index'
+    if (-not (Equal $stall $stall ($completeScope + $wake + @('log_writer_id', 'session_id', 'transfer_id'))) -or
+        (Field $stall 'direction') -cne 'inbound' -or (Field $stall 'route') -cne 'post_tuna_fallback_v6' -or
+        (Field $stall 'protocol_version') -cne '6' -or (Field $stall 'authority_effect') -cne 'none' -or
+        $frontier -lt 0 -or $highest -le $frontier -or (Number $stall 'wake_generation') -le 0 -or
+        (Number $stall 'data_session_generation') -le 0 -or (Field $stall 'data_session_identity') -in @('', '(none)', 'none') -or
+        (Number $stall 'stall_grace_ms') -ne 750 -or (Ticks $stall 'stall_started_utc') -le 0 -or
+        $deadline -ne ((Ticks $stall 'stall_started_utc') + 7500000L)) { return $null }
+    foreach ($name in @('live_route_epoch', 'runtime_generation', 'leg_generation', 'transport_epoch',
+            'route_publication_generation', 'data_session_generation')) {
+        if ((Number $stall $name) -le 0) { return $null }
+    }
+    foreach ($name in @('terminal_generation', 'bridge_recovery_generation', 'bridge_decision_generation',
+            'route_commit_generation', 'checkpoint_generation')) {
+        if ((Number $stall $name) -lt 0) { return $null }
+    }
+
+    $seen = @{}
+    $conflicts = [Collections.Generic.List[long]]::new()
+    $scoped = [Collections.Generic.List[object]]::new()
+    foreach ($event in $Events) {
+        if ((Field $event 'log_writer_id') -cne (Field $stall 'log_writer_id')) { continue }
+        if ($null -ne $event.PSObject.Properties['EventName'] -and $event.EventName -cne (Field $event 'event')) {
+            $conflicts.Add([long]$event.Sequence)
+        }
+        $key = Field $event 'log_writer_sequence'
+        if ($key -notmatch '^[1-9][0-9]*$') {
+            if ((Equal $event $stall @('session_id', 'transfer_id'))) { $conflicts.Add([long]$event.Sequence) }
+            continue
+        }
+        # Check writer copies before transfer filtering: changed identity is a
+        # conflict, not permission for the copy to disappear from the proof.
+        if ($seen.ContainsKey($key)) {
+            $prior = $seen[$key]
+            $names = @($event.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' })
+            $same = $names.Count -eq @($prior.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' }).Count
+            foreach ($name in $names) {
+                if ((Field $event $name) -cne (Field $prior $name)) { $same = $false; break }
+            }
+            if (-not $same) { $conflicts.Add([long]$event.Sequence); $conflicts.Add([long]$prior.Sequence) }
+            continue
+        }
+        $seen[$key] = $event
+        if ([long]$event.Sequence -lt [long]$stall.Sequence -or
+            -not (Equal $event $stall @('session_id', 'transfer_id'))) { continue }
+        $scoped.Add($event)
+    }
+    # Events supplied by the partition are bounded support, not global input.
+    $ordered = @($scoped | Sort-Object Sequence)
+    $buckets = @{}
+    foreach ($event in $ordered) {
+        if ([long]$event.Sequence -le [long]$stall.Sequence) { continue }
+        $name = Field $event 'event'
+        if (-not $buckets.ContainsKey($name)) { $buckets[$name] = [Collections.Generic.List[object]]::new() }
+        $buckets[$name].Add($event)
+    }
+    function Named([string]$Name) { if ($buckets.ContainsKey($Name)) { return $buckets[$Name].ToArray() } }
+    $rechecks = @(Named 'filetransfer_v6_frontier_stall_grace_recheck_decided' | Where-Object {
+        (Field $_ 'wake_generation') -ceq (Field $stall 'wake_generation')
+    })
+    if ($rechecks.Count -ne 1) { return $null }
+    $recheck = $rechecks[0]
+    if (-not (Equal $recheck $stall ($completeScope + $wake)) -or
+        (Field $recheck 'decision_status') -cne 'stale' -or (Field $recheck 'decision_reason') -cne 'frontier_scope_changed' -or
+        (Field $recheck 'authority_effect') -cne 'none' -or
+        (Number $recheck 'log_writer_attempt_utc_ticks') -lt (Number $stall 'log_writer_attempt_utc_ticks')) { return $null }
+
+    $growthHighest = $highest
+    $growthEpoch = 0L
+    foreach ($event in @(Named 'filetransfer_v6_receiver_state_sent')) {
+        if ([long]$event.Sequence -ge [long]$recheck.Sequence) { break }
+        if ((Number $event 'contiguous_committed_chunk_index') -ne $frontier -or
+            (Number $event 'durable_received_highest_chunk_index') -lt $growthHighest -or
+            (Number $event 'epoch') -le 0 -or (Number $event 'epoch') -lt $growthEpoch -or
+            (Field $event 'transfer_paused') -cne '0' -or (Field $event 'transport_epoch') -cne (Field $stall 'transport_epoch')) { return $null }
+        $growthHighest = Number $event 'durable_received_highest_chunk_index'
+        $growthEpoch = Number $event 'epoch'
+    }
+    if ($growthHighest -le $highest) { return $null }
+
+    # Select subjects before their successful outcomes. A malformed first
+    # grant/advance must not be skipped in favour of a later recovery.
+    $grants = @(Named 'filetransfer_fallback_frontier_repair_authority_granted' | Where-Object {
+        [long]$_.Sequence -gt [long]$recheck.Sequence -and (Number $_ 'frontier_chunk_index') -eq $frontier
+    })
+    if ($grants.Count -eq 0) { return $null }
+    $grant = $grants[0]
+    if (-not (Equal $grant $stall $scope) -or (Field $grant 'authority_schema') -cne '2' -or
+        (Field $grant 'source_kind') -cne 'ReceiverRequest' -or (Field $grant 'target_transport') -cne 'regular_nkn' -or
+        (Field $grant 'authority_decision_reason') -cne 'fallback_frontier_request' -or
+        (Number $grant 'repair_generation') -le 0 -or (Number $grant 'range_count') -le 0 -or
+        (Number $grant 'requested_chunk_count') -le 0 -or (Number $grant 'log_writer_attempt_utc_ticks') -lt $deadline -or
+        (Number $grant 'log_writer_attempt_utc_ticks') -lt (Number $recheck 'log_writer_attempt_utc_ticks') -or
+        (Number $grant 'durable_received_highest_chunk_index') -lt $growthHighest) { return $null }
+    foreach ($name in @('authority_id', 'repair_request_key', 'range_fingerprint',
+            'primary_protocol_repair_request_id', 'primary_request_correlation_id')) {
+        if ((Field $grant $name) -in @('', '(none)', 'none')) { return $null }
+    }
+    if (-not (Field $grant 'range_fingerprint').StartsWith('frng-', [StringComparison]::Ordinal) -or
+        (Field $grant 'repair_request_key') -cne "fallback-frontier:${frontier}:$(Number $grant 'requested_chunk_count'):$(Field $grant 'range_fingerprint')") { return $null }
+    $repair = $scope + @('authority_schema', 'authority_id', 'repair_generation', 'repair_request_key', 'range_fingerprint',
+        'primary_protocol_repair_request_id', 'primary_request_correlation_id', 'frontier_chunk_index',
+        'durable_received_highest_chunk_index', 'source_kind', 'target_transport', 'predecessor_authority_id',
+        'range_count', 'requested_chunk_count', 'authority_decision_reason')
+    $stages = @{}
+    foreach ($name in @('filetransfer_control_plane_delivery_observed', 'filetransfer_fallback_frontier_repair_dispatched',
+            'filetransfer_v6_frontier_request_sent')) {
+        $subjects = @(Named $name | Where-Object {
+            (Field $_ 'authority_id') -ceq (Field $grant 'authority_id') -or
+            (Field $_ 'repair_request_id') -ceq (Field $grant 'primary_protocol_repair_request_id') -or
+            (Field $_ 'primary_protocol_repair_request_id') -ceq (Field $grant 'primary_protocol_repair_request_id') -or
+            (Field $_ 'primary_request_correlation_id') -ceq (Field $grant 'primary_request_correlation_id') -or
+            (Field $_ 'request_correlation_id') -ceq (Field $grant 'primary_request_correlation_id')
+        })
+        if ($subjects.Count -ne 1) { return $null }
+        $stages[$name] = $subjects[0]
+    }
+    $delivery = $stages['filetransfer_control_plane_delivery_observed']
+    $dispatch = $stages['filetransfer_fallback_frontier_repair_dispatched']
+    $send = $stages['filetransfer_v6_frontier_request_sent']
+    if (-not (Equal $dispatch $grant $repair) -or -not (Equal $send $grant $repair) -or
+        (Field $dispatch 'dispatch_observed') -cne '1' -or
+        (Field $dispatch 'protocol_repair_request_id') -cne (Field $grant 'primary_protocol_repair_request_id') -or
+        (Field $dispatch 'request_correlation_id') -cne (Field $grant 'primary_request_correlation_id') -or
+        (Field $send 'repair_request_id') -cne (Field $grant 'primary_protocol_repair_request_id') -or
+        (Field $send 'protocol_repair_request_id') -cne (Field $grant 'primary_protocol_repair_request_id') -or
+        (Field $send 'request_correlation_id') -cne (Field $grant 'primary_request_correlation_id') -or
+        (Field $send 'reason') -cnotin @('chunk_batch_committed', 'frontier_stall_repair_due') -or
+        -not (Equal $delivery $grant @('authority_schema', 'route', 'protocol_version', 'direction', 'live_route_epoch',
+            'leg_generation', 'transport_epoch', 'bridge_recovery_generation', 'checkpoint_request_id',
+            'repair_request_key', 'range_fingerprint', 'range_count', 'requested_chunk_count')) -or
+        (Field $delivery 'authority_id') -in @('', '(none)', 'none', (Field $grant 'authority_id')) -or
+        (Number $delivery 'control_plane_generation') -le 0 -or
+        (Field $delivery 'repair_request_id') -cne (Field $grant 'primary_protocol_repair_request_id') -or
+        (Field $delivery 'request_correlation_id') -cne (Field $grant 'primary_request_correlation_id') -or
+        (Field $delivery 'reason') -cne (Field $send 'reason') -or
+        (Field $delivery 'kind') -cne 'frontier_request' -or (Field $delivery 'frame_type') -cne 'filetransfer.frontier_request.v6' -or
+        (Field $delivery 'accepted_any') -cne '1' -or (Field $delivery 'peer_visible_any') -cne '1' -or
+        (Field $delivery 'local_only_rejected') -cne '0' -or
+        (Number $delivery 'first_start_chunk_index') -ne $frontier -or (Number $delivery 'first_chunk_count') -le 0 -or
+        (Number $delivery 'first_chunk_count') -gt (Number $grant 'requested_chunk_count')) { return $null }
+    $prior = $recheck
+    foreach ($event in @($grant, $delivery, $dispatch, $send)) {
+        if ([long]$event.Sequence -le [long]$prior.Sequence -or
+            (Number $event 'log_writer_attempt_utc_ticks') -lt (Number $prior 'log_writer_attempt_utc_ticks')) { return $null }
+        $prior = $event
+    }
+    $advances = @(Named 'filetransfer_v6_frontier_request_deferred' | Where-Object {
+        [long]$_.Sequence -gt [long]$send.Sequence -and (Number $_ 'frontier_chunk_index') -gt $frontier
+    })
+    if ($advances.Count -eq 0) { return $null }
+    $advance = $advances[0]
+    if (-not (Equal $advance $stall $completeScope) -or (Field $advance 'reason') -cne 'chunk_batch_committed' -or
+        (Field $advance 'authority_effect') -cne 'none' -or (Number $advance 'elapsed_ms') -ne 0 -or
+        (Number $advance 'stall_grace_ms') -ne 750 -or (Number $advance 'wake_generation') -le (Number $stall 'wake_generation') -or
+        (Number $advance 'highest_received_chunk_index') -lt (Number $grant 'durable_received_highest_chunk_index') -or
+        (Ticks $advance 'stall_started_utc') -lt (Number $send 'log_writer_attempt_utc_ticks') -or
+        (Ticks $advance 'wake_deadline_utc') -ne ((Ticks $advance 'stall_started_utc') + 7500000L)) { return $null }
+    $states = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
+        [long]$_.Sequence -gt [long]$advance.Sequence -and
+        (Number $_ 'contiguous_committed_chunk_index') -ge (Number $advance 'frontier_chunk_index')
+    })
+    if ($states.Count -eq 0) { return $null }
+    $state = $states[0]
+    if ((Number $state 'durable_received_highest_chunk_index') -lt (Number $advance 'highest_received_chunk_index') -or
+        (Number $state 'epoch') -le $growthEpoch -or (Number $state 'log_writer_attempt_utc_ticks') -lt (Ticks $advance 'stall_started_utc')) { return $null }
+    if (@($conflicts | Where-Object { $_ -ge [long]$stall.Sequence -and $_ -le [long]$state.Sequence }).Count -gt 0) { return $null }
+
+    $predecessor = Field $grant 'predecessor_authority_id'
+    if ([string]::IsNullOrWhiteSpace($predecessor) -or $predecessor -ceq (Field $grant 'authority_id')) { return $null }
+    if ($predecessor -cnotin @('(none)', 'none')) {
+        $retirements = @(Named 'filetransfer_fallback_frontier_repair_contract_settled' | Where-Object {
+            [long]$_.Sequence -le [long]$state.Sequence -and (Field $_ 'authority_id') -ceq $predecessor
+        })
+        if ($retirements.Count -ne 1) { return $null }
+        $retired = $retirements[0]
+        if ([long]$retired.Sequence -le [long]$grant.Sequence -or -not (Equal $retired $grant $scope) -or
+            (Field $retired 'settlement_outcome') -cne 'Superseded' -or
+            (Field $retired 'successor_authority_id') -cne (Field $grant 'authority_id') -or
+            (Number $retired 'repair_generation') -le 0 -or
+            (Number $retired 'repair_generation') -ge (Number $grant 'repair_generation')) { return $null }
+    }
+
+    $currentFrontier = $frontier
+    $currentHighest = $highest
+    $currentEpoch = 0L
+    $stateFrontier = $frontier
+    $stateHighest = $highest
+    $priorTicks = Number $stall 'log_writer_attempt_utc_ticks'
+    foreach ($event in $ordered) {
+        if ([long]$event.Sequence -le [long]$stall.Sequence -or [long]$event.Sequence -gt [long]$state.Sequence) { continue }
+        $ticks = Number $event 'log_writer_attempt_utc_ticks'
+        if ($ticks -lt $priorTicks) { return $null }
+        $priorTicks = $ticks
+        $name = Field $event 'event'
+        if ($name -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+            (Field $event 'transfer_paused') -ceq '1') { return $null }
+        foreach ($fieldName in $completeScope) {
+            if ($event.Fields.ContainsKey($fieldName) -and (Field $event $fieldName) -cne (Field $stall $fieldName)) { return $null }
+        }
+        if ($name -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and $event -ne $grant) { return $null }
+        if ($name -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+            (Field $event 'authority_id') -ceq (Field $grant 'authority_id')) { return $null }
+        if ($event -eq $grant) { $currentHighest = Number $grant 'durable_received_highest_chunk_index' }
+        if ($name -eq 'filetransfer_v6_frontier_request_deferred' -and
+            (Field $event 'reason') -ceq 'chunk_batch_committed' -and
+            (Number $event 'wake_generation') -gt (Number $stall 'wake_generation')) {
+            $f = Number $event 'frontier_chunk_index'; $h = Number $event 'highest_received_chunk_index'
+            if ($f -lt $currentFrontier -or $h -lt $currentHighest -or
+                [long]$event.Sequence -lt [long]$send.Sequence) { return $null }
+            $currentFrontier = $f; $currentHighest = $h
+        }
+        # Only current physical progress participates in monotonicity. Frozen
+        # wakes and retired predecessor repair fields are historical evidence.
+        if ($name -in @('filetransfer_v6_receiver_state_sent', 'filetransfer_v6_sparse_write_committed')) {
+            $f = if ($name -eq 'filetransfer_v6_receiver_state_sent') { Number $event 'contiguous_committed_chunk_index' } else { Number $event 'next_chunk_index' }
+            $h = if ($name -eq 'filetransfer_v6_receiver_state_sent') { Number $event 'durable_received_highest_chunk_index' } else { Number $event 'highest_received_chunk_index' }
+            if ($f -lt $currentFrontier -or $h -lt $currentHighest -or
+                ([long]$event.Sequence -lt [long]$send.Sequence -and $f -ne $frontier)) { return $null }
+            $currentFrontier = $f; $currentHighest = $h
+            if ($name -eq 'filetransfer_v6_receiver_state_sent') {
+                $epoch = Number $event 'epoch'
+                if ($epoch -le 0 -or $epoch -lt $currentEpoch -or (Field $event 'transfer_paused') -cne '0' -or
+                    (Field $event 'transport_epoch') -cne (Field $stall 'transport_epoch') -or
+                    ($epoch -eq $currentEpoch -and ($f -ne $stateFrontier -or $h -ne $stateHighest))) { return $null }
+                $currentEpoch = $epoch
+                $stateFrontier = $f; $stateHighest = $h
+            }
+        }
+    }
+    return $state
+}
+
+# A dispatched wake can be fulfilled by independent committed traffic. This
+# closes only the stall obligation; it does not settle the repair authority.
+function Get-FileTransferStallGraceDispatchedProgressClosure {
+    param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode)
+
+    function Field($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function Number($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((Field $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function Ticks($Event, [string]$Name) {
+        $value = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse((Field $Event $Name), [ref]$value)) { return 0L }
+        return $value.UtcTicks
+    }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            $value = Field $Left $name
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Right $name)) { return $false }
+        }
+        return $true
+    }
+    $stall = $Episode.Event
+    $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+        'bridge_decision_generation', 'checkpoint_request_id', 'route_publication_generation', 'route_commit_generation')
+    $completeScope = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation')
+    $wake = @('frontier_chunk_index', 'highest_received_chunk_index', 'wake_generation', 'stall_started_utc', 'wake_deadline_utc')
+    $deadline = Ticks $stall 'wake_deadline_utc'
+    if (-not (Equal $stall $stall ($completeScope + $wake)) -or
+        (Field $stall 'direction') -cne 'inbound' -or (Field $stall 'route') -cne 'post_tuna_fallback_v6' -or
+        (Field $stall 'protocol_version') -cne '6' -or (Number $stall 'wake_generation') -le 0 -or
+        (Number $stall 'frontier_chunk_index') -lt 0 -or (Number $stall 'data_session_generation') -le 0 -or
+        (Field $stall 'data_session_identity') -in @('', '(none)', 'none') -or
+        (Number $stall 'stall_grace_ms') -ne 750 -or (Ticks $stall 'stall_started_utc') -le 0 -or
+        $deadline -ne ((Ticks $stall 'stall_started_utc') + 7500000L)) { return $null }
+
+    $buckets = @{}
+    $seen = @{}
+    $conflicts = [Collections.Generic.List[long]]::new()
+    $scoped = [Collections.Generic.List[object]]::new()
+    foreach ($event in $Events) {
+        if ([long]$event.Sequence -le [long]$stall.Sequence -or
+            -not (Equal $event $stall @('log_writer_id', 'session_id', 'transfer_id'))) { continue }
+        $key = Field $event 'log_writer_sequence'
+        if ($key -notmatch '^[1-9][0-9]*$') { continue }
+        if ($seen.ContainsKey($key)) {
+            $prior = $seen[$key]
+            $names = @($event.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' })
+            $same = $names.Count -eq @($prior.Fields.Keys | Where-Object { $_ -ne 'gui_evidence_sequence' }).Count
+            foreach ($name in $names) {
+                if ((Field $event $name) -cne (Field $prior $name)) { $same = $false; break }
+            }
+            if (-not $same) { $conflicts.Add([long]$event.Sequence) }
+            continue
+        }
+        $seen[$key] = $event
+        $scoped.Add($event)
+        $name = Field $event 'event'
+        if (-not $buckets.ContainsKey($name)) { $buckets[$name] = [Collections.Generic.List[object]]::new() }
+        $buckets[$name].Add($event)
+    }
+    function Named([string]$Name) { if ($buckets.ContainsKey($Name)) { return $buckets[$Name].ToArray() } }
+    $rechecks = @(Named 'filetransfer_v6_frontier_stall_grace_recheck_decided' | Where-Object {
+        (Field $_ 'wake_generation') -ceq (Field $stall 'wake_generation')
+    })
+    if ($rechecks.Count -ne 1) { return $null }
+    $recheck = $rechecks[0]
+    if (-not (Equal $recheck $stall ($completeScope + $wake)) -or
+        (Field $recheck 'decision_status') -cne 'dispatched' -or
+        (Field $recheck 'decision_reason') -cne 'exact_receiver_request_dispatched' -or
+        (Field $recheck 'authority_effect') -cne 'none' -or
+        (Number $recheck 'log_writer_attempt_utc_ticks') -lt $deadline) { return $null }
+
+    $grants = @(Named 'filetransfer_fallback_frontier_repair_authority_granted' | Where-Object {
+        [long]$_.Sequence -lt [long]$recheck.Sequence -and
+        (Number $_ 'log_writer_attempt_utc_ticks') -ge $deadline -and
+        (Equal $_ $stall ($scope + @('frontier_chunk_index'))) -and
+        (Field $_ 'source_kind') -ceq 'ReceiverRequest'
+    })
+    if ($grants.Count -ne 1) { return $null }
+    $grant = $grants[0]
+    foreach ($name in @('authority_id', 'repair_request_key', 'range_fingerprint',
+            'primary_protocol_repair_request_id', 'primary_request_correlation_id')) {
+        if ((Field $grant $name) -in @('', '(none)', 'none')) { return $null }
+    }
+    if ((Number $grant 'repair_generation') -le 0 -or (Field $grant 'target_transport') -cne 'regular_nkn' -or
+        (Number $grant 'durable_received_highest_chunk_index') -ne (Number $stall 'highest_received_chunk_index')) { return $null }
+    $repair = $scope + @('authority_id', 'repair_generation', 'repair_request_key', 'range_fingerprint',
+        'primary_protocol_repair_request_id', 'primary_request_correlation_id', 'frontier_chunk_index',
+        'durable_received_highest_chunk_index', 'source_kind', 'target_transport', 'predecessor_authority_id')
+    function AfterGrant($Event) {
+        return [long]$Event.Sequence -gt [long]$grant.Sequence -and [long]$Event.Sequence -lt [long]$recheck.Sequence
+    }
+    # Count subjects before validating outcomes, so a conflicting copy cannot
+    # disappear merely because its receipt/dispatch status is unsuccessful.
+    foreach ($name in @('filetransfer_control_plane_delivery_observed', 'filetransfer_fallback_frontier_repair_dispatched',
+            'filetransfer_v6_frontier_request_sent')) {
+        $subjects = @(Named $name | Where-Object {
+            (AfterGrant $_) -and $(if ($name -eq 'filetransfer_control_plane_delivery_observed') {
+                (Field $_ 'repair_request_id') -ceq (Field $grant 'primary_protocol_repair_request_id') -or
+                    (Field $_ 'request_correlation_id') -ceq (Field $grant 'primary_request_correlation_id')
+            } else { (Field $_ 'authority_id') -ceq (Field $grant 'authority_id') })
+        })
+        if ($subjects.Count -ne 1) { return $null }
+    }
+    $deliveries = @(Named 'filetransfer_control_plane_delivery_observed' | Where-Object {
+        (AfterGrant $_) -and (Equal $_ $grant @('route', 'protocol_version', 'direction', 'live_route_epoch',
+            'leg_generation', 'transport_epoch', 'bridge_recovery_generation', 'checkpoint_request_id',
+            'repair_request_key', 'range_fingerprint')) -and
+        (Field $_ 'repair_request_id') -ceq (Field $grant 'primary_protocol_repair_request_id') -and
+        (Field $_ 'request_correlation_id') -ceq (Field $grant 'primary_request_correlation_id') -and
+        (Field $_ 'kind') -ceq 'frontier_request' -and (Field $_ 'frame_type') -ceq 'filetransfer.frontier_request.v6' -and
+        (Field $_ 'accepted_any') -ceq '1' -and (Field $_ 'peer_visible_any') -ceq '1'
+    })
+    $dispatches = @(Named 'filetransfer_fallback_frontier_repair_dispatched' | Where-Object {
+        (AfterGrant $_) -and (Equal $_ $grant $repair) -and (Field $_ 'dispatch_observed') -ceq '1'
+    })
+    $sends = @(Named 'filetransfer_v6_frontier_request_sent' | Where-Object {
+        (AfterGrant $_) -and (Equal $_ $grant $repair) -and
+        (Field $_ 'repair_request_id') -ceq (Field $grant 'primary_protocol_repair_request_id') -and
+        (Field $_ 'request_correlation_id') -ceq (Field $grant 'primary_request_correlation_id') -and
+        (Field $_ 'reason') -ceq 'frontier_stall_grace_elapsed'
+    })
+    if ($deliveries.Count -ne 1 -or $dispatches.Count -ne 1 -or $sends.Count -ne 1 -or
+        [long]$deliveries[0].Sequence -ge [long]$dispatches[0].Sequence -or
+        [long]$dispatches[0].Sequence -ge [long]$sends[0].Sequence) { return $null }
+    $priorTicks = Number $grant 'log_writer_attempt_utc_ticks'
+    foreach ($event in @($deliveries[0], $dispatches[0], $sends[0], $recheck)) {
+        $ticks = Number $event 'log_writer_attempt_utc_ticks'
+        if ($ticks -lt $priorTicks) { return $null }
+        $priorTicks = $ticks
+    }
+
+    $advances = @(Named 'filetransfer_v6_frontier_request_deferred' | Where-Object {
+        [long]$_.Sequence -gt [long]$recheck.Sequence -and (Equal $_ $stall $completeScope) -and
+        (Field $_ 'reason') -ceq 'chunk_batch_committed' -and (Field $_ 'authority_effect') -ceq 'none' -and
+        (Number $_ 'elapsed_ms') -eq 0 -and (Number $_ 'stall_grace_ms') -eq 750 -and
+        (Number $_ 'frontier_chunk_index') -gt (Number $stall 'frontier_chunk_index') -and
+        (Number $_ 'highest_received_chunk_index') -ge (Number $stall 'highest_received_chunk_index') -and
+        (Number $_ 'wake_generation') -gt (Number $stall 'wake_generation') -and
+        (Ticks $_ 'stall_started_utc') -ge (Number $recheck 'log_writer_attempt_utc_ticks') -and
+        (Ticks $_ 'wake_deadline_utc') -eq ((Ticks $_ 'stall_started_utc') + 7500000L)
+    } | Sort-Object Sequence)
+    foreach ($advance in $advances) {
+        $states = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
+            [long]$_.Sequence -gt [long]$advance.Sequence -and
+            (Number $_ 'log_writer_attempt_utc_ticks') -ge (Ticks $advance 'stall_started_utc') -and
+            (Number $_ 'contiguous_committed_chunk_index') -ge (Number $advance 'frontier_chunk_index') -and
+            (Number $_ 'durable_received_highest_chunk_index') -ge (Number $advance 'highest_received_chunk_index') -and
+            (Field $_ 'transport_epoch') -ceq (Field $stall 'transport_epoch') -and
+            (Field $_ 'transfer_paused') -ceq '0' -and (Number $_ 'epoch') -gt 0
+        } | Sort-Object Sequence)
+        if ($states.Count -eq 0) { continue }
+        $state = $states[0]
+        if (@($conflicts | Where-Object { $_ -le [long]$state.Sequence }).Count -gt 0) { return $null }
+        foreach ($event in $scoped) {
+            if ([long]$event.Sequence -gt [long]$state.Sequence) { continue }
+            if ((Field $event 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                    'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+                (Field $event 'transfer_paused') -ceq '1') { return $null }
+            # Scope-poor physical records corroborate this exact full-scope
+            # interval; they cannot supply or replace its authority fields.
+            foreach ($name in $completeScope) {
+                if ($event.Fields.ContainsKey($name) -and (Field $event $name) -cne (Field $stall $name)) { return $null }
+            }
+            if ((Field $event 'event') -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+                (Field $event 'authority_id') -ceq (Field $grant 'authority_id')) { return $null }
+            if ((Field $event 'event') -eq 'filetransfer_v6_receiver_state_sent' -and
+                (Number $event 'contiguous_committed_chunk_index') -lt (Number $stall 'frontier_chunk_index')) { return $null }
+        }
+        return $state
+    }
+    return $null
+}
+
 # A fulfilled recent-progress wake transfers the obligation to the ordinary
 # stall grace. Natural progress can close that grace without repair authority,
 # but a sparse write alone is not publication proof.

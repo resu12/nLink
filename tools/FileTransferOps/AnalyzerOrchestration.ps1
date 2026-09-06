@@ -908,7 +908,6 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
         return & $empty
     }
 
-    [object[]]$orderedEvents = @($Events | Sort-Object Sequence, LineNumber)
     [object[]]$entries = @(
         foreach ($boundary in @($SnapshotEvaluation.Boundaries)) {
             if ([string]$boundary.verdict -cne 'pass') {
@@ -949,8 +948,81 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
                 [long]$_.TransitionSequence
         })
 
+    if ($starts.Count -eq 0) {
+        return & $empty
+    }
+
+    # This is a conservative candidate view only. The existing predicates below
+    # retain exact case, scope, receipt ownership, and poison semantics.
+    $candidateEventNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @(
+            'filetransfer_fallback_tail_yield_proof_received',
+            'filetransfer_fallback_tail_local_yield_blocked',
+            'filetransfer_runtime_terminalized',
+            'filetransfer_terminalized_by_peer_down',
+            'filetransfer_terminalized_by_peer_session_end',
+            'filetransfer_terminalized_by_peer_disconnect',
+            'filetransfer_terminalized_by_session_end',
+            'filetransfer_session_replaced',
+            'filetransfer_data_session_recreated',
+            'filetransfer_data_session_removed',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'transfer_terminal',
+            'filetransfer_fallback_tail_peer_proof_pending_decided',
+            'filetransfer_fallback_leg_transport_epoch_adopted',
+            'filetransfer_fallback_transport_epoch_adopted',
+            'filetransfer_leg_started',
+            'filetransfer_fallback_leg_authority_started',
+            'filetransfer_live_route_epoch_started',
+            'filetransfer_live_route_epoch_terminal',
+            'filetransfer_fallback_leg_authority_completed',
+            'filetransfer_fallback_leg_authority_superseded_by_route_hint',
+            'filetransfer_leg_frozen',
+            'filetransfer_v6_epoch_terminal',
+            'filetransfer_runtime_owner_workers_retired')) {
+        [void]$candidateEventNames.Add($name)
+    }
+    $candidatesByWriter = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::Ordinal)
+    $ordinal = 0L
+    foreach ($event in @($Events | Sort-Object Sequence, LineNumber)) {
+        $ordinal++
+        if (-not $candidateEventNames.Contains([string]$event.EventName)) {
+            continue
+        }
+        $writer = Get-FileTransferEventField -Event $event -Name 'log_writer_id' -Default ''
+        if (-not $candidatesByWriter.ContainsKey($writer)) {
+            $candidatesByWriter[$writer] = [pscustomobject]@{
+                Receipts = [System.Collections.Generic.List[object]]::new()
+                Blocked = [System.Collections.Generic.List[object]]::new()
+                Poison = [System.Collections.Generic.List[object]]::new()
+            }
+        }
+        $candidate = [pscustomobject]@{
+            Event = $event
+            Ordinal = $ordinal
+            WriterSequence = Get-FileTransferFallbackTailEventWriterSequence -Event $event
+        }
+        $bucket = $candidatesByWriter[$writer]
+        if ([string]$event.EventName -eq 'filetransfer_fallback_tail_yield_proof_received') {
+            $bucket.Receipts.Add($candidate)
+        }
+        elseif ([string]$event.EventName -eq 'filetransfer_fallback_tail_local_yield_blocked') {
+            $bucket.Blocked.Add($candidate)
+        }
+        else {
+            $bucket.Poison.Add($candidate)
+        }
+    }
+
     $incidents = [System.Collections.Generic.List[object]]::new()
     foreach ($start in $starts) {
+        if (-not $candidatesByWriter.ContainsKey([string]$start.Writer)) {
+            continue
+        }
+        $candidates = $candidatesByWriter[[string]$start.Writer]
         $startSequence = [long]$start.TransitionSequence
         [object[]]$retirements = @($entries | Where-Object {
                 [string]$_.Boundary.coordinatorInstanceId -ceq
@@ -980,15 +1052,14 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
             [long]::MaxValue
         }
 
-        [object[]]$receipts = @($orderedEvents | Where-Object {
-                $writerSequence = Get-FileTransferFallbackTailEventWriterSequence `
-                    -Event $_
+        [object[]]$receipts = @($candidates.Receipts | Where-Object {
+                $writerSequence = $_.WriterSequence
                 $writerSequence -gt $startSequence -and
                 $writerSequence -lt $retirementBound -and
                 (Test-FileTransferFallbackTailSnapshotReceiptMatch `
                     -Binding $start `
-                    -Event $_)
-            })
+                    -Event $_.Event)
+            } | ForEach-Object { $_.Event })
         if ($receipts.Count -ne 1) {
             continue
         }
@@ -1007,12 +1078,11 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
         }
         $receiptSequence = Get-FileTransferFallbackTailEventWriterSequence -Event $receipt
 
-        [object[]]$preReceiptPoisonEvents = @($orderedEvents | Where-Object {
-                $writerSequence = Get-FileTransferFallbackTailEventWriterSequence `
-                    -Event $_
+        [object[]]$preReceiptPoisonEvents = @($candidates.Poison | Where-Object {
+                $writerSequence = $_.WriterSequence
                 $writerSequence -gt $startSequence -and
                 $writerSequence -lt $receiptSequence -and
-                (([string]$_.EventName -in @(
+                (([string]$_.Event.EventName -in @(
                             'filetransfer_runtime_terminalized',
                             'filetransfer_terminalized_by_peer_down',
                             'filetransfer_terminalized_by_peer_session_end',
@@ -1026,11 +1096,11 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
                             'transfer_terminal') -and
                         (Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch `
                             -Pending $receipt `
-                            -Event $_)) -or
+                            -Event $_.Event)) -or
                     (Test-FileTransferFallbackTailLocalYieldScopeMutation `
                         -Pending $receipt `
-                        -Event $_))
-            })
+                        -Event $_.Event))
+            } | ForEach-Object { $_.Event })
         if ($preReceiptPoisonEvents.Count -gt 0) {
             continue
         }
@@ -1163,12 +1233,11 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
         else {
             $retirementSequence
         }
-        [object[]]$poisonEvents = @($orderedEvents | Where-Object {
-                $writerSequence = Get-FileTransferFallbackTailEventWriterSequence `
-                    -Event $_
+        [object[]]$poisonEvents = @($candidates.Poison | Where-Object {
+                $writerSequence = $_.WriterSequence
                 $writerSequence -gt $receiptSequence -and
                 $writerSequence -lt $poisonUpperBound -and
-                (([string]$_.EventName -in @(
+                (([string]$_.Event.EventName -in @(
                             'filetransfer_runtime_terminalized',
                             'filetransfer_terminalized_by_peer_down',
                             'filetransfer_terminalized_by_peer_session_end',
@@ -1182,13 +1251,11 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
                             'transfer_terminal') -and
                         (Test-FileTransferFallbackTailLocalYieldPoisonScopeMatch `
                             -Pending $receipt `
-                            -Event $_)) -or
+                            -Event $_.Event)) -or
                     (Test-FileTransferFallbackTailLocalYieldScopeMutation `
                         -Pending $receipt `
-                        -Event $_))
-            } | Sort-Object {
-                Get-FileTransferFallbackTailEventWriterSequence -Event $_
-            })
+                        -Event $_.Event))
+            } | Sort-Object WriterSequence | ForEach-Object { $_.Event })
         $poisonSequence = if ($poisonEvents.Count -gt 0) {
             Get-FileTransferFallbackTailEventWriterSequence -Event $poisonEvents[0]
         }
@@ -1196,19 +1263,19 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
             [long]::MaxValue
         }
         $endSequence = [Math]::Min($retirementSequence, $poisonSequence)
-        [object[]]$blocked = @($orderedEvents | Where-Object {
-                [string]$_.EventName -ceq 'filetransfer_fallback_tail_local_yield_blocked' -and
-                (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -ceq
+        [object[]]$blocked = @($candidates.Blocked | Where-Object {
+                [string]$_.Event.EventName -ceq 'filetransfer_fallback_tail_local_yield_blocked' -and
+                (Get-FileTransferEventField -Event $_.Event -Name 'source' -Default '') -ceq
                     'fallback_tail_peer_yield' -and
-                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -ceq
+                (Get-FileTransferEventField -Event $_.Event -Name 'decision_reason' -Default '') -ceq
                     'fallback_tail_local_owner_work_pending' -and
-                (Get-FileTransferFallbackTailEventWriterSequence -Event $_) -gt $receiptSequence -and
-                (Get-FileTransferFallbackTailEventWriterSequence -Event $_) -lt $endSequence -and
-                (Test-FileTransferFallbackTailRawScopeEqual -Left $receipt -Right $_) -and
+                $_.WriterSequence -gt $receiptSequence -and
+                $_.WriterSequence -lt $endSequence -and
+                (Test-FileTransferFallbackTailRawScopeEqual -Left $receipt -Right $_.Event) -and
                 (Test-FileTransferFallbackTailSnapshotScopeEventMatch `
                     -Binding $start `
-                    -Event $_)
-            })
+                    -Event $_.Event)
+            } | ForEach-Object { $_.Event })
         if ($blocked.Count -gt 0) {
             $firstBlockedSequence = Get-FileTransferFallbackTailEventWriterSequence `
                 -Event ($blocked | Sort-Object Sequence, LineNumber | Select-Object -First 1)
@@ -8895,8 +8962,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [string]$routeConsistencyState.Parity.FailureReason
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
-    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
-    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
     $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
     return [pscustomobject]@{
@@ -12297,9 +12364,9 @@ function Invoke-FileTransferRetainedAnalysis {
         $artifactStopwatch.Start()
         & $fullReportStageObserver -Name 'full_snapshot_summary_publication' -Status Started -InputCount $fullSnapshotLines.Count
         Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
-            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 |
+            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
-            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings | ConvertTo-Json -Depth 64 |
+            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
             $snapshotParity | ConvertTo-Json -Depth 8 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8

@@ -14867,7 +14867,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Get-TunaGuiFallbackFrontierStallGraceRecheckFailure {
         param(
-            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+            [switch]$IncludeEpisodeAudit
         )
 
         $byEvent = @{}
@@ -14905,7 +14906,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             return @()
         }
         function Get-GuiStallSequence([object]$Line) {
-            $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name 'gui_evidence_sequence'
+            $value = ([string]$Line.Fields['gui_evidence_sequence'])
             if ($value -match '^[1-9][0-9]*$') { return [long]$value }
             return [long]::MaxValue
         }
@@ -14916,7 +14917,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         })
         function Get-GuiStallField([object]$Line, [string[]]$Names) {
             foreach ($name in $Names) {
-                $value = Get-TunaGuiLogLineFieldValue -Line $Line -Name $name
+                $value = ([string]$Line.Fields[$name])
                 if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
             }
             return ''
@@ -14930,8 +14931,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'route_commit_generation')
         function Test-GuiStallScope([object]$Reference, [object]$Candidate) {
             foreach ($field in $scopeFields) {
-                $expected = Get-TunaGuiLogLineFieldValue -Line $Reference -Name $field
-                $actual = Get-TunaGuiLogLineFieldValue -Line $Candidate -Name $field
+                $expected = ([string]$Reference.Fields[$field])
+                $actual = ([string]$Candidate.Fields[$field])
                 if ([string]::IsNullOrWhiteSpace($expected) -or
                     [string]::IsNullOrWhiteSpace($actual) -or $expected -ne $actual) {
                     return $false
@@ -14949,8 +14950,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'data_session_identity', 'data_session_generation')
         function Test-GuiStallExactSource([object]$Reference, [object]$Candidate) {
             foreach ($field in $stallScopeFields) {
-                $expected = Get-TunaGuiLogLineFieldValue -Line $Reference -Name $field
-                $actual = Get-TunaGuiLogLineFieldValue -Line $Candidate -Name $field
+                $expected = ([string]$Reference.Fields[$field])
+                $actual = ([string]$Candidate.Fields[$field])
                 if ([string]::IsNullOrWhiteSpace($expected) -or
                     [string]::IsNullOrWhiteSpace($actual) -or $expected -ne $actual) {
                     return $false
@@ -14963,7 +14964,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [object[]]$grants = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_authority_granted')
         [object[]]$settlements = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_contract_settled')
         $hasTunaHandoffRetirement = @($settlements | Where-Object {
-                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_reason') -eq 'tuna_reactivation_replaced_fallback_owner'
+                ([string]$_.Fields['decision_reason']) -eq 'tuna_reactivation_replaced_fallback_owner'
             }).Count -gt 0
         [object[]]$progresses = @(Get-GuiStallLines 'filetransfer_fallback_frontier_repair_progress_observed')
         [object[]]$forcedStates = @(Get-GuiStallLines 'filetransfer_v6_fallback_frontier_repair_progress_state_forced')
@@ -14991,85 +14992,85 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         foreach ($deferred in $deferrals) {
             $sequence = Get-GuiStallSequence $deferred
-            $writer = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'log_writer_id'
-            $session = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'session_id'
-            $transfer = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'transfer_id'
-            $frontier = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'frontier_chunk_index'
-            $highest = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'highest_received_chunk_index'
-            $grace = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'stall_grace_ms'
-            $ticks = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'log_writer_attempt_utc_ticks'
+            $writer = ([string]$deferred.Fields['log_writer_id'])
+            $session = ([string]$deferred.Fields['session_id'])
+            $transfer = ([string]$deferred.Fields['transfer_id'])
+            $frontier = ([string]$deferred.Fields['frontier_chunk_index'])
+            $highest = ([string]$deferred.Fields['highest_received_chunk_index'])
+            $grace = ([string]$deferred.Fields['stall_grace_ms'])
+            $ticks = ([string]$deferred.Fields['log_writer_attempt_utc_ticks'])
             if ([string]::IsNullOrWhiteSpace($writer) -or [string]::IsNullOrWhiteSpace($session) -or
                 [string]::IsNullOrWhiteSpace($transfer) -or $frontier -notmatch '^[0-9]+$' -or
                 $highest -notmatch '^[0-9]+$' -or [long]$highest -lt ([long]$frontier - 1) -or
                 $grace -notmatch '^[1-9][0-9]*$' -or $ticks -notmatch '^[1-9][0-9]*$' -or
-                (Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'elapsed_ms') -ne '0') {
+                ([string]$deferred.Fields['elapsed_ms']) -ne '0') {
                 continue
             }
             [object[]]$priorProgress = @($progresses | Where-Object {
                     (Get-GuiStallSequence $_) -lt $sequence -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $writer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $session -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $transfer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'direction') -eq 'inbound' -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'route') -eq 'post_tuna_fallback_v6' -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'protocol_version') -eq '6' -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'source_kind') -eq 'ReceiverRequest' -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'current_frontier_chunk_index') -eq $frontier
+                    ([string]$_.Fields['log_writer_id']) -eq $writer -and
+                    ([string]$_.Fields['session_id']) -eq $session -and
+                    ([string]$_.Fields['transfer_id']) -eq $transfer -and
+                    ([string]$_.Fields['direction']) -eq 'inbound' -and
+                    ([string]$_.Fields['route']) -eq 'post_tuna_fallback_v6' -and
+                    ([string]$_.Fields['protocol_version']) -eq '6' -and
+                    ([string]$_.Fields['source_kind']) -eq 'ReceiverRequest' -and
+                    ([string]$_.Fields['current_frontier_chunk_index']) -eq $frontier
                 } | Select-Object -Last 1)
             if ($priorProgress.Count -ne 1) { continue }
             $progress = $priorProgress[0]
-            $authority = Get-TunaGuiLogLineFieldValue -Line $progress -Name 'authority_id'
-            $generation = Get-TunaGuiLogLineFieldValue -Line $progress -Name 'repair_generation'
-            $repairKey = Get-TunaGuiLogLineFieldValue -Line $progress -Name 'repair_request_key'
-            $fingerprint = Get-TunaGuiLogLineFieldValue -Line $progress -Name 'range_fingerprint'
+            $authority = ([string]$progress.Fields['authority_id'])
+            $generation = ([string]$progress.Fields['repair_generation'])
+            $repairKey = ([string]$progress.Fields['repair_request_key'])
+            $fingerprint = ([string]$progress.Fields['range_fingerprint'])
             $requestId = Get-GuiStallField $progress @('primary_protocol_repair_request_id', 'protocol_repair_request_id')
             $correlation = Get-GuiStallField $progress @('primary_request_correlation_id', 'request_correlation_id')
             if ($authority -in @('', '(none)', 'none') -or $generation -notmatch '^[1-9][0-9]*$' -or
                 $repairKey -in @('', '(none)', 'none') -or $fingerprint -in @('', '(none)', 'none') -or
                 $requestId -in @('', '(none)', 'none') -or $correlation -in @('', '(none)', 'none') -or
-                [long](Get-TunaGuiLogLineFieldValue -Line $progress -Name 'previous_frontier_chunk_index') -ne ([long]$frontier - 1)) {
+                [long]([string]$progress.Fields['previous_frontier_chunk_index']) -ne ([long]$frontier - 1)) {
                 continue
             }
             [object[]]$grant = @($grants | Where-Object {
                     (Get-GuiStallSequence $_) -lt (Get-GuiStallSequence $progress) -and
                     (Test-GuiStallScope $progress $_) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $authority -and
+                    ([string]$_.Fields['authority_id']) -eq $authority -and
                     (Get-GuiStallField $_ @('primary_protocol_repair_request_id', 'protocol_repair_request_id')) -eq $requestId -and
                     (Get-GuiStallField $_ @('primary_request_correlation_id', 'request_correlation_id')) -eq $correlation
                 } | Select-Object -Last 1)
             [object[]]$settlement = @($settlements | Where-Object {
                     (Get-GuiStallSequence $_) -lt (Get-GuiStallSequence $progress) -and
                     (Test-GuiStallScope $progress $_) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $authority -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'settlement_outcome') -eq 'ProgressObserved'
+                    ([string]$_.Fields['authority_id']) -eq $authority -and
+                    ([string]$_.Fields['settlement_outcome']) -eq 'ProgressObserved'
                 } | Select-Object -Last 1)
             [object[]]$forced = @($forcedStates | Where-Object {
                     (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $progress) -and
                     (Get-GuiStallSequence $_) -lt $sequence -and (Test-GuiStallScope $progress $_) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $authority -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'current_frontier_chunk_index') -eq $frontier -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_status') -in @('Accepted', 'Idempotent')
+                    ([string]$_.Fields['authority_id']) -eq $authority -and
+                    ([string]$_.Fields['current_frontier_chunk_index']) -eq $frontier -and
+                    ([string]$_.Fields['decision_status']) -in @('Accepted', 'Idempotent')
                 } | Select-Object -First 1)
             if ($grant.Count -ne 1 -or $settlement.Count -ne 1 -or $forced.Count -ne 1) { continue }
-            $dataSession = Get-TunaGuiLogLineFieldValue -Line $forced[0] -Name 'data_session_identity'
-            $dataGeneration = Get-TunaGuiLogLineFieldValue -Line $forced[0] -Name 'data_session_generation'
-            $stateEpoch = Get-TunaGuiLogLineFieldValue -Line $forced[0] -Name 'receiver_state_epoch'
+            $dataSession = ([string]$forced[0].Fields['data_session_identity'])
+            $dataGeneration = ([string]$forced[0].Fields['data_session_generation'])
+            $stateEpoch = ([string]$forced[0].Fields['receiver_state_epoch'])
             [object[]]$state = @($receiverStates | Where-Object {
                     (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $forced[0]) -and
                     (Get-GuiStallSequence $_) -lt $sequence -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $writer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $session -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $transfer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'epoch') -eq $stateEpoch -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'contiguous_committed_chunk_index') -eq $frontier
+                    ([string]$_.Fields['log_writer_id']) -eq $writer -and
+                    ([string]$_.Fields['session_id']) -eq $session -and
+                    ([string]$_.Fields['transfer_id']) -eq $transfer -and
+                    ([string]$_.Fields['epoch']) -eq $stateEpoch -and
+                    ([string]$_.Fields['contiguous_committed_chunk_index']) -eq $frontier
                 } | Select-Object -First 1)
             if ($state.Count -ne 1 -or $dataSession -in @('', '(none)', 'none') -or
                 $dataGeneration -notmatch '^[1-9][0-9]*$') { continue }
-            $stallStart = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'stall_started_utc'
+            $stallStart = ([string]$deferred.Fields['stall_started_utc'])
             if ([string]::IsNullOrWhiteSpace($stallStart)) { $stallStart = $ticks }
-            $wakeGeneration = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'wake_generation'
-            $wakeDeadline = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'wake_deadline_utc'
-            $checkpointGeneration = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'checkpoint_generation'
+            $wakeGeneration = ([string]$deferred.Fields['wake_generation'])
+            $wakeDeadline = ([string]$deferred.Fields['wake_deadline_utc'])
+            $checkpointGeneration = ([string]$deferred.Fields['checkpoint_generation'])
             $key = "$writer|$session|$transfer|$frontier|$highest|$stallStart|$wakeGeneration|$wakeDeadline|$checkpointGeneration|$authority|$generation|$repairKey|$fingerprint|$dataSession|$dataGeneration".ToLowerInvariant()
             if (-not $candidates.ContainsKey($key)) {
                 $candidates[$key] = [pscustomobject]@{
@@ -15078,25 +15079,73 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     Highest = [long]$highest
                     DeadlineTicks = [long]$ticks + ([long]$grace * 10000L); Authority = $authority
                     CandidateTicks = [long]$ticks
-                    WakeGeneration = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'wake_generation'
-                    WakeDeadline = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'wake_deadline_utc'
-                    StallStartedUtc = Get-TunaGuiLogLineFieldValue -Line $deferred -Name 'stall_started_utc'
+                    WakeGeneration = ([string]$deferred.Fields['wake_generation'])
+                    WakeDeadline = ([string]$deferred.Fields['wake_deadline_utc'])
+                    StallStartedUtc = ([string]$deferred.Fields['stall_started_utc'])
                     DataSessionIdentity = $dataSession; DataSessionGeneration = $dataGeneration
+                    RawEvents = [Collections.Generic.List[object]]::new()
                 }
             }
+            $candidates[$key].RawEvents.Add($deferred)
+        }
+
+        $admittedSequences = [Collections.Generic.HashSet[long]]::new()
+        foreach ($candidate in $candidates.Values) {
+            foreach ($raw in $candidate.RawEvents) { [void]$admittedSequences.Add((Get-GuiStallSequence $raw)) }
+        }
+        $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $handoffEvents
+        foreach ($deferred in $deferrals) {
+            $sequence = Get-GuiStallSequence $deferred
+            if ($admittedSequences.Contains($sequence)) { continue }
+            $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex `
+                -Candidate ([pscustomobject]@{ Fields = $deferred.Fields; Sequence = $sequence })
+            if ($null -eq $admission -or -not $admission.Admitted) { continue }
+            $episode = $admission.Episode
+            if (-not $candidates.ContainsKey($episode.Key)) {
+                $candidates[$episode.Key] = [pscustomobject]@{
+                    Sequence = $sequence; Line = $deferred; Progress = $deferred; Writer = $episode.Writer
+                    Session = $episode.Session; Transfer = $episode.Transfer; Frontier = $episode.Frontier
+                    Highest = $episode.Highest; Authority = ''; DataSessionIdentity = $episode.DataSessionIdentity
+                    DataSessionGeneration = $episode.DataSessionGeneration
+                    DeadlineTicks = ([DateTimeOffset]::Parse([string]$deferred.Fields['wake_deadline_utc'])).UtcTicks
+                    CandidateTicks = [long]$deferred.Fields['log_writer_attempt_utc_ticks']
+                    WakeGeneration = [string]$deferred.Fields['wake_generation']; WakeDeadline = [string]$deferred.Fields['wake_deadline_utc']
+                    StallStartedUtc = [string]$deferred.Fields['stall_started_utc']; PublishedSource = $admission.Source
+                    RawEvents = [Collections.Generic.List[object]]::new()
+                }
+            }
+            $candidates[$episode.Key].RawEvents.Add($deferred)
         }
 
         $unresolved = [System.Collections.Generic.List[object]]::new()
+        $audit = [Collections.Generic.List[object]]::new()
         foreach ($candidate in @($candidates.Values)) {
+            $episodeResult = [pscustomobject]@{
+                Event = $candidate.Line; RawEvents = $candidate.RawEvents.ToArray()
+                Recovered = $false; Excluded = $false; RecoveryEvent = $null
+            }
+            $audit.Add($episodeResult)
+            if ($null -eq (Get-Variable -Name currentSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
+                $currentSourceIndex = New-FileTransferStallGraceCurrentSourceIndex -Events $handoffEvents
+            }
+            $currentSourceRecovery = Get-FileTransferStallGraceCurrentSourceRecovery -Index $currentSourceIndex `
+                -Candidate ([pscustomobject]@{ Fields = $candidate.Line.Fields; Sequence = $candidate.Sequence }) `
+                -HistoricalProgress ([pscustomobject]@{ Fields = $candidate.Progress.Fields; Sequence = (Get-GuiStallSequence $candidate.Progress) })
+            if ($null -ne $currentSourceRecovery) {
+                if ($null -eq $currentSourceRecovery.RecoveryEvent) { $unresolved.Add($candidate) }
+                $episodeResult.Recovered = $null -ne $currentSourceRecovery.RecoveryEvent
+                $episodeResult.RecoveryEvent = $currentSourceRecovery.RecoveryEvent
+                continue
+            }
             $sameCandidateTransfer = {
                 param($line)
-                return (Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_id') -eq $candidate.Writer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'session_id') -eq $candidate.Session -and
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'transfer_id') -eq $candidate.Transfer
+                return ([string]$line.Fields['log_writer_id']) -eq $candidate.Writer -and
+                    ([string]$line.Fields['session_id']) -eq $candidate.Session -and
+                    ([string]$line.Fields['transfer_id']) -eq $candidate.Transfer
             }
             $beforeCandidateDeadline = {
                 param($line)
-                $eventTicks = Get-TunaGuiLogLineFieldValue -Line $line -Name 'log_writer_attempt_utc_ticks'
+                $eventTicks = ([string]$line.Fields['log_writer_attempt_utc_ticks'])
                 return $eventTicks -match '^[1-9][0-9]*$' -and
                     [long]$eventTicks -gt $candidate.CandidateTicks -and
                     [long]$eventTicks -le $candidate.DeadlineTicks
@@ -15110,16 +15159,16 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     [string]::IsNullOrWhiteSpace($eventProtocol)) {
                     return $true
                 }
-                if ($eventRoute -ne (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'route') -or
-                    $eventProtocol -ne (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'protocol_version')) {
+                if ($eventRoute -ne ([string]$candidate.Progress.Fields['route']) -or
+                    $eventProtocol -ne ([string]$candidate.Progress.Fields['protocol_version'])) {
                     return $true
                 }
                 foreach ($field in @(
                         'live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation',
                         'route_publication_generation', 'route_commit_generation')) {
-                    $actual = Get-TunaGuiLogLineFieldValue -Line $line -Name $field
+                    $actual = ([string]$line.Fields[$field])
                     if (-not [string]::IsNullOrWhiteSpace($actual) -and
-                        $actual -ne (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name $field)) {
+                        $actual -ne ([string]$candidate.Progress.Fields[$field])) {
                         return $true
                     }
                 }
@@ -15128,11 +15177,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $candidateDataSessionMutation = {
                 param($line)
                 if (-not (& $sameCandidateTransfer $line)) { return $false }
-                return (Get-TunaGuiLogLineFieldValue -Line $line -Name 'event') -eq
+                return ([string]$line.Fields['event']) -eq
                         'filetransfer_data_session_removed' -or
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_identity') -ne
+                    ([string]$line.Fields['data_session_identity']) -ne
                         $candidate.DataSessionIdentity -or
-                    (Get-TunaGuiLogLineFieldValue -Line $line -Name 'data_session_generation') -ne
+                    ([string]$line.Fields['data_session_generation']) -ne
                         $candidate.DataSessionGeneration
             }
             [object[]]$sourceEndedBeforeDeadline = @(
@@ -15147,19 +15196,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     }) +
                 @($receiverStates | Where-Object {
                         (& $beforeCandidateDeadline $_) -and (& $sameCandidateTransfer $_) -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_paused') -eq '1'
+                        ([string]$_.Fields['transfer_paused']) -eq '1'
                     }))
-            if ($sourceEndedBeforeDeadline.Count -gt 0) { continue }
+            if ($sourceEndedBeforeDeadline.Count -gt 0) { $episodeResult.Excluded = $true; continue }
 
             [object[]]$naturalProgress = @(@($receiverStates + $sparseWrites) | Where-Object {
-                    $eventTicks = Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_attempt_utc_ticks'
+                    $eventTicks = ([string]$_.Fields['log_writer_attempt_utc_ticks'])
                     $eventTicks -match '^[1-9][0-9]*$' -and [long]$eventTicks -le $candidate.DeadlineTicks -and
                     (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
+                    ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                    ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                    ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer -and
                     [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name $(
-                            if ((Get-TunaGuiLogLineFieldValue -Line $_ -Name 'event') -eq 'filetransfer_v6_sparse_write_committed') {
+                            if (([string]$_.Fields['event']) -eq 'filetransfer_v6_sparse_write_committed') {
                                 'next_chunk_index'
                             }
                             else {
@@ -15170,22 +15219,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [object[]]$matchingRechecks = @($rechecks | Where-Object {
                     (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
                     (Test-GuiStallExactSource $candidate.Line $_) -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -eq
+                    ([string]$_.Fields['frontier_chunk_index']) -eq
                         [string]$candidate.Frontier -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'highest_received_chunk_index') -eq
+                    ([string]$_.Fields['highest_received_chunk_index']) -eq
                         [string]$candidate.Highest -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'stall_started_utc') -eq
+                    ([string]$_.Fields['stall_started_utc']) -eq
                         $candidate.StallStartedUtc -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'wake_generation') -eq
+                    ([string]$_.Fields['wake_generation']) -eq
                         $candidate.WakeGeneration -and
-                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'wake_deadline_utc') -eq
+                    ([string]$_.Fields['wake_deadline_utc']) -eq
                         $candidate.WakeDeadline
                 } | Sort-Object { Get-GuiStallSequence $_ })
             [string[]]$matchingRecheckDecisions = @($matchingRechecks | ForEach-Object {
                     @(
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_status'),
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_reason'),
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_effect')) -join '|'
+                        ([string]$_.Fields['decision_status']),
+                        ([string]$_.Fields['decision_reason']),
+                        ([string]$_.Fields['authority_effect'])) -join '|'
                 } | Sort-Object -Unique)
             $matchingRecheckConflict = $matchingRecheckDecisions.Count -gt 1
             $knownSupersessionRecheck = $matchingRecheckDecisions.Count -eq 1 -and
@@ -15209,22 +15258,22 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         if ((Get-GuiStallSequence $_) -le $candidate.Sequence -or
                             -not (& $beforeCandidateDeadline $_) -or
                             -not (Test-GuiStallExactSource $candidate.Line $_) -or
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'reason') -ne 'chunk_batch_committed' -or
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'elapsed_ms') -ne '0' -or
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -notmatch '^[0-9]+$' -or
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -le
+                            ([string]$_.Fields['reason']) -ne 'chunk_batch_committed' -or
+                            ([string]$_.Fields['elapsed_ms']) -ne '0' -or
+                            ([string]$_.Fields['frontier_chunk_index']) -notmatch '^[0-9]+$' -or
+                            [long]([string]$_.Fields['frontier_chunk_index']) -le
                                 $candidate.Frontier -or
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'highest_received_chunk_index') -notmatch '^[0-9]+$' -or
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'highest_received_chunk_index') -lt
+                            ([string]$_.Fields['highest_received_chunk_index']) -notmatch '^[0-9]+$' -or
+                            [long]([string]$_.Fields['highest_received_chunk_index']) -lt
                                 $candidate.Highest -or
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'wake_generation') -notmatch '^[1-9][0-9]*$' -or
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'wake_generation') -le
+                            ([string]$_.Fields['wake_generation']) -notmatch '^[1-9][0-9]*$' -or
+                            [long]([string]$_.Fields['wake_generation']) -le
                                 [long]$candidate.WakeGeneration) {
                             return $false
                         }
                         [DateTimeOffset]$successorStallUtc = [DateTimeOffset]::MinValue
                         return [DateTimeOffset]::TryParse(
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'stall_started_utc'),
+                            ([string]$_.Fields['stall_started_utc']),
                             [ref]$successorStallUtc) -and $successorStallUtc -gt $candidateStallUtc
                     } | Sort-Object { Get-GuiStallSequence $_ } | Select-Object -First 1)
             }
@@ -15242,12 +15291,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [object[]]$freshGrants = @($grants | Where-Object {
                         (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $routeScopeRecheck) -and
                         (Test-GuiStallScope $candidate.Progress $_) -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'source_kind') -eq 'ReceiverRequest' -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -eq
+                        ([string]$_.Fields['source_kind']) -eq 'ReceiverRequest' -and
+                        ([string]$_.Fields['frontier_chunk_index']) -eq
                             [string]$candidate.Frontier -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'durable_received_highest_chunk_index') -eq
+                        ([string]$_.Fields['durable_received_highest_chunk_index']) -eq
                             [string]$candidate.Highest -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'predecessor_authority_id') -eq
+                        ([string]$_.Fields['predecessor_authority_id']) -eq
                             $candidate.Authority
                     } | Sort-Object { Get-GuiStallSequence $_ })
                 if ($freshGrants.Count -gt 0) {
@@ -15258,19 +15307,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
                 [string[]]$freshGrantKeys = @($freshGrants | ForEach-Object {
                         @(
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id'),
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_generation'),
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_request_key'),
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'range_fingerprint'),
+                            ([string]$_.Fields['authority_id']),
+                            ([string]$_.Fields['repair_generation']),
+                            ([string]$_.Fields['repair_request_key']),
+                            ([string]$_.Fields['range_fingerprint']),
                             (Get-GuiStallField $_ @('primary_protocol_repair_request_id', 'protocol_repair_request_id')),
                             (Get-GuiStallField $_ @('primary_request_correlation_id', 'request_correlation_id'))) -join '|'
                     } | Sort-Object -Unique)
                 if ($freshGrantKeys.Count -eq 1) {
                     $freshGrant = $freshGrants[0]
-                    $freshAuthority = Get-TunaGuiLogLineFieldValue -Line $freshGrant -Name 'authority_id'
-                    $freshGeneration = Get-TunaGuiLogLineFieldValue -Line $freshGrant -Name 'repair_generation'
-                    $freshRepairKey = Get-TunaGuiLogLineFieldValue -Line $freshGrant -Name 'repair_request_key'
-                    $freshFingerprint = Get-TunaGuiLogLineFieldValue -Line $freshGrant -Name 'range_fingerprint'
+                    $freshAuthority = ([string]$freshGrant.Fields['authority_id'])
+                    $freshGeneration = ([string]$freshGrant.Fields['repair_generation'])
+                    $freshRepairKey = ([string]$freshGrant.Fields['repair_request_key'])
+                    $freshFingerprint = ([string]$freshGrant.Fields['range_fingerprint'])
                     $freshRequest = Get-GuiStallField $freshGrant @('primary_protocol_repair_request_id', 'protocol_repair_request_id')
                     $freshCorrelation = Get-GuiStallField $freshGrant @('primary_request_correlation_id', 'request_correlation_id')
                     if ($freshAuthority -notin @('', '(none)', 'none') -and
@@ -15283,33 +15332,33 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                                 (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $freshGrant) -and
                                 (& $sameCandidateTransfer $_) -and
                                 (Get-GuiStallField $_ @('repair_request_id', 'protocol_repair_request_id')) -eq $freshRequest -and
-                                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'request_correlation_id') -eq $freshCorrelation -and
-                                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_request_key') -eq $freshRepairKey -and
-                                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'range_fingerprint') -eq $freshFingerprint -and
-                                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'peer_visible_any') -eq '1' -and
-                                (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'accepted_any') -eq '1'
+                                ([string]$_.Fields['request_correlation_id']) -eq $freshCorrelation -and
+                                ([string]$_.Fields['repair_request_key']) -eq $freshRepairKey -and
+                                ([string]$_.Fields['range_fingerprint']) -eq $freshFingerprint -and
+                                ([string]$_.Fields['peer_visible_any']) -eq '1' -and
+                                ([string]$_.Fields['accepted_any']) -eq '1'
                             } | Sort-Object { Get-GuiStallSequence $_ } | Select-Object -First 1)
                         if ($freshDeliveries.Count -eq 1) {
                             [object[]]$freshDispatches = @($dispatches | Where-Object {
                                     (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $freshDeliveries[0]) -and
                                     (Test-GuiStallScope $candidate.Progress $_) -and
-                                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $freshAuthority -and
-                                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_generation') -eq $freshGeneration -and
-                                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_request_key') -eq $freshRepairKey -and
-                                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'range_fingerprint') -eq $freshFingerprint -and
-                                    (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'dispatch_observed') -eq '1'
+                                    ([string]$_.Fields['authority_id']) -eq $freshAuthority -and
+                                    ([string]$_.Fields['repair_generation']) -eq $freshGeneration -and
+                                    ([string]$_.Fields['repair_request_key']) -eq $freshRepairKey -and
+                                    ([string]$_.Fields['range_fingerprint']) -eq $freshFingerprint -and
+                                    ([string]$_.Fields['dispatch_observed']) -eq '1'
                                 } | Sort-Object { Get-GuiStallSequence $_ } | Select-Object -First 1)
                             if ($freshDispatches.Count -eq 1) {
                                 [object[]]$freshSends = @($requestSends | Where-Object {
                                         (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $freshDispatches[0]) -and
                                         (Test-GuiStallScope $candidate.Progress $_) -and
-                                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $freshAuthority -and
-                                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_generation') -eq $freshGeneration -and
-                                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'repair_request_key') -eq $freshRepairKey -and
-                                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'range_fingerprint') -eq $freshFingerprint -and
+                                        ([string]$_.Fields['authority_id']) -eq $freshAuthority -and
+                                        ([string]$_.Fields['repair_generation']) -eq $freshGeneration -and
+                                        ([string]$_.Fields['repair_request_key']) -eq $freshRepairKey -and
+                                        ([string]$_.Fields['range_fingerprint']) -eq $freshFingerprint -and
                                         (Get-GuiStallField $_ @('repair_request_id', 'protocol_repair_request_id')) -eq $freshRequest -and
-                                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'request_correlation_id') -eq $freshCorrelation -and
-                                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -eq
+                                        ([string]$_.Fields['request_correlation_id']) -eq $freshCorrelation -and
+                                        ([string]$_.Fields['frontier_chunk_index']) -eq
                                             [string]$candidate.Frontier
                                     } | Sort-Object { Get-GuiStallSequence $_ } | Select-Object -First 1)
                                 if ($freshSends.Count -eq 1) {
@@ -15326,59 +15375,59 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [object[]]$successorGrants = @($grants | Where-Object {
                         (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
                         (Test-GuiStallScope $candidate.Progress $_) -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'source_kind') -eq 'ReceiverRequest' -and
-                        [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -eq $candidate.Frontier
+                        ([string]$_.Fields['source_kind']) -eq 'ReceiverRequest' -and
+                        [long]([string]$_.Fields['frontier_chunk_index']) -eq $candidate.Frontier
                     } | Sort-Object { Get-GuiStallSequence $_ })
                 foreach ($successorGrant in $successorGrants) {
                     $grantSequence = Get-GuiStallSequence $successorGrant
-                    $successorAuthority = Get-TunaGuiLogLineFieldValue -Line $successorGrant -Name 'authority_id'
-                    $successorGeneration = Get-TunaGuiLogLineFieldValue -Line $successorGrant -Name 'repair_generation'
-                    $successorRepairKey = Get-TunaGuiLogLineFieldValue -Line $successorGrant -Name 'repair_request_key'
-                    $successorFingerprint = Get-TunaGuiLogLineFieldValue -Line $successorGrant -Name 'range_fingerprint'
+                    $successorAuthority = ([string]$successorGrant.Fields['authority_id'])
+                    $successorGeneration = ([string]$successorGrant.Fields['repair_generation'])
+                    $successorRepairKey = ([string]$successorGrant.Fields['repair_request_key'])
+                    $successorFingerprint = ([string]$successorGrant.Fields['range_fingerprint'])
                     $successorRequest = Get-GuiStallField $successorGrant @('primary_protocol_repair_request_id', 'protocol_repair_request_id')
                     $successorCorrelation = Get-GuiStallField $successorGrant @('primary_request_correlation_id', 'request_correlation_id')
                     $sameSuccessor = {
                         param($line)
                         return (Test-GuiStallScope $candidate.Progress $line) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'authority_id') -eq $successorAuthority -and
-                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_generation') -eq $successorGeneration -and
-                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'repair_request_key') -eq $successorRepairKey -and
-                            (Get-TunaGuiLogLineFieldValue -Line $line -Name 'range_fingerprint') -eq $successorFingerprint
+                            ([string]$line.Fields['authority_id']) -eq $successorAuthority -and
+                            ([string]$line.Fields['repair_generation']) -eq $successorGeneration -and
+                            ([string]$line.Fields['repair_request_key']) -eq $successorRepairKey -and
+                            ([string]$line.Fields['range_fingerprint']) -eq $successorFingerprint
                     }
                     [object[]]$successorDispatch = @($dispatches | Where-Object {
                             (Get-GuiStallSequence $_) -gt $grantSequence -and
                             (Test-GuiStallScope $candidate.Progress $_) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $successorAuthority -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'dispatch_observed') -eq '1'
+                            ([string]$_.Fields['authority_id']) -eq $successorAuthority -and
+                            ([string]$_.Fields['dispatch_observed']) -eq '1'
                         } | Select-Object -First 1)
                     [object[]]$successorSend = @($requestSends | Where-Object {
                             (Get-GuiStallSequence $_) -gt $grantSequence -and
                             (Test-GuiStallScope $candidate.Progress $_) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $successorAuthority -and
+                            ([string]$_.Fields['authority_id']) -eq $successorAuthority -and
                             (Get-GuiStallField $_ @('repair_request_id', 'protocol_repair_request_id')) -eq $successorRequest -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'request_correlation_id') -eq $successorCorrelation
+                            ([string]$_.Fields['request_correlation_id']) -eq $successorCorrelation
                         } | Select-Object -First 1)
                     [object[]]$successorDelivery = @($deliveries | Where-Object {
                             (Get-GuiStallSequence $_) -gt $grantSequence -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
+                            ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
                             (Get-GuiStallField $_ @('repair_request_id', 'protocol_repair_request_id')) -eq $successorRequest -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'request_correlation_id') -eq $successorCorrelation -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'peer_visible_any') -eq '1' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'accepted_any') -eq '1'
+                            ([string]$_.Fields['request_correlation_id']) -eq $successorCorrelation -and
+                            ([string]$_.Fields['peer_visible_any']) -eq '1' -and
+                            ([string]$_.Fields['accepted_any']) -eq '1'
                         } | Select-Object -First 1)
                     [object[]]$successorProgress = @($progresses | Where-Object {
                             (Get-GuiStallSequence $_) -gt $grantSequence -and
                             (Test-GuiStallScope $candidate.Progress $_) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_id') -eq $successorAuthority -and
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'current_frontier_chunk_index') -gt $candidate.Frontier
+                            ([string]$_.Fields['authority_id']) -eq $successorAuthority -and
+                            [long]([string]$_.Fields['current_frontier_chunk_index']) -gt $candidate.Frontier
                         } | Select-Object -First 1)
                     [object[]]$successorState = @($receiverStates | Where-Object {
                             $successorProgress.Count -eq 1 -and
                             (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $successorProgress[0]) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'contiguous_committed_chunk_index') -gt $candidate.Frontier
+                            ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                            ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                            ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer -and
+                            [long]([string]$_.Fields['contiguous_committed_chunk_index']) -gt $candidate.Frontier
                         } | Select-Object -First 1)
                     $lineageRecovered = $successorDispatch.Count -eq 1 -and $successorSend.Count -eq 1 -and
                         $successorDelivery.Count -eq 1 -and $successorProgress.Count -eq 1 -and
@@ -15397,20 +15446,20 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $successorFingerprint -in @('', '(none)', 'none') -or
                         $successorRequest -in @('', '(none)', 'none') -or
                         $successorCorrelation -in @('', '(none)', 'none') -or
-                        [long](Get-TunaGuiLogLineFieldValue -Line $successorGrant -Name 'durable_received_highest_chunk_index') -ne
+                        [long]([string]$successorGrant.Fields['durable_received_highest_chunk_index']) -ne
                             $candidate.Highest -or
                         -not (& $sameSuccessor $successorGrant) -or
                         -not (& $sameSuccessor $successorDispatch[0]) -or
                         -not (& $sameSuccessor $successorSend[0]) -or
                         -not (& $sameSuccessor $successorProgress[0]) -or
-                        (Get-TunaGuiLogLineFieldValue -Line $successorProgress[0] -Name 'source_kind') -ne 'ReceiverRequest' -or
-                        [long](Get-TunaGuiLogLineFieldValue -Line $successorProgress[0] -Name 'previous_frontier_chunk_index') -ne
+                        ([string]$successorProgress[0].Fields['source_kind']) -ne 'ReceiverRequest' -or
+                        [long]([string]$successorProgress[0].Fields['previous_frontier_chunk_index']) -ne
                             $candidate.Frontier -or
-                        [long](Get-TunaGuiLogLineFieldValue -Line $successorProgress[0] -Name 'current_frontier_chunk_index') -ne
+                        [long]([string]$successorProgress[0].Fields['current_frontier_chunk_index']) -ne
                             ($candidate.Highest + 1) -or
-                        (Get-TunaGuiLogLineFieldValue -Line $successorSend[0] -Name 'reason') -ne
+                        ([string]$successorSend[0].Fields['reason']) -ne
                             'frontier_stall_grace_elapsed' -or
-                        (Get-TunaGuiLogLineFieldValue -Line $successorDelivery[0] -Name 'reason') -ne
+                        ([string]$successorDelivery[0].Fields['reason']) -ne
                             'frontier_stall_grace_elapsed') {
                         continue
                     }
@@ -15419,82 +15468,82 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                             (Get-GuiStallSequence $_) -gt $grantSequence -and
                             (Get-GuiStallSequence $_) -lt $progressSequence -and
                             (& $sameSuccessor $_) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'settlement_outcome') -eq 'ProgressObserved'
+                            ([string]$_.Fields['settlement_outcome']) -eq 'ProgressObserved'
                         } | Select-Object -First 1)
                     [object[]]$successorRecheck = @($rechecks | Where-Object {
                             (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
                             (Get-GuiStallSequence $_) -lt $progressSequence -and
                             (Test-GuiStallScope $candidate.Progress $_) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'data_session_identity') -eq
+                            ([string]$_.Fields['data_session_identity']) -eq
                                 $candidate.DataSessionIdentity -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'data_session_generation') -eq
+                            ([string]$_.Fields['data_session_generation']) -eq
                                 $candidate.DataSessionGeneration -and
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'frontier_chunk_index') -eq
+                            [long]([string]$_.Fields['frontier_chunk_index']) -eq
                                 $candidate.Frontier -and
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'highest_received_chunk_index') -eq
+                            [long]([string]$_.Fields['highest_received_chunk_index']) -eq
                                 $candidate.Highest -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'stall_started_utc') -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'stall_started_utc') -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'wake_generation') -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'wake_generation') -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'wake_deadline_utc') -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $candidate.Line -Name 'wake_deadline_utc') -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_status') -eq 'dispatched' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'decision_reason') -eq
+                            ([string]$_.Fields['stall_started_utc']) -eq
+                                ([string]$candidate.Line.Fields['stall_started_utc']) -and
+                            ([string]$_.Fields['wake_generation']) -eq
+                                ([string]$candidate.Line.Fields['wake_generation']) -and
+                            ([string]$_.Fields['wake_deadline_utc']) -eq
+                                ([string]$candidate.Line.Fields['wake_deadline_utc']) -and
+                            ([string]$_.Fields['decision_status']) -eq 'dispatched' -and
+                            ([string]$_.Fields['decision_reason']) -eq
                                 'exact_receiver_request_dispatched' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'authority_effect') -eq 'none'
+                            ([string]$_.Fields['authority_effect']) -eq 'none'
                         } | Select-Object -First 1)
                     if ($successorSettlement.Count -ne 1 -or $successorRecheck.Count -ne 1) { continue }
 
                     $terminalFrontier = $candidate.Highest + 1
                     [object[]]$terminalProof = @($terminalProofs | Where-Object {
                             (Get-GuiStallSequence $_) -gt $progressSequence -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'direction') -eq 'inbound' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'route') -eq 'post_tuna_fallback_v6' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'protocol_version') -eq '6' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'live_route_epoch') -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'live_route_epoch') -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'leg_generation') -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'leg_generation') -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transport_epoch') -eq
-                                (Get-TunaGuiLogLineFieldValue -Line $candidate.Progress -Name 'transport_epoch') -and
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'committed_chunk') -eq $terminalFrontier -and
-                            [long](Get-TunaGuiLogLineFieldValue -Line $_ -Name 'chunk_count') -eq $terminalFrontier
+                            ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                            ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                            ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer -and
+                            ([string]$_.Fields['direction']) -eq 'inbound' -and
+                            ([string]$_.Fields['route']) -eq 'post_tuna_fallback_v6' -and
+                            ([string]$_.Fields['protocol_version']) -eq '6' -and
+                            ([string]$_.Fields['live_route_epoch']) -eq
+                                ([string]$candidate.Progress.Fields['live_route_epoch']) -and
+                            ([string]$_.Fields['leg_generation']) -eq
+                                ([string]$candidate.Progress.Fields['leg_generation']) -and
+                            ([string]$_.Fields['transport_epoch']) -eq
+                                ([string]$candidate.Progress.Fields['transport_epoch']) -and
+                            [long]([string]$_.Fields['committed_chunk']) -eq $terminalFrontier -and
+                            [long]([string]$_.Fields['chunk_count']) -eq $terminalFrontier
                         } | Select-Object -First 1)
                     if ($terminalProof.Count -ne 1) { continue }
                     [object[]]$integrity = @($integrityPassed | Where-Object {
                             (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $terminalProof[0]) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'direction') -eq 'inbound' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'file_size_bytes') -match '^[1-9][0-9]*$'
+                            ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                            ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                            ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer -and
+                            ([string]$_.Fields['direction']) -eq 'inbound' -and
+                            ([string]$_.Fields['file_size_bytes']) -match '^[1-9][0-9]*$'
                         } | Select-Object -First 1)
                     if ($integrity.Count -ne 1) { continue }
-                    $fileSize = Get-TunaGuiLogLineFieldValue -Line $integrity[0] -Name 'file_size_bytes'
+                    $fileSize = ([string]$integrity[0].Fields['file_size_bytes'])
                     [object[]]$finalized = @($tempFinalized | Where-Object {
                             (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $integrity[0]) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'direction') -eq 'inbound' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'file_size_bytes') -eq $fileSize -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'saved_path') -notin @('', '(none)', 'none')
+                            ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                            ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                            ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer -and
+                            ([string]$_.Fields['direction']) -eq 'inbound' -and
+                            ([string]$_.Fields['file_size_bytes']) -eq $fileSize -and
+                            ([string]$_.Fields['saved_path']) -notin @('', '(none)', 'none')
                         } | Select-Object -First 1)
                     if ($finalized.Count -ne 1) { continue }
-                    $savedPath = Get-TunaGuiLogLineFieldValue -Line $finalized[0] -Name 'saved_path'
+                    $savedPath = ([string]$finalized[0].Fields['saved_path'])
                     [object[]]$terminalCompleted = @($terminals | Where-Object {
                             (Get-GuiStallSequence $_) -gt (Get-GuiStallSequence $finalized[0]) -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'event') -eq 'file_transfer_inbound_terminal' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'state') -eq 'Completed' -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'error_code') -in @('', '(none)', 'none') -and
-                            (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'saved_path') -eq $savedPath
+                            ([string]$_.Fields['event']) -eq 'file_transfer_inbound_terminal' -and
+                            ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                            ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                            ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer -and
+                            ([string]$_.Fields['state']) -eq 'Completed' -and
+                            ([string]$_.Fields['error_code']) -in @('', '(none)', 'none') -and
+                            ([string]$_.Fields['saved_path']) -eq $savedPath
                         } | Select-Object -First 1)
                     if ($terminalCompleted.Count -eq 1) {
                         $recovered = $true
@@ -15502,6 +15551,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         break
                     }
                 }
+            }
+            $episode = [pscustomobject]@{
+                Event = [pscustomobject]@{ Fields = $candidate.Line.Fields; Sequence = $candidate.Sequence }
+                Progress = $candidate.Progress; Writer = $candidate.Writer; Session = $candidate.Session
+                Transfer = $candidate.Transfer; Frontier = $candidate.Frontier
+                DataSessionIdentity = $candidate.DataSessionIdentity; DataSessionGeneration = $candidate.DataSessionGeneration
+            }
+            if (-not $recovered -and -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1) {
+                if ($matchingRecheckDecisions[0] -eq 'dispatched|exact_receiver_request_dispatched|none') {
+                    $recoveryEvent = Get-FileTransferStallGraceDispatchedProgressClosure -Events $handoffEvents -Episode $episode
+                }
+                elseif ($matchingRecheckDecisions[0] -eq 'stale|frontier_scope_changed|none') {
+                    $recoveryEvent = Get-FileTransferStallGraceStaleHighestProgressClosure -Events $handoffEvents -Episode $episode
+                }
+                $recovered = $null -ne $recoveryEvent
             }
             $stallHandoffClosure = $null
             if (-not $recovered -and $hasTunaHandoffRetirement) {
@@ -15519,9 +15583,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 [object[]]$poison = @($terminals | Where-Object {
                         (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
                         (Get-GuiStallSequence $_) -lt $recoverySequence -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'log_writer_id') -eq $candidate.Writer -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'session_id') -eq $candidate.Session -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_id') -eq $candidate.Transfer
+                        ([string]$_.Fields['log_writer_id']) -eq $candidate.Writer -and
+                        ([string]$_.Fields['session_id']) -eq $candidate.Session -and
+                        ([string]$_.Fields['transfer_id']) -eq $candidate.Transfer
                     } | Select-Object -First 1)
                 [object[]]$routeMutation = @($routePublications | Where-Object {
                         (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
@@ -15537,19 +15601,23 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         (Get-GuiStallSequence $_) -gt $candidate.Sequence -and
                         (Get-GuiStallSequence $_) -lt $recoverySequence -and
                         (& $sameCandidateTransfer $_) -and
-                        (Get-TunaGuiLogLineFieldValue -Line $_ -Name 'transfer_paused') -eq '1'
+                        ([string]$_.Fields['transfer_paused']) -eq '1'
                     } | Select-Object -First 1)
                 $recovered = $poison.Count -eq 0 -and $routeMutation.Count -eq 0 -and
                     $dataSessionMutation.Count -eq 0 -and $pause.Count -eq 0
             }
             if (-not $recovered) { $unresolved.Add($candidate) }
+            $episodeResult.Recovered = $recovered
+            $episodeResult.RecoveryEvent = if ($null -ne $stallHandoffClosure) { $stallHandoffClosure } else { $recoveryEvent }
         }
         [object[]]$first = @($unresolved | Sort-Object Sequence | Select-Object -First 1)
-        return [pscustomobject]@{
+        $result = [pscustomobject]@{
             Unresolved = $first.Count -eq 1
             FirstSequence = if ($first.Count -eq 1) { [long]$first[0].Sequence } else { [long]::MaxValue }
             ParsedRecords = $visits
         }
+        if ($IncludeEpisodeAudit) { $result | Add-Member -NotePropertyName EpisodeAudit -NotePropertyValue $audit.ToArray() }
+        return $result
     }
 
     function Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure {

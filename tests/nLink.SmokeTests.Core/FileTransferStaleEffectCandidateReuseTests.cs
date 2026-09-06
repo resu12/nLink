@@ -7,6 +7,69 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferStaleEffectCandidateReuseTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    public async Task StaleEffectReuse_EmptyPlansSkipCandidateWorkWithoutDroppingRejections()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync("""
+            $empty = @(1..81 | ForEach-Object { Empty-Reject $_ 'RepairReplay' })
+            $empty += @((Empty-Reject 82 'FallbackCheckpointBegin'), (Empty-Reject 83 'ControlPlaneSend'))
+            $effects = @((Event 100 'filetransfer_v4_repair_scheduled'),
+                (Event 101 'filetransfer_fallback_checkpoint_accepted'),
+                (Event 102 'filetransfer_control_plane_delivery_observed'))
+            $proof = Compare-Proofs @($empty + $effects)
+            if ($proof.RejectedActionCount -ne 83 -or $proof.ForbiddenEffectCount -ne 0 -or $proof.Verdict -cne 'pass' -or
+                $script:ActualVisits -ne 0 -or $script:ActualScopeVisits -ne 0) { throw 'empty plans performed candidate work or lost rejection evidence' }
+            $proof = Compare-Proofs @($empty + (Empty-Reject 84 'UnknownAction') + $effects)
+            if ($proof.RejectedActionCount -ne 84 -or $proof.UnknownActionCount -ne 1 -or $proof.Verdict -cne 'fail' -or
+                $script:ActualVisits -ne 0 -or $script:ActualScopeVisits -ne 0) { throw 'empty unknown action bypassed diagnostics' }
+            """);
+    }
+
+    [Fact]
+    public async Task StaleEffectReuse_EmptyPlansAroundEligibleRejectionsPreserveExactSuffixAndDuplicates()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync("""
+            $effect = Event 12 'filetransfer_v4_repair_scheduled'
+            $events = @((Empty-Reject 1 'RepairReplay'), (Event 5 'filetransfer_v4_repair_scheduled'),
+                (Reject 10 'RepairReplay'), (Event 10 'filetransfer_v4_repair_scheduled'), (Empty-Reject 11 'RepairReplay'),
+                $effect, $effect, (Reject 20 'RepairReplay'), (Event 20 'filetransfer_v4_repair_scheduled'),
+                (Empty-Reject 21 'RepairReplay'), (Event 22 'filetransfer_v4_repair_scheduled'))
+            foreach ($mode in @('all', 'absent', 'empty')) {
+                $proof = Compare-Proofs $events $mode
+                if ($proof.RejectedActionCount -ne 5 -or $proof.ForbiddenEffectCount -ne 5 -or $script:ActualVisits -ne 7 -or
+                    $script:ActualEmptyPlanScopeVisits -ne 0) { throw 'empty plan changed eligible suffix, multiplicity or matching work' }
+            }
+            [array]::Reverse($events)
+            $null = Compare-Proofs $events
+            """);
+    }
+
+    [Fact]
+    public async Task StaleEffectReuse_RuntimeOnlyAndPublicationExceptionPlansRemainEligible()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync("""
+            foreach ($name in @('filetransfer_runtime_unlock_callback_rejected', 'filetransfer_runtime_unlock_precommit_probe_pending_rejected')) {
+                $callback = Event 1 $name @{action_kind='RuntimeUnlockTransactionCallback'; runtime_generation='(none)'; current_runtime_generation='(none)'; transaction_generation='5'}
+                $plan = New-FileTransferStaleRejectedProofMatchPlan -Rejection $callback
+                if ($plan.AuthorityValues.Count -ne 0 -or $plan.RuntimeUnlockValues.Count -ne 1) { throw 'runtime-only fixture is not exact' }
+                $proof = Compare-Proofs @($callback, (Event 2 'runtime_unlock_probe_started' @{transaction_generation='5'}),
+                    (Event 3 'runtime_unlock_probe_started' @{transaction_generation='6'}))
+                if ($proof.ForbiddenEffectCount -ne 1 -or $script:ActualScopeVisits -ne 2) { throw 'runtime-only plan was skipped or wrong authority matched' }
+            }
+            $rejection = Event 1 'filetransfer_route_hint_ignored_missing_publication_authority' @{runtime_generation='(none)'; current_runtime_generation='(none)'}
+            $plan = New-FileTransferStaleRejectedProofMatchPlan -Rejection $rejection
+            if (-not $plan.MissingPublicationAuthority -or $plan.AuthorityValues.Count -ne 0 -or $plan.RuntimeUnlockValues.Count -ne 0) { throw 'publication exception fixture is not empty' }
+            $effect = Event 3 'filetransfer_route_selected'
+            $proof = Compare-Proofs @($rejection, $effect)
+            if ($proof.ForbiddenEffectCount -ne 1 -or $script:ActualVisits -ne 1) { throw 'empty publication exception lost its authority check' }
+            $proof = Compare-Proofs @($rejection, (Event 2 'filetransfer_route_hint_authorized_publication_accepted'), $effect)
+            if ($proof.ForbiddenEffectCount -ne 0) { throw 'exact prior publication acceptance lost' }
+            """);
+    }
+
+    [Fact]
     public async Task StaleEffectReuse_RejectionMatchPlanPreservesExactLegacyPredicateSemantics()
     {
         if (!OperatingSystem.IsWindows()) { return; }
@@ -211,6 +274,16 @@ public sealed class FileTransferStaleEffectCandidateReuseTests : FileTransferOps
             $script:Visits++
             & $script:Predicate -Family $Family -Event $Event -FallbackSubfamily $FallbackSubfamily
         }
+        $script:ScopePredicate = (Get-Command Test-FileTransferStaleRejectedProofPlannedScopeMatches).ScriptBlock
+        $script:ScopeVisits = 0L; $script:EmptyPlanScopeVisits = 0L
+        function Test-FileTransferStaleRejectedProofPlannedScopeMatches {
+            param($Plan, $Effect)
+            $script:ScopeVisits++
+            if (-not $Plan.MissingPublicationAuthority -and $Plan.AuthorityValues.Count -eq 0 -and $Plan.RuntimeUnlockValues.Count -eq 0) {
+                $script:EmptyPlanScopeVisits++
+            }
+            & $script:ScopePredicate -Plan $Plan -Effect $Effect
+        }
         function Event([long]$Sequence, [string]$Name, [hashtable]$Overrides=@{}) {
             $fields = @{session_id='session'; transfer_id='transfer'; direction='outbound'; runtime_generation='1'; current_runtime_generation='2'}
             foreach ($key in $Overrides.Keys) { $fields[$key]=$Overrides[$key] }
@@ -218,6 +291,9 @@ public sealed class FileTransferStaleEffectCandidateReuseTests : FileTransferOps
         }
         function Reject([long]$Sequence, [string]$Action) {
             Event $Sequence 'filetransfer_runtime_owner_stale_update_rejected' @{action_kind=$Action}
+        }
+        function Empty-Reject([long]$Sequence, [string]$Action) {
+            Event $Sequence 'filetransfer_runtime_owner_stale_update_rejected' @{action_kind=$Action; runtime_generation='(none)'; current_runtime_generation='(none)'}
         }
         function Compare-Proofs([AllowEmptyCollection()][object[]]$Events, [string]$Mode='all') {
             $summary = [pscustomobject]@{GlobalEvents=@(); TransferEvents=$Events}
@@ -228,8 +304,11 @@ public sealed class FileTransferStaleEffectCandidateReuseTests : FileTransferOps
             $expected = Invoke-StaleEffectBaseline -Summary $summary
             $baselineVisits = $script:Visits
             $script:Visits = 0L
+            $script:ScopeVisits = 0L; $script:EmptyPlanScopeVisits = 0L
             $actual = Get-FileTransferStaleRejectedActionEffectProof -Summary $summary
             $script:ActualVisits = $script:Visits
+            $script:ActualScopeVisits = $script:ScopeVisits
+            $script:ActualEmptyPlanScopeVisits = $script:EmptyPlanScopeVisits
             if ((ConvertTo-Json -InputObject $expected -Depth 12 -Compress) -cne (ConvertTo-Json -InputObject $actual -Depth 12 -Compress)) { throw 'complete proof changed' }
             foreach ($property in @('EvidenceEvents', 'FailureEvents')) {
                 for ($i=0; $i -lt $expected.$property.Count; $i++) {
@@ -238,9 +317,11 @@ public sealed class FileTransferStaleEffectCandidateReuseTests : FileTransferOps
             }
             if ((ConvertTo-Json -InputObject $summary -Depth 12 -Compress) -cne $before) { throw 'input mutated' }
             $bound = 0L; $seen = @{}
-            foreach ($rejection in @($Events | Where-Object { $_.EventName -in @('filetransfer_runtime_owner_stale_update_rejected', 'filetransfer_route_hint_ignored_missing_publication_authority') } | Sort-Object Sequence)) {
+            foreach ($rejection in @($Events | Where-Object { $_.EventName -in @('filetransfer_runtime_owner_stale_update_rejected', 'filetransfer_route_hint_ignored_missing_publication_authority', 'filetransfer_runtime_unlock_callback_rejected', 'filetransfer_runtime_unlock_precommit_probe_pending_rejected') } | Sort-Object Sequence)) {
                 $family = Get-FileTransferStaleRejectedProofActionFamily -Event $rejection
                 if ($family -eq 'unknown') { continue }
+                $plan = New-FileTransferStaleRejectedProofMatchPlan -Rejection $rejection
+                if (-not $plan.MissingPublicationAuthority -and $plan.AuthorityValues.Count -eq 0 -and $plan.RuntimeUnlockValues.Count -eq 0) { continue }
                 $subfamily = Get-FileTransferStaleRejectedProofFallbackSubfamily -Event $rejection
                 $key = $family + '|' + $subfamily
                 if (-not $seen.ContainsKey($key)) {

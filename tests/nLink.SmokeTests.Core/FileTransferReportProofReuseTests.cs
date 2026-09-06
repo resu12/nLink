@@ -248,12 +248,245 @@ public sealed class FileTransferReportProofReuseTests : FileTransferOpsScriptsTe
             """);
     }
 
+    [Theory]
+    [InlineData("route")]
+    [InlineData("stability")]
+    public async Task ReportProofHandoff_SummaryConstructorsReuseExactProofsAndPreserveCompleteLines(string consumer)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync(SummaryConsumerHarness + Environment.NewLine + """
+            foreach ($count in @(0, 1, 3)) {
+                $summary = New-TestConsumerSummary $count
+                $written = Invoke-TestWriter -Summary $summary
+                foreach ($name in @('LocalYieldMissingRawCount', 'LocalYieldMissingDistinctCount',
+                        'LocalYieldMissingRecoveredCount', 'LocalYieldMissingUnresolvedCount')) {
+                    $written.Proofs.FallbackTail | Add-Member -NotePropertyName $name -NotePropertyValue 31 -Force
+                }
+                $written.Proofs.FallbackTail | Add-Member -NotePropertyName LocalYieldMissingUnresolvedCandidateRecords -NotePropertyValue $script:ConsumerEvidence -Force
+                $augmentedBefore = $written.Proofs.FallbackTail | ConvertTo-Json -Depth 20 -Compress
+                Reset-TestCalls
+                $reused = @(Invoke-TestConsumer -Summary $summary -Handoff $written.Handoff)
+                Assert-TestConsumerCalls 0
+                if (-not [object]::ReferenceEquals($script:ConsumerCapture.Handoff, $written.Handoff)) { throw 'constructor changed handoff identity' }
+                foreach ($key in $script:ConsumerKeys) {
+                    if (-not [object]::ReferenceEquals($script:ConsumerCapture.Proofs[$key], $written.Proofs.$key)) { throw "constructor copied/recomputed $key" }
+                    Assert-NoPrivateProperties $script:ConsumerCapture.Proofs[$key]
+                }
+                $standalone = @(Invoke-TestConsumer -Summary $summary -OmitHandoff)
+                Assert-TestConsumerCalls 1
+                Assert-TestConsumerLines $reused $standalone
+
+                $consumerCommands = @($script:Writer.Body.FindAll({ param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -ceq $script:ConsumerName
+                }, $true))
+                if ($consumerCommands.Count -ne 1 -or $consumerCommands[0].Extent.Text -notmatch '-ReportProofHandoff\s+\$reportProofHandoff\b') { throw 'writer must forward the original handoff' }
+                $Summary = $summary; $GateResult = $script:ConsumerGate; $LiveRouteProofMode = 'None'
+                $recoveryClassification = $script:TestClassification; $reportProofHandoff = $written.Handoff
+                Reset-TestCalls
+                $forwarded = @(. ([scriptblock]::Create($consumerCommands[0].Extent.Text)))
+                Assert-TestConsumerCalls 0
+                if (-not [object]::ReferenceEquals($script:ConsumerCapture.Handoff, $written.Handoff)) { throw 'writer forwarded a different handoff' }
+                Assert-TestConsumerLines $standalone $forwarded
+                if (($written.Proofs.FallbackTail | ConvertTo-Json -Depth 20 -Compress) -cne $augmentedBefore) { throw 'summary changed classifier-augmented tail proof' }
+                Assert-NoPrivateProperties $summary
+                Assert-NoPrivateProperties $script:TestClassification
+            }
+            Write-Output 'report-proof-reuse-ok'
+            """, consumer);
+    }
+
+    [Theory]
+    [InlineData("route")]
+    [InlineData("stability")]
+    public async Task ReportProofHandoff_SummaryConstructorsRejectForeignOrMutatedInputsAndCachedClassifierFallback(string consumer)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync(SummaryConsumerHarness + Environment.NewLine + """
+            foreach ($mutation in @('null', 'malformed', 'foreign', 'all-copy', 'global-copy', 'transfer-copy',
+                    'ordinal', 'event-copy', 'missing-all', 'missing-global', 'empty-transfer')) {
+                $summary = New-TestConsumerSummary 3
+                $written = Invoke-TestWriter -Summary $summary
+                $handoff = $written.Handoff
+                switch ($mutation) {
+                    'null' { $handoff = $null }
+                    'malformed' { $handoff = [pscustomobject]@{ Summary = $summary; Proofs = $written.Handoff.Proofs } }
+                    'foreign' { $summary = New-TestConsumerSummary 3; $null = Invoke-TestWriter -Summary $summary }
+                    'all-copy' { $summary.AllEvents = [object[]]@($summary.AllEvents) }
+                    'global-copy' { $summary.GlobalEvents = [object[]]@($summary.GlobalEvents) }
+                    'transfer-copy' { $summary.TransferEvents = [object[]]@($summary.TransferEvents) }
+                    'ordinal' { $first = $summary.AllEvents[0]; $summary.AllEvents[0] = $summary.AllEvents[1]; $summary.AllEvents[1] = $first }
+                    'event-copy' { $summary.TransferEvents[0] = $summary.TransferEvents[0].PSObject.Copy() }
+                    'missing-all' { $summary.PSObject.Properties.Remove('AllEvents') }
+                    'missing-global' { $summary.PSObject.Properties.Remove('GlobalEvents') }
+                    'empty-transfer' { $summary.TransferEvents = [object[]]@() }
+                }
+                Reset-TestCalls
+                $actual = @(Invoke-TestConsumer -Summary $summary -Handoff $handoff)
+                Assert-TestConsumerCalls 1
+                foreach ($key in $script:ConsumerKeys) {
+                    if (-not [object]::ReferenceEquals($script:ConsumerCapture.Proofs[$key], $script:LastProofs[$key])) { throw "$mutation reused stale $key" }
+                }
+                $standalone = @(Invoke-TestConsumer -Summary $summary -OmitHandoff)
+                Assert-TestConsumerCalls 2
+                Assert-TestConsumerLines $actual $standalone
+            }
+            $summary = New-TestConsumerSummary 1
+            $null = Invoke-TestWriter -Summary $summary
+            $cached = Invoke-TestWriter -Summary $summary
+            if ($null -ne $cached.Handoff) { throw 'cached classifier manufactured handoff' }
+            Reset-TestCalls
+            $actual = @(Invoke-TestConsumer -Summary $summary -Handoff $cached.Handoff)
+            Assert-TestConsumerCalls 1
+            $standalone = @(Invoke-TestConsumer -Summary $summary -OmitHandoff)
+            Assert-TestConsumerCalls 2
+            Assert-TestConsumerLines $actual $standalone
+            Write-Output 'report-proof-reuse-ok'
+            """, consumer);
+    }
+
+    [Theory]
+    [InlineData("route")]
+    [InlineData("stability")]
+    public async Task ReportProofHandoff_SummaryConstructorsFallBackPerMissingOrNullProofWithoutChangingLines(string consumer)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync(SummaryConsumerHarness + Environment.NewLine + """
+            foreach ($missing in $script:ConsumerKeys) {
+                foreach ($kind in @('missing', 'null')) {
+                    $summary = New-TestConsumerSummary 3
+                    $written = Invoke-TestWriter -Summary $summary
+                    if ($kind -ceq 'missing') { $written.Handoff.Proofs.Remove($missing) }
+                    else { $written.Handoff.Proofs[$missing] = $null }
+                    Reset-TestCalls
+                    $actual = @(Invoke-TestConsumer -Summary $summary -Handoff $written.Handoff)
+                    foreach ($key in $script:ProofKeys) {
+                        $expected = if ($key -ceq $missing) { 1 } else { 0 }
+                        if ($script:Calls[$key] -ne $expected) { throw "$kind $missing affected $key" }
+                    }
+                    foreach ($key in $script:ConsumerKeys) {
+                        $expectedProof = if ($key -ceq $missing) { $script:LastProofs[$key] } else { $written.Proofs.$key }
+                        if (-not [object]::ReferenceEquals($script:ConsumerCapture.Proofs[$key], $expectedProof)) { throw 'per-proof fallback lost reference identity' }
+                    }
+                    Reset-TestCalls
+                    $standalone = @(Invoke-TestConsumer -Summary $summary -OmitHandoff)
+                    Assert-TestConsumerCalls 1
+                    Assert-TestConsumerLines $actual $standalone
+                }
+            }
+            Write-Output 'report-proof-reuse-ok'
+            """, consumer);
+    }
+
     private static async Task RunHarnessAsync(string body, string argument = "")
     {
         var result = await RunPowerShellScriptTextAsync(HarnessPrefix + Environment.NewLine + body, [FindRepoRoot(), argument]);
         Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         Assert.Equal("report-proof-reuse-ok", result.Stdout.Trim());
     }
+
+    private const string SummaryConsumerHarness = """
+        $script:ConsumerName = if ($Case -ceq 'route') { 'New-FileTransferRouteConsistencySummaryLines' } else { 'New-FileTransferStabilityGateSummaryLines' }
+        $script:ConsumerKeys = if ($Case -ceq 'route') { @($script:ProofKeys) } else { @('FallbackAuthority', 'FallbackTail', 'ControlPlane') }
+        $consumerFunctions = @(
+            (Find-TestFunction $script:ArtifactAst 'New-FileTransferRouteConsistencySummaryLines'),
+            (Find-TestFunction $script:ArtifactAst 'New-FileTransferStabilityGateSummaryLines'))
+        $script:ConsumerSource = ($consumerFunctions | ForEach-Object { $_.Extent.Text }) -join "`n"
+        function Add-TestConsumerProperties($Value, [string]$Variable) {
+            # Populate only fixture DTO fields; execute every production formatting statement.
+            # Distinct findings and evidence exercise ordering as well as scalar output.
+            $pattern = '\$' + [regex]::Escape($Variable) + '\.([A-Za-z_][A-Za-z0-9_]*)'
+            foreach ($match in [regex]::Matches($script:ConsumerSource, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+                $name = $match.Groups[1].Value
+                if ($name -ceq 'PSObject') { continue }
+                if ($null -ne $Value.PSObject.Properties[$name]) { continue }
+                $field = if ($name -in @('Sequence', 'EvidenceEvents', 'RouteChanges')) { ,([object[]]@()) }
+                    elseif ($name -in @('Findings', 'QuiescenceFindings')) { [object[]]@("$Variable-second", "$Variable-first") }
+                    else { 7 }
+                $Value | Add-Member -NotePropertyName $name -NotePropertyValue $field
+            }
+            return $Value
+        }
+        function New-TestConsumerProof([string]$Key) {
+            $proof = New-TestProof $Key
+            return Add-TestConsumerProperties $proof $script:ProofVariables[$Key]
+        }
+        function Get-FileTransferFallbackLegAuthorityProof { param($TransferEvents) New-TestConsumerProof 'FallbackAuthority' }
+        function Get-FileTransferFallbackTailReconciliationProof { param($Summary) New-TestConsumerProof 'FallbackTail' }
+        function Get-FileTransferControlPlaneIsolationProof { param($Summary) New-TestConsumerProof 'ControlPlane' }
+        function Get-FileTransferStaleRejectedActionEffectProof { param($Summary) New-TestConsumerProof 'StaleRejectedActionEffect' }
+        function Get-FileTransferFallbackRuntimeUnlockSeparationProof { param($Summary) New-TestConsumerProof 'FallbackRuntimeUnlockSeparation' }
+        function Get-FileTransferPublicationAuthorityFieldCoverageProof { param($Summary) New-TestConsumerProof 'PublicationAuthorityFieldCoverage' }
+        function Get-FileTransferLiveRouteEpochProof { param($TransferEvents, $Mode) Add-TestConsumerProperties ([pscustomobject]@{}) 'liveRouteProof' }
+        function Get-FileTransferBridgeLivenessIntegrationProof { param($Summary) Add-TestConsumerProperties ([pscustomobject]@{}) 'bridgeLivenessProof' }
+        function Get-FileTransferFileTunaV4DataPathProof {
+            param($Summary)
+            $proof = Add-TestConsumerProperties ([pscustomobject]@{}) 'fileTunaV4DataPathProof'
+            foreach ($pair in @(
+                    @('RouteTransitionProof', 'fileTransferRouteTransitionProof'),
+                    @('RouteTransitionLiveEpochProjectionProof', 'fileTransferRouteTransitionLiveEpochProjectionProof'),
+                    @('RouteTransitionTransportGraceProof', 'fileTransferRouteTransitionDrainingTransportGraceProof'),
+                    @('RouteCommitSendDrainProof', 'runtimeUnlockRegularV4RouteCommitSendDrainProof'))) {
+                $proof.($pair[0]) = Add-TestConsumerProperties ([pscustomobject]@{}) $pair[1]
+            }
+            return $proof
+        }
+        function Get-FileTransferGateWarningCap { param($GateResult) Add-TestConsumerProperties ([pscustomobject]@{}) 'warningCap' }
+        function Get-FileTransferGateFallbackDiagnostics { param($GateResult) Add-TestConsumerProperties ([pscustomobject]@{}) 'fallbackDiagnostics' }
+        $script:TestClassification = Add-TestConsumerProperties $script:TestClassification 'recoveryClassification'
+        $script:ConsumerEvidence = [object[]]@(
+            [pscustomobject]@{ FileName = 'fixture.log'; LineNumber = 19; Message = 'second evidence' },
+            [pscustomobject]@{ FileName = 'fixture.log'; LineNumber = 17; Message = 'first evidence' })
+        $script:ConsumerGate = [pscustomobject]@{ Verdict = 'fail'; GateStatus = 'fixture'; NextArtifact = 'fixture.txt'
+            HardFailures = [object[]]@('failure-second', 'failure-first'); Warnings = [object[]]@('warning-second', 'warning-first'); EvidenceEvents = $script:ConsumerEvidence }
+        function New-TestConsumerSummary([int]$Count) {
+            $summary = Add-TestConsumerProperties (New-TestSummary $Count) 'Summary'
+            foreach ($event in $summary.TransferEvents) {
+                $event | Add-Member -NotePropertyName EventName -NotePropertyValue 'filetransfer_v4_gap_stall_summary'
+            }
+            $summary.RouteConsistency = [pscustomobject]@{ Source = 'SnapshotAuthorityV1'; RouteSelectedEvents = [object[]]@()
+                RouteAwareEvents = [object[]]@(); Findings = [object[]]@('route-second', 'route-first'); EvidenceEvents = $script:ConsumerEvidence
+                SelectedRouteChanges = [object[]]@('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6') }
+            $summary.RouteConsistency = Add-TestConsumerProperties $summary.RouteConsistency 'routeConsistency'
+            return $summary
+        }
+        foreach ($function in $consumerFunctions) {
+            if ($function.Body.ParamBlock.Extent.Text -notmatch '\$ReportProofHandoff\s*=\s*\$null') { throw 'constructor optional handoff missing' }
+            $resolve = @($function.Body.EndBlock.Statements | Where-Object { $_.Extent.Text -match '=\s*Resolve-FileTransferReportProofHandoff\b' })
+            if ($resolve.Count -ne 1) { throw 'constructor must validate handoff exactly once' }
+            $keys = if ($function.Name -ceq 'New-FileTransferRouteConsistencySummaryLines') { @($script:ProofKeys) } else { @('FallbackAuthority', 'FallbackTail', 'ControlPlane') }
+            $body = $function.Body.Extent.Text
+            $offset = $function.Body.ParamBlock.Extent.EndOffset - $function.Body.Extent.StartOffset
+            $capture = "`$script:ConsumerCapture = [pscustomobject]@{ Handoff = `$ReportProofHandoff; Proofs = [ordered]@{} };"
+            foreach ($key in $keys) {
+                $capture += "`$__ConsumerProofVariable = Get-Variable -Name '$($script:ProofVariables[$key])' -Scope Local -ErrorAction SilentlyContinue; if (`$null -ne `$__ConsumerProofVariable) { `$script:ConsumerCapture.Proofs['$key'] = `$__ConsumerProofVariable.Value };"
+            }
+            # Keep the complete production function, including its returned line array;
+            # observe the selected proof references only after it executes.
+            $wrapped = $body.Substring(1, $offset - 1) + "`ntry {`n" +
+                $body.Substring($offset, $body.Length - $offset - 1) + "`n} finally { $capture }"
+            Set-Item -LiteralPath ("Function:script:" + $function.Name) -Value ([scriptblock]::Create($wrapped))
+        }
+        function Invoke-TestConsumer($Summary, $Handoff = $null, [switch]$OmitHandoff) {
+            $parameters = @{ Summary = $Summary; LiveRouteProofMode = 'None' }
+            if (-not $OmitHandoff) { $parameters.ReportProofHandoff = $Handoff }
+            if ($Case -ceq 'route') { $parameters.RecoveryClassification = $script:TestClassification }
+            else { $parameters.GateResult = $script:ConsumerGate }
+            & $script:ConsumerName @parameters
+        }
+        function Assert-TestConsumerCalls([int]$Expected) {
+            foreach ($key in $script:ProofKeys) {
+                $count = if ($key -in $script:ConsumerKeys) { $Expected } else { 0 }
+                if ($script:Calls[$key] -ne $count) { throw "expected $count calls for $key, got $($script:Calls[$key])" }
+            }
+        }
+        function Assert-TestConsumerLines([object[]]$Expected, [object[]]$Actual) {
+            if ($Expected.Count -lt 100 -or $Expected.Count -ne $Actual.Count) { throw 'complete summary line count changed' }
+            for ($i = 0; $i -lt $Expected.Count; $i++) {
+                if ($Expected[$i] -isnot [string] -or $Actual[$i] -isnot [string] -or $Expected[$i] -cne $Actual[$i]) { throw "summary line $i changed" }
+            }
+        }
+        """;
 
     private const string HarnessPrefix = """
         param([string]$RepoRoot, [string]$Case)
