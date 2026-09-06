@@ -7571,7 +7571,28 @@ internal static partial class FileTransferCoordinator
         };
 
         FallbackCheckpointLease? routeTransitionFallbackCheckpointLease = null;
-        if (!toTuna && committedState.Direction == FileTransferDirection.Outbound)
+        var inboundBootstrapCheckpoint =
+            !toTuna && state.Direction == FileTransferDirection.Inbound &&
+            string.Equals(
+                fallbackProof!.PeerProofEvidence.ProofKind,
+                "fallback_v6_proof_bootstrap_peer_frame",
+                StringComparison.Ordinal) &&
+            string.Equals(
+                fallbackProof.RetainedFrameIdentity.FrameType,
+                FileTransferProtocol.FrontierRequestFrameTypeV6,
+                StringComparison.Ordinal);
+        if (inboundBootstrapCheckpoint &&
+            !IsInboundFallbackBootstrapCheckpointBoundaryCurrent(state, authority))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_inbound_bootstrap_checkpoint_boundary_invalid");
+        }
+
+        if (!toTuna &&
+            (committedState.Direction == FileTransferDirection.Outbound ||
+             inboundBootstrapCheckpoint))
         {
             const string checkpointReason =
                 "filetransfer_route_transition_fallback_checkpoint_registered";
@@ -7630,6 +7651,41 @@ internal static partial class FileTransferCoordinator
             dispositionCommand: disposition,
             retainedFrameApplyCommand: frameApplyCommand,
             routeDecision: routeDecision);
+    }
+
+    private static bool IsInboundFallbackBootstrapCheckpointBoundaryCurrent(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority)
+    {
+        if (state.Direction != FileTransferDirection.Inbound ||
+            state.PersistentState.FileTransferRouteTransition
+                .LastFallbackV6ProofBootstrapReceipt is not
+                {
+                    IsDefault: false,
+                    Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered,
+                    Command: { FrameKind: FileTransferFallbackV6ProofBootstrapFrameKind.ReceiverState } command,
+                } ||
+            !IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(state, command) ||
+            !IsFileTransferFallbackV6ProofBootstrapTransitionAuthorityScope(authority, command) ||
+            authority.ProofBoundary is not FileTransferFallbackTransitionProofBoundary fallback ||
+            fallback.PeerProofEvidence.ProofGeneration != command.BootstrapGeneration)
+        {
+            return false;
+        }
+
+        // The retained peer frame is evidence for this already-issued local
+        // bootstrap, not a checkpoint request or an independent authority.
+        return fallback.RetainedFrameIdentity.Matches(new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = command.Observation.SessionId,
+            TransferId = command.Observation.TransferId,
+            TransportEpoch = command.TargetTransportEpoch,
+            RequestCorrelationId = FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(
+                command.BootstrapGeneration),
+            MissingRanges = [],
+            Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
+            RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
+        });
     }
 
     internal static FileTransferRouteTransitionDecision

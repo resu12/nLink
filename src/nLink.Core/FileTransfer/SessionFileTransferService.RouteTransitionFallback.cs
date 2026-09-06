@@ -3625,6 +3625,8 @@ public sealed partial class SessionFileTransferService
                     } current ||
                 current.FrameApplyInFlight ||
                 current.LastFrameReceipt is not null ||
+                !ReferenceEquals(context.DataSession, current.SourceDataSession) ||
+                context.DataSessionGeneration != current.SourceDataSessionGeneration ||
                 !identity.Matches(retainedFrame) ||
                 FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
                         CreateCoordinatorStateLocked(context))

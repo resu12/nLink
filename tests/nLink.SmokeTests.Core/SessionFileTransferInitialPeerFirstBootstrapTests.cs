@@ -18,8 +18,8 @@ public sealed partial class SessionFileTransferV4SenderTests
     {
         const string transferId = "initial_peer_first_bootstrap_arrival_order";
         using var service = new SessionFileTransferService();
-        using var bridge = new LoopbackFileTransferTransport($"session_{transferId}");
         var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
+        using var bridge = new InitialBootstrapCheckpointTransport(dataSession);
         var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(
             service, bridge, dataSession);
         var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(context, dataSession);
@@ -93,6 +93,18 @@ public sealed partial class SessionFileTransferV4SenderTests
                 .RetainedFrameApplyReceipt!.Value.Command.FrameIdentity);
         Assert.Equal(FileTransferRoute.PostTunaFallbackV6,
             GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection").Route);
+        var fallbackLeg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        Assert.True(fallbackLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.RecoveryActive, fallbackLeg.State);
+        Assert.True(fallbackLeg.CheckpointGeneration > 0);
+        Assert.Null(fallbackLeg.CheckpointRequestId);
+        var checkpointState = Assert.Single(dataSession.SentFrames
+            .OfType<FileTransferReceiverStateFrameV6>()
+            .Where(state => state.RecoveryMode == "regular_nkn_state_refresh"));
+        Assert.Equal(
+            $"v6-regular-nkn-state-refresh:route-transition:{completed.FileTransferRouteTransition.LastTerminalOperation!.Value.Authority.TransitionGeneration}:1",
+            checkpointState.RepairRequestId);
         Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
         Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
         Assert.Null(GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution"));
@@ -105,6 +117,300 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Single(dataSession.SentFrames.OfType<FileTransferTransportEpochFrameV6>());
         Assert.Single(dataSession.SentFrames.OfType<FileTransferReceiverStateFrameV6>()
             .Where(FileTransferProtocol.IsFallbackV6ProofBootstrapReceiverState));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public async Task InboundBootstrapCheckpoint_DeliveryMustCompleteWithPeerVisibleProof(bool peerVisible)
+    {
+        const string transferId = "inbound_bootstrap_checkpoint_delivery";
+        using var service = new SessionFileTransferService();
+        var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
+        using var bridge = new InitialBootstrapCheckpointTransport(dataSession)
+        {
+            ReleaseCheckpoint = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            PeerVisible = peerVisible,
+        };
+        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession);
+        var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(context, dataSession);
+        AssertInitialPeerFirstBootstrapFrameReceived(service, context, frame);
+        var processing = ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
+        try
+        {
+            await bridge.CheckpointCaptured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var pending = CreateCoordinatorStateForTest(context);
+            var lease = Assert.IsType<FallbackCheckpointLease>(pending.CurrentFallbackCheckpointLease);
+            Assert.Equal(FallbackCheckpointLeaseState.Pending, lease.State);
+            Assert.Equal(FileTransferLegState.CheckpointPending, pending.CurrentLeg!.State);
+            Assert.False(pending.CurrentLeg.CanSendData);
+            Assert.Null(pending.PersistentState.FallbackTailYield.CurrentOperation);
+            var request = Assert.Single(bridge.Requests);
+            Assert.Equal(FileTransferControlPlaneKind.FallbackCheckpointProof, request.Kind);
+            Assert.Equal(lease.CheckpointRequestId, request.CheckpointRequestId);
+            Assert.Equal(lease.CheckpointGeneration, pending.CurrentLeg.CheckpointGeneration);
+            Assert.Equal(lease.LegGeneration, request.TransferLegGeneration);
+            Assert.Equal(lease.TransportEpoch, request.TransportEpoch);
+            Assert.Equal(lease.BridgeRecoveryGeneration, request.BridgeRecoveryGeneration);
+            Assert.Equal(lease.RuntimeOwner, pending.CurrentRuntimeOwner);
+            Assert.True(request.PreTransportDeliveryValidator!());
+
+            bridge.ReleaseCheckpoint.TrySetResult();
+            await processing.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() =>
+            {
+                var execution = GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution");
+                return peerVisible ? execution is null : execution is not null &&
+                    GetPrivatePropertyValue(execution, "LastFrameReceipt") is not null;
+            }, 5000);
+            var completed = CreateCoordinatorStateForTest(context);
+            Assert.Equal(peerVisible, completed.CurrentLeg!.CanSendData);
+            Assert.Equal(peerVisible ? FileTransferLegState.RecoveryActive : FileTransferLegState.CheckpointPending,
+                completed.CurrentLeg.State);
+            Assert.Equal(lease.LeaseGeneration, completed.LastFallbackCheckpointLeaseGeneration);
+            Assert.Null(completed.PersistentState.FallbackTailYield.CurrentOperation);
+            if (!peerVisible)
+            {
+                Assert.Equal(lease.CheckpointRequestId, completed.CurrentLeg.CheckpointRequestId);
+            }
+            Assert.False(pending.CurrentLeg.CanSendData);
+            Assert.Equal(FallbackCheckpointLeaseState.Pending, lease.State);
+        }
+        finally
+        {
+            bridge.ReleaseCheckpoint.TrySetResult();
+            await processing.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Theory]
+    [InlineData("data_session")]
+    [InlineData("data_session_generation")]
+    [InlineData("data_session_aba")]
+    [InlineData("replacement")]
+    [InlineData("terminal")]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public async Task InboundBootstrapCheckpoint_StaleDeliveryCannotAcceptOrYield(string mutation)
+    {
+        var transferId = $"inbound_bootstrap_checkpoint_{mutation}";
+        using var service = new SessionFileTransferService();
+        var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
+        using var replacementSession = new InitialBootstrapRecordingDataSession(dataSession.SessionId, transferId);
+        using var bridge = new InitialBootstrapCheckpointTransport(dataSession)
+        {
+            ReleaseCheckpoint = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession);
+        var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(context, dataSession);
+        AssertInitialPeerFirstBootstrapFrameReceived(service, context, frame);
+        var processing = ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
+        try
+        {
+            await bridge.CheckpointCaptured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var pending = CreateCoordinatorStateForTest(context);
+            var request = Assert.Single(bridge.Requests);
+            switch (mutation)
+            {
+                case "data_session":
+                case "data_session_aba": SetPrivateProperty(context, "DataSession", replacementSession); break;
+                case "data_session_generation": SetPrivateProperty(context, "DataSessionGeneration", 2L); break;
+                case "replacement":
+                    typeof(SessionFileTransferService).GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .SetValue(service, null);
+                    break;
+                case "terminal": SetPrivateProperty(context, "State", FileTransferTransferState.Canceled); break;
+            }
+
+            var validatorTarget = request.PreTransportDeliveryValidator!.Target!;
+            var contract = validatorTarget.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .Single(field => field.FieldType.Name == "FallbackControlPlaneDeliveryContract")
+                .GetValue(validatorTarget);
+            var completion = new FileTransferControlPlaneDeliveryResult(
+                request.Kind, transferId, dataSession.SessionId, "late-checkpoint-proof",
+                true, false, true, false, true, true, "", "", "", "");
+            Assert.False(Assert.IsType<bool>(typeof(SessionFileTransferService)
+                .GetMethod("TryCompleteInboundFallbackControlPlaneSendLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [context, request, contract, completion])));
+            if (mutation == "data_session_aba")
+            {
+                SetPrivateProperty(context, "DataSession", dataSession);
+            }
+            Assert.False(request.PreTransportDeliveryValidator!());
+            bridge.ReleaseCheckpoint.TrySetResult();
+            await processing.WaitAsync(TimeSpan.FromSeconds(5));
+            await bridge.CheckpointReturned.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            // A consumed stale delivery validator must never become valid again.
+            Assert.False(request.PreTransportDeliveryValidator!());
+            var current = CreateCoordinatorStateForTest(context);
+            Assert.False(current.CurrentLeg!.CanSendData);
+            Assert.Equal(pending.CurrentFallbackCheckpointLease, current.CurrentFallbackCheckpointLease);
+            Assert.Null(current.PersistentState.FallbackTailYield.CurrentOperation);
+        }
+        finally
+        {
+            bridge.ReleaseCheckpoint.TrySetResult();
+            await processing.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("missing_receipt")]
+    [InlineData("held_receipt")]
+    [InlineData("frame_identity")]
+    [InlineData("proof_generation")]
+    [InlineData("bootstrap_generation")]
+    [InlineData("data_session_generation")]
+    [InlineData("publication")]
+    [InlineData("target_transport")]
+    [InlineData("target_epoch")]
+    [InlineData("terminal")]
+    [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    public async Task InboundBootstrapCheckpoint_CommitRequiresExactLocalBootstrap(string mutation)
+    {
+        var transferId = $"inbound_bootstrap_commit_{mutation}";
+        using var service = new SessionFileTransferService();
+        var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
+        using var bridge = new InitialBootstrapCheckpointTransport(dataSession);
+        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession);
+        var source = CreateCoordinatorStateForTest(context);
+        var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(context, dataSession);
+        AssertInitialPeerFirstBootstrapFrameReceived(service, context, frame);
+        await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
+        await WaitUntilAsync(() => GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution") is null, 5000);
+        var completed = CreateCoordinatorStateForTest(context);
+        var terminal = completed.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+        var bootstrap = completed.PersistentState.FileTransferRouteTransition.LastFallbackV6ProofBootstrapReceipt!;
+        var authority = terminal.Authority;
+        var fallback = Assert.IsType<FileTransferFallbackTransitionProofBoundary>(authority.ProofBoundary);
+        authority = mutation switch
+        {
+            "frame_identity" => authority with { ProofBoundary = fallback with { RetainedFrameIdentity = fallback.RetainedFrameIdentity with { Sha256 = new string('a', 64) } } },
+            "proof_generation" => authority with { ProofBoundary = fallback with { PeerProofEvidence = fallback.PeerProofEvidence with { ProofGeneration = 99 } } },
+            "target_epoch" => authority with { ProofBoundary = fallback with { TargetTransportEpoch = 99 } },
+            "target_transport" => authority with { TargetTransport = FileTransferTransportKind.Tuna },
+            "publication" => authority with { SourceRoutePublication = authority.SourceRoutePublication with { PublicationGeneration = 99 } },
+            _ => authority,
+        };
+        var input = source with
+        {
+            CurrentDataSessionGeneration = mutation == "data_session_generation" ? 99 : source.CurrentDataSessionGeneration,
+            IsTerminal = mutation == "terminal",
+            PersistentState = source.PersistentState with
+            {
+                FileTransferRouteTransition = source.PersistentState.FileTransferRouteTransition with
+                {
+                    CurrentOperation = terminal with { State = FileTransferRouteTransitionState.Draining, Authority = authority },
+                    LastFallbackV6ProofBootstrapGeneration = bootstrap.Command.BootstrapGeneration,
+                    LastFallbackV6ProofBootstrapReceipt = mutation switch
+                    {
+                        "missing_receipt" => null,
+                        "held_receipt" => bootstrap with { Status = FileTransferFallbackV6ProofBootstrapReceiptStatus.Held },
+                        "bootstrap_generation" => bootstrap with { Command = bootstrap.Command with { BootstrapGeneration = 99 } },
+                        _ => bootstrap,
+                    },
+                },
+            },
+        };
+        var valid = Assert.IsType<bool>(typeof(FileTransferCoordinator)
+            .GetMethod("IsInboundFallbackBootstrapCheckpointBoundaryCurrent", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [input, authority]));
+        Assert.Equal(mutation == "none", valid);
+        if (mutation != "none")
+        {
+            var rejected = FileTransferCoordinator.CommitFileTransferRouteTransition(input, authority, terminal.DrainReceipt!.Value);
+            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Rejected, rejected.Status);
+            Assert.Null(rejected.State.CurrentFallbackCheckpointLease);
+            Assert.Equal(input.PersistentState.SnapshotStateGeneration, rejected.State.PersistentState.SnapshotStateGeneration);
+            return;
+        }
+
+        var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(input, authority, terminal.DrainReceipt!.Value);
+        Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, committed.Status);
+        var lease = Assert.IsType<FallbackCheckpointLease>(committed.RouteDecision!.FallbackCheckpointLease);
+        Assert.Equal(lease, committed.State.CurrentFallbackCheckpointLease);
+        Assert.False(committed.State.CurrentLeg!.CanSendData);
+        Assert.Equal(FileTransferLegState.CheckpointPending, committed.State.CurrentLeg.State);
+        Assert.Equal(input.PersistentState.SnapshotStateGeneration + 1, committed.State.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(FileTransferRoute.FileTunaV4, source.CurrentLeg!.RouteSelection.Route);
+        Assert.Null(source.CurrentFallbackCheckpointLease);
+        var duplicate = FileTransferCoordinator.CommitFileTransferRouteTransition(committed.State, authority, terminal.DrainReceipt.Value);
+        Assert.Equal(FileTransferRouteTransitionDecisionStatus.Idempotent, duplicate.Status);
+        Assert.Equal(committed.State.CurrentFallbackCheckpointLease, duplicate.State.CurrentFallbackCheckpointLease);
+        Assert.Equal(committed.State.PersistentState.SnapshotStateGeneration, duplicate.State.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(committed.State.PersistentState.SnapshotStateFingerprint, duplicate.State.PersistentState.SnapshotStateFingerprint);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteTransition")]
+    public async Task InboundBootstrapCheckpoint_ExactPeerYieldPairsOnlyAfterAcceptance()
+    {
+        const string transferId = "inbound_bootstrap_checkpoint_pair";
+        using var service = new SessionFileTransferService();
+        var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
+        using var bridge = new InitialBootstrapCheckpointTransport(dataSession)
+        {
+            ReleaseCheckpoint = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession);
+        var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(context, dataSession);
+        AssertInitialPeerFirstBootstrapFrameReceived(service, context, frame);
+        var processing = ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
+        try
+        {
+            await bridge.CheckpointCaptured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var pending = CreateCoordinatorStateForTest(context);
+            var leg = pending.CurrentLeg!;
+            var proof = new FileTransferFallbackTailYieldFrameV6
+            {
+                AuthoritySchema = FileTransferAuthoritySchema.Current,
+                SessionId = dataSession.SessionId,
+                TransferId = transferId,
+                TransportEpoch = leg.TransportEpochId,
+                OwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+                    dataSession.SessionId, transferId, leg.RouteSelection.TelemetryToken,
+                    leg.ProtocolVersion, leg.LiveRouteEpochId, leg.Generation + 1,
+                    leg.BridgeRecoveryGeneration, leg.TransportEpochId, "(none)"),
+                PairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+                    dataSession.SessionId, transferId, leg.RouteSelection.TelemetryToken,
+                    leg.ProtocolVersion, leg.LiveRouteEpochId, leg.TransportEpochId, "(none)"),
+                Direction = "outbound",
+                YieldGeneration = 1,
+                AuthorityId = CreatePeerFallbackTailYieldAuthorityId(transferId),
+                LiveRouteEpoch = leg.LiveRouteEpochId,
+                FallbackLegGeneration = leg.Generation + 1,
+                BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+                CommittedChunkIndex = 100,
+                HighestObservedChunkIndex = 99,
+                RecoveryMode = "fallback_tail_yield",
+            };
+            var applyPeerProof = typeof(SessionFileTransferService).GetMethod(
+                "ApplyInboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            applyPeerProof.Invoke(service, [context, proof]);
+            Assert.Null(GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation);
+            Assert.False(CreateCoordinatorStateForTest(context).CurrentLeg!.CanSendData);
+            bridge.ReleaseCheckpoint.TrySetResult();
+            await processing.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution") is null, 5000);
+            Assert.True(CreateCoordinatorStateForTest(context).CurrentLeg!.CanSendData);
+
+            applyPeerProof.Invoke(service, [context, proof]);
+            await WaitUntilAsync(() => GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation?.PairedRelease is not null, 5000);
+            var paired = GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation!.Value;
+            Assert.NotNull(paired.LocalProof);
+            Assert.NotNull(paired.PeerProof);
+            Assert.Equal(proof.AuthorityId, paired.PeerProof.Value.Proof.AuthorityId.ToString());
+            applyPeerProof.Invoke(service, [context, proof]);
+            Assert.Equal(paired.Decision.AuthorityId,
+                GetCoordinatorFallbackTailYieldSubstate(context).CurrentOperation!.Value.Decision.AuthorityId);
+            Assert.Single(dataSession.SentFrames.OfType<FileTransferFallbackTailYieldFrameV6>());
+        }
+        finally
+        {
+            bridge.ReleaseCheckpoint.TrySetResult();
+            await processing.WaitAsync(TimeSpan.FromSeconds(5));
+        }
     }
 
     [Theory]
@@ -354,6 +660,30 @@ public sealed partial class SessionFileTransferV4SenderTests
         return context;
     }
 
+    internal static async Task<string> CreateInboundBootstrapCheckpointEvidenceFixtureAsync()
+    {
+        const string transferId = "inbound_bootstrap_checkpoint_evidence";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
+        using var bridge = new InitialBootstrapCheckpointTransport(dataSession);
+        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession);
+        var identity = GetPrivateProperty<string>(context, "CoordinatorInstanceId");
+        var evidenceIdentity = "fte1-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(identity))).ToLowerInvariant()[..24];
+        var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(context, dataSession);
+        AssertInitialPeerFirstBootstrapFrameReceived(service, context, frame);
+        await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
+        await WaitUntilAsync(() => GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution") is null, 5000);
+        Assert.True(CreateCoordinatorStateForTest(context).CurrentLeg!.CanSendData);
+        service.Dispose();
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Split('\n').Any(line =>
+            line.Contains("event=filetransfer_coordinator_snapshot_stream_completed;", StringComparison.Ordinal) &&
+            line.Contains($"coordinator_instance_id={evidenceIdentity};", StringComparison.Ordinal)), 5000);
+        return string.Join('\n', ReadOperationalLogTail(logStart).Split('\n')
+            .Where(line => line.Contains($"coordinator_instance_id={evidenceIdentity};", StringComparison.Ordinal)));
+    }
+
     private static (FileTransferFrontierRequestFrameV6 Frame, FileTransferFallbackV6ProofBootstrapEvaluation Evaluation)
         CreateInitialPeerFirstBootstrapTrigger(object context, InitialBootstrapRecordingDataSession dataSession)
     {
@@ -426,5 +756,50 @@ public sealed partial class SessionFileTransferV4SenderTests
             => recording.SendAsync(frame, ct);
 
         public void Dispose() => recording.Dispose();
+    }
+
+    private sealed class InitialBootstrapCheckpointTransport(InitialBootstrapRecordingDataSession dataSession) :
+        LoopbackFileTransferTransport(dataSession.SessionId), IFileTransferControlPlaneDeliveryTransport
+    {
+        public List<FileTransferControlPlaneDeliveryRequest> Requests { get; } = [];
+        public TaskCompletionSource CheckpointCaptured { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CheckpointReturned { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource? ReleaseCheckpoint { get; set; }
+        public bool PeerVisible { get; set; } = true;
+
+        public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+            FileTransferControlPlaneDeliveryRequest request, CancellationToken ct)
+        {
+            var accepted = request.PreTransportDeliveryValidator?.Invoke() == true;
+            Requests.Add(request);
+            if (request.Kind == FileTransferControlPlaneKind.FallbackCheckpointProof)
+            {
+                CheckpointCaptured.TrySetResult();
+                if (ReleaseCheckpoint is { } release)
+                {
+                    await release.Task.WaitAsync(ct);
+                }
+            }
+
+            if (accepted)
+            {
+                await dataSession.SendAsync(request.Frame, ct);
+            }
+
+            if (request.Kind == FileTransferControlPlaneKind.FallbackCheckpointProof)
+            {
+                CheckpointReturned.TrySetResult();
+            }
+            return new FileTransferControlPlaneDeliveryResult(
+                request.Kind, request.Frame.TransferId, request.Frame.SessionId,
+                "bootstrap-checkpoint-test", ControlQueue: accepted,
+                ControlAck: false, ControlCopy: accepted && PeerVisible,
+                BulkCopy: false, PeerVisibleAny: accepted && PeerVisible,
+                AcceptedAny: accepted, ControlQueueErrorName: string.Empty,
+                ControlAckErrorName: string.Empty, ControlCopyErrorName: string.Empty,
+                BulkCopyErrorName: string.Empty);
+        }
     }
 }

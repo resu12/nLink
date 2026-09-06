@@ -19525,6 +19525,8 @@ public sealed partial class SessionFileTransferService :
         FileTransferControlPlaneDeliveryRequest request,
         FallbackControlPlaneToken token)
     {
+        var checkpointDataSession = context.DataSession;
+        var checkpointDataSessionGeneration = context.DataSessionGeneration;
         var contract = new FallbackControlPlaneDeliveryContract(
             token,
             BindFallbackControlPlaneDeliveryRequest(request, token));
@@ -19546,6 +19548,16 @@ public sealed partial class SessionFileTransferService :
                                 ? FallbackControlPlaneDeliveryOutcome.TerminalRejected
                                 : FallbackControlPlaneDeliveryOutcome.StaleRejected,
                             context.IsTerminal ? "transfer_terminal" : "stale_inbound_context");
+                        return false;
+                    }
+
+                    if (request.Kind == FileTransferControlPlaneKind.FallbackCheckpointProof &&
+                        (!ReferenceEquals(context.DataSession, checkpointDataSession) ||
+                         context.DataSessionGeneration != checkpointDataSessionGeneration))
+                    {
+                        contract.Lifecycle.TrySettle(
+                            FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            "checkpoint_data_session_changed");
                         return false;
                     }
 
@@ -19918,6 +19930,12 @@ public sealed partial class SessionFileTransferService :
         }
 
         if (contract.Lifecycle.IsSettled)
+        {
+            return false;
+        }
+
+        if (request.Kind == FileTransferControlPlaneKind.FallbackCheckpointProof &&
+            contract.Request.PreTransportDeliveryValidator?.Invoke() != true)
         {
             return false;
         }
@@ -22718,6 +22736,15 @@ public sealed partial class SessionFileTransferService :
             requestId,
             reason);
         MarkLiveRouteEpochRecoveredFromFallbackCheckpointIfCurrent(context, currentLeg);
+        if (context.CoordinatorPersistentState.FallbackTailYield
+                .PendingPeerProofBeforeLocalYield is not null)
+        {
+            // Recheck only after the exact Coordinator acceptance above. The
+            // yield decision still validates (or discards) the retained scope.
+            ResolveInboundFallbackTailSurvivalLocked(
+                context,
+                "fallback_checkpoint_accepted");
+        }
     }
 
     private static bool ShouldUseV6RegularNknSparseRuntime(OutboundTransferContext context)

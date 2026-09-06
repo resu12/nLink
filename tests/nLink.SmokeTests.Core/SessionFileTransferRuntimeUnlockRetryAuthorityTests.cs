@@ -780,6 +780,43 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             granted.Contract!.Authority,
             GetCurrentAttempt(fixture.Context)?.Authority);
         Assert.Same(granted.Contract, fixture.Bridge.InfraCurrentContract);
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        var installedReceipt = GetCurrentInstallReceipt(fixture.Context)!.Value;
+        var duplicate = fixture.Bridge.CommitRuntimeUnlockRetryDispatchInstall(installedReceipt);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Idempotent, duplicate.Status);
+        Assert.Equal(1, fixture.Bridge.InstallCount);
+        Assert.Equal(installedReceipt, GetCurrentInstallReceipt(fixture.Context));
+    }
+
+    [Fact]
+    public async Task FallbackTailProof_OmittedAdoptionRejectsLaterEnvelopeWithoutChangingContext()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_skipped_proof_adoption",
+            "transfer_retry_skipped_proof_adoption");
+        var (_, tailYield) = SeedPostTunaFallbackRetrySource(fixture.Context);
+        var before = CreateCoordinatorState(fixture.Context);
+        var receipt = FileTransferCoordinator.CreateFallbackTailLocalProofReceipt(
+            before, tailYield, "skipped-local-proof", "skipped-local-frame", 10_000);
+        var skipped = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(before, receipt);
+        Assert.True(skipped.Accepted, skipped.Reason);
+        var later = FileTransferCoordinator.ApplyFallbackTailLocalProofReceipt(skipped.State, receipt);
+        Assert.Equal(skipped.State.PersistentState.SnapshotStateGeneration,
+            later.SnapshotEnvelope!.Aggregate.BeforeStateGeneration);
+        var adopt = typeof(SessionFileTransferService).GetMethod(
+            "AdoptCoordinatorStateLocked",
+            BindingFlags.Static | BindingFlags.NonPublic,
+            binder: null,
+            types: [fixture.Context.GetType(), typeof(FileTransferFallbackTailYieldTransitionDecision)],
+            modifiers: null)!;
+
+        var error = Assert.Throws<TargetInvocationException>(() =>
+            adopt.Invoke(null, [fixture.Context, later]));
+
+        Assert.Contains("not contiguous", Assert.IsType<InvalidOperationException>(error.InnerException).Message);
+        Assert.Equal(before.PersistentState, GetCoordinatorPersistentState(fixture.Context));
+        Assert.Null(fixture.Bridge.InfraCurrentContract);
+        Assert.Equal(0, fixture.Bridge.InstallCount);
     }
 
     [Fact]
@@ -1181,6 +1218,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                 state,
                 localReceipt);
         Assert.True(localApplied.Accepted, localApplied.Reason);
+        AdoptFallbackTailYieldDecision(context, localApplied);
 
         var scope = operation.Scope;
         var peerAuthority = new FileTransferAuthorityId(
@@ -1213,21 +1251,20 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             CommittedChunkIndex: 0,
             HighestObservedChunkIndex: 0,
             "retry-fallback-tail-peer-frame");
+        var pairedState = CreateCoordinatorState(context);
         var peerReceipt =
             FileTransferCoordinator.CreateFallbackTailPeerProofReceipt(
-                localApplied.State,
+                pairedState,
                 peerProof,
                 "retry-fallback-tail-peer-proof",
                 10_001);
         var paired =
             FileTransferCoordinator.ApplyFallbackTailPeerProofReceipt(
-                localApplied.State,
+                pairedState,
                 peerReceipt);
         Assert.True(paired.Accepted, paired.Reason);
         Assert.NotNull(paired.PairedRelease);
-        SetCoordinatorPersistentState(
-            context,
-            paired.State.PersistentState);
+        AdoptFallbackTailYieldDecision(context, paired);
     }
 
     private static void CarryForwardPairedFallbackTailYield(
@@ -1241,9 +1278,30 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                     targetTransportEpoch,
                     "retry-fallback-tail-transport-epoch");
         Assert.True(carried.Accepted, carried.Reason);
-        SetCoordinatorPersistentState(
-            context,
-            carried.State.PersistentState);
+        AdoptFallbackTailYieldDecision(context, carried);
+    }
+
+    private static void AdoptFallbackTailYieldDecision(
+        object context,
+        FileTransferFallbackTailYieldTransitionDecision decision)
+    {
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(decision.SnapshotEnvelope);
+        var before = GetCoordinatorPersistentState(context);
+        Assert.Equal(before.SnapshotStateGeneration, envelope.Aggregate.BeforeStateGeneration);
+        Assert.Equal(before.SnapshotStateFingerprint, envelope.Aggregate.BeforeStateFingerprint);
+        Assert.Equal(before.SnapshotStateGeneration + 1, envelope.Aggregate.AfterStateGeneration);
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "AdoptCoordinatorStateLocked" &&
+                candidate.GetParameters().Length == 2 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters()[1].ParameterType ==
+                    typeof(FileTransferFallbackTailYieldTransitionDecision));
+        method.Invoke(null, [context, decision]);
+        var adopted = GetCoordinatorPersistentState(context);
+        Assert.Equal(envelope.Aggregate.AfterStateGeneration, adopted.SnapshotStateGeneration);
+        Assert.Equal(envelope.Aggregate.AfterStateFingerprint, adopted.SnapshotStateFingerprint);
     }
 
     private static FileTransferCoordinatorState CreateCoordinatorState(object context)
@@ -1264,7 +1322,9 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
             .Single(candidate =>
                 candidate.Name == "ApplyCoordinatorDecisionToContextLocked" &&
-                candidate.GetParameters()[0].ParameterType == context.GetType());
+                candidate.GetParameters().Length == 3 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters()[1].ParameterType == typeof(FileTransferCoordinatorDecision));
         method.Invoke(null, [context, decision, true]);
     }
 

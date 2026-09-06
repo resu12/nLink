@@ -7737,6 +7737,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var serviceType = typeof(SessionFileTransferService);
         var context = CreatePostTunaFallbackV6InboundContext(
             "transfer_post_tuna_fallback_checkpoint_proof_control_plane_durable");
+        serviceType.GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
         SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
         SetPrivateProperty(context, "V6ReceiverTransportEpoch", 3L);
         serviceType
@@ -7753,9 +7755,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Priority = "state_refresh",
             RecoveryMode = "regular_nkn_state_refresh",
         };
-        serviceType
-            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, checkpointRequest, "state_refresh_received"]);
+        Assert.True(Assert.IsType<bool>(serviceType
+            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, checkpointRequest, "state_refresh_received"])));
 
         var proof = new FileTransferReceiverStateFrameV6
         {
@@ -7830,14 +7832,14 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Priority = "state_refresh",
             RecoveryMode = "regular_nkn_state_refresh",
         };
-        serviceType
-            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, checkpointRequest, "test_inbound_checkpoint_retire"]);
+        Assert.True((bool)serviceType
+            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, checkpointRequest, "test_inbound_checkpoint_retire"])!);
 
         var logStart = GetOperationalLogLength();
         var sent = await (Task<bool>)serviceType
             .GetMethod("SendInboundV6ReceiverStateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "regular_nkn_state_refresh", true, false])!;
+            .Invoke(service, [context, "regular_nkn_state_refresh", true, false, null])!;
 
         Assert.True(sent);
         var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg");
