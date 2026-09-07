@@ -16848,6 +16848,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Theory]
     [InlineData(false, false, "none")]
+    [InlineData(false, true, "none")]
     [InlineData(true, false, "none")]
     [InlineData(true, true, "none")]
     [InlineData(true, false, "concurrent")]

@@ -11,6 +11,7 @@ param(
     [double]$GoodputRegressionTolerancePercent = 10D,
     [int]$GoodputOnlyRerunLimit = 1,
     [int]$SetupOnlyRerunLimit = 1,
+    [switch]$StrictCampaignPreflight,
     [int]$TimeoutSeconds = 900,
     [int]$ProgressTimeoutSeconds = 180,
     [int]$FallbackMaxAttempts = 2,
@@ -1115,6 +1116,7 @@ function Complete-RouteAcceptanceRunEvidence {
             -InitialSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
             -FinalSnapshot $finalSnapshot `
             -ScenarioAttempts $scenarioEvidence
+        $manifest | Add-Member -NotePropertyName strictCampaignPreflight -NotePropertyValue ([bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue))
         $writeResult = Set-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $manifest
         $validation = $writeResult.validation
         $script:RouteAcceptanceManifestPath = [System.IO.Path]::GetFullPath($manifestPath)
@@ -1149,6 +1151,7 @@ function Complete-RouteAcceptanceRunEvidence {
                     -InitialSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
                     -FinalSnapshot $script:RouteAcceptanceInitialEvidenceSnapshot `
                     -ScenarioAttempts @($scenarioEvidence)
+                $failureManifest | Add-Member -NotePropertyName strictCampaignPreflight -NotePropertyValue ([bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue))
                 Write-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $failureManifest | Out-Null
             }
             catch {
@@ -8073,7 +8076,7 @@ function Test-Phase5BridgeReadinessPreflightQuarantinableFailure {
         [Parameter(Mandatory = $true)]$PreflightResult
     )
 
-    if ($null -eq $PreflightResult -or $PreflightResult.Passed) {
+    if ([bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue) -or $null -eq $PreflightResult -or $PreflightResult.Passed) {
         return $false
     }
 
@@ -8134,6 +8137,7 @@ function Write-Phase5BridgeReadinessPreflightAttemptSummary {
 
     $lines = @(
         'Phase 5 Bridge Readiness Preflight Attempts',
+        ("strict_campaign_preflight={0}" -f [int][bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue)),
         ("verdict={0}" -f $verdict),
         ("attempt_count={0}" -f $attemptCount),
         ("retry_used={0}" -f $retryUsed),
@@ -8151,6 +8155,7 @@ function Write-Phase5BridgeReadinessPreflightAttemptSummary {
 
     ([ordered]@{
         event = 'phase5_bridge_readiness_preflight_attempts'
+        strictCampaignPreflight = [bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue)
         verdict = $verdict
         attemptCount = $attemptCount
         retryUsed = $retryUsed
@@ -8174,7 +8179,7 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
     )
 
     $first = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
-    if ($first.Passed -or -not (Test-Phase5BridgeReadinessPreflightRetryableFailure -PreflightResult $first)) {
+    if ([bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue) -or $first.Passed -or -not (Test-Phase5BridgeReadinessPreflightRetryableFailure -PreflightResult $first)) {
         $firstSubreason = if ($first.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$first.FailureSubreason } else { '' }
         $result = [pscustomobject]@{
             Passed = $first.Passed
@@ -8471,6 +8476,7 @@ function Write-Phase5PreflightFailureSummaryFiles {
         'correctness_verdict=FAIL',
         'performance_verdict=PASS',
         'acceptance_phase=phase5',
+        ("strict_campaign_preflight={0}" -f [int][bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue)),
         ("artifact_root={0}" -f $RunRoot),
         ("manifest_present={0}" -f ($(if ([bool]$evidence.ManifestPresent) { 1 } else { 0 }))),
         ("manifest_path={0}" -f ($(if ([string]::IsNullOrWhiteSpace([string]$evidence.ManifestPath)) { '(none)' } else { [string]$evidence.ManifestPath }))),
@@ -8586,6 +8592,7 @@ function Write-Phase5PreflightFailureSummaryFiles {
         correctnessVerdict = 'FAIL'
         performanceVerdict = 'PASS'
         acceptancePhase = 'phase5'
+        strictCampaignPreflight = [bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue)
         artifactRoot = $RunRoot
         manifestPresent = [bool]$evidence.ManifestPresent
         manifestPath = [string]$evidence.ManifestPath
@@ -12246,6 +12253,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("correctness_verdict={0}" -f $correctnessVerdict),
         ("performance_verdict={0}" -f $performanceVerdict),
         ("acceptance_phase={0}" -f $AcceptancePhase),
+        ("strict_campaign_preflight={0}" -f [int][bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue)),
         ("artifact_root={0}" -f $RunRoot),
         ("manifest_present={0}" -f ($(if ([bool]$evidence.ManifestPresent) { 1 } else { 0 }))),
         ("manifest_path={0}" -f ($(if ([string]::IsNullOrWhiteSpace([string]$evidence.ManifestPath)) { '(none)' } else { [string]$evidence.ManifestPath }))),
@@ -13166,6 +13174,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         correctnessVerdict = $correctnessVerdict
         performanceVerdict = $performanceVerdict
         acceptancePhase = $AcceptancePhase
+        strictCampaignPreflight = [bool](Get-Variable -Name StrictCampaignPreflight -ValueOnly -ErrorAction SilentlyContinue)
         artifactRoot = $RunRoot
         manifestPresent = [bool]$evidence.ManifestPresent
         manifestPath = [string]$evidence.ManifestPath
@@ -13834,6 +13843,11 @@ try {
     $fakeMode = $evidenceDryRunMode -or
         (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_GUI')
     $script:RouteAcceptanceExecutionMode = if ($evidenceDryRunMode) { 'evidence_dry_run' } elseif ($fakeMode) { 'fake' } else { 'live' }
+    if ($StrictCampaignPreflight -and
+        ($MatrixMode -ne 'phase5-analyzer-gui-acceptance' -or $fakeMode -or
+            (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_SKIP_PHASE5_PREFLIGHT'))) {
+        throw 'StrictCampaignPreflight requires live Phase 5 execution with preflights enabled.'
+    }
     if ($evidenceDryRunMode -and -not [string]::IsNullOrWhiteSpace($EvidenceDryRunFixtureRoot)) {
         $script:RouteAcceptanceEvidenceDryRunFixtureRoot = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $EvidenceDryRunFixtureRoot)).Path
         $fixtureRunId = Get-RouteAcceptanceEvidenceDryRunFixtureRunId -FixtureRoot $script:RouteAcceptanceEvidenceDryRunFixtureRoot

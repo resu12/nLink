@@ -5557,7 +5557,7 @@ function New-FileTransferCoordinatorSnapshotAggregateIntervalIndex {
 }
 
 function Get-FileTransferCoordinatorReceiveRecoveryRootLifecycle {
-    param([AllowEmptyCollection()][object[]]$Entries, $AggregateIndex)
+    param([AllowEmptyCollection()][object[]]$Entries, $AggregateIndex, $ValidatedHandoffSuccessors)
 
     # A current retirement and terminal installation are one state boundary,
     # not two chronologically ordered observations. Never select a retired
@@ -5659,11 +5659,16 @@ function Get-FileTransferCoordinatorReceiveRecoveryRootLifecycle {
             $role = [string]$entry.Operation.operationRole
             $prior = $slots[$role]
             $successors = @()
-            if ($role -ceq 'operation_current' -and $boundary.decisionKind -ceq 'IssueReceiveRecoveryOperation' -and
-                $boundary.decisionStatus -ceq 'Accepted' -and $boundary.decisionReason -ceq 'filetransfer_receive_recovery_operation_successor_issued') {
+            $handoffKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.boundaryId)"
+            $handoffSuccessor = if ($null -ne $ValidatedHandoffSuccessors -and
+                $ValidatedHandoffSuccessors.ContainsKey($handoffKey)) { $ValidatedHandoffSuccessors[$handoffKey] } else { $null }
+            $directSuccessor = $boundary.decisionKind -ceq 'IssueReceiveRecoveryOperation' -and
+                $boundary.decisionStatus -ceq 'Accepted' -and $boundary.decisionReason -ceq 'filetransfer_receive_recovery_operation_successor_issued'
+            if ($role -ceq 'operation_current' -and ($directSuccessor -or $null -ne $handoffSuccessor)) {
                 $successors = @($boundary.operations | Where-Object {
                     $_.family -ceq 'receive_recovery' -and $_.operationRole -ceq 'operation_current' -and $_.stateApplied -and
                     $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Issued:None' -and
+                    ($directSuccessor -or $_.operationKey -ceq $handoffSuccessor.operationKey) -and
                     $_.authorityId -cne $prior.Operation.authorityId -and $_.predecessorAuthorityId -ceq $prior.Operation.authorityId -and
                     [long]$_.operationGeneration -eq ([long]$prior.Operation.operationGeneration + 1L) -and
                     $_.operationKind -ceq $prior.Operation.operationKind -and
@@ -9392,6 +9397,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $validatedHandoffSuccessors = @{}
     $recoveryHandoffEffectKinds = @(
         'pressure_settlement_bridge_applied',
         'local_contract_settled',
@@ -9564,6 +9570,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             continue
         }
 
+        $handoffEffectsValid = $true
         foreach ($effectKind in $recoveryHandoffEffectKinds) {
             $subject = if ($effectKind -in @(
                     'recovery_handoff_committed',
@@ -9583,6 +9590,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             if ($kindEffects.Count -eq 1 -and $exactEffects.Count -eq 1) {
                 continue
             }
+            $handoffEffectsValid = $false
             if ($kindEffects.Count -eq 0) {
                 $errors.Add(
                     "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|recovery_handoff_commit_required_effect_missing:$($boundary.evidenceLineIndex)")
@@ -9601,6 +9609,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         "snapshot_regular_v4_pressure_recovery_handoff_effect_binding_invalid|recovery_handoff_commit_effect_duplicated:$($duplicateEffect.LineIndex)")
                 }
             }
+        }
+        if ($handoffEffectsValid) {
+            # This atomic Family-3/5 boundary installs recovery authority just
+            # as direct issuance does, but only after its state and five exact
+            # physical effects have passed the existing handoff validation.
+            $handoffKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.boundaryId)"
+            $validatedHandoffSuccessors[$handoffKey] = $recoveries[0]
         }
     }
 
@@ -11334,7 +11349,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 [string]$_.Operation.operationRole -in @(
                     'operation_current', 'operation_terminal')
             })
-        $rootLifecycle = Get-FileTransferCoordinatorReceiveRecoveryRootLifecycle -Entries $operationEntries -AggregateIndex $aggregateBoundaryIndex
+        $rootLifecycle = Get-FileTransferCoordinatorReceiveRecoveryRootLifecycle -Entries $operationEntries -AggregateIndex $aggregateBoundaryIndex -ValidatedHandoffSuccessors $validatedHandoffSuccessors
         if ($validateRecoveryRoots) {
             foreach ($failure in $rootLifecycle.Errors) { $errors.Add([string]$failure) }
         }
@@ -14026,8 +14041,8 @@ function ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue {
                 ConvertTo-FileTransferCoordinatorSnapshotBindingSemanticValue `
                     -Value $_
             })
-        Write-Output -NoEnumerate $items
-        return
+        # Preserve plain arrays; Write-Output -NoEnumerate adds PS5.1 serializer metadata.
+        return ,$items
     }
 
     $result = [ordered]@{}

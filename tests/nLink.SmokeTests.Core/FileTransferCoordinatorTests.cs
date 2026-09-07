@@ -25013,7 +25013,8 @@ public sealed partial class FileTransferCoordinatorTests
     private static (FileTransferCoordinatorState State, RepairReplayDecision Decision)
         AuthorizeRegularV4FrontierRepair(
             FileTransferCoordinatorState? currentState = null,
-            FileTransferAuthorityId? predecessorAuthorityId = null)
+            FileTransferAuthorityId? predecessorAuthorityId = null,
+            Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var state = currentState ?? StartRegular(regular).State;
@@ -25035,6 +25036,8 @@ public sealed partial class FileTransferCoordinatorTests
                     RuntimeGeneration: owner.RuntimeGeneration,
                     TerminalGeneration: state.TerminalGeneration));
             Assert.True(publication.Accepted);
+            capture?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+                publication.SnapshotEnvelope));
             state = publication.State;
         }
 
@@ -25048,6 +25051,8 @@ public sealed partial class FileTransferCoordinatorTests
                 predecessorAuthorityId: predecessorAuthorityId));
         Assert.True(repair.Accepted);
         Assert.NotNull(repair.RepairReplayDecision);
+        capture?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            repair.SnapshotEnvelope));
         return (repair.State, repair.RepairReplayDecision!.Value);
     }
 
@@ -25742,22 +25747,50 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferDirection direction =
                 FileTransferDirection.Outbound,
             string? coordinatorInstanceId = null,
-            long lastOperationGeneration = 0)
+            long lastOperationGeneration = 0,
+            Action<FileTransferCoordinatorTransitionEnvelope>? captureInitial = null)
     {
         var regular =
             FileTransferRouteResolver.Resolve(
                 FileTransferRoute.RegularNknV4Fast);
-        var state = FileTransferCoordinator.Apply(
+        var initialState = EmptyState(regular) with { Direction = direction };
+        if (captureInitial is not null)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(coordinatorInstanceId));
+            initialState = initialState with
+            {
+                CurrentDataSessionIdentity = "data-session-1",
+                CurrentDataSessionGeneration = 1,
+                PersistentState = initialState.PersistentState with
+                {
+                    CoordinatorInstanceId = coordinatorInstanceId,
+                    SnapshotStateGeneration = 0,
+                    FileTransferReceiveRecovery = initialState.PersistentState.FileTransferReceiveRecovery with
+                    {
+                        LastOperationGeneration = lastOperationGeneration,
+                    },
+                },
+            };
+        }
+        var started = FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
                 regular,
                 state: FileTransferLegState.Active,
                 canSendData: true),
-            EmptyState(regular) with { Direction = direction }).State with
+            initialState);
+        Assert.Null(started.MutationRejectedReason);
+        captureInitial?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            started.SnapshotEnvelope));
+        var state = started.State;
+        if (captureInitial is null)
         {
-            CurrentDataSessionIdentity = "data-session-1",
-            CurrentDataSessionGeneration = 1,
-        };
+            state = state with
+            {
+                CurrentDataSessionIdentity = "data-session-1",
+                CurrentDataSessionGeneration = 1,
+            };
+        }
         var owner = Assert.IsType<RuntimeOwnerToken>(
             state.CurrentRuntimeOwner);
         var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
@@ -25779,8 +25812,10 @@ public sealed partial class FileTransferCoordinatorTests
                 TargetTransport:
                     FileTransferTransportKind.RegularNkn));
         Assert.True(published.Accepted);
+        captureInitial?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
+            published.SnapshotEnvelope));
         state = published.State;
-        if (!string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        if (captureInitial is null && !string.IsNullOrWhiteSpace(coordinatorInstanceId))
         {
             state = state with
             {
@@ -25795,7 +25830,7 @@ public sealed partial class FileTransferCoordinatorTests
         var observation = CreateReceiveRecoveryObservationForTest(
             state,
             "receive_recovery_operation");
-        if (lastOperationGeneration > 0)
+        if (captureInitial is null && lastOperationGeneration > 0)
         {
             state = state with
             {

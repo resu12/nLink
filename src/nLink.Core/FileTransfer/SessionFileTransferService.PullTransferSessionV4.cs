@@ -24700,7 +24700,7 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            if (TryDeferInboundRegularNknV4ReceiverStateSendFailureForRecovery(context, state, reason, ex))
+            if (TryDeferInboundRegularNknV4ReceiverStateSendFailureForRecovery(context, dataSession, state, reason, ex))
             {
                 return false;
             }
@@ -24772,11 +24772,19 @@ public sealed partial class SessionFileTransferService
 
     private bool TryDeferInboundRegularNknV4ReceiverStateSendFailureForRecovery(
         InboundTransferContext context,
+        IFileTransferDataSession dataSession,
         FileTransferStateFrameV4 state,
         string reason,
         Exception ex)
     {
-        if (!IsRecoverableRegularNknV4RecoveryTransportSendException(ex) ||
+        var unavailable = FindDataSessionSubmissionUnavailableException(ex);
+        var recoveryBarrierRejected = unavailable is
+        {
+            Reason: FileTransferDataSessionSubmissionUnavailableReason.SubmissionEpochNotReady,
+            RecoveryBarrierActive: true,
+        };
+        if ((!IsRecoverableRegularNknV4RecoveryTransportSendException(ex) &&
+             !recoveryBarrierRejected) ||
             state.TerminalReady)
         {
             return false;
@@ -24802,6 +24810,28 @@ public sealed partial class SessionFileTransferService
                 context.NextChunkIndex >= context.ChunkCount)
             {
                 return false;
+            }
+
+            if (recoveryBarrierRejected)
+            {
+                // The rejection is transport evidence only. Defer this state send
+                // failure only while the Coordinator owns this exact session's
+                // recovery execution; early receive proof does not release its hold.
+                if (!ReferenceEquals(context.DataSession, dataSession) ||
+                    !FileTransferCoordinator.TryGetCurrentReceiveRecoveryPayloadSubmissionHold(
+                        CreateCoordinatorStateLocked(context),
+                        out var operation,
+                        out _) ||
+                    context.CurrentBridgeRecoveryExecutionCommand !=
+                        operation.Authority.ExecutionCommand)
+                {
+                    return false;
+                }
+
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_regular_v4_receiver_state_submission_held; authority_effect=none; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; recovery_operation_authority_id={FormatProtocolLogValue(operation.Authority.AuthorityId.ToString())}; recovery_operation_generation={operation.Authority.OperationGeneration}; data_session_generation={context.DataSessionGeneration}; state_reason={FormatProtocolLogValue(reason)}; epoch={state.Epoch}; reason=coordinator_receive_recovery_execution_current; submission_failure_reason={unavailable!.Reason}; recovery_barrier_active=1");
+                return true;
             }
 
             frontierLagChunks = Math.Max(
