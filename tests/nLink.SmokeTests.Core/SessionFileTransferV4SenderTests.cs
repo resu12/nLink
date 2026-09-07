@@ -722,6 +722,478 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task RegularV4ObsoleteUndispatchedRepair_FinalFrontierAdvanceRetiresExactAuthorityOnce()
+    {
+        const string transferId = "transfer_regular_v4_obsolete_undispatched_repair";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        var context = CreateRegularV4ObsoleteRepairContext(service, transport, transferId);
+        var initialPublication = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
+        AssertRoutePublicationRepeatsStayDiagnostic(service, transport, context, initialPublication);
+        var contract = GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract")!;
+        var lifecycle = GetPrivatePropertyValue(contract, "Lifecycle")!;
+        var authority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(contract, "Authority"));
+        Assert.Equal("639:12:639:12", authority.RepairKey);
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "DispatchObserved"));
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
+
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 2, frontier: 642);
+        Assert.Equal(9, Assert.IsAssignableFrom<IReadOnlyList<int>>(GetPrivatePropertyValue(
+            Assert.Single(GetQueuedV4RepairSends(context)), "ChunkIndices")).Count);
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+        Assert.Same(contract, GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 3, frontier: 648);
+        Assert.Equal(3, Assert.IsAssignableFrom<IReadOnlyList<int>>(GetPrivatePropertyValue(
+            Assert.Single(GetQueuedV4RepairSends(context)), "ChunkIndices")).Count);
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 4, frontier: 651);
+
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(authority.AuthorityId, settlement.AuthorityId);
+        Assert.Equal(authority.DecisionGeneration, settlement.DecisionGeneration);
+        Assert.Equal(authority.RepairKey, settlement.RepairKey);
+        Assert.Equal(12, settlement.RequestedChunkCount);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch, settlement.Outcome);
+        Assert.Equal("regular_v4_repair_obsolete_before_dispatch", settlement.DecisionReason);
+        Assert.True(GetPrivateProperty<bool>(lifecycle, "IsSettled"));
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "DispatchObserved"));
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Null(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+        Assert.Equal("tuna_activation_negotiating", GetPrivateProperty<string>(context, "PullTransportPauseReason"));
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast,
+            GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection").Route);
+        var settledState = CreateCoordinatorStateForTest(context);
+        var retryLifecycle = FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(settledState);
+        var release = Assert.IsType<RuntimeUnlockRetryLifecycleRepairSettlementRelease>(
+            retryLifecycle.RepairSettlementRelease);
+        Assert.Equal(settlement, release.Settlement);
+        Assert.Equal(RuntimeUnlockRetryLifecycleRepairSettlementReleaseState.Available, release.State);
+        Assert.Null(retryLifecycle.CurrentAuthorizedAuthority);
+
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 4, frontier: 651);
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 5, frontier: 654);
+        Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "DispatchObserved"));
+        Assert.Equal(settledState.PersistentState.SnapshotStateGeneration,
+            CreateCoordinatorStateForTest(context).PersistentState.SnapshotStateGeneration);
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
+
+        var emitter = GetPrivatePropertyValue(context, "CoordinatorSnapshotEmitter")!;
+        var projectEvidenceToken = emitter.GetType().GetMethod("EvidenceToken", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var evidenceInstanceId = Assert.IsType<string>(projectEvidenceToken.Invoke(null,
+            [GetPrivateProperty<string>(context, "CoordinatorInstanceId")]));
+        var evidenceAuthorityId = Assert.IsType<string>(projectEvidenceToken.Invoke(null, [authority.AuthorityId.ToString()]));
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Split('\n').Any(line =>
+            line.Contains($"coordinator_instance_id={evidenceInstanceId};", StringComparison.Ordinal) &&
+            line.Contains("effect_kind=local_contract_reference_cleared;", StringComparison.Ordinal)), timeoutMs: 5000);
+        var effects = ReadOperationalLogTail(logStart).Split('\n').Where(line =>
+            line.Contains("event=filetransfer_coordinator_authority_effect;", StringComparison.Ordinal) &&
+            line.Contains($"coordinator_instance_id={evidenceInstanceId};", StringComparison.Ordinal)).ToArray();
+        static string Field(string line, string name) => line.Split(';')
+            .Select(part => part.Trim()).Single(part => part.StartsWith(name + "=", StringComparison.Ordinal))[(name.Length + 1)..];
+        var installedEffect = Assert.Single(effects, line => Field(line, "effect_kind") == "repair_contract_bound");
+        var closure = new[] { "pressure_settlement_bridge_applied", "local_contract_settled", "local_contract_reference_cleared" }
+            .Select(kind => Assert.Single(effects, line => Field(line, "effect_kind") == kind)).ToArray();
+        Assert.All(closure, line =>
+        {
+            Assert.Equal(evidenceAuthorityId, Field(line, "operation_authority_id"));
+            Assert.Equal(Field(installedEffect, "operation_authority_id"), Field(line, "operation_authority_id"));
+            Assert.Equal(authority.DecisionGeneration.ToString(), Field(line, "operation_generation"));
+            Assert.Equal(Field(closure[0], "transition_id"), Field(line, "transition_id"));
+            Assert.NotEqual("(none)", Field(line, "transition_id"));
+            Assert.Equal(settledState.PersistentState.SnapshotStateGeneration.ToString(), Field(line, "coordinator_state_generation"));
+            Assert.Equal(Field(closure[0], "receipt_identity"), Field(line, "receipt_identity"));
+            Assert.Equal(Field(closure[0], "receipt_fingerprint"), Field(line, "receipt_fingerprint"));
+        });
+        AssertSingleInitialRoutePublicationEffect(context, initialPublication, ReadOperationalLogTail(logStart));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task InitialInboundRoutePublication_ForwardsOneExactBoundEffectAndRejectsWrongToken()
+    {
+        const string transferId = "transfer_regular_v4_initial_inbound_publication";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateProjectionInboundContext(transferId);
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        StartCoordinatorSnapshotStreamForTest(context);
+        Assert.NotNull(typeof(SessionFileTransferService)
+            .GetMethod("EnsureInboundTransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_initial_inbound_publication", null]));
+        var publishRoute = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "TryPublishRouteSelectedIfAuthorizedLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType() &&
+                method.GetParameters()[4].ParameterType.IsByRef);
+        Assert.True(Assert.IsType<bool>(publishRoute.Invoke(service,
+            [context, FileTransferRouteResolverInput.FromTransport(transport),
+                "unit_test_initial_inbound_publication", "unit_test_initial_inbound_publication", null, null])));
+        var publication = GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken");
+        AssertRoutePublicationRepeatsStayDiagnostic(service, transport, context, publication);
+        var emitter = GetPrivatePropertyValue(context, "CoordinatorSnapshotEmitter")!;
+        var instanceId = Assert.IsType<string>(emitter.GetType()
+            .GetMethod("EvidenceToken", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [GetPrivateProperty<string>(context, "CoordinatorInstanceId")]));
+        service.Dispose();
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Split('\n').Any(line =>
+            line.Contains("event=filetransfer_coordinator_snapshot_stream_completed;", StringComparison.Ordinal) &&
+            line.Contains($"coordinator_instance_id={instanceId};", StringComparison.Ordinal)), timeoutMs: 5000);
+
+        AssertSingleInitialRoutePublicationEffect(context, publication, ReadOperationalLogTail(logStart));
+    }
+
+    private static void AssertRoutePublicationRepeatsStayDiagnostic(
+        SessionFileTransferService service,
+        LoopbackFileTransferTransport transport,
+        object context,
+        RoutePublicationToken publication)
+    {
+        var stateBefore = CreateCoordinatorStateForTest(context);
+        var publishExisting = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "TryPublishRouteSelectedIfAuthorizedLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType() &&
+                !method.GetParameters()[4].ParameterType.IsByRef);
+        Assert.True(Assert.IsType<bool>(publishExisting.Invoke(service,
+            [context, FileTransferRouteResolverInput.FromTransport(transport),
+                "unit_test_duplicate_publication", "unit_test_duplicate_publication", publication, null])));
+        Assert.False(Assert.IsType<bool>(publishExisting.Invoke(service,
+            [context, FileTransferRouteResolverInput.FromTransport(transport),
+                "unit_test_wrong_publication", "unit_test_wrong_publication",
+                publication with { PublicationGeneration = publication.PublicationGeneration + 1 }, null])));
+        Assert.Equal(publication, GetPrivateProperty<RoutePublicationToken>(context, "CurrentRoutePublicationToken"));
+        Assert.Equal(stateBefore.PersistentState, CreateCoordinatorStateForTest(context).PersistentState);
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Outbound)]
+    [InlineData(FileTransferDirection.Inbound)]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task InitialRoutePublication_NewAuthoritiesHaveDistinctEffectsAndTerminalRejectsFurtherPublication(
+        FileTransferDirection direction)
+    {
+        var transferId = $"transfer_initial_publication_terminal_{direction}";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var outbound = direction == FileTransferDirection.Outbound;
+        var context = outbound
+            ? CreateRegularNknV4OutboundContext(transferId, 0, 0, 0, DateTimeOffset.UtcNow, seedRuntimeOwner: false)
+            : CreateProjectionInboundContext(transferId);
+        typeof(SessionFileTransferService)
+            .GetField(outbound ? "outboundTransfer" : "inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        StartCoordinatorSnapshotStreamForTest(context);
+        Assert.NotNull(typeof(SessionFileTransferService)
+            .GetMethod(outbound ? "EnsureOutboundTransferLegLocked" : "EnsureInboundTransferLegLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, outbound
+                ? [context, "unit_test_initial_publication_terminal", null, null]
+                : [context, "unit_test_initial_publication_terminal", null]));
+        var publish = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "TryPublishRouteSelectedIfAuthorizedLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType() &&
+                method.GetParameters()[4].ParameterType.IsByRef);
+        object?[] arguments = [context, FileTransferRouteResolverInput.FromTransport(transport),
+            "unit_test_initial_publication_terminal", "unit_test_initial_publication_terminal", null, null];
+        Assert.True(Assert.IsType<bool>(publish.Invoke(service, arguments)));
+        var first = Assert.IsType<RoutePublicationToken>(arguments[4]);
+        Assert.True(Assert.IsType<bool>(publish.Invoke(service, arguments)));
+        var second = Assert.IsType<RoutePublicationToken>(arguments[4]);
+        Assert.Equal(first.PublicationGeneration + 1, second.PublicationGeneration);
+        Assert.NotEqual(first, second);
+        var canceled = await service.CancelTransferAsync(transferId, "unit_test_publication_terminal", CancellationToken.None);
+        Assert.NotNull(canceled);
+        Assert.Equal(FileTransferTransferState.Canceled, canceled.State);
+        var terminalState = CreateCoordinatorStateForTest(context);
+        Assert.True(terminalState.IsTerminal);
+        Assert.False(Assert.IsType<bool>(publish.Invoke(service, arguments)));
+        Assert.True(Assert.IsType<RoutePublicationToken>(arguments[4]).IsDefault);
+        Assert.Equal(terminalState.PersistentState, CreateCoordinatorStateForTest(context).PersistentState);
+        Assert.Equal(terminalState.CurrentRoutePublicationToken,
+            CreateCoordinatorStateForTest(context).CurrentRoutePublicationToken);
+        var emitter = GetPrivatePropertyValue(context, "CoordinatorSnapshotEmitter")!;
+        var project = emitter.GetType().GetMethod("EvidenceToken", BindingFlags.Static | BindingFlags.NonPublic)!;
+        string Project(string value) => Assert.IsType<string>(project.Invoke(null, [value]));
+        var instanceId = Project(GetPrivateProperty<string>(context, "CoordinatorInstanceId"));
+        service.Dispose();
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Split('\n').Any(line =>
+            line.Contains("event=filetransfer_coordinator_snapshot_stream_completed;", StringComparison.Ordinal) &&
+            line.Contains($"coordinator_instance_id={instanceId};", StringComparison.Ordinal)), timeoutMs: 5000);
+        var effects = ReadOperationalLogTail(logStart).Split('\n').Where(line =>
+            line.Contains($"coordinator_instance_id={instanceId};", StringComparison.Ordinal) &&
+            line.Contains("effect_kind=route_publication_forwarded;", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(2, effects.Length);
+        foreach (var publication in new[] { first, second })
+        {
+            var effect = Assert.Single(effects, line => line.Contains(
+                $"effect_identity={Project($"publication:{publication.PublicationGeneration}")};", StringComparison.Ordinal));
+            Assert.Contains($"operation_generation={publication.PublicationGeneration};", effect, StringComparison.Ordinal);
+            Assert.Contains($"receipt_fingerprint={Project(FileTransferCoordinator.CalculateSnapshotFingerprint(publication))};",
+                effect, StringComparison.Ordinal);
+            Assert.DoesNotContain("transition_id=(none);", effect, StringComparison.Ordinal);
+        }
+    }
+
+    private static void AssertSingleInitialRoutePublicationEffect(
+        object context,
+        RoutePublicationToken publication,
+        string log)
+    {
+        var emitter = GetPrivatePropertyValue(context, "CoordinatorSnapshotEmitter")!;
+        var project = emitter.GetType().GetMethod("EvidenceToken", BindingFlags.Static | BindingFlags.NonPublic)!;
+        string Project(string value) => Assert.IsType<string>(project.Invoke(null, [value]));
+        static string Field(string line, string name) => line.Split(';')
+            .Select(part => part.Trim()).Single(part => part.StartsWith(name + "=", StringComparison.Ordinal))[(name.Length + 1)..];
+        var instanceId = Project(GetPrivateProperty<string>(context, "CoordinatorInstanceId"));
+        var lines = log.Split('\n').Where(line =>
+            line.Contains($"coordinator_instance_id={instanceId};", StringComparison.Ordinal)).ToArray();
+        var effect = Assert.Single(lines, line =>
+            line.Contains("event=filetransfer_coordinator_authority_effect;", StringComparison.Ordinal) &&
+            Field(line, "effect_kind") == "route_publication_forwarded");
+        var identity = Project($"publication:{publication.PublicationGeneration}");
+        Assert.Equal(identity, Field(effect, "operation_authority_id"));
+        Assert.Equal(identity, Field(effect, "receipt_identity"));
+        Assert.Equal(identity, Field(effect, "effect_identity"));
+        Assert.Equal(publication.PublicationGeneration.ToString(), Field(effect, "operation_generation"));
+        Assert.Equal(publication.PublicationGeneration.ToString(), Field(effect, "receipt_generation"));
+        Assert.Equal(publication.PublicationGeneration.ToString(), Field(effect, "effect_generation"));
+        Assert.Equal(Project(FileTransferCoordinator.CalculateSnapshotFingerprint(publication)), Field(effect, "receipt_fingerprint"));
+        Assert.Equal("Accepted", Field(effect, "receipt_status"));
+        Assert.Equal(publication.RouteToken, Field(effect, "route"));
+        Assert.Equal(publication.ProtocolVersion.ToString(), Field(effect, "protocol_version"));
+        Assert.NotEqual("(none)", Field(effect, "transition_id"));
+        var snapshot = Assert.Single(lines, line =>
+            line.Contains("event=filetransfer_coordinator_transition_snapshot;", StringComparison.Ordinal) &&
+            Field(line, "transition_id") == Field(effect, "transition_id"));
+        Assert.Equal(Field(snapshot, "after_state_generation"), Field(effect, "coordinator_state_generation"));
+        var payload = Field(snapshot, "snapshot_payload").Replace('-', '+').Replace('_', '/');
+        using var document = System.Text.Json.JsonDocument.Parse(Convert.FromBase64String(
+            payload.PadRight((payload.Length + 3) / 4 * 4, '=')));
+        Assert.Equal("RoutePublication", document.RootElement.GetProperty("decisionKind").GetString());
+        var operation = Assert.Single(document.RootElement.GetProperty("aggregate").GetProperty("operations").EnumerateArray(),
+            item => item.GetProperty("operationRole").GetString() == "route_publication");
+        Assert.Equal(operation.GetProperty("operationKey").GetString(), Field(effect, "operation_key"));
+        Assert.True(operation.GetProperty("receiptValidated").GetBoolean());
+        Assert.Equal(operation.GetProperty("receiptFingerprint").GetString(), Field(effect, "receipt_fingerprint"));
+    }
+
+    [Theory]
+    [InlineData("rejected")]
+    [InlineData("partial")]
+    [InlineData("wrong_generation")]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task RegularV4ObsoleteUndispatchedRepair_RejectedReceiptRetainsOwnershipAtPruneAndPump(string failure)
+    {
+        var transferId = $"transfer_regular_v4_obsolete_repair_{failure}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        var context = CreateRegularV4ObsoleteRepairContext(service, transport, transferId);
+        var queued = Assert.Single(GetQueuedV4RepairSends(context));
+        var contract = GetPrivatePropertyValue(queued, "RegularV4RepairContract")!;
+        var lifecycle = GetPrivatePropertyValue(contract, "Lifecycle")!;
+        var installed = GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding");
+        var requests = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivatePropertyValue(context, "PullV4SenderPumpRepairRequests"));
+        var repairState = requests[GetPrivateProperty<string>(queued, "RepairRequestKey")]!;
+        var dataSession = Assert.IsType<RecordingDataSession>(GetPrivatePropertyValue(context, "DataSession"));
+        transport.RegularV4PressureSettlementApplyOverride = command => new(
+            failure == "wrong_generation" ? command with { InstallGeneration = command.InstallGeneration + 1 } : command,
+            failure == "rejected"
+                ? FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Rejected
+                : FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
+            $"unit_test_obsolete_repair_{failure}",
+            CurrentAuthorityCleared: failure == "wrong_generation",
+            RetainedPredecessorCleared: false);
+
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 2, frontier: 651);
+        Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Same(queued, Assert.Single(GetQueuedV4RepairSends(context)));
+        Assert.Equal(installed, GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.True(GetPrivateProperty<bool>(repairState, "Queued"));
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "IsSettled"));
+        Assert.Null(FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(CreateCoordinatorStateForTest(context)).RepairSettlementRelease);
+
+        // Enter normal pump selection after the failed prune. This test does not
+        // grant a route transition: the existing pause contract remains untouched.
+        SetPrivateProperty(context, "PullTransportPaused", false);
+        var loops = 0;
+        var previousCompletion = SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests;
+        SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests = (id, _) =>
+            id == transferId && Interlocked.Increment(ref loops) > 1;
+        try
+        {
+            using var source = new MemoryStream();
+            var pumpTask = Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService)
+                .GetMethod("RunOutboundV4SenderPumpAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, [context, source, dataSession, CancellationToken.None, null]));
+            await pumpTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            SessionFileTransferService.OutboundSparseSenderPumpNormalCompletionForTests = previousCompletion;
+        }
+
+        Assert.Equal(2, transport.RegularV4FrontierRepairSettlements.Count);
+        Assert.Same(queued, Assert.Single(GetQueuedV4RepairSends(context)));
+        Assert.True(GetPrivateProperty<bool>(repairState, "Queued"));
+        Assert.False(GetPrivateProperty<bool>(repairState, "InFlight"));
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "DispatchObserved"));
+        Assert.False(GetPrivateProperty<bool>(lifecycle, "IsSettled"));
+        Assert.Equal(installed, GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "CurrentRepairReplayDecision"));
+        Assert.Null(FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(CreateCoordinatorStateForTest(context)).RepairSettlementRelease);
+        Assert.Empty(dataSession.SentFrames);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public void RegularV4ObsoleteUndispatchedRepair_InFlightWorkCannotBeRetiredAsMissingDispatch()
+    {
+        const string transferId = "transfer_regular_v4_obsolete_repair_in_flight";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        var context = CreateRegularV4ObsoleteRepairContext(service, transport, transferId);
+        var queued = Assert.Single(GetQueuedV4RepairSends(context));
+        var requests = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivatePropertyValue(context, "PullV4SenderPumpRepairRequests"));
+        var repairState = requests[GetPrivateProperty<string>(queued, "RepairRequestKey")]!;
+        SetPrivateProperty(repairState, "InFlight", true);
+
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 2, frontier: 651);
+
+        Assert.Same(queued, Assert.Single(GetQueuedV4RepairSends(context)));
+        Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+        Assert.NotNull(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        Assert.True(GetPrivateProperty<bool>(repairState, "InFlight"));
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task RegularV4ObsoleteUndispatchedRepair_ReplacedDataSessionRejectsOldFrontierCallback()
+    {
+        const string transferId = "transfer_regular_v4_obsolete_repair_stale_receive";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        var context = CreateRegularV4ObsoleteRepairContext(service, transport, transferId);
+        var originalSession = Assert.IsType<RecordingDataSession>(GetPrivatePropertyValue(context, "DataSession"));
+        var originalGeneration = GetPrivateProperty<long>(context, "DataSessionGeneration");
+        var originalOwner = GetPrivatePropertyValue(context, "CurrentRuntimeOwner");
+        var staged = StageSparsePumpInstall(service, context, predecessor: null, "unit_test_obsolete_repair_receive");
+        Assert.True(staged.Accepted, staged.Reason);
+        var committed = CommitSparsePumpInstall(service, context, staged.Install!, originalSession);
+        Assert.True(committed.Accepted, committed.Reason);
+        using var replacementSession = new RecordingDataSession($"session_{transferId}", transferId);
+        Assert.True(Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("ReplaceOutboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, replacementSession])));
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.StaleRejected,
+            Assert.Single(transport.RegularV4FrontierRepairSettlements).Outcome);
+        var stateBefore = CreateCoordinatorStateForTest(context);
+        var queuedBefore = GetQueuedV4RepairSends(context).ToArray();
+        var receiveTask = Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService)
+            .GetMethod("ApplyOutboundV4StateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service,
+            [
+                context,
+                new FileTransferStateFrameV4
+                {
+                    SessionId = $"session_{transferId}", TransferId = transferId, Epoch = 2,
+                    ContiguousCommittedChunkIndex = 651, DurableReceivedHighestChunkIndex = 971,
+                    CreditUntilChunkIndexExclusive = 2712, MissingRanges = [], BytesCommitted = 651L * 21 * 1024,
+                },
+                committed.Install, originalOwner, originalSession, originalGeneration,
+            ]));
+        await receiveTask;
+
+        Assert.Equal(639, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
+        Assert.Equal(stateBefore.PersistentState, CreateCoordinatorStateForTest(context).PersistentState);
+        Assert.Equal(queuedBefore, GetQueuedV4RepairSends(context).ToArray());
+        Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Empty(originalSession.SentFrames);
+        Assert.Empty(replacementSession.SentFrames);
+    }
+
+    private static object CreateRegularV4ObsoleteRepairContext(
+        SessionFileTransferService service,
+        LoopbackFileTransferTransport transport,
+        string transferId)
+    {
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 639,
+            chunksAcceptedForTransport: 2712,
+            remoteGrantedUntilExclusive: 2712,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow,
+            seedRuntimeOwner: false,
+            chunkCount: 4096);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        StartCoordinatorSnapshotStreamForTest(context);
+        Assert.NotNull(typeof(SessionFileTransferService)
+            .GetMethod("EnsureOutboundTransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_obsolete_repair_start", null, null]));
+        var publishRoute = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "TryPublishRouteSelectedIfAuthorizedLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType() &&
+                method.GetParameters()[4].ParameterType.IsByRef);
+        Assert.True(Assert.IsType<bool>(publishRoute.Invoke(service,
+            [context, FileTransferRouteResolverInput.FromTransport(transport),
+                "unit_test_obsolete_repair_start", "unit_test_obsolete_repair_start", null, null])));
+        Assert.True((bool)typeof(SessionFileTransferService)
+            .GetMethod("TryPauseOutboundTransportLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "tuna_activation_negotiating", false])!);
+        ApplyRegularV4ObsoleteRepairState(service, context, transferId, epoch: 1, frontier: 639,
+            [new FileTransferRangeV4 { StartChunkIndex = 639, ChunkCount = 12 }]);
+        Assert.Single(GetQueuedV4RepairSends(context));
+        Assert.NotNull(GetPrivatePropertyValue(context, "InstalledRegularV4FrontierRepairPressureBinding"));
+        return context;
+    }
+
+    private static void ApplyRegularV4ObsoleteRepairState(
+        SessionFileTransferService service,
+        object context,
+        string transferId,
+        int epoch,
+        int frontier,
+        IReadOnlyList<FileTransferRangeV4>? missingRanges = null)
+        => typeof(SessionFileTransferService)
+            .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service,
+            [
+                context,
+                new FileTransferStateFrameV4
+                {
+                    SessionId = $"session_{transferId}",
+                    TransferId = transferId,
+                    Epoch = epoch,
+                    ContiguousCommittedChunkIndex = frontier,
+                    DurableReceivedHighestChunkIndex = 971,
+                    CreditUntilChunkIndexExclusive = 2712,
+                    MissingRanges = missingRanges ?? [],
+                    BytesCommitted = frontier * (long)(21 * 1024),
+                },
+            ]);
+
+    [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public async Task RegularNknV4ReceiveRecoveryRequest_ArmsPeerSilenceSafetyReplayWithBoundedNormalSends()
     {
@@ -6160,13 +6632,14 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         int chunksAcceptedForTransport,
         int remoteGrantedUntilExclusive,
         DateTimeOffset lastGrantReceivedUtc,
-        bool seedRuntimeOwner = true)
+        bool seedRuntimeOwner = true,
+        int chunkCount = 512)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType("OutboundTransferContext", BindingFlags.NonPublic)!;
         FileTransferReadStreamFactory openReadStreamAsync =
             _ => Task.FromResult<Stream>(new MemoryStream(Array.Empty<byte>(), writable: false));
-        var descriptor = new FileTransferSendDescriptor($"{transferId}.bin", 512L * 21 * 1024, transferId);
+        var descriptor = new FileTransferSendDescriptor($"{transferId}.bin", (long)chunkCount * 21 * 1024, transferId);
         var context = Activator.CreateInstance(
             contextType,
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
@@ -6180,7 +6653,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         SetPrivateProperty(context, "NegotiatedDataProtocolVersion", FileTransferProtocol.ProtocolVersionV4);
         SetPrivateProperty(context, "State", FileTransferTransferState.Sending);
         SetPrivateProperty(context, "ChunkSizeBytes", 21 * 1024);
-        SetPrivateProperty(context, "ChunkCount", 512);
+        SetPrivateProperty(context, "ChunkCount", chunkCount);
         SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", remoteNextExpectedChunkIndex);
         SetPrivateProperty(context, "ChunksAcceptedForTransport", chunksAcceptedForTransport);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", remoteGrantedUntilExclusive);

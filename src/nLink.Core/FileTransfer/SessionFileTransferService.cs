@@ -10234,6 +10234,7 @@ public sealed partial class SessionFileTransferService :
         out RoutePublicationToken routePublicationToken,
         RouteCommitToken? routeCommitToken = null)
     {
+        var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         var actionKind = routeCommitToken is null
             ? FileTransferCoordinatorActionKind.RoutePublication
             : FileTransferCoordinatorActionKind.RouteCommitPublication;
@@ -10251,6 +10252,10 @@ public sealed partial class SessionFileTransferService :
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             routePublicationToken,
             rejectionReason);
+        if (previousRoutePublicationToken != routePublicationToken)
+        {
+            EnqueueRoutePublicationAuthorityEffect(context, routePublicationToken);
+        }
         return true;
     }
 
@@ -10262,6 +10267,7 @@ public sealed partial class SessionFileTransferService :
         out RoutePublicationToken routePublicationToken,
         RouteCommitToken? routeCommitToken = null)
     {
+        var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         var actionKind = routeCommitToken is null
             ? FileTransferCoordinatorActionKind.RoutePublication
             : FileTransferCoordinatorActionKind.RouteCommitPublication;
@@ -10279,6 +10285,10 @@ public sealed partial class SessionFileTransferService :
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             routePublicationToken,
             rejectionReason);
+        if (previousRoutePublicationToken != routePublicationToken)
+        {
+            EnqueueRoutePublicationAuthorityEffect(context, routePublicationToken);
+        }
         return true;
     }
 

@@ -5556,6 +5556,180 @@ function New-FileTransferCoordinatorSnapshotAggregateIntervalIndex {
     return $index
 }
 
+function Get-FileTransferCoordinatorSnapshotInitialRegularPublications {
+    param($AggregateIndex, [AllowEmptyCollection()][object[]]$Effects)
+
+    $result = @{}
+    $effectsByBoundary = @{}
+    foreach ($effect in $Effects) {
+        if ($effect.EffectKind -cne 'route_publication_forwarded') { continue }
+        $key = "$($effect.CoordinatorInstanceId)|$($effect.Writer)|$($effect.TransitionId)"
+        if (-not $effectsByBoundary.ContainsKey($key)) {
+            $effectsByBoundary[$key] = [System.Collections.Generic.List[object]]::new()
+        }
+        $effectsByBoundary[$key].Add($effect)
+    }
+    foreach ($stream in $AggregateIndex.Values) {
+        $owner = $null; $publication = $null; $started = $false; $poisoned = $false
+        $publicationAuthorities = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $scope = $null; $hash = $null; $generation = 0L; $identity = $null
+        foreach ($entry in @($stream.Boundaries.Values | Sort-Object {
+                    [long]$_.Boundary.beforeStateGeneration
+                }, { [long]$_.Boundary.afterStateGeneration }, { [string]$_.Boundary.boundaryId })) {
+            $boundary = $entry.Boundary
+            # Reduced route fixtures and malformed inputs cannot establish
+            # an initial-owner exemption; leave their existing validation live.
+            foreach ($field in @('beforeBoundary','afterBoundary','beforeStateHash','afterStateHash',
+                    'sessionId','transferId','direction','decisionKind','decisionStatus')) {
+                if ($null -eq $boundary.PSObject.Properties[$field]) { $poisoned = $true }
+            }
+            if ($poisoned) { continue }
+            $before = $boundary.beforeBoundary; $after = $boundary.afterBoundary
+            $boundaryIdentity = "$($boundary.sessionId)|$($boundary.transferId)|$($boundary.direction)"
+            if ($null -eq $before -or $null -eq $after -or
+                [string]::IsNullOrWhiteSpace([string]$boundary.beforeStateHash) -or
+                [string]::IsNullOrWhiteSpace([string]$boundary.afterStateHash) -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $before) -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $after) -or
+                [long]$boundary.beforeStateGeneration -ne $generation -or
+                [long]$boundary.afterStateGeneration -notin @($generation, ($generation + 1L)) -or
+                (([long]$boundary.afterStateGeneration -eq $generation) -ne
+                    ($boundary.beforeStateHash -ceq $boundary.afterStateHash)) -or
+                ([long]$boundary.afterStateGeneration -eq $generation -and
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $before $after)) -or
+                ($null -ne $hash -and ($boundary.beforeStateHash -cne $hash -or
+                    $boundaryIdentity -cne $identity -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $before $scope)))) {
+                $poisoned = $true
+            }
+            $generation = [long]$boundary.afterStateGeneration
+            $hash = [string]$boundary.afterStateHash; $scope = $after; $identity = $boundaryIdentity
+            if ($poisoned) { continue }
+            $regular = $after.route -ceq 'regular_nkn_v4_fast' -and
+                [long]$after.protocolVersion -eq 4L -and [long]$after.liveRouteEpoch -eq 0L -and
+                [long]$after.routeCommitGeneration -eq 0L -and [long]$after.terminalGeneration -eq 0L
+            $runtime = @($boundary.operations | Where-Object { $_.family -ceq 'route_runtime' -and $_.stateApplied })
+            if (-not $started) {
+                $births = @($runtime | Where-Object {
+                    $_.operationRole -ceq 'runtime_owner' -and $_.operationKind -ceq 'RuntimeOwner' -and
+                    $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Current'
+                })
+                if ($births.Count -eq 0) { continue }
+                $started = $true
+                if ($births.Count -ne 1 -or $runtime.Count -ne 1 -or -not $regular -or
+                    $boundary.decisionKind -cne 'StartTransfer' -or $boundary.decisionStatus -cne 'Accepted' -or
+                    [long]$boundary.afterStateGeneration -ne ([long]$boundary.beforeStateGeneration + 1L) -or
+                    $boundary.beforeStateHash -ceq $boundary.afterStateHash -or
+                    [long]$before.runtimeGeneration -ne 0L -or [long]$before.legGeneration -ne 0L -or
+                    [long]$before.routePublicationGeneration -ne 0L -or [long]$after.routePublicationGeneration -ne 0L -or
+                    [long]$after.runtimeGeneration -le 0L -or [long]$after.legGeneration -le 0L -or
+                    [long]$births[0].operationGeneration -ne [long]$after.runtimeGeneration -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $births[0].routeRuntime.boundary $after)) {
+                    $poisoned = $true; continue
+                }
+                $owner = $births[0]
+                foreach ($field in @('route','protocolVersion','liveRouteEpoch','routeCommitGeneration','terminalGeneration',
+                        'transportEpoch','bridgeRecoveryGeneration','checkpointGeneration','checkpointRequestId',
+                        'dataSessionIdentity','dataSessionGeneration')) {
+                    if ([string]$before.$field -cne [string]$after.$field) { $poisoned = $true }
+                }
+                if ([string]::IsNullOrWhiteSpace([string]$owner.authorityId) -or $owner.authorityId -ceq '(none)' -or
+                    $owner.operationKey -cne "route_runtime|runtime_owner|$($owner.authorityId)|$($owner.operationGeneration)|RuntimeOwner" -or
+                    $owner.predecessorAuthorityId -cne '(none)' -or $owner.routeRuntime.role -cne 'runtime_owner' -or
+                    $owner.commandIdentity -cne $owner.authorityId -or
+                    [long]$owner.commandGeneration -ne [long]$owner.operationGeneration -or
+                    [string]::IsNullOrWhiteSpace([string]$owner.commandFingerprint) -or $owner.commandFingerprint -ceq '(none)' -or
+                    $owner.routeRuntime.tokenFingerprint -cne $owner.commandFingerprint -or
+                    $owner.receiptValidated -or $owner.receiptIdentity -cne '(none)' -or
+                    [long]$owner.receiptGeneration -ne 0L -or $owner.receiptStatus -cne '(none)' -or
+                    $owner.receiptFingerprint -cne '(none)') { $poisoned = $true }
+                continue
+            }
+            if (-not $regular -or
+                -not (Test-FileTransferCoordinatorSnapshotRouteOwnerLineageEqual $before $after) -or
+                [long]$before.routeCommitGeneration -ne [long]$after.routeCommitGeneration -or
+                -not (Test-FileTransferCoordinatorSnapshotRouteOwnerLineageEqual $owner.routeRuntime.boundary $after)) {
+                $poisoned = $true; continue
+            }
+            if ($runtime.Count -eq 0) {
+                if ([long]$before.routePublicationGeneration -ne [long]$after.routePublicationGeneration) { $poisoned = $true }
+                continue
+            }
+            $entrants = @($runtime | Where-Object {
+                $_.operationRole -ceq 'route_publication' -and $_.operationKind -ceq 'RoutePublication' -and
+                $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Published'
+            })
+            $retirements = @($runtime | Where-Object {
+                $_.operationRole -ceq 'route_publication' -and $_.operationKind -ceq 'RoutePublication' -and
+                $_.beforeState -ceq 'Published' -and $_.afterState -ceq 'None'
+            })
+            $expectedRetirements = if ($null -eq $publication) { 0 } else { 1 }
+            if ($runtime.Count -ne (1 + $expectedRetirements) -or $entrants.Count -ne 1 -or
+                $retirements.Count -ne $expectedRetirements -or
+                $boundary.decisionKind -cne 'RoutePublication' -or $boundary.decisionStatus -cne 'Accepted' -or
+                [long]$boundary.afterStateGeneration -ne ([long]$boundary.beforeStateGeneration + 1L) -or
+                $boundary.beforeStateHash -ceq $boundary.afterStateHash -or
+                [long]$before.routePublicationGeneration -ne $(if ($null -eq $publication) { 0L } else { [long]$publication.operationGeneration }) -or
+                [long]$after.routePublicationGeneration -ne ([long]$before.routePublicationGeneration + 1L) -or
+                @($boundary.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.stateApplied }).Count -ne 0) {
+                $poisoned = $true; continue
+            }
+            if ($null -ne $publication) {
+                $retirement = $retirements[0]
+                foreach ($field in @('operationKey','authorityId','operationGeneration','predecessorAuthorityId',
+                        'commandIdentity','commandGeneration','commandFingerprint','receiptIdentity',
+                        'receiptGeneration','receiptFingerprint','receiptStatus','receiptValidated')) {
+                    if ([string]$retirement.$field -cne [string]$publication.$field) { $poisoned = $true }
+                }
+                if ($retirement.routeRuntime.role -cne 'route_publication' -or
+                    $retirement.routeRuntime.tokenFingerprint -cne $publication.routeRuntime.tokenFingerprint -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $retirement.routeRuntime.boundary $before)) {
+                    $poisoned = $true
+                }
+                if ($poisoned) { continue }
+            }
+            $operation = $entrants[0]
+            if ([string]::IsNullOrWhiteSpace([string]$operation.authorityId) -or $operation.authorityId -ceq '(none)' -or
+                [string]::IsNullOrWhiteSpace([string]$operation.commandFingerprint) -or $operation.commandFingerprint -ceq '(none)' -or
+                $publicationAuthorities.Contains([string]$operation.authorityId) -or
+                $operation.operationKey -cne "route_runtime|route_publication|$($operation.authorityId)|$($operation.operationGeneration)|RoutePublication" -or
+                $operation.predecessorAuthorityId -cne '(none)' -or $operation.routeRuntime.role -cne 'route_publication' -or
+                [long]$operation.operationGeneration -ne [long]$after.routePublicationGeneration -or
+                $operation.commandIdentity -cne $operation.authorityId -or $operation.receiptIdentity -cne $operation.authorityId -or
+                [long]$operation.commandGeneration -ne [long]$operation.operationGeneration -or
+                [long]$operation.receiptGeneration -ne [long]$operation.operationGeneration -or
+                $operation.receiptStatus -cne 'Accepted' -or -not $operation.receiptValidated -or
+                $operation.commandFingerprint -cne $operation.receiptFingerprint -or
+                $operation.routeRuntime.tokenFingerprint -cne $operation.receiptFingerprint -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.routeRuntime.boundary $after)) {
+                $poisoned = $true; continue
+            }
+            $key = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.boundaryId)"
+            $boundEffects = @(if ($effectsByBoundary.ContainsKey($key)) { $effectsByBoundary[$key].ToArray() })
+            if ($boundEffects.Count -ne 1) { $poisoned = $true; continue }
+            $effect = $boundEffects[0]
+            if ($effect.Family -cne 'route_runtime' -or $effect.OperationKey -cne $operation.operationKey -or
+                $effect.AuthorityId -cne $operation.authorityId -or
+                [long]$effect.OperationGeneration -ne [long]$operation.operationGeneration -or
+                [long]$effect.StateGeneration -ne [long]$boundary.afterStateGeneration -or
+                $effect.ReceiptIdentity -cne $operation.receiptIdentity -or
+                [long]$effect.ReceiptGeneration -ne [long]$operation.receiptGeneration -or
+                $effect.ReceiptStatus -cne $operation.receiptStatus -or
+                $effect.ReceiptFingerprint -cne $operation.receiptFingerprint -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $effect $after)) {
+                $poisoned = $true; continue
+            }
+            $result["$key|$($operation.operationKey)"] = [pscustomobject]@{
+                RuntimeOwner = $owner
+                PreviousPublicationKey = if ($null -eq $publication) { '(none)' } else { [string]$publication.operationKey }
+            }
+            [void]$publicationAuthorities.Add([string]$operation.authorityId)
+            $publication = $operation
+        }
+    }
+    return $result
+}
+
 function Get-FileTransferCoordinatorReceiveRecoveryRootLifecycle {
     param([AllowEmptyCollection()][object[]]$Entries, $AggregateIndex, $ValidatedHandoffSuccessors)
 
@@ -9923,6 +10097,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             }
         }
     )
+    $aggregateBoundaryIndex = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries @($aggregateEntries)
+    $initialRegularPublications = Get-FileTransferCoordinatorSnapshotInitialRegularPublications `
+        -AggregateIndex $aggregateBoundaryIndex -Effects @($effects)
     foreach ($group in @($operationHistory | Group-Object Key)) {
         $history = @($group.Group | Sort-Object {
                 [long]$_.Boundary.decisionUtcMilliseconds
@@ -10080,7 +10257,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         -InputObject $runtimeBoundary `
                         -Name 'legGeneration' `
                         -Default 0L)
-                if ($liveRouteEpoch -le 0 -or
+                $initialRegularKey = "$($latest.Boundary.coordinatorInstanceId)|$($latest.Boundary.writer)|$($latest.Boundary.boundaryId)|$($latest.Operation.operationKey)"
+                if (($liveRouteEpoch -le 0 -and -not $initialRegularPublications.ContainsKey($initialRegularKey)) -or
                     $runtimeGeneration -le 0 -or
                     $legGeneration -le 0) {
                 $latest.Boundary.taxonomyClass =
@@ -10097,8 +10275,6 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
-    $aggregateBoundaryIndex = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex `
-        -Entries @($aggregateEntries)
     $invalidConsumedReleaseBoundaries = @{}
     foreach ($failure in @(ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
             -Errors @($errors) -Records @($records) -Boundaries @($boundaries))) {
@@ -12926,14 +13102,17 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
     }
     $publicationEntries = [System.Collections.Generic.List[object]]::new()
     $publicationEffectsByBoundary = @{}
-    foreach ($effect in @(Get-FileTransferCoordinatorSnapshotObjectProperty -InputObject $Evaluation `
-            -Name '__RoutePublicationEffects' -Default @())) {
+    $publicationEffects = @(Get-FileTransferCoordinatorSnapshotObjectProperty -InputObject $Evaluation `
+            -Name '__RoutePublicationEffects' -Default @())
+    foreach ($effect in $publicationEffects) {
         $key = "$($effect.CoordinatorInstanceId)|$($effect.Writer)|$($effect.TransitionId)"
         if (-not $publicationEffectsByBoundary.ContainsKey($key)) {
             $publicationEffectsByBoundary[$key] = [System.Collections.Generic.List[object]]::new()
         }
         $publicationEffectsByBoundary[$key].Add($effect)
     }
+    $initialRegularPublications = Get-FileTransferCoordinatorSnapshotInitialRegularPublications `
+        -AggregateIndex $routeAggregateIndex -Effects $publicationEffects
     $transitionEntries = [System.Collections.Generic.List[object]]::new()
     foreach ($boundary in @($boundaries | Sort-Object {
                 [long]$_.decisionUtcMilliseconds
@@ -12984,6 +13163,7 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                 RouteCommit = $null
                 LastTransition = $null
                 SameRouteOwnerSuccessor = $false
+                SameOwnerRegularRepublication = $false
                 Valid = $false
             }
             $publicationEntries.Add($entry)
@@ -13092,7 +13272,14 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                         -Left $_.routeRuntime.boundary -Right $entry.RouteBoundary)
                 })
             if ($index -eq 0) {
-                if ($runtimeEntrants.Count -eq 0) {
+                if ([long]$entry.RouteBoundary.liveRouteEpoch -eq 0L) {
+                    $initialKey = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)"
+                    $runtimeEntrants = @(if ($initialRegularPublications.ContainsKey($initialKey) -and
+                            $initialRegularPublications[$initialKey].PreviousPublicationKey -ceq '(none)') {
+                        $initialRegularPublications[$initialKey].RuntimeOwner
+                    })
+                }
+                elseif ($runtimeEntrants.Count -eq 0) {
                     $runtimeBirths = @(
                         foreach ($candidateBoundary in @($boundaries | Where-Object {
                                      [string]$_.sessionId -ceq
@@ -13178,6 +13365,21 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                 }
                 continue
             }
+            $previous = $ordered[$index - 1]
+            [void]$priorPublicationAuthorities.Add([string]$previous.Operation.authorityId)
+            if ($null -ne $previous.RuntimeOwner) { [void]$priorRuntimeAuthorities.Add([string]$previous.RuntimeOwner.authorityId) }
+            $entry.LastTransition = $previous.LastTransition
+            $regularKey = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)"
+            if ($entry.Valid -and $previous.Valid -and $null -ne $previous.RuntimeOwner -and
+                -not $priorPublicationAuthorities.Contains([string]$entry.Operation.authorityId) -and
+                $initialRegularPublications.ContainsKey($regularKey) -and
+                $initialRegularPublications[$regularKey].PreviousPublicationKey -ceq $previous.Operation.operationKey -and
+                $initialRegularPublications[$regularKey].RuntimeOwner.operationKey -ceq $previous.RuntimeOwner.operationKey) {
+                $entry.RuntimeOwner = $previous.RuntimeOwner
+                $entry.RouteCommit = $previous.RouteCommit
+                $entry.SameOwnerRegularRepublication = $true
+                continue
+            }
             if ($runtimeEntrants.Count -ne 1) {
                 & $addFinding "runtime|$($entry.Boundary.boundaryId)|$($entry.Operation.operationKey)" `
                     "snapshot route publication has no unique runtime owner entrant: route=$($entry.RouteBoundary.route)" `
@@ -13186,10 +13388,6 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
             else {
                 $entry.RuntimeOwner = $runtimeEntrants[0]
             }
-            $previous = $ordered[$index - 1]
-            [void]$priorPublicationAuthorities.Add([string]$previous.Operation.authorityId)
-            if ($null -ne $previous.RuntimeOwner) { [void]$priorRuntimeAuthorities.Add([string]$previous.RuntimeOwner.authorityId) }
-            $entry.LastTransition = $previous.LastTransition
             $retiredPublications = @($entry.Boundary.operations | Where-Object {
                     [string]$_.family -ceq 'route_runtime' -and
                     [string]$_.operationRole -ceq 'route_publication' -and
@@ -13471,14 +13669,14 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
             } | Sort-Object Name)
         $reference = @()
         if ($directionHistories.Count -gt 0) {
-            $reference = @($directionHistories[0].Group | Where-Object { -not $_.SameRouteOwnerSuccessor } | Sort-Object {
+            $reference = @($directionHistories[0].Group | Where-Object { -not $_.SameRouteOwnerSuccessor -and -not $_.SameOwnerRegularRepublication } | Sort-Object {
                     [long]$_.Operation.operationGeneration
                 } | ForEach-Object {
                     "$($_.RouteBoundary.liveRouteEpoch)|$($_.RouteBoundary.route)|$($_.RouteBoundary.protocolVersion)"
                 })
         }
         foreach ($directionHistory in @($directionHistories | Select-Object -Skip 1)) {
-            $candidate = @($directionHistory.Group | Where-Object { -not $_.SameRouteOwnerSuccessor } | Sort-Object {
+            $candidate = @($directionHistory.Group | Where-Object { -not $_.SameRouteOwnerSuccessor -and -not $_.SameOwnerRegularRepublication } | Sort-Object {
                     [long]$_.Operation.operationGeneration
                 } | ForEach-Object {
                     "$($_.RouteBoundary.liveRouteEpoch)|$($_.RouteBoundary.route)|$($_.RouteBoundary.protocolVersion)"

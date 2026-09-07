@@ -10827,7 +10827,14 @@ public sealed partial class SessionFileTransferService
                 {
                     while (context.PullV4SenderPumpRepairQueue.Count > 0 && repairSend is null)
                     {
-                        var queuedRepair = context.PullV4SenderPumpRepairQueue.Dequeue();
+                        var queuedRepair = context.PullV4SenderPumpRepairQueue.Peek();
+                        if (ShouldRetainObsoleteUndispatchedRegularV4RepairLocked(context, queuedRepair))
+                        {
+                            waitForSignal = context.ResetAndGetSparseSenderPumpSignalTask();
+                            break;
+                        }
+
+                        context.PullV4SenderPumpRepairQueue.Dequeue();
                         foreach (var chunkIndex in queuedRepair.ChunkIndices)
                         {
                             context.PullV4SenderPumpRepairQueuedChunkIndices.Remove(chunkIndex);
@@ -10840,7 +10847,11 @@ public sealed partial class SessionFileTransferService
                                 (queuedRepair.FallbackFrontierRepairContract is null ||
                                  ReferenceEquals(
                                      skippedRepairState.FallbackFrontierRepairContract,
-                                     queuedRepair.FallbackFrontierRepairContract)))
+                                     queuedRepair.FallbackFrontierRepairContract)) &&
+                                (queuedRepair.RegularV4RepairContract is null ||
+                                 ReferenceEquals(
+                                     skippedRepairState.RegularV4RepairContract,
+                                     queuedRepair.RegularV4RepairContract)))
                             {
                                 skippedRepairState.Queued = false;
                                 skippedRepairState.QueuedUtc = null;
@@ -16773,6 +16784,46 @@ public sealed partial class SessionFileTransferService
         };
     }
 
+    private bool ShouldRetainObsoleteUndispatchedRegularV4RepairLocked(
+        OutboundTransferContext context,
+        PullV4QueuedRepairSend queuedRepair)
+    {
+        if (queuedRepair.RegularV4RepairContract is not { } contract ||
+            contract.Lifecycle.IsSettled ||
+            contract.Lifecycle.DispatchObserved ||
+            queuedRepair.ChunkIndices.Any(chunkIndex => chunkIndex >= context.RemoteNextExpectedChunkIndex) ||
+            !ReferenceEquals(context.CurrentRegularV4FrontierRepairContract, contract))
+        {
+            return false;
+        }
+
+        if (!TryValidateOutboundRegularV4FrontierRepairContractLocked(context, contract, out _) ||
+            queuedRepair.FallbackFrontierRepairContract is not null ||
+            contract.DispatchedUtc is not null ||
+            contract.ScheduledDispatch is not { } scheduled ||
+            scheduled.RepairKey != queuedRepair.RepairRequestKey ||
+            scheduled.RepairReplayKind != ResolveRepairReplayKind(queuedRepair) ||
+            scheduled.StartChunkIndex != queuedRepair.FirstStartChunkIndex ||
+            scheduled.EndChunkExclusive != queuedRepair.LastEndChunkExclusive ||
+            scheduled.ChunkIndices.Any(chunkIndex => chunkIndex >= context.RemoteNextExpectedChunkIndex) ||
+            queuedRepair.RequestedChunkCount != contract.Authority.PendingRepairCount ||
+            queuedRepair.RuntimeOwner != context.CurrentRuntimeOwner ||
+            queuedRepair.RuntimeOwner != contract.RepairDecision.RuntimeOwner ||
+            !context.PullV4SenderPumpRepairRequests.TryGetValue(queuedRepair.RepairRequestKey, out var repairState) ||
+            !ReferenceEquals(repairState.RegularV4RepairContract, contract) ||
+            !repairState.Queued ||
+            repairState.InFlight)
+        {
+            return true;
+        }
+
+        return !TrySettleRegularV4FrontierRepairContract(
+            contract,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
+            contract.Authority.PendingRepairCount,
+            "regular_v4_repair_obsolete_before_dispatch");
+    }
+
     private void ClearObsoleteOutboundV4RepairWorkAfterFrontierAdvanceLocked(
         OutboundTransferContext context,
         int previousRemoteFrontier,
@@ -16795,6 +16846,12 @@ public sealed partial class SessionFileTransferService
             remoteFrontier,
             "legacy_sparse_remote_frontier_progress");
 
+        if (context.PullV4SenderPumpRepairQueue.Any(
+                repair => ShouldRetainObsoleteUndispatchedRegularV4RepairLocked(context, repair)))
+        {
+            return;
+        }
+
         var removedQueuedChunks = context.PullV4SenderPumpRepairQueuedChunkIndices.RemoveWhere(
             chunkIndex => chunkIndex < remoteFrontier);
         var removedRepairItems = 0;
@@ -16811,7 +16868,9 @@ public sealed partial class SessionFileTransferService
             {
                 removedRepairItems++;
                 removedRepairChunks += queuedRepair.ChunkIndices.Count;
-                if (context.PullV4SenderPumpRepairRequests.TryGetValue(queuedRepair.RepairRequestKey, out var repairState))
+                if (context.PullV4SenderPumpRepairRequests.TryGetValue(queuedRepair.RepairRequestKey, out var repairState) &&
+                    (queuedRepair.RegularV4RepairContract is null ||
+                     ReferenceEquals(repairState.RegularV4RepairContract, queuedRepair.RegularV4RepairContract)))
                 {
                     repairState.Queued = false;
                     repairState.QueuedUtc = null;
