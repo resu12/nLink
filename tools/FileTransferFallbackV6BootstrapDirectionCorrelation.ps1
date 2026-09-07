@@ -1,7 +1,8 @@
 Set-StrictMode -Version Latest
 
-# This is consumption of an already completed episode, not recovery inferred
-# from a later route. Bulk and peer-first triggers deliberately remain distinct.
+# This is consumption of an exact peer-first bootstrap committed before the wait,
+# not recovery inferred from a later route. Its disposition may finish after the
+# wait. Bulk and peer-first triggers deliberately remain distinct.
 function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
     param($Episode, [long]$BeforeSequence)
 
@@ -21,8 +22,15 @@ function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
     }
     $buckets = @{}
     $seen = @{}
+    $laterCompletion = [Collections.Generic.List[object]]::new()
     foreach ($record in $Episode.CompletionRecords) {
-        if ($record.WriterSequence -le $Episode.PendingSequence -or $record.WriterSequence -ge $BeforeSequence) { continue }
+        if ($record.WriterSequence -le $Episode.PendingSequence) { continue }
+        if ($record.WriterSequence -ge $BeforeSequence) {
+            if ($record.EventName -in @('filetransfer_route_transition_disposition_applied', 'filetransfer_live_route_epoch_recovered')) {
+                $laterCompletion.Add($record)
+            }
+            continue
+        }
         $key = [string]$record.WriterSequence
         if ($seen.ContainsKey($key)) {
             if ($seen[$key].Line -cne $record.Line) { return $false }
@@ -31,6 +39,21 @@ function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
         $seen[$key] = $record
         if (-not $buckets.ContainsKey($record.EventName)) { $buckets[$record.EventName] = [Collections.Generic.List[object]]::new() }
         $buckets[$record.EventName].Add($record)
+    }
+    # Preserve the completed-before-wait path. For an in-flight disposition,
+    # admit only completion records; no later issuance or commit may be borrowed.
+    if (-not $buckets.ContainsKey('filetransfer_route_transition_disposition_applied') -or
+        -not $buckets.ContainsKey('filetransfer_live_route_epoch_recovered')) {
+        foreach ($record in $laterCompletion) {
+            $key = [string]$record.WriterSequence
+            if ($seen.ContainsKey($key)) {
+                if ($seen[$key].Line -cne $record.Line) { return $false }
+                continue
+            }
+            $seen[$key] = $record
+            if (-not $buckets.ContainsKey($record.EventName)) { $buckets[$record.EventName] = [Collections.Generic.List[object]]::new() }
+            $buckets[$record.EventName].Add($record)
+        }
     }
     function Named([string]$Name) { if ($buckets.ContainsKey($Name)) { return $buckets[$Name].ToArray() } }
     $identity = @('session_id', 'transfer_id', 'direction')
@@ -110,6 +133,10 @@ function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
     if ($prepared.Count -ne 1 -or $draining.Count -ne 1 -or $committed.Count -ne 1 -or
         $dispositions.Count -ne 1 -or $publications.Count -ne 1) { return $false }
     $prepare = $prepared[0]; $drain = $draining[0]; $commit = $committed[0]; $disposition = $dispositions[0]; $publication = $publications[0]
+    # All issuance, delivery, binding and preparation stages below must lead to
+    # this pre-wait commit. Only its exact disposition/publication may follow the
+    # wait; a later bootstrap or route cannot supply the missing authority.
+    if ($commit.WriterSequence -ge $BeforeSequence -or $bulk[0].WriterSequence -ge $BeforeSequence) { return $false }
     if (-not (Equal $prepare $command ($identity + $source + $durable + @('target_route', 'target_protocol_version', 'target_transport', 'target_transport_epoch'))) -or
         (Field $prepare 'authority_schema') -cne '2' -or
         (Field $prepare 'authority_id') -notmatch '^fta2-filetransfer_route_transition-[a-zA-Z0-9-]+$' -or
@@ -150,6 +177,9 @@ function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
     # consumed obligation. Before closure, cancellation/mutation poisons it.
     foreach ($record in $Episode.CompletionRecords) {
         if ($record.WriterSequence -le $Episode.PendingSequence) { continue }
+        if ($record.WriterSequence -ge $BeforeSequence -and $record.WriterSequence -le $publication.WriterSequence -and
+            $record.EventName -in @('filetransfer_fallback_v6_proof_bootstrap_observed', 'filetransfer_fallback_v6_proof_bootstrap_decided',
+                'filetransfer_route_transition_prepared', 'filetransfer_route_transition_committed')) { return $false }
         if ($record.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted' -and
             $record.WriterSequence -gt $commit.WriterSequence -and
             -not (Equal $record $publication ($identity + @('route', 'protocol_version', 'live_route_epoch',

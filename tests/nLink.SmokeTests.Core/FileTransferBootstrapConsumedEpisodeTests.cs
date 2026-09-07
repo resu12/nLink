@@ -30,7 +30,7 @@ public sealed class FileTransferBootstrapConsumedEpisodeTests : FileTransferOpsS
                 $f.log_writer_id='writer'; $f.session_id='session'
                 $script:records.Add($f)
             }
-            function Fixture {
+            function Fixture([bool]$straddling) {
                 $script:records=[Collections.Generic.List[hashtable]]::new()
                 $source=@{transfer_id='transfer';direction='inbound';source_route='file_tuna_v4';source_protocol_version='4';
                     source_live_route_epoch='3';source_runtime_generation='4';source_route_publication_generation='4';
@@ -61,23 +61,28 @@ public sealed class FileTransferBootstrapConsumedEpisodeTests : FileTransferOpsS
                 $applied=@{decision_status='Applied';decision_reason='filetransfer_route_transition_committed'}
                 foreach($name in $target.Keys){$committed["target_$name"]=$target[$name];if($name -notin @('route','protocol_version')){$applied["resulting_$name"]=$target[$name]}}
                 Add 'filetransfer_route_transition_committed' 13 $route $committed
-                Add 'filetransfer_route_transition_disposition_applied' 14 $route $applied
-                Add 'filetransfer_live_route_epoch_recovered' 15 $target @{transfer_id='transfer';direction='inbound';transition_generation='4';projection_source='coordinator_route_transition';route_publication_action_kind='RoutePublication';reason='filetransfer_route_transition_committed'}
+                Add 'filetransfer_route_transition_disposition_applied' $(if($straddling){24}else{14}) $route $applied
+                Add 'filetransfer_live_route_epoch_recovered' $(if($straddling){25}else{15}) $target @{transfer_id='transfer';direction='inbound';transition_generation='4';projection_source='coordinator_route_transition';route_publication_action_kind='RoutePublication';reason='filetransfer_route_transition_committed'}
                 Add 'filetransfer_fallback_nkn_proof_unconfirmed' 16 @{} @{proof='nkn_control_ack_received';bulk_seen='1';control_seen='1';requires_control_proof='0';requires_v6_epoch_recovery='1'}
-                for($i=0;$i -lt 28;$i++){Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' (20+$i) @{} @{proof='nkn_control_ack_received'}}
-                Add 'file_transfer_inbound_terminal' 48 @{} @{transfer_id='transfer';state='Completed'}
-                Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' 49 @{} @{proof='nkn_control_ack_received'}
-                Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' 50 @{} @{proof='nkn_control_session_end_received'}
+                Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' 20 @{} @{proof='nkn_control_ack_received'}
+                for($i=0;$i -lt 68;$i++){Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' (30+$i) @{} @{proof='nkn_control_ack_received'}}
+                Add 'file_transfer_inbound_terminal' 98 @{} @{transfer_id='transfer';state='Completed'}
+                Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' 99 @{} @{proof='nkn_control_ack_received'}
+                Add 'filetransfer_fallback_nkn_proof_waiting_for_v6_epoch' 100 @{} @{proof='nkn_control_session_end_received'}
                 return $script:records.ToArray()
             }
             $cases=@('exact','duplicate','reordered','empty','missing_issue','missing_execution','missing_application','missing_binding',
                 'missing_prepared','missing_draining','missing_commit','missing_disposition','missing_publication','wrong_authority',
                 'wrong_receipt','missing_fingerprint','wrong_generation','wrong_source','wrong_data_session','wrong_peer',
                 'wrong_target','wrong_disposition','wrong_publication','ambiguous_observation','conflict','new_pending',
-                'invalidation','replacement','terminal_before_commit','publication_mutation','episode_aba','aba')
-            foreach($case in $cases){
-                $events=@(Fixture)
-                $remove=@{missing_issue=7;missing_execution=8;missing_application=9;missing_binding=12;missing_prepared=10;missing_draining=11;missing_commit=13;missing_disposition=14;missing_publication=15}
+                'invalidation','replacement','terminal_before_commit','publication_mutation','episode_aba','aba','late_issue','late_commit')
+            foreach($straddling in @($false,$true)){
+            $order=if($straddling){'straddling'}else{'before_wait'}
+            $orderCases=@($cases)
+            if($straddling){$orderCases+=@('between_wait_pending','between_wait_invalidation','between_wait_replacement','between_wait_terminal','between_wait_publication_mutation','between_wait_aba','two_exact_episodes','independent_missing_issue')}
+            foreach($case in $orderCases){
+                $events=@(Fixture $straddling)
+                $remove=@{missing_issue=7;missing_execution=8;missing_application=9;missing_binding=12;missing_prepared=10;missing_draining=11;missing_commit=13;missing_disposition=$(if($straddling){24}else{14});missing_publication=$(if($straddling){25}else{15})}
                 if($remove.ContainsKey($case)){$events=@($events|Where-Object {[int]$_.log_writer_sequence -ne $remove[$case]})}
                 switch($case){
                     'empty' {$events=@()}
@@ -102,29 +107,60 @@ public sealed class FileTransferBootstrapConsumedEpisodeTests : FileTransferOpsS
                     'publication_mutation' {$copy=$events[14].Clone();$copy.event='filetransfer_route_hint_authorized_publication_accepted';$copy.log_writer_sequence='17';$copy.runtime_generation='6';$events+=$copy}
                     'terminal_before_commit' {
                         foreach($event in $events){if([int]$event.log_writer_sequence -ge 10 -and [int]$event.log_writer_sequence -le 16){$event.log_writer_sequence=[string]([int]$event.log_writer_sequence+1)}}
-                        $events[44].log_writer_sequence='10'
+                        ($events|Where-Object {$_.event -eq 'file_transfer_inbound_terminal'}).log_writer_sequence='10'
                     }
                     'aba' {$copy=$events[9].Clone();$copy.log_writer_sequence='17';$copy.authority_id='fta2-filetransfer_route_transition-B';$events+=$copy;$copy=$events[9].Clone();$copy.log_writer_sequence='18';$events+=$copy}
+                    'late_issue' {
+                        for($i=6;$i -le 14;$i++){$events[$i].log_writer_sequence=[string]($i+15)}
+                    }
+                    'late_commit' {$events[12].log_writer_sequence='21';$events[13].log_writer_sequence='24';$events[14].log_writer_sequence='25'}
+                    'between_wait_pending' {$copy=$events[1].Clone();$copy.log_writer_sequence='21';$events+=$copy}
+                    'between_wait_invalidation' {$copy=$events[9].Clone();$copy.event='filetransfer_route_transition_invalidated';$copy.log_writer_sequence='21';$events+=$copy}
+                    'between_wait_replacement' {$copy=$events[9].Clone();$copy.event='filetransfer_data_session_availability_changed';$copy.log_writer_sequence='21';$events+=$copy}
+                    'between_wait_terminal' {($events|Where-Object {$_.event -eq 'file_transfer_inbound_terminal'}).log_writer_sequence='21'}
+                    'between_wait_publication_mutation' {$copy=$events[14].Clone();$copy.event='filetransfer_route_hint_authorized_publication_accepted';$copy.log_writer_sequence='21';$copy.runtime_generation='6';$events+=$copy}
+                    'between_wait_aba' {$copy=$events[9].Clone();$copy.log_writer_sequence='21';$copy.authority_id='fta2-filetransfer_route_transition-B';$events+=$copy;$copy=$events[9].Clone();$copy.log_writer_sequence='22';$events+=$copy}
+                }
+                if($case -in @('two_exact_episodes','independent_missing_issue')){
+                    $other=@(Fixture $true)
+                    foreach($event in $other){
+                        $event.log_writer_id='writer-secondary';$event.session_id='session-secondary'
+                        if($event.ContainsKey('fallback_epoch')){$event.fallback_epoch='3'}
+                        foreach($name in @('transfer_id','trigger_transfer_id')){if($event.ContainsKey($name)){$event[$name]='transfer-secondary'}}
+                    }
+                    if($case -eq 'independent_missing_issue'){$other=@($other|Where-Object {$_.event -ne 'filetransfer_fallback_v6_proof_bootstrap_decided'})}
+                    $events+=$other
                 }
                 $full=@($events|ForEach-Object {$f=$_; 'event='+$f.event+'; '+(@($f.Keys|Where-Object {$_ -ne 'event'}|Sort-Object|ForEach-Object {"$_=$($f[$_])"}) -join '; ')})
                 $full+= 'event=unrelated_liveness; session_id=session; log_writer_id=writer; log_writer_sequence=1000'
                 $compact=@($full|Where-Object {$catalog.Contains((Get-FileTransferAuthorityLogField -Line $_ -Name 'event'))})
                 $a=Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $full
                 $b=Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $compact
-                $expected=$case -in @('exact','duplicate','reordered','empty')
-                if($a.UnresolvedCount -ne [int](-not $expected)){throw "$case unexpected direction result $($a|ConvertTo-Json -Depth 2 -Compress)"}
-                if(($a|ConvertTo-Json -Depth 5 -Compress) -cne ($b|ConvertTo-Json -Depth 5 -Compress)){throw "$case compact parity"}
-                if(-not $expected -and ($a.RawCount -ne 30 -or $a.CandidateRecords[0].WriterSequence -ne 20)){throw "$case location/quartet changed"}
-                if($case -in @('exact','duplicate','reordered','empty','missing_issue','wrong_authority','wrong_data_session','new_pending')){
+                $expected=$case -in @('exact','duplicate','reordered','empty','two_exact_episodes')
+                if($a.UnresolvedCount -ne [int](-not $expected)){throw "$order/$case unexpected direction result $($a|ConvertTo-Json -Depth 2 -Compress)"}
+                if(($a|ConvertTo-Json -Depth 5 -Compress) -cne ($b|ConvertTo-Json -Depth 5 -Compress)){throw "$order/$case compact parity"}
+                if(-not $expected -and ($a.RawCount -ne 71 -or $a.CandidateRecords[0].WriterSequence -ne 20)){throw "$order/$case location/quartet changed"}
+                if($expected -and ($a.RawCount -ne 0 -or $a.DistinctCount -ne 0 -or $a.RecoveredCount -ne 0)){throw "$order/$case callbacks counted as incidents"}
+                if($case -eq 'independent_missing_issue' -and ($a.DistinctCount -ne 1 -or $a.RecoveredCount -ne 0 -or $a.CandidateRecords[0].Writer -cne 'writer-secondary')){throw "$order/$case completed episode borrowed by independent missing issue"}
+                if($case -in @('exact','duplicate','reordered','empty','missing_issue','wrong_authority','wrong_data_session','new_pending','late_issue','late_commit','between_wait_pending','between_wait_invalidation','between_wait_terminal','between_wait_aba','two_exact_episodes','independent_missing_issue')){
                     $gui=Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines $compact
-                    if($gui.Unresolved -eq $expected){throw "$case GUI mismatch $($gui|ConvertTo-Json -Depth 3 -Compress)"}
-                    if(-not $expected -and $gui.FirstSequence -ne 20){throw "$case GUI location"}
+                    $guiFull=Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines $full
+                    $guiFields=@('Unresolved','Reason','Variant','FirstSequence','RawCount','DistinctCount','RecoveredCount','UnresolvedCount')
+                    if(($gui|Select-Object $guiFields|ConvertTo-Json -Compress) -cne ($guiFull|Select-Object $guiFields|ConvertTo-Json -Compress)){throw "$order/$case GUI full/compact boundary parity"}
+                    if($gui.Unresolved -eq $expected){throw "$order/$case GUI mismatch $($gui|ConvertTo-Json -Depth 3 -Compress)"}
+                    if(-not $expected -and $gui.FirstSequence -ne 20){throw "$order/$case GUI location"}
+                    if($case -eq 'independent_missing_issue' -and ($gui.RawCount -ne 71 -or $gui.DistinctCount -ne 1 -or $gui.RecoveredCount -ne 0 -or $gui.UnresolvedCount -ne 1)){throw "$order/$case GUI quartet"}
                 }
-                "pass $case"
+                "pass $order/$case"
+            }
             }
             """;
         var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()]);
         Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
-        Assert.Contains("pass aba", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("pass before_wait/aba", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("pass straddling/exact", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("pass straddling/between_wait_aba", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("pass straddling/two_exact_episodes", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("pass straddling/independent_missing_issue", result.Stdout, StringComparison.Ordinal);
     }
 }

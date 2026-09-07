@@ -11251,8 +11251,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("derived-input-receipt-ok", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task RouteAcceptanceAttemptFinalization_RequiresExactDirectClaimsAndIdentity()
+    [Theory]
+    [InlineData("powershell", 5)]
+    [InlineData("pwsh", 7)]
+    public async Task RouteAcceptanceAttemptFinalization_RequiresExactDirectClaimsAndIdentity(string powerShellHost, int expectedMajorVersion)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -11280,6 +11282,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var scriptText = $$"""
             Set-StrictMode -Version Latest
             $ErrorActionPreference = 'Stop'
+            if ($PSVersionTable.PSVersion.Major -ne {{expectedMajorVersion}}) { throw 'unexpected PowerShell test host' }
             $repoRoot = $args[0]
             . (Join-Path $repoRoot 'tools\FileTransferSoak\RetainedAnalysisEvidence.ps1')
             . (Join-Path $repoRoot 'tools\FileTransferRouteAcceptanceEvidence.ps1')
@@ -11394,6 +11397,72 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 }
                 $inputSha = Get-FileTransferEvidenceSha256 -Path $script:logPath
                 $inputLineCount = Get-FileTransferEvidenceLineCount -Path $script:logPath
+                $operatorPath = Join-Path $tempRoot 'filetransfer-operator-verdict.txt'
+                $semanticFailure = "verdict=FAIL_PROTOCOL_OR_INTEGRITY`nhard_failure_count=0`n"
+                [IO.File]::WriteAllText($operatorPath, $semanticFailure)
+                $operatorSha = Get-FileTransferEvidenceSha256 -Path $operatorPath
+                $snapshot = [ordered]@{
+                    Mode = 'SnapshotV1Authoritative'; ContractVersion = 1; CatalogVersion = 'snapshot-authority-v1'
+                    CatalogHash = 'catalog-hash'; BoundaryHash = 'boundary-hash'; ArtifactEvidenceVerdict = 'pass'
+                }
+                foreach ($name in @('filetransfer-coordinator-snapshot-full-summary.json', 'filetransfer-coordinator-snapshot-compact-summary.json')) {
+                    Write-FileTransferEvidenceAtomicJson -Path (Join-Path $tempRoot $name) -Value $snapshot
+                }
+                Write-FileTransferEvidenceAtomicJson -Path (Join-Path $tempRoot 'filetransfer-coordinator-snapshot-parity-summary.json') -Value @{ Verdict = 'pass' }
+
+                $producerRoot = Join-Path $tempRoot 'producer'
+                $producerTools = Join-Path $producerRoot 'tools'
+                New-Item -ItemType Directory -Force -Path $producerTools | Out-Null
+                $exePath = Join-Path $producerRoot 'nLink.exe'
+                [IO.File]::WriteAllText($exePath, 'fixture-executable')
+                foreach ($name in @('GuiSmoke-Windows.ps1', 'Run-FileTransferTunaGuiSmoke.ps1')) {
+                    [IO.File]::WriteAllText((Join-Path $producerTools $name), "fixture-$name")
+                }
+                & git -C $producerRoot init --quiet
+                if ($LASTEXITCODE -ne 0) { throw 'fixture git initialization failed' }
+                & git -C $producerRoot add --all
+                if ($LASTEXITCODE -ne 0) { throw 'fixture git staging failed' }
+                & git -C $producerRoot -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit --quiet -m fixture
+                if ($LASTEXITCODE -ne 0) { throw 'fixture git commit failed' }
+                $producerCommit = [string](& git -C $producerRoot rev-parse HEAD)
+
+                $capturePath = Join-Path $tempRoot 'filetransfer-gui-log-ledger-slice.log'
+                [IO.File]::WriteAllText($capturePath, "event=fixture`n")
+                $captureSha = Get-FileTransferEvidenceSha256 -Path $capturePath
+                Write-FileTransferEvidenceAtomicJson -Path (Join-Path $tempRoot 'filetransfer-gui-evidence-finalization-state.json') -Value ([ordered]@{
+                    acceptanceRunId = $runId; scenarioRunId = $scenarioRunId
+                    timedOut = $false; lastCompletedStage = 'gui_child_exited'
+                    exitCodeAvailable = $true; exitCode = 0; captureSha256 = $captureSha
+                })
+                Write-FileTransferEvidenceAtomicJson -Path (Join-Path $tempRoot 'filetransfer-gui-log-ledger.json') -Value ([ordered]@{
+                    acceptanceRunId = $runId; scenarioRunId = $scenarioRunId
+                    retainedSlice = @{ sha256 = $captureSha }; analyzerInput = @{ captureSha256 = $inputSha }
+                    cursorIntegrityVerdict = 'pass'; writerEvidenceVersion = 3; writerIntegrityVerdict = 'pass'
+                })
+                Write-FileTransferEvidenceAtomicJson -Path (Join-Path $tempRoot 'filetransfer-tuna-gui-summary.json') -Value ([ordered]@{
+                    event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+                    routeMode = 'live-regular-activation-cycle'; completed = $true; integrityOk = $true
+                })
+                $manifestPath = Join-Path $tempRoot 'filetransfer-tuna-gui-evidence-manifest.json'
+                Write-FileTransferTunaDirectEvidenceManifestProjection -Path $manifestPath -Source ([pscustomobject]@{
+                    schemaVersion = 1; event = 'filetransfer_tuna_gui_direct_evidence_manifest'
+                    acceptanceRunId = $runId; scenarioRunId = $scenarioRunId
+                    sourceCommit = $producerCommit; sourceDirty = $false
+                    routeMode = 'live-regular-activation-cycle'; payloadSize = '256MB'; direction = 'both'
+                    payerMode = 'helpee'; fault = 'switch-off'; liveToggleSequence = 'on,off,on,off'
+                    executableSha256 = Get-FileTransferEvidenceSha256 -Path $exePath
+                    harnessSha256 = Get-FileTransferEvidenceSha256 -Path (Join-Path $producerTools 'GuiSmoke-Windows.ps1')
+                    wrapperSha256 = Get-FileTransferEvidenceSha256 -Path (Join-Path $producerTools 'Run-FileTransferTunaGuiSmoke.ps1')
+                    analyzerInputPath = $script:logPath; artifactFinalized = $true; currentRuntimeProof = $false
+                    retainedAnalysisOwner = 'RouteAcceptance'; retainedAnalysisReceiptPaths = @()
+                    retainedAnalysisReceiptSha256 = ''; retainedAnalysisReceiptValid = $false
+                    retainedAnalysisCompleted = $false; retainedAnalysisStatus = 'delegated_pending'
+                }) | Out-Null
+                $pendingManifestSha = Get-FileTransferEvidenceSha256 -Path $manifestPath
+                $script:selectedCount = 0
+                $selected = TrySelect-RouteAcceptanceScenarioAttemptEvidence -ScenarioName 'scenario' -AttemptIndex 1 -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if ($selected -or $script:selectedCount -ne 0) { throw 'delegated pending attempt was selected before its receipt existed' }
+
                 $receipt = Write-FileTransferRetainedAnalysisAttemptReceipt `
                     -ArtifactDir $tempRoot `
                     -Owner 'RouteAcceptance' `
@@ -11414,6 +11483,33 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     -CompletedProofArtifacts $true
                 $receiptPath = Join-Path $tempRoot 'filetransfer-retained-analysis-attempt-receipt.json'
                 $script:receiptSha256 = Get-FileTransferEvidenceSha256 -Path $receiptPath
+
+                $reconciliation = Update-FileTransferTunaDirectEvidenceManifestFromReceipt `
+                    -RepoRoot $producerRoot -ArtifactDir $tempRoot -ExpectedOwner RouteAcceptance `
+                    -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId -ExePath $exePath `
+                    -RouteMode live-regular-activation-cycle -PayloadSize '256MB' -Direction both `
+                    -PayerMode helpee -Fault switch-off -LiveToggleSequence 'on,off,on,off' `
+                    -LiveRouteProofMode RegularActivationCycle
+                $reconciled = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                if (-not $reconciliation.ReceiptValid -or -not $reconciliation.CurrentRuntimeProof -or
+                    $reconciled.retainedAnalysisStatus -ne 'completed' -or
+                    $reconciled.retainedAnalysisReceiptSha256 -ne $script:receiptSha256 -or
+                    $reconciled.analyzerInputSha256 -ne $inputSha -or
+                    $reconciled.captureSha256 -ne $captureSha -or
+                    (Get-FileTransferEvidenceSha256 -Path $manifestPath) -eq $pendingManifestSha) {
+                    throw ("completed receipt did not atomically replace the delegated manifest with exact proof hashes: result={0}; manifest={1}; receipt_sha={2}; input_sha={3}; capture_sha={4}" -f
+                        ($reconciliation | ConvertTo-Json -Compress), ($reconciled | ConvertTo-Json -Depth 5 -Compress),
+                        $script:receiptSha256, $inputSha, $captureSha)
+                }
+                Assert-Finalized $true 'completed semantic failure must still finalize its exact attempt'
+                $selected = TrySelect-RouteAcceptanceScenarioAttemptEvidence -ScenarioName 'scenario' -AttemptIndex 1 -ArtifactDir $tempRoot -AcceptanceRunId $runId -ScenarioRunId $scenarioRunId
+                if (-not $selected -or $script:selectedCount -ne 1) { throw 'reconciled completed semantic failure was not selected exactly once' }
+                if ($receipt.status -ne 'completed' -or $receipt.exitCode -ne 0 -or
+                    (Get-FileTransferEvidenceSha256 -Path $operatorPath) -ne $operatorSha -or
+                    [IO.File]::ReadAllText($operatorPath) -cne $semanticFailure -or
+                    (Get-FileTransferEvidenceSha256 -Path $receiptPath) -ne $script:receiptSha256) {
+                    throw 'attempt selection changed completed semantic FAIL evidence into acceptance'
+                }
 
                 Write-TunaAttemptManifest -ReceiptPaths @($receiptPath)
                 Assert-Finalized $true 'singleton Tuna receipt array must finalize under strict mode'
@@ -11448,9 +11544,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, [repoRoot]);
+        var result = await RunPowerShellScriptTextAsync(scriptText, [repoRoot], powerShellHost);
 
-        Assert.True(result.ExitCode == 0, $"Direct attempt finalization test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.True(result.ExitCode == 0, $"Direct attempt finalization test failed in {powerShellHost}.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("direct-attempt-finalization-ok", result.Stdout, StringComparison.Ordinal);
     }
 
@@ -11558,12 +11654,22 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Assert.Contains("stability-gates-summary.txt", scriptText, StringComparison.Ordinal);
             Assert.Contains("hard_failure_count", scriptText, StringComparison.Ordinal);
             Assert.Contains("gate_status", scriptText, StringComparison.Ordinal);
-            Assert.Contains("[string]::Equals($stabilityGateStatus, 'warn'", scriptText, StringComparison.Ordinal);
-            Assert.Contains("StartsWith('FAIL'", scriptText, StringComparison.Ordinal);
-            Assert.Contains("StartsWith('INVALID'", scriptText, StringComparison.Ordinal);
-            Assert.Contains("StartsWith('INCONCLUSIVE'", scriptText, StringComparison.Ordinal);
             Assert.Contains("$Process.WaitForExit(5000)", scriptText, StringComparison.Ordinal);
         }
+
+        Assert.Contains("[string]::Equals($stabilityGateStatus, 'warn'", wrapperText, StringComparison.Ordinal);
+        foreach (var prefix in new[] { "FAIL", "INVALID", "INCONCLUSIVE" })
+        {
+            Assert.Contains($"StartsWith('{prefix}'", wrapperText, StringComparison.Ordinal);
+        }
+        var parentCompletedProof = ExtractPowerShellFunctionBody(
+            routeAcceptanceText,
+            "Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts",
+            "Write-RouteAcceptanceFakeAuthoritativeSnapshotEvidence");
+        Assert.Contains("$operatorHardFailureCount -ne 0", parentCompletedProof, StringComparison.Ordinal);
+        Assert.Contains("$stabilityHardFailureCount -ne 0", parentCompletedProof, StringComparison.Ordinal);
+        Assert.Contains("[string]::Equals($stabilityGateStatus, '(missing)'", parentCompletedProof, StringComparison.Ordinal);
+        Assert.DoesNotContain("StartsWith('FAIL'", parentCompletedProof, StringComparison.Ordinal);
 
         Assert.Contains("retained_analysis_attempt_receipt_already_terminal", evidenceText, StringComparison.Ordinal);
         Assert.Contains("analyzerInputUnchanged", evidenceText, StringComparison.Ordinal);
@@ -11671,8 +11777,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("analysis-warning-proof-ok", result.Stdout, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task RetainedAnalysisAttemptReceipt_IsSingleOwnerAndInputBound()
+    [Theory]
+    [InlineData("powershell", 5)]
+    [InlineData("pwsh", 7)]
+    public async Task RetainedAnalysisAttemptReceipt_IsSingleOwnerAndInputBound(string powerShellHost, int expectedMajorVersion)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -11682,6 +11790,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var helperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferSoak", "RetainedAnalysisEvidence.ps1");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            if ($PSVersionTable.PSVersion.Major -ne {{expectedMajorVersion}}) { throw 'unexpected PowerShell test host' }
             . '{{helperPath.Replace("'", "''", StringComparison.Ordinal)}}'
             $root = Join-Path ([IO.Path]::GetTempPath()) ('nlink-analysis-receipt-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Force -Path $root | Out-Null
@@ -11801,6 +11910,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $projection.generatedAtUtc = [string]$generation
                     Write-FileTransferTunaDirectEvidenceManifestProjection -Path $manifestPath -Source $projection | Out-Null
                 }
+                $replacedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                if ($replacedManifest.generatedAtUtc -ne '50') { throw 'atomic manifest replacement did not persist its final generation' }
                 [IO.File]::WriteAllText($stopPath, 'stop', [Text.UTF8Encoding]::new($false))
                 $completedReader = Wait-Job $reader -Timeout 10
                 if ($null -eq $completedReader -or $reader.State -ne 'Completed') {
@@ -11820,8 +11931,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
-        Assert.True(result.ExitCode == 0, $"Analysis receipt test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), powerShellHost);
+        Assert.True(result.ExitCode == 0, $"Analysis receipt test failed in {powerShellHost}.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("analysis-receipt-ok", result.Stdout, StringComparison.Ordinal);
     }
 

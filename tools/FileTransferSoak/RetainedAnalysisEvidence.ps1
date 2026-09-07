@@ -41,8 +41,8 @@ function Write-FileTransferEvidenceAtomicJson {
         $stream.Dispose()
         $stream = $null
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            $isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-            if ($isWindows) {
+            $isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+            if ($isWindowsPlatform) {
                 $moveFileReplaceExisting = 0x1
                 $moveFileWriteThrough = 0x8
                 $replaced = $false

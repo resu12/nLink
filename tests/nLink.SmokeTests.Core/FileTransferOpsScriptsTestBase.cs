@@ -1567,7 +1567,10 @@ public abstract class FileTransferOpsScriptsTestBase
         }
     }
 
-    protected static async Task<ScriptResult> RunPowerShellScriptTextAsync(string scriptText, IReadOnlyList<string> arguments)
+    protected static async Task<ScriptResult> RunPowerShellScriptTextAsync(
+        string scriptText,
+        IReadOnlyList<string> arguments,
+        string powerShellHost = "powershell")
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-ops-harness", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
@@ -1581,7 +1584,7 @@ public abstract class FileTransferOpsScriptsTestBase
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = "powershell",
+                    FileName = powerShellHost,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
