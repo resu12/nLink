@@ -104,6 +104,8 @@ public sealed partial class NknSignalingTransport
     internal static Func<NknSignalingTransport, string?>? RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
     internal static Func<NknSignalingTransport, string?>? RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests;
     internal static Func<NknSignalingTransport, string?>? RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
+    internal static Action<NknSignalingTransport, RuntimeUnlockRetryDispatchInstallReceipt>?
+        RuntimeUnlockRetryPhysicalSendCompletionOverrideForTests;
     internal static Func<
         NknSignalingTransport,
         string,
@@ -925,7 +927,17 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryDispatchSuccessorEvaluation SuccessorEvaluation,
         FileTransferBridgeRecoveryExecutionCommand RecoveryCommand,
         RuntimeUnlockRetryNegotiationSourceScope SourceScope,
-        long BoundUtcMs);
+        TransportFileTransferDataSession DataSession,
+        long BoundUtcMs)
+    {
+        public RuntimeUnlockRetryAcceptedReceiveProof? AcceptedProof { get; init; }
+    }
+
+    private sealed record RuntimeUnlockRetryAcceptedReceiveProof(
+        FileTransferReceiveRecoveryProofObservation Observation,
+        FileTransferAuthorityId AuthorityId,
+        long OperationGeneration,
+        TransportFileTransferDataSession DataSession);
 
     private sealed record
         RuntimeUnlockMissingDispatchPredecessorCleanupCapture(
@@ -1786,15 +1798,22 @@ public sealed partial class NknSignalingTransport
             decision.Authority is { } authority &&
             !authority.IsDefault &&
             authority.ExecutionCommand == observation.Command &&
-            captured.RecoveryCommand == observation.Command;
+            captured.RecoveryCommand == observation.Command &&
+            authority.Observation.DataSessionIdentity == captured.SourceScope.DataSessionIdentity &&
+            authority.Observation.DataSessionGeneration == captured.SourceScope.DataSessionGeneration &&
+            !string.IsNullOrWhiteSpace(observation.ProofIdentity) &&
+            observation.ObservedUtcMs > 0;
+        TransportFileTransferDataSession? dataSession = null;
         var sourceCurrent = accepted &&
             TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
                 captured.Intent.SourcePublicationAuthority,
-                out var currentSourceScope) &&
-            currentSourceScope == captured.SourceScope;
-        RuntimeUnlockRetryNegotiationIntent? releasedIntent = null;
+                out var currentSourceScope,
+                out dataSession) &&
+            currentSourceScope == captured.SourceScope &&
+            ReferenceEquals(dataSession, captured.DataSession);
         string outcome;
         string reason;
+        RuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral? proofAccepted = null;
         lock (accelerationGate)
         {
             if (!ReferenceEquals(
@@ -1821,16 +1840,31 @@ public sealed partial class NknSignalingTransport
                          currentIntent.State) ||
                      disposed)
             {
-                runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
+                InvalidateRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferralUnsafe(captured);
                 outcome = "Stale";
                 reason = "deferred_successor_intent_or_source_replaced";
             }
             else
             {
-                runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
-                releasedIntent = currentIntent;
-                outcome = "Released";
-                reason = "exact_receive_recovery_proof_accepted";
+                var proof = new RuntimeUnlockRetryAcceptedReceiveProof(
+                    observation,
+                    decision.Authority!.Value.AuthorityId,
+                    decision.Authority.Value.OperationGeneration,
+                    dataSession!);
+                if (captured.AcceptedProof is { } retained && retained != proof)
+                {
+                    outcome = "Stale";
+                    reason = "accepted_receive_recovery_proof_conflict";
+                }
+                else
+                {
+                    proofAccepted = captured.AcceptedProof is null
+                        ? captured with { AcceptedProof = proof }
+                        : captured;
+                    runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = proofAccepted;
+                    outcome = "Held";
+                    reason = "exact_receive_recovery_proof_retained";
+                }
             }
         }
 
@@ -1840,12 +1874,95 @@ public sealed partial class NknSignalingTransport
             slotGeneration: 0,
             reason,
             decision.Authority?.OperationGeneration ?? 0);
-        if (releasedIntent is not null)
+        if (proofAccepted is not null)
+        {
+            ReconcileRuntimeUnlockRetryPostFallbackReceiveRecovery(proofAccepted);
+        }
+    }
+
+    private void ObserveRuntimeUnlockRetryPostFallbackReceiveResumed(
+        FileTransferBridgeRecoveryExecutionCommand command)
+    {
+        RuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral? captured;
+        lock (accelerationGate)
+        {
+            captured = runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral;
+        }
+        if (captured is not null && captured.RecoveryCommand == command)
+        {
+            ReconcileRuntimeUnlockRetryPostFallbackReceiveRecovery(captured);
+        }
+    }
+
+    private void ReconcileRuntimeUnlockRetryPostFallbackReceiveRecovery(
+        RuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral captured)
+    {
+        var sourceCurrent = TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+                captured.Intent.SourcePublicationAuthority,
+                out var scope,
+                out var dataSession) &&
+            scope == captured.SourceScope &&
+            ReferenceEquals(dataSession, captured.DataSession) &&
+            (captured.AcceptedProof is null ||
+             ReferenceEquals(captured.AcceptedProof.DataSession, dataSession));
+        var commandCurrent = TryGetRuntimeUnlockRetryPostFallbackReceiveRecoveryCommand(
+                captured.Intent, out var command) && command == captured.RecoveryCommand;
+        var blocked = TryCaptureRuntimeUnlockRetryPostFallbackReceiveRecoveryBlocker(
+            captured.Intent, out _, out _);
+        RuntimeUnlockRetryNegotiationIntent? released = null;
+        string outcome;
+        string reason;
+        lock (accelerationGate)
+        {
+            if (!ReferenceEquals(runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral, captured))
+            {
+                return;
+            }
+            if (!sourceCurrent || !commandCurrent || disposed ||
+                !ReferenceEquals(pendingRuntimeUnlockRetryNegotiationIntent, captured.Intent) ||
+                !ReferenceEquals(runtimeUnlockRecoveryRetryState, captured.Intent.State) ||
+                captured.Intent.State.SourcePublicationAuthority != captured.Intent.SourcePublicationAuthority ||
+                captured.Intent.State.SourceDataSessionGeneration != captured.Intent.SourceDataSessionGeneration ||
+                captured.Intent.State.ContractState is SessionRecoveryContractState.Completed or
+                    SessionRecoveryContractState.Failed)
+            {
+                InvalidateRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferralUnsafe(captured);
+                outcome = "Stale";
+                reason = "deferred_successor_intent_or_recovery_replaced";
+            }
+            else if (captured.AcceptedProof is null || blocked)
+            {
+                outcome = "Held";
+                reason = captured.AcceptedProof is null
+                    ? "transport_ready_waiting_for_exact_receive_recovery_proof"
+                    : "proof_accepted_waiting_for_transport_ready";
+            }
+            else
+            {
+                runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
+                released = captured.Intent;
+                outcome = "Released";
+                reason = "exact_receive_recovery_proof_and_transport_ready";
+            }
+        }
+        LogRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral(
+            outcome, captured, 0, reason, captured.AcceptedProof?.OperationGeneration ?? 0);
+        if (released is not null)
         {
             SchedulePendingRuntimeUnlockRetryNegotiationIntent(
                 "post_fallback_receive_recovery_proof_accepted",
-                releasedIntent.IntentGeneration,
-                releasedIntent.SourceScope);
+                released.IntentGeneration,
+                released.SourceScope);
+        }
+    }
+
+    private void InvalidateRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferralUnsafe(
+        RuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral captured)
+    {
+        runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
+        if (ReferenceEquals(pendingRuntimeUnlockRetryNegotiationIntent, captured.Intent))
+        {
+            pendingRuntimeUnlockRetryNegotiationIntent = null;
         }
     }
 
@@ -9369,8 +9486,16 @@ public sealed partial class NknSignalingTransport
     private bool TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
         FileTransferRoutePublicationAuthority sourcePublicationAuthority,
         out RuntimeUnlockRetryNegotiationSourceScope sourceScope)
+        => TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+            sourcePublicationAuthority, out sourceScope, out _);
+
+    private bool TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+        FileTransferRoutePublicationAuthority sourcePublicationAuthority,
+        out RuntimeUnlockRetryNegotiationSourceScope sourceScope,
+        out TransportFileTransferDataSession? capturedDataSession)
     {
         sourceScope = default;
+        capturedDataSession = null;
         lock (gate)
         {
             var key = CreateFileTransferRouteHintKey(
@@ -9407,6 +9532,7 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
+            capturedDataSession = dataSession;
             sourceScope = new RuntimeUnlockRetryNegotiationSourceScope(
                 sourcePublicationAuthority,
                 routeHint.FallbackTransportEpoch,
@@ -14434,16 +14560,6 @@ public sealed partial class NknSignalingTransport
                             requireRuntimeUnlockRetryDispatchInstall,
                             runtimeUnlockActivation)
                         .ConfigureAwait(false);
-                    if (requireRuntimeUnlockRetryDispatchInstall)
-                    {
-                        _ = TryBindMissingDispatchPredecessorOperationCompletionLatch(
-                            expectedInstallReceipt,
-                            scheduledOperationGeneration,
-                            payerDecisionId,
-                            reason);
-                        _ = TryReconcileSettledMissingDispatchPredecessorAfterOperationCompletion(
-                            "operation_completion");
-                    }
                     (disposition, dispositionReason) =
                         requireRuntimeUnlockRetryDispatchInstall
                             ? ResolveRuntimeUnlockPostTunaFallbackActivationDispositionAfterOffer(
@@ -14451,6 +14567,12 @@ public sealed partial class NknSignalingTransport
                             : (
                                 "completed",
                                 "initial_activation_offer_flow_completed");
+                }
+                catch (OperationCanceledException)
+                {
+                    disposition = "cancelled";
+                    dispositionReason = "negotiation_operation_cancelled";
+                    throw;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -15328,6 +15450,7 @@ public sealed partial class NknSignalingTransport
                     runtimeUnlockActivation,
                     physicalSendScope)
                 .ConfigureAwait(false);
+            RuntimeUnlockRetryPhysicalSendCompletionOverrideForTests?.Invoke(this, installReceipt);
         }
         finally
         {
@@ -15354,6 +15477,16 @@ public sealed partial class NknSignalingTransport
                 "Drained",
                 "operation_descendants_completed");
             physicalSendScope.Dispose();
+
+            // A drained cancelled operation is also complete. Retire only when
+            // the existing exact MissingDispatch settlement and intent agree.
+            _ = TryBindMissingDispatchPredecessorOperationCompletionLatch(
+                installReceipt,
+                operationGeneration,
+                payerDecisionId,
+                reason);
+            _ = TryReconcileSettledMissingDispatchPredecessorAfterOperationCompletion(
+                "operation_completion");
         }
     }
 
@@ -30213,6 +30346,11 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRecoveryRetryState state,
         string reason = "retry_dispatch_intent_scope_invalidated")
     {
+        if (runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral is { } deferred &&
+            ReferenceEquals(deferred.Intent.State, state))
+        {
+            runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
+        }
         RuntimeUnlockRetryNegotiationIntent? invalidatedIntent = null;
         if (pendingRuntimeUnlockRetryNegotiationIntent is { } pending &&
             ReferenceEquals(pending.State, state))
@@ -30568,10 +30706,32 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
+    private bool TryGetRuntimeUnlockRetryPostFallbackReceiveRecoveryCommand(
+        RuntimeUnlockRetryNegotiationIntent intent,
+        out FileTransferBridgeRecoveryExecutionCommand command)
+    {
+        if (RuntimeUnlockRetryPostFallbackReceiveRecoveryCommandOverrideForTests?.Invoke(
+                this, intent.State.SessionId, intent.State.TransferId ?? string.Empty) is
+            { IsDefault: false } overridden)
+        {
+            command = overridden;
+            return true;
+        }
+        if (client is RealNknClientAdapter realClient &&
+            realClient.TryGetFileTransferBridgeRecoveryExecutionCommandForProof(
+                intent.State.SessionId, intent.State.TransferId ?? string.Empty, out command))
+        {
+            return true;
+        }
+        command = default;
+        return false;
+    }
+
     private RuntimeUnlockRetryPostFallbackReceiveRecoveryDeferral
         BindRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferralUnsafe(
             RuntimeUnlockRetryNegotiationIntent intent,
-            FileTransferBridgeRecoveryExecutionCommand recoveryCommand)
+            FileTransferBridgeRecoveryExecutionCommand recoveryCommand,
+            TransportFileTransferDataSession dataSession)
     {
         var current = runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral;
         if (current is not null &&
@@ -30589,6 +30749,7 @@ public sealed partial class NknSignalingTransport
                 intent.SuccessorEvaluation!.Value,
                 recoveryCommand,
                 intent.SourceScope,
+                dataSession,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = bound;
         return bound;
@@ -30602,7 +30763,10 @@ public sealed partial class NknSignalingTransport
         if (!TryCaptureRuntimeUnlockRetryPostFallbackReceiveRecoveryBlocker(
                 intent,
                 out var recoveryCommand,
-                out var blockerReason))
+                out var blockerReason) ||
+            !TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+                intent.SourcePublicationAuthority, out var sourceScope, out var dataSession) ||
+            sourceScope != intent.SourceScope)
         {
             return false;
         }
@@ -30625,7 +30789,8 @@ public sealed partial class NknSignalingTransport
                 deferral =
                     BindRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferralUnsafe(
                         intent,
-                        recoveryCommand);
+                        recoveryCommand,
+                        dataSession!);
                 released = TryReleaseAccelerationNegotiationSlotUnsafe(
                     slotReceipt.SlotGeneration,
                     AccelerationNegotiationSlotOwner.RuntimeUnlockRetryIntent);
@@ -30676,6 +30841,7 @@ public sealed partial class NknSignalingTransport
         string? rejectionReason = null;
         long replacedPredecessorSlotGeneration = 0;
         RuntimeUnlockRetryNegotiationSourceScope currentSourceScope = default;
+        TransportFileTransferDataSession? currentDataSession = null;
         RuntimeUnlockRetryNegotiationIntent? capturedIntent;
         RuntimeUnlockRetiredAnswerBarrier? capturedRetiredAnswerBarrier;
         FileTransferBridgeRecoveryExecutionCommand capturedRecoveryCommand =
@@ -30698,7 +30864,8 @@ public sealed partial class NknSignalingTransport
             capturedIntent is { SourceScope.IsDefault: false } &&
             TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
                 capturedIntent.SourcePublicationAuthority,
-                out currentSourceScope) &&
+                out currentSourceScope,
+                out currentDataSession) &&
             currentSourceScope == capturedIntent.SourceScope;
         var retainedAnswerSourceCurrent =
             capturedRetiredAnswerBarrier is not null &&
@@ -30758,9 +30925,18 @@ public sealed partial class NknSignalingTransport
                 recoveryDeferral =
                     BindRuntimeUnlockRetryPostFallbackReceiveRecoveryDeferralUnsafe(
                         intent,
-                        capturedRecoveryCommand);
+                        capturedRecoveryCommand,
+                        currentDataSession!);
                 rejectionReason =
                     "retry_dispatch_post_fallback_receive_recovery_current";
+            }
+            else if (intent is not null &&
+                     runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral is { } held &&
+                     ReferenceEquals(held.Intent, intent))
+            {
+                // Adapter readiness cannot replace the Coordinator proof/rendezvous.
+                recoveryDeferral = held;
+                rejectionReason = "retry_dispatch_post_fallback_receive_recovery_rendezvous_pending";
             }
             else if (intent is not null)
             {
@@ -40861,6 +41037,7 @@ public sealed partial class NknSignalingTransport
             accelerationNegotiationScheduled = 0;
             pendingRuntimeUnlockRetryNegotiationIntent = null;
             runtimeUnlockRetryNegotiationSlotReceipt = null;
+            runtimeUnlockRetryPostFallbackReceiveRecoveryDeferral = null;
         }
         ClearPendingRuntimeUnlockAccelerationNegotiation();
         Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);

@@ -7061,6 +7061,16 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                     'responder_probe_handoff')
             }
 
+            # This fixture isolates shared-boundary forwarding, not route-consistency evaluation.
+            function Get-FileTransferCoordinatorSnapshotRouteConsistency {
+                param($Evaluation)
+                return [pscustomobject]@{ Verdict = 'pass' }
+            }
+            function Compare-FileTransferCoordinatorSnapshotRouteConsistency {
+                param($Full, $Compact)
+                return [pscustomobject]@{ Verdict = 'pass' }
+            }
+
             $root = Join-Path ([IO.Path]::GetTempPath()) (
                 'nlink-family2-gui-boundary-' + [guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($root)

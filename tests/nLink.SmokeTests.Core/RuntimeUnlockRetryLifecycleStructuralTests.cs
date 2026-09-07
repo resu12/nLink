@@ -5,6 +5,47 @@ namespace NLink.SmokeTests;
 public sealed class RuntimeUnlockRetryLifecycleStructuralTests
 {
     [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryLifecycle")]
+    public void RuntimeUnlockRetryLifecycle_PhysicalCompletionReconcilesOnlyAfterDrainInFinally()
+    {
+        var source = File.ReadAllText(Path.Combine(CoreSmokeTestsBase.FindRepoRoot(),
+            "src", "nLink.Infra.Nkn", "NknSignalingTransport.Acceleration.cs"));
+        var start = source.IndexOf("private async Task TrySendAccelerationOfferAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = source.IndexOf("private async Task TrySendAccelerationOfferCoreAsync(", start, StringComparison.Ordinal);
+        Assert.True(end > start);
+        var wrapper = source[start..end];
+        var finallyIndex = wrapper.IndexOf("finally", StringComparison.Ordinal);
+        var drain = wrapper.IndexOf("await physicalSendScope.DrainAsync()", StringComparison.Ordinal);
+        var capture = wrapper.IndexOf("TryBindMissingDispatchPredecessorOperationCompletionLatch(", StringComparison.Ordinal);
+        var reconcile = wrapper.IndexOf("TryReconcileSettledMissingDispatchPredecessorAfterOperationCompletion(", StringComparison.Ordinal);
+        Assert.True(finallyIndex >= 0 && drain > finallyIndex && capture > drain && reconcile > capture);
+        Assert.Single(Regex.Matches(source, @"_ = TryBindMissingDispatchPredecessorOperationCompletionLatch\("));
+        Assert.Contains("catch (OperationCanceledException)", source, StringComparison.Ordinal);
+        Assert.Contains("negotiation_operation_cancelled", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RuntimeUnlockRetryLifecycle")]
+    public void RuntimeUnlockRetryLifecycle_ReceiveResumedUsesExactCommandRendezvous()
+    {
+        var source = File.ReadAllText(Path.Combine(CoreSmokeTestsBase.FindRepoRoot(),
+            "src", "nLink.Infra.Nkn", "NknSignalingTransport.cs"));
+        Assert.Matches(
+            @"if \(current && e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed\)\s*" +
+            @"\{\s*ObserveRuntimeUnlockRetryPostFallbackReceiveResumed\(executionCommand\);\s*\}",
+            source);
+        var acceleration = File.ReadAllText(Path.Combine(CoreSmokeTestsBase.FindRepoRoot(),
+            "src", "nLink.Infra.Nkn", "NknSignalingTransport.Acceleration.cs"));
+        var observer = Regex.Match(acceleration,
+            @"private void ObserveRuntimeUnlockRetryPostFallbackReceiveResumed\([\s\S]*?\n    \}");
+        Assert.True(observer.Success);
+        Assert.Contains("captured.RecoveryCommand == command", observer.Value, StringComparison.Ordinal);
+        Assert.Contains("ReconcileRuntimeUnlockRetryPostFallbackReceiveRecovery(captured)", observer.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("SchedulePending", observer.Value, StringComparison.Ordinal);
+    }
+
+    [Fact]
     [Trait("Category", "LegacySmoke")]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockRetryLifecycle")]
     public void RuntimeUnlockRetryLifecycle_CoreContextsRetainOnlyCoordinatorPersistentState()

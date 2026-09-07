@@ -3357,9 +3357,8 @@ function scheduleStdinProcessing() {
     })
     .finally(() => {
       stdinProcessing = false;
-      if (stdinBuffer.length > 0) {
-        scheduleStdinProcessing();
-      }
+      // A partial frame must wait for the next data event. The drain loop
+      // already consumes input that arrives while a command is awaited.
     });
 }
 

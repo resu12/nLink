@@ -3233,6 +3233,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     new FileTransferReceiveRecoveryPeerReachabilityObservedEventArgs(
                         observation));
             }
+            if (current && e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
+            {
+                ObserveRuntimeUnlockRetryPostFallbackReceiveResumed(executionCommand);
+            }
             PublishCompatibilityLifecycle(e);
             return;
         }
