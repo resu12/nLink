@@ -342,6 +342,167 @@ function Get-FileTransferStallGraceCurrentSourceRecovery {
     return $result
 }
 
+# A highest-only stale callback is diagnostic, not repair authority. Exact
+# ordinary progress may nevertheless close its stall obligation after grace.
+function Get-FileTransferStallGraceStaleNaturalProgressClosure {
+    param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode)
+
+    function Field($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function Number($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((Field $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function Ticks($Event, [string]$Name) {
+        $value = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse((Field $Event $Name), [ref]$value)) { return 0L }
+        return $value.UtcTicks
+    }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            $value = Field $Left $name
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -cne (Field $Right $name)) { return $false }
+        }
+        return $true
+    }
+    $stall = $Episode.Event
+    $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
+        'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
+        'bridge_decision_generation', 'checkpoint_request_id', 'route_publication_generation',
+        'route_commit_generation', 'checkpoint_generation', 'data_session_identity', 'data_session_generation')
+    $wake = @('frontier_chunk_index', 'highest_received_chunk_index', 'wake_generation', 'stall_started_utc', 'wake_deadline_utc')
+    $frontier = Number $stall 'frontier_chunk_index'; $highest = Number $stall 'highest_received_chunk_index'
+    $deadline = Ticks $stall 'wake_deadline_utc'
+    if (-not (Equal $stall $stall ($scope + $wake + @('log_writer_id', 'session_id', 'transfer_id'))) -or
+        (Field $stall 'event') -cne 'filetransfer_v6_frontier_request_deferred' -or
+        (Field $stall 'direction') -cne 'inbound' -or (Field $stall 'route') -cne 'post_tuna_fallback_v6' -or
+        (Field $stall 'protocol_version') -cne '6' -or (Field $stall 'authority_effect') -cne 'none' -or
+        $frontier -lt 0 -or $highest -le $frontier -or (Number $stall 'wake_generation') -le 0 -or
+        (Field $stall 'data_session_identity') -in @('', '(none)', 'none') -or
+        (Number $stall 'stall_grace_ms') -ne 750 -or (Ticks $stall 'stall_started_utc') -le 0 -or
+        $deadline -ne ((Ticks $stall 'stall_started_utc') + 7500000L)) { return $null }
+    foreach ($name in @('live_route_epoch', 'runtime_generation', 'leg_generation', 'transport_epoch',
+            'route_publication_generation', 'data_session_generation')) {
+        if ((Number $stall $name) -le 0) { return $null }
+    }
+    foreach ($name in @('terminal_generation', 'bridge_recovery_generation', 'bridge_decision_generation',
+            'route_commit_generation', 'checkpoint_generation')) {
+        if ((Number $stall $name) -lt 0) { return $null }
+    }
+
+    $index = New-FileTransferStallGraceCurrentSourceIndex -Events $Events
+    $key = '{0}|{1}|{2}' -f (Field $stall 'log_writer_id'), (Field $stall 'session_id'), (Field $stall 'transfer_id')
+    if (-not $index.ContainsKey($key)) { return $null }
+    $ordered = @($index[$key] | Where-Object { [long]$_.Sequence -ge [long]$stall.Sequence })
+    # Select the first physical advance and publication, before testing their
+    # outcomes. Never skip a contradictory first subject for later recovery.
+    $commits = @($ordered | Where-Object {
+        (Field $_ 'event') -ceq 'filetransfer_v6_sparse_write_committed' -and
+        (Number $_ 'log_writer_attempt_utc_ticks') -ge $deadline -and
+        (Number $_ 'next_chunk_index') -gt $frontier
+    })
+    if ($commits.Count -eq 0) { return $null }
+    $commit = $commits[0]
+    $states = @($ordered | Where-Object {
+        [long]$_.Sequence -gt [long]$commit.Sequence -and (Field $_ 'event') -ceq 'filetransfer_v6_receiver_state_sent'
+    })
+    if ($states.Count -eq 0) { return $null }
+    $state = $states[0]
+    $interval = @($ordered | Where-Object { [long]$_.Sequence -le [long]$state.Sequence })
+    foreach ($event in $Events) {
+        if ((Field $event 'log_writer_id') -cne (Field $stall 'log_writer_id') -or
+            [long]$event.Sequence -lt [long]$stall.Sequence -or [long]$event.Sequence -gt [long]$state.Sequence) { continue }
+        $writerKey = '{0}|{1}' -f (Field $event 'log_writer_id'), (Field $event 'log_writer_sequence')
+        if ($index['__conflicts'].ContainsKey($writerKey) -or (Field $event 'log_writer_sequence') -notmatch '^[1-9][0-9]*$' -or
+            ($null -ne $event.PSObject.Properties['EventName'] -and $event.EventName -cne (Field $event 'event'))) { return $null }
+    }
+    $rechecks = @($interval | Where-Object {
+        (Field $_ 'event') -ceq 'filetransfer_v6_frontier_stall_grace_recheck_decided' -and
+        (Field $_ 'wake_generation') -ceq (Field $stall 'wake_generation')
+    })
+    if ($rechecks.Count -ne 1) { return $null }
+    $recheck = $rechecks[0]
+    if (-not (Equal $recheck $stall ($scope + $wake)) -or
+        (Field $recheck 'decision_status') -cne 'stale' -or (Field $recheck 'decision_reason') -cne 'frontier_scope_changed' -or
+        (Field $recheck 'authority_effect') -cne 'none' -or
+        (Number $recheck 'log_writer_attempt_utc_ticks') -lt $deadline -or
+        [long]$recheck.Sequence -ge [long]$commit.Sequence) { return $null }
+
+    $growth = @($interval | Where-Object {
+        [long]$_.Sequence -gt [long]$stall.Sequence -and [long]$_.Sequence -lt [long]$recheck.Sequence -and
+        (Field $_ 'event') -ceq 'filetransfer_v6_receiver_state_sent'
+    })
+    if ($growth.Count -eq 0) { return $null }
+    $growthEpoch = 0L; $growthHighest = $highest
+    foreach ($event in $growth) {
+        if ((Number $event 'contiguous_committed_chunk_index') -ne $frontier -or
+            (Number $event 'durable_received_highest_chunk_index') -lt $growthHighest -or
+            (Number $event 'epoch') -le 0 -or (Number $event 'epoch') -lt $growthEpoch) { return $null }
+        $growthEpoch = Number $event 'epoch'; $growthHighest = Number $event 'durable_received_highest_chunk_index'
+    }
+    if ($growthHighest -le $highest) { return $null }
+    $arms = @($interval | Where-Object {
+        [long]$_.Sequence -gt [long]$recheck.Sequence -and [long]$_.Sequence -lt [long]$commit.Sequence -and
+        (Field $_ 'event') -ceq 'filetransfer_v6_frontier_recent_progress_grace_deferred' -and
+        (Number $_ 'frontier_chunk_index') -gt $frontier
+    })
+    if ($arms.Count -ne 1) { return $null }
+    $arm = $arms[0]
+    $progressTicks = Ticks $arm 'committed_progress_utc'
+    $next = Number $commit 'next_chunk_index'; $nextHighest = Number $commit 'highest_received_chunk_index'
+    if (-not (Equal $arm $stall $scope) -or (Number $arm 'wake_generation') -le 0 -or
+        (Field $arm 'authority_effect') -cne 'none' -or (Field $arm 'decision_status') -cne 'held' -or
+        (Field $arm 'decision_reason') -cne 'recent_progress_grace_current' -or
+        $progressTicks -le (Number $recheck 'log_writer_attempt_utc_ticks') -or
+        (Ticks $arm 'wake_deadline_utc') -ne ($progressTicks + [TimeSpan]::TicksPerSecond) -or
+        (Number $arm 'log_writer_attempt_utc_ticks') -lt $progressTicks -or
+        (Number $commit 'log_writer_attempt_utc_ticks') -ge (Ticks $arm 'wake_deadline_utc') -or
+        (Number $arm 'frontier_chunk_index') -ne $next -or (Number $arm 'highest_received_chunk_index') -ne $nextHighest -or
+        (Number $commit 'contiguous_chunks_committed') -ne ($next - $frontier) -or $nextHighest -le $next -or
+        (Number $state 'contiguous_committed_chunk_index') -ne $next -or
+        (Number $state 'durable_received_highest_chunk_index') -ne $nextHighest -or
+        (Number $state 'epoch') -le $growthEpoch) { return $null }
+
+    $currentFrontier = $frontier; $currentHighest = $highest; $currentEpoch = 0L
+    $stateFrontier = $frontier; $stateHighest = $highest
+    $priorTicks = Number $stall 'log_writer_attempt_utc_ticks'
+    foreach ($event in $interval) {
+        $ticks = Number $event 'log_writer_attempt_utc_ticks'
+        if ($ticks -le 0 -or $ticks -lt $priorTicks) { return $null }
+        $priorTicks = $ticks
+        $name = Field $event 'event'
+        if ($name -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
+            (Field $event 'transfer_paused') -ceq '1') { return $null }
+        # The full-scope wakes anchor the interval. Scope-poor physical records
+        # can corroborate progress, never supply or override authority scope.
+        foreach ($fieldName in $scope) {
+            if ($event.Fields.ContainsKey($fieldName) -and (Field $event $fieldName) -cne (Field $stall $fieldName)) { return $null }
+        }
+        if ($name -in @('filetransfer_fallback_frontier_repair_authority_granted', 'filetransfer_control_plane_delivery_observed',
+                'filetransfer_control_plane_delivery_result',
+                'filetransfer_fallback_frontier_repair_dispatched', 'filetransfer_v6_frontier_request_sent',
+                'filetransfer_fallback_frontier_repair_progress_observed', 'filetransfer_fallback_frontier_repair_contract_settled') -and
+            ((Number $event 'frontier_chunk_index') -eq $frontier -or
+                (Field $event 'repair_request_id').StartsWith("v6-frontier:${frontier}:", [StringComparison]::Ordinal) -or
+                (Field $event 'repair_request_key').StartsWith("fallback-frontier:${frontier}:", [StringComparison]::Ordinal))) { return $null }
+        if ($name -notin @('filetransfer_v6_receiver_state_sent', 'filetransfer_v6_sparse_write_committed')) { continue }
+        $f = if ($name -eq 'filetransfer_v6_receiver_state_sent') { Number $event 'contiguous_committed_chunk_index' } else { Number $event 'next_chunk_index' }
+        $h = if ($name -eq 'filetransfer_v6_receiver_state_sent') { Number $event 'durable_received_highest_chunk_index' } else { Number $event 'highest_received_chunk_index' }
+        if ($f -lt $currentFrontier -or $h -lt $currentHighest -or $h -lt $f -or
+            ([long]$event.Sequence -lt [long]$commit.Sequence -and $f -ne $frontier)) { return $null }
+        $currentFrontier = $f; $currentHighest = $h
+        if ($name -eq 'filetransfer_v6_receiver_state_sent') {
+            $epoch = Number $event 'epoch'
+            if ($epoch -le 0 -or $epoch -lt $currentEpoch -or (Field $event 'transfer_paused') -cne '0' -or
+                (Field $event 'transport_epoch') -cne (Field $stall 'transport_epoch') -or
+                ($epoch -eq $currentEpoch -and ($f -ne $stateFrontier -or $h -ne $stateHighest))) { return $null }
+            $currentEpoch = $epoch; $stateFrontier = $f; $stateHighest = $h
+        }
+    }
+    return $state
+}
+
 # Highest-only growth can obsolete a wake before a normal request entry wins.
 # The stale callback is evidence only; a new exact grant and committed progress
 # close the obligation without manufacturing a repair ProgressObserved receipt.

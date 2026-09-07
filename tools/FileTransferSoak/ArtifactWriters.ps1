@@ -15968,6 +15968,106 @@ function Test-FileTransferFallbackPeerVisibleCompletion {
         $reason -match 'fallback|checkpoint|receiver_state|frontier')
 }
 
+function Get-FileTransferDelayedDeliveryIdentity {
+    param($Event)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('log_writer_id', 'session_id', 'transfer_id', 'direction', 'authority_schema', 'authority_id', 'control_plane_generation')) {
+        if (-not $Event.Fields.ContainsKey($name)) { return '' }
+        $value = [string]$Event.Fields[$name]
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -ceq '(none)') { return '' }
+        $parts.Add(('{0}:{1}' -f $value.Length, $value))
+    }
+    $generation = 0L
+    if ($Event.Fields['authority_schema'] -cne '2' -or
+        -not [long]::TryParse([string]$Event.Fields['control_plane_generation'], [ref]$generation) -or $generation -le 0) { return '' }
+    return [string]::Join('|', $parts)
+}
+
+function New-FileTransferDelayedDeliveryIndex {
+    param([AllowEmptyCollection()][object[]]$Events)
+
+    $identities = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $copies = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $conflicts = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($event in $Events) {
+        $writer = [string]$event.Fields['log_writer_id']
+        $sequence = [string]$event.Fields['log_writer_sequence']
+        if (-not [string]::IsNullOrWhiteSpace($writer) -and -not [string]::IsNullOrWhiteSpace($sequence)) {
+            $copyKey = '{0}:{1}|{2}' -f $writer.Length, $writer, $sequence
+            if ($null -ne $event.PSObject.Properties['RawLine']) {
+                $raw = [string]$event.RawLine
+                if ($copies.ContainsKey($copyKey) -and $copies[$copyKey] -cne $raw) { $null = $conflicts.Add($copyKey) }
+                else { $copies[$copyKey] = $raw }
+            }
+            else { $null = $conflicts.Add($copyKey) }
+        }
+        if ($event.EventName -cne 'filetransfer_control_plane_delivery_result' -and
+            $event.EventName -cne 'filetransfer_control_plane_delivery_observed') { continue }
+        $key = Get-FileTransferDelayedDeliveryIdentity -Event $event
+        if ([string]::IsNullOrEmpty($key)) { continue }
+        if (-not $identities.ContainsKey($key)) {
+            $identities[$key] = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+        }
+        # Only byte-identical log copies coalesce, never merely equivalent field tuples.
+        if ($null -eq $event.PSObject.Properties['RawLine'] -or [string]::IsNullOrWhiteSpace($event.RawLine)) { continue }
+        $identities[$key][[string]$event.RawLine] = $event
+    }
+    return [pscustomobject]@{ Identities = $identities; Conflicts = $conflicts }
+}
+
+function Test-FileTransferDelayedDeliveryObservation {
+    param($Index, $Rejection, $Effect, [string]$FallbackSubfamily)
+
+    if ($FallbackSubfamily -cne 'fallback_send' -or $Effect.EventName -cne 'filetransfer_control_plane_delivery_observed' -or
+        $Effect.Fields['kind'] -cne 'receiver_state' -or $Effect.Fields['frame_type'] -cne 'filetransfer.receiver_state.v6') { return $false }
+    $key = Get-FileTransferDelayedDeliveryIdentity -Event $Effect
+    if ([string]::IsNullOrEmpty($key) -or -not $Index.Identities.ContainsKey($key)) { return $false }
+    $entries = $Index.Identities[$key]
+    if ($entries.Count -ne 2) { return $false }
+    $result = $null; $observation = $null
+    foreach ($entry in $entries.Values) {
+        if ($entry.EventName -ceq 'filetransfer_control_plane_delivery_result') { $result = $entry }
+        else { $observation = $entry }
+    }
+    if ($null -eq $result -or $null -eq $observation -or $observation.RawLine -cne $Effect.RawLine) { return $false }
+
+    $required = @('kind', 'frame_type', 'reason', 'route', 'protocol_version', 'live_route_epoch', 'leg_generation',
+        'transport_epoch', 'bridge_recovery_generation', 'checkpoint_request_id', 'control_queue', 'control_copy',
+        'bulk_copy', 'peer_visible_any', 'accepted_any', 'local_only_rejected')
+    foreach ($name in $required) {
+        if (-not $result.Fields.ContainsKey($name) -or -not $Effect.Fields.ContainsKey($name) -or
+            [string]::IsNullOrWhiteSpace([string]$result.Fields[$name]) -or $result.Fields[$name] -cne $Effect.Fields[$name]) { return $false }
+    }
+    if ($Effect.Fields['route'] -cne 'post_tuna_fallback_v6' -or $Effect.Fields['protocol_version'] -cne '6') { return $false }
+    foreach ($name in @('control_queue', 'control_copy', 'bulk_copy', 'peer_visible_any', 'accepted_any', 'local_only_rejected')) {
+        if ($Effect.Fields[$name] -cne '0' -and $Effect.Fields[$name] -cne '1') { return $false }
+    }
+    # Transport-only diagnostics are not projected by the service. Every other optional
+    # correlation field must be present and equal on both sides (no missing-field wildcard).
+    $physicalOnly = @('transport', 'msg_id', 'control_queue_error', 'control_copy_error', 'bulk_copy_error')
+    foreach ($name in @($result.Fields.Keys) + @($Effect.Fields.Keys)) {
+        if ($name -ceq 'event' -or $name -clike 'log_writer_*') { continue }
+        if ($name -cin $physicalOnly -and -not $Effect.Fields.ContainsKey($name)) { continue }
+        if (-not $result.Fields.ContainsKey($name) -or -not $Effect.Fields.ContainsKey($name) -or
+            $result.Fields[$name] -cne $Effect.Fields[$name]) { return $false }
+    }
+    $previousSequence = 0L; $previousTicks = 0L; $previousTime = $null
+    foreach ($entry in @($result, $Rejection, $Effect)) {
+        if ($entry.Fields['log_writer_id'] -cne $Effect.Fields['log_writer_id']) { return $false }
+        $sequence = 0L; $ticks = 0L
+        if (-not [long]::TryParse([string]$entry.Fields['log_writer_sequence'], [ref]$sequence) -or
+            -not [long]::TryParse([string]$entry.Fields['log_writer_attempt_utc_ticks'], [ref]$ticks) -or
+            $sequence -le $previousSequence -or $ticks -le $previousTicks -or $ticks -gt [DateTime]::MaxValue.Ticks -or
+            $null -eq $entry.PSObject.Properties['TimestampUtc'] -or $null -eq $entry.TimestampUtc) { return $false }
+        if ($null -ne $previousTime -and $entry.TimestampUtc -lt $previousTime) { return $false }
+        $writer = [string]$entry.Fields['log_writer_id']
+        if ($Index.Conflicts.Contains(('{0}:{1}|{2}' -f $writer.Length, $writer, $entry.Fields['log_writer_sequence']))) { return $false }
+        $previousSequence = $sequence; $previousTicks = $ticks; $previousTime = $entry.TimestampUtc
+    }
+    return $true
+}
+
 function Get-FileTransferStaleRejectedActionEffectProof {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -16010,6 +16110,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
     $evidence = New-Object System.Collections.Generic.List[object]
     $failureEvents = New-Object System.Collections.Generic.List[object]
 
+    $delayedDeliveryIndex = New-FileTransferDelayedDeliveryIndex -Events $events
     $forbiddenEffectsByFamily = @{}
     foreach ($rejection in @($rejections | Sort-Object Sequence)) {
         $family = Get-FileTransferStaleRejectedProofActionFamily -Event $rejection
@@ -16058,6 +16159,10 @@ function Get-FileTransferStaleRejectedActionEffectProof {
                 }
             }
             elseif (-not (Test-FileTransferStaleRejectedProofPlannedAuthorityMatches -Plan $matchPlan -Effect $effect)) {
+                continue
+            }
+
+            if (Test-FileTransferDelayedDeliveryObservation -Index $delayedDeliveryIndex -Rejection $rejection -Effect $effect -FallbackSubfamily $fallbackSubfamily) {
                 continue
             }
 
@@ -60354,6 +60459,9 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             -not $matchingRecheckConflict -and $matchingRecheckDecisions.Count -eq 1 -and
             $matchingRecheckDecisions[0] -eq 'stale|frontier_scope_changed|none') {
             $recoveryEvent = Get-FileTransferStallGraceStaleHighestProgressClosure -Events $ordered -Episode $incident
+            if ($null -eq $recoveryEvent) {
+                $recoveryEvent = Get-FileTransferStallGraceStaleNaturalProgressClosure -Events $ordered -Episode $incident
+            }
         }
         $stallHandoffClosure = $null
         if ($naturalProgress.Count -eq 0 -and $null -eq $recoveryEvent) {

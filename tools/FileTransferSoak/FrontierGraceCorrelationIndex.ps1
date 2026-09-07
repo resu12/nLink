@@ -350,6 +350,10 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
         Get-FileTransferFallbackFrontierGraceNamedEvents `
             -Index $Index -TransferKey $TransferKey `
             -EventName 'filetransfer_v6_receiver_state_sent')
+    [object[]]$sparseWritePool = @(
+        Get-FileTransferFallbackFrontierGraceNamedEvents `
+            -Index $Index -TransferKey $TransferKey `
+            -EventName 'filetransfer_v6_sparse_write_committed')
     [object[]]$stallCandidates = @($selected.Values | Where-Object {
             $_.EventName -eq 'filetransfer_v6_frontier_request_deferred'
         })
@@ -434,6 +438,26 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
                     }
                     $throughSequence = if ($null -ne $lifetimeEnd) { [long]$lifetimeEnd.Sequence } else { [long]::MaxValue }
                     & $addEvents @($lifetimeEnd | Where-Object { $null -ne $_ }) -IncludeWriterCopies
+                    # Natural progress may close before a later request send.
+                    # Keep the first subjects, even when their proof fails.
+                    $sparseAdvance = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                        -Index $Index -Events $sparseWritePool `
+                        -AfterSequence ([long]$recheck.Sequence) -ThroughSequence $throughSequence `
+                        -Predicate {
+                            param($event)
+                            (Get-FileTransferEventInt64Field -Event $event -Name 'next_chunk_index' -Default -1) -gt $candidateFrontier
+                        }
+                    if ($null -ne $sparseAdvance) {
+                        $naturalState = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
+                            -Index $Index -Events $receiverStatePool `
+                            -AfterSequence ([long]$sparseAdvance.Sequence) -ThroughSequence $throughSequence `
+                            -Predicate { param($event) $true }
+                        if ($null -ne $naturalState) {
+                            & $addEvents @(Get-FileTransferFallbackFrontierGraceSequenceRange `
+                                -Index $Index -Events $transferEvents -AfterSequence $candidateSequence `
+                                -ThroughSequence ([long]$naturalState.Sequence)) -IncludeWriterCopies
+                        }
+                    }
                     $currentSend = Find-FileTransferFallbackFrontierGraceEventAfterSequence `
                         -Index $Index -Events $Index.EventsByTransferAndFrontier[$frontierKey] `
                         -AfterSequence ([long]$recheck.Sequence) -ThroughSequence $throughSequence `
@@ -543,10 +567,6 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
             ((Get-FileTransferEventField -Event $_ -Name 'transfer_paused' -Default '0') -eq '1' -or
                 (Get-FileTransferEventField -Event $_ -Name 'status' -Default '') -in @('Completed', 'Failed', 'Canceled'))
         })
-    [object[]]$sparseWritePool = @(
-        Get-FileTransferFallbackFrontierGraceNamedEvents `
-            -Index $Index -TransferKey $TransferKey `
-            -EventName 'filetransfer_v6_sparse_write_committed')
     [object[]]$graceCandidates = @($selected.Values | Where-Object {
             $_.EventName -in @(
                 'filetransfer_v6_frontier_request_deferred',

@@ -15564,6 +15564,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 }
                 elseif ($matchingRecheckDecisions[0] -eq 'stale|frontier_scope_changed|none') {
                     $recoveryEvent = Get-FileTransferStallGraceStaleHighestProgressClosure -Events $handoffEvents -Episode $episode
+                    if ($null -eq $recoveryEvent) {
+                        $recoveryEvent = Get-FileTransferStallGraceStaleNaturalProgressClosure -Events $handoffEvents -Episode $episode
+                    }
                 }
                 $recovered = $null -ne $recoveryEvent
             }
