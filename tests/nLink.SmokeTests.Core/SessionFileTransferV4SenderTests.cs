@@ -6756,7 +6756,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         int remoteNextExpectedChunkIndex = 100,
         int chunksAcceptedForTransport = 256,
         int remoteGrantedUntilExclusive = 256,
-        int chunkCount = 256)
+        int chunkCount = 256,
+        bool startCoordinatorSnapshotStream = true)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType("OutboundTransferContext", BindingFlags.NonPublic)!;
@@ -6794,7 +6795,11 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "DataSession",
             new CompletingDataSession($"session_{transferId}", transferId));
         SetPrivateProperty(context, "DataSessionGeneration", 1L);
-        var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_post_tuna_fallback_v6");
+        var leg = SeedCurrentRuntimeOwnerForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "unit_test_post_tuna_fallback_v6",
+            startCoordinatorSnapshotStream);
         leg.TransportEpochId = 3;
         leg.BridgeRecoveryGeneration = 1;
         return context;

@@ -8207,7 +8207,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 true,
                 RuntimeUnlockRetryDispatchListenerRearmRequirement
                     .RequiredBeforeDispatch);
-            InvokePrivateMethod(host, "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed", "test_recovery_settled");
+            // Arming queues Coordinator evaluation after the real backoff. Only
+            // its committed install follow-up may schedule this retry.
             await host.DrainRuntimeUnlockRetryDispatchInstallFollowUpsForTestsAsync();
             var installReceipt = Assert.IsType<
                 RuntimeUnlockRetryDispatchInstallReceipt>(

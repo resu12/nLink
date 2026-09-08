@@ -786,23 +786,64 @@ public sealed partial class SessionFileTransferV4SenderTests
         const string transferId = "precommit_launch_post_tuna_fallback";
         const string sessionId = "session_precommit_launch_post_tuna_fallback";
         using var service = new SessionFileTransferService();
-        using var transport = new LoopbackFileTransferTransport(sessionId);
+        using var transport = Assert.IsAssignableFrom<LoopbackFileTransferTransport>(
+            Activator.CreateInstance(
+                typeof(SessionFileTransferRuntimeUnlockRetryAuthorityTests).GetNestedType(
+                    "RetryAuthorityLoopbackTransport", BindingFlags.NonPublic)!,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                args: [sessionId],
+                culture: null));
         service.AttachTransport(transport);
-        var context = CreatePostTunaFallbackV6OutboundContext(transferId);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            startCoordinatorSnapshotStream: false);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
         var dataSession = new RecordingDataSession(sessionId, transferId);
-        ReplaceOutboundDataSession(service, context, dataSession);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "DataSessionGeneration", 2L);
         SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
         var leg = Assert.IsType<FileTransferLeg>(
             GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        StartCoordinatorSnapshotStreamForTest(context);
         SeedPairedFallbackTailYieldForTest(context, leg);
-        SeedInstalledFallbackRuntimeUnlockRetryForTest(context);
-        var admission = SeedRuntimeUnlockAdmissionForTest(
-            context,
-            FileTransferDirection.Outbound,
-            "unit_test_post_tuna_fallback_launch");
+        var state = CreateCoordinatorStateForTest(context);
+        var operation = Assert.IsType<FileTransferFallbackTailYieldOperation>(
+            state.PersistentState.FallbackTailYield.CurrentOperation);
+        var request = Assert.IsType<RuntimeUnlockRetryDispatchAuthorityRequest>(
+            state.PersistentState.FallbackTailYield.PendingRetryRecheckRequest);
+        var authorization = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            operation.Decision.AuthorityId,
+            operation.Decision.YieldGeneration,
+            FallbackTailYieldKind.Quiescent.ToString());
+        Assert.True(authorization.Granted, authorization.Reason);
+        typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType())
+            .Invoke(null, [context, request, authorization]);
+        typeof(SessionFileTransferService)
+            .GetMethod("ProcessRuntimeUnlockRetryDispatchDecision", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [transport, authorization, GetPrivateProperty<long>(context, "DataSessionGeneration")]);
+        Assert.True(FileTransferCoordinator.TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(
+            CreateCoordinatorStateForTest(context), out var installed));
+        Assert.Equal(authorization.Contract!.Authority, installed.Authority);
+        var admissionDecision = Assert.IsType<RuntimeUnlockAdmissionDecision>(typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "RequestRuntimeUnlockAdmissionLocked" &&
+                method.GetParameters()[0].ParameterType == context.GetType())
+            .Invoke(null, [context, "route_hint", "unit_test_post_tuna_fallback_launch", false]));
+        Assert.True(admissionDecision.Granted, admissionDecision.Reason);
+        var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(admissionDecision.AdmissionToken);
         var snapshot = new RuntimeUnlockRouteCommitSnapshot(
             sessionId,
             transferId,
