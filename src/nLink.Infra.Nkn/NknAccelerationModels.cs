@@ -12,15 +12,32 @@ internal enum NknAccelerationLaneKind
 
 internal sealed class AccelerationStateChangedEventArgs : EventArgs
 {
-    public AccelerationStateChangedEventArgs(bool isAvailable, string reason)
+    public AccelerationStateChangedEventArgs(
+        bool isAvailable,
+        string reason,
+        NknAccelerationFailureOrigin? failureOrigin = null)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        FailureOrigin = failureOrigin;
     }
 
     public bool IsAvailable { get; }
 
     public string Reason { get; }
+
+    public NknAccelerationFailureOrigin? FailureOrigin { get; }
+}
+
+internal readonly record struct NknAccelerationFailureOrigin(
+    Guid LaneInstanceId,
+    long ClientGeneration,
+    string ProcessRunId,
+    long FailureGeneration)
+{
+    public bool IsDefault =>
+        LaneInstanceId == Guid.Empty || ClientGeneration <= 0 ||
+        string.IsNullOrWhiteSpace(ProcessRunId) || FailureGeneration <= 0;
 }
 
 internal interface INknAccelerationLane : IDisposable
@@ -28,6 +45,10 @@ internal interface INknAccelerationLane : IDisposable
     bool IsAvailable { get; }
 
     NknAccelerationLaneDiagnostics GetDiagnosticsSnapshot();
+
+    bool IsFailureOriginCurrent(NknAccelerationFailureOrigin origin) => false;
+
+    bool TryApplyFailureOrigin(NknAccelerationFailureOrigin origin, Func<bool> apply) => false;
 
     Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct);
 

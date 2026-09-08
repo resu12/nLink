@@ -2203,6 +2203,10 @@ public sealed partial class SessionFileTransferService
             source,
             reason,
             admission);
+        if (admission.Granted)
+        {
+            AttachInitialReceiverBarrierAdmissionLocked(context);
+        }
         return admission;
     }
 

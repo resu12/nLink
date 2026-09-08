@@ -16,13 +16,18 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     }
 
     private readonly object gate = new();
+    private readonly Guid laneInstanceId = Guid.NewGuid();
     private readonly NknTunaAccelerationOptions options;
     private readonly INknTunaListenerSidecarSupervisor? listenerSupervisor;
     private NknTunaSidecarClient? client;
     private ClientRole clientRole;
     private NknTunaListenerStartRequest? listenerRequest;
     private NknTunaSidecarProcessOwner? dialerProcessOwner;
+    private NknTunaSidecarProcessOwner? clientDialerProcessOwner;
     private Task<bool>? dialerStartTask;
+    private long clientGeneration;
+    private long failureGeneration;
+    private NknAccelerationFailureOrigin? currentFailureOrigin;
     private NknAccelerationLaneDiagnostics lastDiagnostics = NknAccelerationLaneDiagnostics.Empty;
     private bool disposed;
 
@@ -89,6 +94,28 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     public event EventHandler<NknIncomingMessage>? MessageReceived;
 
     public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
+
+    public bool IsFailureOriginCurrent(NknAccelerationFailureOrigin origin)
+    {
+        lock (gate)
+        {
+            return IsFailureOriginCurrentUnsafe(origin);
+        }
+    }
+
+    public bool TryApplyFailureOrigin(NknAccelerationFailureOrigin origin, Func<bool> apply)
+    {
+        lock (gate)
+        {
+            // The callback may only perform the data-session's atomic availability
+            // close. It must not enter transport/service gates or invoke route code.
+            return IsFailureOriginCurrentUnsafe(origin) && apply();
+        }
+    }
+
+    private bool IsFailureOriginCurrentUnsafe(NknAccelerationFailureOrigin origin)
+        => !disposed && !origin.IsDefault && client is null &&
+            dialerProcessOwner is null && currentFailureOrigin == origin;
 
     public NknAccelerationLaneDiagnostics GetDiagnosticsSnapshot()
     {
@@ -382,7 +409,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
                 if (IsTerminalSidecarEvent(safeEventName))
                 {
-                    MarkCurrentClientUnavailable($"sidecar_{safeReason ?? safeEventName}");
+                    MarkDialerClientUnavailable(owner, $"sidecar_{safeReason ?? safeEventName}");
                 }
             }
         };
@@ -400,10 +427,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                 ready.TrySetException(new InvalidOperationException("Tuna dialer sidecar exited before ready."));
             }
 
-            if (IsCurrentDialerOwner(owner))
-            {
-                MarkCurrentClientUnavailable("dialer_exited");
-            }
+            MarkDialerClientUnavailable(owner, "dialer_exited");
         };
 
         try
@@ -419,6 +443,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             {
                 ThrowIfDisposed();
                 dialerProcessOwner = owner;
+                currentFailureOrigin = null;
             }
 
             process.BeginOutputReadLine();
@@ -531,9 +556,11 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
             client = null;
             clientRole = ClientRole.None;
+            clientDialerProcessOwner = null;
             listenerRequest = null;
             dialerProcessOwner = null;
             dialerStartTask = null;
+            currentFailureOrigin = null;
         }
 
         clientToDispose?.Dispose();
@@ -570,9 +597,11 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
             client = null;
             clientRole = ClientRole.None;
+            clientDialerProcessOwner = null;
             listenerRequest = null;
             dialerProcessOwner = null;
             dialerStartTask = null;
+            currentFailureOrigin = null;
         }
 
         clientToDispose?.Dispose();
@@ -593,18 +622,30 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     private void OnClientStateChanged(object? sender, AccelerationStateChangedEventArgs e)
     {
         NknTunaSidecarProcessOwner? processToStop = null;
+        var forwardedEvent = e;
         var shouldForward = true;
         if (sender is NknTunaSidecarClient sidecarClient)
         {
             lock (gate)
             {
-                if (ReferenceEquals(client, sidecarClient))
+                if (ReferenceEquals(client, sidecarClient) &&
+                    (clientRole != ClientRole.Dialer ||
+                     ReferenceEquals(clientDialerProcessOwner, dialerProcessOwner)))
                 {
                     lastDiagnostics = sidecarClient.GetDiagnosticsSnapshot();
                     if (!e.IsAvailable)
                     {
+                        if (clientRole == ClientRole.Dialer && clientDialerProcessOwner is { } owner &&
+                            clientGeneration > 0)
+                        {
+                            var origin = new NknAccelerationFailureOrigin(
+                                laneInstanceId, clientGeneration, owner.RunId, ++failureGeneration);
+                            currentFailureOrigin = origin;
+                            forwardedEvent = new AccelerationStateChangedEventArgs(false, e.Reason, origin);
+                        }
                         client = null;
                         clientRole = ClientRole.None;
+                        clientDialerProcessOwner = null;
                         listenerRequest = null;
                         dialerStartTask = null;
                         processToStop = dialerProcessOwner;
@@ -627,7 +668,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
 
         processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
-        StateChanged?.Invoke(this, e);
+        StateChanged?.Invoke(this, forwardedEvent);
     }
 
     private void OnListenerSupervisorStateChanged(object? sender, AccelerationStateChangedEventArgs e)
@@ -679,6 +720,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
             client = null;
             clientRole = ClientRole.None;
+            clientDialerProcessOwner = null;
             listenerRequest = null;
         }
 
@@ -720,13 +762,16 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                     previousClient.StateChanged -= OnClientStateChanged;
                 }
 
-                if (clientRole == ClientRole.Dialer && !ReferenceEquals(dialerProcessOwner, nextDialerOwner))
+                if (clientRole == ClientRole.Dialer && !ReferenceEquals(clientDialerProcessOwner, nextDialerOwner))
                 {
-                    previousDialerOwner = dialerProcessOwner;
+                    previousDialerOwner = clientDialerProcessOwner;
                 }
 
                 client = nextClient;
                 clientRole = nextRole;
+                clientDialerProcessOwner = nextRole == ClientRole.Dialer ? nextDialerOwner : null;
+                clientGeneration++;
+                currentFailureOrigin = null;
                 if (nextRole != ClientRole.Listener)
                 {
                     listenerRequest = null;
@@ -755,11 +800,17 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         return true;
     }
 
-    private void MarkCurrentClientUnavailable(string reason)
+    private void MarkDialerClientUnavailable(NknTunaSidecarProcessOwner? owner, string reason)
     {
         NknTunaSidecarClient? current;
         lock (gate)
         {
+            if (owner is null || !ReferenceEquals(dialerProcessOwner, owner) ||
+                !ReferenceEquals(clientDialerProcessOwner, owner) ||
+                clientRole != ClientRole.Dialer)
+            {
+                return;
+            }
             current = client;
         }
 
@@ -957,19 +1008,6 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         finally
         {
             CryptographicOperations.ZeroMemory(seedBytes);
-        }
-    }
-
-    private bool IsCurrentDialerOwner(NknTunaSidecarProcessOwner? owner)
-    {
-        if (owner is null)
-        {
-            return false;
-        }
-
-        lock (gate)
-        {
-            return ReferenceEquals(dialerProcessOwner, owner);
         }
     }
 

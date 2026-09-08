@@ -6,6 +6,13 @@ namespace NLink.SmokeTests;
 internal sealed class FakeNknAccelerationLane : INknAccelerationLane
 {
     private readonly bool sendResult;
+    private readonly bool enableFailureOrigins;
+    private readonly object failureOriginGate = new();
+    private readonly Guid laneInstanceId = Guid.NewGuid();
+    private bool available;
+    private long clientGeneration = 1;
+    private long failureGeneration;
+    private NknAccelerationFailureOrigin? currentFailureOrigin;
     private bool disposed;
     private long controlAccepted;
     private long mediaAccepted;
@@ -18,13 +25,42 @@ internal sealed class FakeNknAccelerationLane : INknAccelerationLane
     private long bulkReceived;
     private long sendRejected;
 
-    public FakeNknAccelerationLane(bool isAvailable = true, bool sendResult = true)
+    public FakeNknAccelerationLane(bool isAvailable = true, bool sendResult = true, bool enableFailureOrigins = false)
     {
-        IsAvailable = isAvailable;
+        available = isAvailable;
         this.sendResult = sendResult;
+        this.enableFailureOrigins = enableFailureOrigins;
     }
 
-    public bool IsAvailable { get; set; }
+    public bool IsAvailable
+    {
+        get { lock (failureOriginGate) { return available; } }
+        set
+        {
+            lock (failureOriginGate)
+            {
+                if (enableFailureOrigins && value)
+                {
+                    if (!available) { clientGeneration++; }
+                    currentFailureOrigin = null;
+                }
+                available = value;
+            }
+        }
+    }
+
+    public bool IsFailureOriginCurrent(NknAccelerationFailureOrigin origin)
+    {
+        lock (failureOriginGate) { return IsFailureOriginCurrentUnsafe(origin); }
+    }
+
+    public bool TryApplyFailureOrigin(NknAccelerationFailureOrigin origin, Func<bool> apply)
+    {
+        lock (failureOriginGate) { return IsFailureOriginCurrentUnsafe(origin) && apply(); }
+    }
+
+    private bool IsFailureOriginCurrentUnsafe(NknAccelerationFailureOrigin origin)
+        => enableFailureOrigins && !disposed && !available && !origin.IsDefault && currentFailureOrigin == origin;
 
     public ConcurrentQueue<(NknBridgeChannel Lane, byte[] Payload)> Sent { get; } = new();
 
@@ -68,8 +104,17 @@ internal sealed class FakeNknAccelerationLane : INknAccelerationLane
 
     public void SetAvailable(bool isAvailable, string reason = "test")
     {
-        IsAvailable = isAvailable;
-        StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(isAvailable, reason));
+        NknAccelerationFailureOrigin? origin;
+        lock (failureOriginGate)
+        {
+            IsAvailable = isAvailable;
+            origin = enableFailureOrigins && !disposed && !isAvailable
+                ? new NknAccelerationFailureOrigin(laneInstanceId, clientGeneration,
+                    $"fake-lane-run-{clientGeneration}", ++failureGeneration)
+                : null;
+            currentFailureOrigin = origin;
+        }
+        StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(isAvailable, reason, origin));
     }
 
     public void InjectInbound(NknBridgeChannel lane, byte[] payload)
@@ -88,8 +133,12 @@ internal sealed class FakeNknAccelerationLane : INknAccelerationLane
 
     public void Dispose()
     {
-        disposed = true;
-        IsAvailable = false;
+        lock (failureOriginGate)
+        {
+            disposed = true;
+            available = false;
+            currentFailureOrigin = null;
+        }
     }
 
     private static void IncrementLane(NknBridgeChannel lane, ref long control, ref long media, ref long bulk)

@@ -257,7 +257,21 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot?
         RegularV4FrontierRepairPressure = null,
     FileTransferCoordinatorResponderProbeHandoffOperationSnapshot?
-        ResponderProbeHandoff = null);
+        ResponderProbeHandoff = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null);
+
+internal sealed record FileTransferCoordinatorReceiverBarrierOperationSnapshot(
+    string Role,
+    FileTransferCoordinatorStateBoundarySnapshot SourceBoundary,
+    FileTransferCoordinatorStateBoundarySnapshot EffectiveBoundary,
+    long PauseGeneration,
+    string NegotiationFingerprint,
+    string AdmissionFingerprint,
+    string FailureOriginFingerprint,
+    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts,
+    string InvalidatingAdmissionFingerprint,
+    long ReplacementPauseGeneration);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -391,6 +405,102 @@ internal readonly record struct
 internal static partial class FileTransferCoordinator
 {
     private static long lastSnapshotDecisionUtcMilliseconds;
+
+    private static InitialActivationReceiverBarrierDecision FinalizeInitialActivationReceiverBarrierSnapshot(
+        FileTransferCoordinatorState before, InitialActivationReceiverBarrierDecision decision,
+        string decisionKind, string stage, InitialActivationReceiverBarrierSource source,
+        InitialActivationReceiverBarrierNegotiation negotiation)
+    {
+        if (string.IsNullOrWhiteSpace(before.PersistentState.CoordinatorInstanceId))
+        {
+            return decision;
+        }
+        var current = decision.State.PersistentState.InitialActivationReceiverBarrier.Current;
+        var terminal = decision.State.PersistentState.InitialActivationReceiverBarrier.LastTerminal;
+        var operation = current?.Authority == decision.Authority ? current :
+            terminal?.Authority == decision.Authority ? terminal : null;
+        var authority = decision.Authority ?? new InitialActivationReceiverBarrierAuthority(
+            Guid.Empty, Math.Max(1, before.PersistentState.InitialActivationReceiverBarrier.LastBarrierGeneration + 1),
+            source, 0, negotiation);
+        var attempted = operation ?? new InitialActivationReceiverBarrierOperation(authority,
+            InitialActivationReceiverBarrierState.Bound, negotiation, CloseCommand: decision.Command,
+            CloseReceipt: decision.Receipt, Reason: decision.Reason);
+        var descriptor = CreateInitialActivationReceiverBarrierDescriptor(decision.State, attempted,
+            "receiver_barrier_attempt", stage, decision.Status.ToString(), decision.Reason);
+        var snapshot = CreateTransitionSnapshot(before, decision.State,
+            before.PersistentState.CoordinatorInstanceId!, before.PersistentState.SnapshotStateGeneration,
+            decisionKind, decision.Status.ToString(), decision.Reason,
+            ImmutableArray.Create(CreateOperationTransitionSnapshot(descriptor, "None", descriptor.State, false)));
+        return decision with { State = snapshot.State, SnapshotEnvelope = snapshot.Envelope };
+    }
+
+    private static void AddInitialActivationReceiverBarrierDescriptors(FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
+        var substate = state.PersistentState.InitialActivationReceiverBarrier;
+        if (substate.Current is { } current)
+        {
+            builder.Add(CreateInitialActivationReceiverBarrierDescriptor(state, current, "receiver_barrier_current"));
+        }
+        if (substate.LastTerminal is { } terminal)
+        {
+            builder.Add(CreateInitialActivationReceiverBarrierDescriptor(state, terminal, "receiver_barrier_terminal"));
+        }
+    }
+
+    private static CoordinatorOperationDescriptor CreateInitialActivationReceiverBarrierDescriptor(
+        FileTransferCoordinatorState state, InitialActivationReceiverBarrierOperation operation, string role,
+        string? attemptedStage = null, string? attemptedStatus = null, string? attemptedReason = null)
+    {
+        var authority = operation.Authority;
+        var source = authority.Source;
+        var stage = attemptedStage ?? operation.State switch
+        {
+            InitialActivationReceiverBarrierState.Bound => "barrier_bind",
+            InitialActivationReceiverBarrierState.AdmissionAttached => "barrier_admission",
+            _ => "barrier_close",
+        };
+        var status = attemptedStatus ?? operation.CloseReceipt?.Status.ToString() ??
+            (operation.State == InitialActivationReceiverBarrierState.Invalidated ? "Invalidated" : "Accepted");
+        var authorityId = authority.AuthorityId == Guid.Empty ? "(none)" : authority.AuthorityId.ToString("N");
+        var sourceBoundary = new FileTransferCoordinatorStateBoundarySnapshot(source.RuntimeOwner.RouteToken,
+            source.RuntimeOwner.ProtocolVersion, source.RuntimeOwner.LiveRouteEpoch,
+            source.RoutePublication.PublicationGeneration, source.RoutePublication.RouteCommitGeneration ?? 0,
+            source.RuntimeOwner.RuntimeGeneration, source.TerminalGeneration, source.LegGeneration,
+            source.TransportEpoch, source.BridgeRecoveryGeneration, source.CheckpointGeneration,
+            source.CheckpointRequestId, source.DataSessionIdentity, source.DataSessionGeneration);
+        var negotiationFingerprint = CalculateSnapshotFingerprint(operation.Negotiation);
+        var admissionFingerprint = operation.Admission is { } admission ? CalculateSnapshotFingerprint(admission) : "(none)";
+        var failureFingerprint = operation.CloseCommand is { } command ? CalculateSnapshotFingerprint(command.FailureOrigin) : "(none)";
+        // The data-session object is checked by reference in the raw contract;
+        // evidence contains its immutable scoped identity, never the object graph.
+        var commandFingerprint = CalculateSnapshotFingerprint(new
+        {
+            authorityId, authority.BarrierGeneration, Source = sourceBoundary, authority.PauseGeneration,
+            Stage = stage, Negotiation = operation.Negotiation, Admission = admissionFingerprint,
+            FailureOrigin = failureFingerprint,
+            operation.InvalidatingAdmissionFingerprint,
+            operation.ReplacementPauseGeneration,
+        });
+        var receiptReason = attemptedReason ?? operation.CloseReceipt?.Reason ?? operation.Reason;
+        var receiptFingerprint = CalculateSnapshotFingerprint(new { commandFingerprint, status, receiptReason });
+        var validated = status is "Accepted" or "Applied" or "Idempotent" or "Invalidated";
+        var receipt = new FileTransferCoordinatorReceiptTransitionSnapshot(stage, authorityId,
+            authority.BarrierGeneration, commandFingerprint, authorityId, authority.BarrierGeneration,
+            status, receiptReason, receiptFingerprint, validated);
+        return new CoordinatorOperationDescriptor("responder_probe_handoff", "InitialActivationReceiverBarrier",
+            authorityId, "(none)", authority.BarrierGeneration, attemptedStatus ?? operation.State.ToString(),
+            receipt.CommandIdentity, receipt.CommandGeneration, receipt.CommandFingerprint,
+            receipt.ReceiptIdentity, receipt.ReceiptGeneration, receipt.ReceiptStatus, receipt.ReceiptFingerprint,
+            receipt.ReceiptValidated, OperationRole: role,
+            OperationKey: CreateCoordinatorOperationKey("responder_probe_handoff", role, authorityId,
+                authority.BarrierGeneration, "InitialActivationReceiverBarrier"),
+            ReceiverBarrier: new(role, sourceBoundary,
+                operation.State == InitialActivationReceiverBarrierState.Closed ? sourceBoundary : CreateStateBoundarySnapshot(state),
+                authority.PauseGeneration,
+                negotiationFingerprint, admissionFingerprint, failureFingerprint, ImmutableArray.Create(receipt),
+                operation.InvalidatingAdmissionFingerprint, operation.ReplacementPauseGeneration));
+    }
 
     internal static
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
@@ -2040,6 +2150,17 @@ internal static partial class FileTransferCoordinator
     {
         ArgumentNullException.ThrowIfNull(before);
         ArgumentNullException.ThrowIfNull(after);
+        var unreconciledAfter = after;
+        if (!ReferenceEquals(before, after))
+        {
+            after = ReconcileInitialActivationReceiverBarrier(after);
+        }
+        if (!ReferenceEquals(unreconciledAfter, after) && suppliedOperationsAreComplete)
+        {
+            var barrierOperations = CreateOperationTransitionSnapshots(unreconciledAfter, after)
+                .Where(operation => operation.ReceiverBarrier is not null).ToImmutableArray();
+            attemptedOperations = attemptedOperations.IsDefault ? barrierOperations : attemptedOperations.AddRange(barrierOperations);
+        }
         if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
         {
             throw new ArgumentException(
@@ -3020,7 +3141,8 @@ internal static partial class FileTransferCoordinator
             operation.ReceiveRecovery,
             operation.FallbackTailYield,
             operation.RegularV4FrontierRepairPressure,
-            operation.ResponderProbeHandoff);
+            operation.ResponderProbeHandoff,
+            operation.ReceiverBarrier);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -3058,6 +3180,7 @@ internal static partial class FileTransferCoordinator
         AddReceiveRecoveryOperationDescriptors(state, builder);
         AddFallbackTailYieldOperationDescriptors(state, builder);
         AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
+        AddInitialActivationReceiverBarrierDescriptors(state, builder);
         if (includeResponderProbeHandoff)
         {
             AddResponderProbeHandoffOperationDescriptors(state, builder);
@@ -6316,5 +6439,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorRegularV4FrontierRepairPressureOperationSnapshot?
             RegularV4FrontierRepairPressure = null,
         FileTransferCoordinatorResponderProbeHandoffOperationSnapshot?
-            ResponderProbeHandoff = null);
+            ResponderProbeHandoff = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null);
 }

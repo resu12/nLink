@@ -535,6 +535,13 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        long receiverPauseGeneration;
+        lock (accelerationGate)
+        {
+            receiverPauseGeneration = fileTransferTunaActivationPauseSessionId == session.SessionId
+                ? fileTransferTunaActivationPauseGeneration : 0;
+        }
+
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_data_session_opened_during_tuna_activation_pause; transfer_id={SanitizeLogToken(session.TransferId)}; session_id={SanitizeLogToken(session.SessionId)}; reason=tuna_activation_negotiating; trigger={SanitizeLogToken(trigger)}");
@@ -543,7 +550,8 @@ public sealed partial class NknSignalingTransport
             reason: "tuna_activation_negotiating",
             requiresResumeRequest: false,
             handoffKind: FileTransferTransportHandoffKind.None,
-            targetTransport: FileTransferTransportKind.RegularNkn);
+            targetTransport: FileTransferTransportKind.RegularNkn,
+            receiverBarrierPauseGeneration: receiverPauseGeneration);
     }
 
     public int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request)
@@ -1758,6 +1766,12 @@ public sealed partial class NknSignalingTransport
                     reason);
             }
 
+            long receiverBarrierPauseGeneration;
+            lock (accelerationGate)
+            {
+                receiverBarrierPauseGeneration = fileTransferTunaActivationPauseSessionId == session.SessionId
+                    ? fileTransferTunaActivationPauseGeneration : 0;
+            }
             session.SetAvailability(
                 isAvailable,
                 reason,
@@ -1765,7 +1779,8 @@ public sealed partial class NknSignalingTransport
                 effectiveHandoffKind,
                 targetTransport,
                 proofScopedFallbackBoundary ? postTunaFallbackHandoffEvidence : null,
-                proofScopedFallbackBoundary ? postTunaFallbackProofBoundary : null);
+                proofScopedFallbackBoundary ? postTunaFallbackProofBoundary : null,
+                receiverBarrierPauseGeneration);
         }
     }
 
@@ -7596,6 +7611,15 @@ public sealed partial class NknSignalingTransport
             ClearPendingFileTransferV6Handoffs($"data_session_removed_{reason}", session.SessionId);
         }
 
+        lock (accelerationGate)
+        {
+            if (initialReceiverBarriers.TryGetValue(session.TransferId, out var barrier) &&
+                ReferenceEquals(barrier.Authority.Source.DataSession, session))
+            {
+                initialReceiverBarriers.Remove(session.TransferId);
+            }
+        }
+
         UnregisterActiveFileTransferDataSession(session.TransferId);
     }
 
@@ -7669,6 +7693,8 @@ public sealed partial class NknSignalingTransport
         private long lastTunaActivationPauseRecoveredUtcTicks;
         private RuntimeUnlockPreCommitAckSendAuthority? preCommitAckSendAuthority;
         private long availabilityGeneration = 1;
+        private long initialReceiverBarrierPauseGeneration;
+        private InitialActivationReceiverBarrierExecutionFence? initialReceiverBarrierExecution;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
         private EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? runtimeUnlockAuthorityFrameReceived;
 
@@ -9428,7 +9454,8 @@ public sealed partial class NknSignalingTransport
             FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
             FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
             PostTunaFallbackHandoffEvidence? postTunaFallbackHandoffEvidence = null,
-            PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null)
+            PostTunaFallbackAvailabilityProofEvidence? postTunaFallbackProofBoundary = null,
+            long receiverBarrierPauseGeneration = 0)
         {
             if (disposed != 0)
             {
@@ -9499,6 +9526,7 @@ public sealed partial class NknSignalingTransport
                 Volatile.Write(ref availabilityReason, normalizedReason);
                 if (activationBarrier)
                 {
+                    initialReceiverBarrierPauseGeneration = receiverBarrierPauseGeneration;
                     Volatile.Write(ref lastTunaActivationPauseReason, normalizedReason);
                     CancelTunaActivationPauseSends();
                 }
@@ -9628,12 +9656,42 @@ public sealed partial class NknSignalingTransport
                     runtimeUnlockPreCommitProbeSnapshot));
         }
 
+        internal InitialActivationReceiverBarrierCloseReceipt ApplyInitialReceiverBarrierClose(
+            InitialActivationReceiverBarrierCloseCommand command,
+            long expectedTransportDataSessionGeneration)
+        {
+            lock (availabilityGate)
+            {
+                if (disposed != 0 || !ReferenceEquals(command.Authority.Source.DataSession, this) ||
+                    expectedTransportDataSessionGeneration != Generation || available != 0 ||
+                    initialReceiverBarrierPauseGeneration != command.Authority.PauseGeneration ||
+                    !IsTunaActivationNegotiationAvailabilityReason(availabilityReason))
+                {
+                    return new(command, InitialActivationReceiverBarrierCloseApplyStatus.Stale,
+                        "receiver_barrier_data_session_not_paused");
+                }
+                // Only this receiver is released. The session-wide pause and every
+                // other transfer remain untouched; Core accepts the receipt before
+                // resuming its state publisher. No generic availability callback.
+                available = 1;
+                availabilityReason = "initial_activation_receiver_barrier_closed";
+                availabilityGeneration++;
+                ResetTunaActivationPauseSends();
+                return new(command, InitialActivationReceiverBarrierCloseApplyStatus.Applied, "receiver_barrier_close_applied");
+            }
+        }
+
+        internal void RegisterInitialReceiverBarrierExecution(InitialActivationReceiverBarrierExecutionFence execution)
+            => Volatile.Write(ref initialReceiverBarrierExecution, execution);
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0)
             {
                 return;
             }
+
+            Volatile.Read(ref initialReceiverBarrierExecution)?.Invalidate();
 
             LogChunkBatchTransportSummary();
             frames.Writer.TryComplete();

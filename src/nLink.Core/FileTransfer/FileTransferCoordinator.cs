@@ -2659,6 +2659,13 @@ internal readonly record struct FileTransferCoordinatorPersistentState(
         fallbackTailYield;
     private readonly FileTransferReceiveRecoverySubstate?
         fileTransferReceiveRecovery;
+    private readonly InitialActivationReceiverBarrierSubstate? initialActivationReceiverBarrier;
+
+    internal InitialActivationReceiverBarrierSubstate InitialActivationReceiverBarrier
+    {
+        get => initialActivationReceiverBarrier ?? InitialActivationReceiverBarrierSubstate.Empty;
+        init => initialActivationReceiverBarrier = value;
+    }
 
     internal RuntimeUnlockRetryLifecycleSubstate RuntimeUnlockRetryLifecycle
     {

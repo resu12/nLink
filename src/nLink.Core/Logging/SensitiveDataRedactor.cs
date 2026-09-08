@@ -111,6 +111,9 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\boperation_key=(?<value>[A-Za-z0-9._/:-]+\|[A-Za-z0-9._/:-]+\|(?:fte1-[a-f0-9]{24}|\(none\))\|[0-9]+\|[A-Za-z0-9._/:-]+)(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceOperationKeyValueRegex();
 
+    [GeneratedRegex(@"\bsnapshot_catalog_version=(?<value>snapshot-authority-v1(?:-receiver-barrier-v1)?)(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex SnapshotEvidenceCatalogVersionRegex();
+
     [GeneratedRegex(@"\bproof_kind=(?<value>file_transfer_(?:bulk_frame|v4_state_frame|v6_state_frame|v6_frontier_request_frame)_(?:received|sent))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex FallbackBootstrapProofKindValueRegex();
 
@@ -185,8 +188,14 @@ public static partial class SensitiveDataRedactor
             return text;
         }
 
-        var protectedText = SnapshotEvidenceOperationKeyValueRegex().Replace(
-            text,
+        var protectedText = SnapshotEvidenceCatalogVersionRegex().Replace(text, match =>
+        {
+            var placeholder = $"SEVP{protectedValues.Count}";
+            protectedValues.Add(match.Groups["value"].Value);
+            return $"snapshot_catalog_version={placeholder}";
+        });
+        protectedText = SnapshotEvidenceOperationKeyValueRegex().Replace(
+            protectedText,
             match =>
             {
                 var placeholder = $"SEVP{protectedValues.Count}";

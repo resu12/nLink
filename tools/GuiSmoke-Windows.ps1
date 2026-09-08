@@ -4452,7 +4452,8 @@ function Write-FileTransferGuiLogLedgerEvidence {
         generations = @($finalSnapshot.generations)
         writers = @($finalWriters)
     }
-    $coordinatorEvidenceCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+    $coordinatorEvidenceCatalog = Get-FileTransferCoordinatorEvidenceCatalog `
+        -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1'
     $evidence = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_gui_log_ledger'

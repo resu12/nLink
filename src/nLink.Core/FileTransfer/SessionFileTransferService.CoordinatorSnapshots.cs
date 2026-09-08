@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1";
+        "snapshot-authority-v1-receiver-barrier-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2";
+        "e507b186e037924e5785e563742fedd9111552684fc8cc2f46eef38225b0bb94";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -826,6 +826,7 @@ public sealed partial class SessionFileTransferService
         }
 
         emitter.ValidateEnvelope(envelope, state);
+        emitter.BeforeStateAdoption(state);
         adopt(state);
         emitter.Enqueue(envelope);
         return state;
@@ -2648,6 +2649,17 @@ public sealed partial class SessionFileTransferService
 
     private sealed class CoordinatorSnapshotStreamEmitter
     {
+        private InitialActivationReceiverBarrierAuthority? receiverBarrierExecutionAuthority;
+
+        internal void BeforeStateAdoption(FileTransferCoordinatorState state)
+        {
+            var current = state.PersistentState.InitialActivationReceiverBarrier.Current?.Authority;
+            var previous = Interlocked.Exchange(ref receiverBarrierExecutionAuthority, current);
+            if (!ReferenceEquals(previous, current))
+            {
+                previous?.ExecutionFence.Invalidate();
+            }
+        }
         private readonly ConcurrentQueue<string> pending = new();
         private readonly object stateGate = new();
         private int drainScheduled;
@@ -2828,6 +2840,7 @@ public sealed partial class SessionFileTransferService
             string transferId,
             FileTransferDirection direction)
         {
+            Interlocked.Exchange(ref receiverBarrierExecutionAuthority, null)?.ExecutionFence.Invalidate();
             lock (stateGate)
             {
                 if (completed || !started)
@@ -3001,7 +3014,8 @@ public sealed partial class SessionFileTransferService
                             operation.FallbackTailYield?.SourceBoundary ??
                             operation.RegularV4FrontierRepairPressure
                                 ?.SourceBoundary ??
-                            operation.ResponderProbeHandoff?.SourceBoundary;
+                            operation.ResponderProbeHandoff?.SourceBoundary ??
+                            operation.ReceiverBarrier?.SourceBoundary;
                 if (operation.ReceiptValidated)
                 {
                     IndexAuthorityEffectBindingLocked(
@@ -3023,6 +3037,7 @@ public sealed partial class SessionFileTransferService
                                     operation.RegularV4FrontierRepairPressure
                                         ?.Receipts ??
                                     operation.ResponderProbeHandoff?.Receipts ??
+                                    operation.ReceiverBarrier?.Receipts ??
                                     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
                                         .Empty;
                 foreach (var receipt in typedReceipts)
@@ -3311,6 +3326,14 @@ public sealed partial class SessionFileTransferService
                                 .ToImmutableArray(),
                         }
                         : null,
+                ReceiverBarrier = operation.ReceiverBarrier is { } barrier
+                    ? barrier with
+                    {
+                        SourceBoundary = CreateEvidenceBoundary(barrier.SourceBoundary),
+                        EffectiveBoundary = CreateEvidenceBoundary(barrier.EffectiveBoundary),
+                        Receipts = barrier.Receipts.Select(CreateEvidenceReceipt).ToImmutableArray(),
+                    }
+                    : null,
             };
         }
 

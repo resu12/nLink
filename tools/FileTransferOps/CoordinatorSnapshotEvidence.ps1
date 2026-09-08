@@ -6,6 +6,36 @@ $script:FileTransferCoordinatorSnapshotCatalogHash = '17b5e4a90a18a5f4173ebd1b20
 $script:FileTransferLegacyV0CatalogVersion = 'legacy-v0-pinned-20260825'
 $script:FileTransferLegacyV0CatalogHash = 'a2ad4a9853c5a9551c98e59c11c5d71e1a35b0b5b0ff3229da1f4d6f295083ac'
 $script:FileTransferCoordinatorEvidenceCatalogCache = $null
+$script:FileTransferCoordinatorReceiverBarrierCatalogVersion = 'snapshot-authority-v1-receiver-barrier-v1'
+$script:FileTransferCoordinatorReceiverBarrierCatalogHash = 'e507b186e037924e5785e563742fedd9111552684fc8cc2f46eef38225b0bb94'
+$script:FileTransferCoordinatorReceiverBarrierCatalog = [ordered]@{
+    version = 1
+    family = 'responder_probe_handoff'
+    operationKind = 'InitialActivationReceiverBarrier'
+    operationRoles = @('receiver_barrier_current', 'receiver_barrier_terminal', 'receiver_barrier_attempt')
+    decisionKinds = @(
+        'BindInitialActivationReceiverBarrier',
+        'AttachInitialActivationReceiverBarrierAdmission',
+        'PrepareInitialActivationReceiverBarrierClose',
+        'CommitInitialActivationReceiverBarrierClose',
+        'InvalidateInitialActivationReceiverBarrier')
+    states = @('Bound', 'AdmissionAttached', 'ClosePrepared', 'Closed', 'Invalidated')
+    receiptStages = @('barrier_bind', 'barrier_admission', 'barrier_close')
+    effectKinds = @('receiver_barrier_close_applied')
+    payloadName = 'receiverBarrier'
+    payloadFields = [ordered]@{
+        role = 'string'
+        sourceBoundary = 'FileTransferCoordinatorStateBoundarySnapshot'
+        effectiveBoundary = 'FileTransferCoordinatorStateBoundarySnapshot'
+        pauseGeneration = 'int64'
+        negotiationFingerprint = 'string'
+        admissionFingerprint = 'string'
+        failureOriginFingerprint = 'string'
+        invalidatingAdmissionFingerprint = 'string'
+        replacementPauseGeneration = 'int64'
+        receipts = 'FileTransferCoordinatorReceiptTransitionSnapshot[]'
+    }
+}
 $script:FileTransferCoordinatorSnapshotRequiredFamilies = @(
     'route_runtime',
     'route_transition',
@@ -496,7 +526,30 @@ $script:FileTransferCoordinatorSnapshotFamily1OperationKinds = [ordered]@{
 
 function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
-    param()
+    param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
+
+    if ($ProfileVersion -cne $script:FileTransferCoordinatorSnapshotCatalogVersion) {
+        if ($ProfileVersion -cne $script:FileTransferCoordinatorReceiverBarrierCatalogVersion) {
+            throw "coordinator_snapshot_catalog_version_unknown:$ProfileVersion"
+        }
+        $baseCatalog = Get-FileTransferCoordinatorEvidenceCatalog
+        $extensionJson = ConvertTo-Json -InputObject $script:FileTransferCoordinatorReceiverBarrierCatalog -Depth 16 -Compress
+        $canonical = "baseHash=$($baseCatalog.Hash)`nReceiverBarrierCatalog=$extensionJson"
+        $actualHash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
+            [System.Text.UTF8Encoding]::new($false).GetBytes($canonical))
+        if ($actualHash -cne $script:FileTransferCoordinatorReceiverBarrierCatalogHash) {
+            throw "coordinator_snapshot_receiver_barrier_catalog_hash_invalid:$actualHash"
+        }
+        $extended = [ordered]@{}
+        foreach ($property in $baseCatalog.PSObject.Properties) {
+            $extended[$property.Name] = $property.Value
+        }
+        $extended.Version = $ProfileVersion
+        $extended.Hash = $actualHash
+        $extended.BaseCatalogHash = $baseCatalog.Hash
+        $extended.ReceiverBarrierCatalog = $script:FileTransferCoordinatorReceiverBarrierCatalog
+        return [pscustomobject]$extended
+    }
 
     if ($null -ne $script:FileTransferCoordinatorEvidenceCatalogCache) {
         return $script:FileTransferCoordinatorEvidenceCatalogCache
@@ -904,6 +957,10 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
         $null -ne $Operation.responderProbeHandoff) {
         $Operation.responderProbeHandoff.sourceBoundary
     }
+    elseif ($Operation.PSObject.Properties.Name -contains 'receiverBarrier' -and
+        $null -ne $Operation.receiverBarrier) {
+        $Operation.receiverBarrier.sourceBoundary
+    }
     else {
         $Operation.runtimeUnlockRetry.sourceBoundary
     }
@@ -964,7 +1021,8 @@ function Test-FileTransferCoordinatorSnapshotEffectReceipt {
             'receiveRecovery',
             'fallbackTailYield',
             'regularV4FrontierRepairPressure',
-            'responderProbeHandoff')) {
+            'responderProbeHandoff',
+            'receiverBarrier')) {
         if ($Operation.PSObject.Properties.Name -notcontains $propertyName -or
             $null -eq $Operation.$propertyName) {
             continue
@@ -1085,6 +1143,251 @@ function Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual {
         }
     }
     return $true
+}
+
+function Test-FileTransferCoordinatorReceiverBarrierMarker {
+    param($Operation)
+    return $Operation.PSObject.Properties.Name -contains 'receiverBarrier' -or
+        [string]$Operation.operationKind -ceq 'InitialActivationReceiverBarrier' -or
+        [string]$Operation.operationRole -in $script:FileTransferCoordinatorReceiverBarrierCatalog.operationRoles
+}
+
+function Test-FileTransferCoordinatorReceiverBarrierOperation {
+    param($Envelope, $Operation, $Catalog)
+    try {
+        if ($Catalog.Version -cne $script:FileTransferCoordinatorReceiverBarrierCatalogVersion -or
+            $Operation.family -cne 'responder_probe_handoff' -or
+            $Operation.operationKind -cne 'InitialActivationReceiverBarrier' -or
+            $Operation.operationRole -cnotin $script:FileTransferCoordinatorReceiverBarrierCatalog.operationRoles -or
+            $Operation.PSObject.Properties.Name -notcontains 'receiverBarrier' -or
+            $null -eq $Operation.receiverBarrier) { return $false }
+        foreach ($other in @('routeRuntime', 'routeTransition', 'runtimeUnlockRetry', 'receiveRecovery',
+                'fallbackTailYield', 'regularV4FrontierRepairPressure', 'responderProbeHandoff')) {
+            if ($Operation.PSObject.Properties.Name -contains $other -and $null -ne $Operation.$other) { return $false }
+        }
+        $payload = $Operation.receiverBarrier
+        $fields = @($script:FileTransferCoordinatorReceiverBarrierCatalog.payloadFields.Keys)
+        if (@($payload.PSObject.Properties).Count -ne $fields.Count -or
+            @($fields | Where-Object { $payload.PSObject.Properties.Name -cnotcontains $_ }).Count -ne 0 -or
+            $payload.role -cne $Operation.operationRole -or
+            $Operation.operationKey -cne "responder_probe_handoff|$($Operation.operationRole)|$($Operation.authorityId)|$($Operation.operationGeneration)|InitialActivationReceiverBarrier" -or
+            $Operation.predecessorAuthorityId -cne '(none)' -or
+            [long]$Operation.operationGeneration -le 0 -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $payload.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $payload.effectiveBoundary) -or
+            [string]$payload.negotiationFingerprint -cnotmatch '^[0-9a-f]{64}$' -or
+            @($payload.receipts).Count -ne 1) { return $false }
+        $attempt = $Operation.operationRole -ceq 'receiver_barrier_attempt'
+        $state = if ($Operation.afterState -ceq 'None') { [string]$Operation.beforeState } else { [string]$Operation.afterState }
+        $receipt = @($payload.receipts)[0]
+        if ($Operation.stateApplied -isnot [bool] -or $Operation.receiptValidated -isnot [bool] -or
+            $receipt.receiptValidated -isnot [bool] -or
+            @($receipt.PSObject.Properties).Count -ne 10 -or
+            @(@('stage','commandIdentity','commandGeneration','commandFingerprint','receiptIdentity','receiptGeneration',
+                'receiptStatus','receiptReason','receiptFingerprint','receiptValidated') | Where-Object {
+                    $receipt.PSObject.Properties.Name -cnotcontains $_ }).Count -ne 0) { return $false }
+        foreach ($value in @($Operation.operationGeneration, $Operation.commandGeneration, $Operation.receiptGeneration,
+                $payload.pauseGeneration, $payload.replacementPauseGeneration, $receipt.commandGeneration, $receipt.receiptGeneration)) {
+            if ($value -isnot [int] -and $value -isnot [long]) { return $false }
+        }
+        foreach ($scope in @($payload.sourceBoundary, $payload.effectiveBoundary)) {
+            if (@($scope.PSObject.Properties).Count -ne 14) { return $false }
+            foreach ($field in @('protocolVersion','liveRouteEpoch','routePublicationGeneration','routeCommitGeneration',
+                    'runtimeGeneration','terminalGeneration','legGeneration','transportEpoch','bridgeRecoveryGeneration',
+                    'checkpointGeneration','dataSessionGeneration')) {
+                if (($scope.$field -isnot [int] -and $scope.$field -isnot [long]) -or [long]$scope.$field -lt 0) { return $false }
+            }
+        }
+        if ($attempt) {
+            if ($Envelope.decisionKind -cnotin $script:FileTransferCoordinatorReceiverBarrierCatalog.decisionKinds -or
+                $state -cnotin @('Accepted','Idempotent','Rejected','Stale','Invalidated') -or
+                $state -cne $Envelope.decisionStatus -or $Operation.beforeState -cne 'None' -or
+                [bool]$Operation.stateApplied -or $receipt.receiptStatus -cne $state -or
+                $receipt.receiptReason -cne $Envelope.decisionReason) { return $false }
+            $stage = switch -CaseSensitive ($Envelope.decisionKind) {
+                'BindInitialActivationReceiverBarrier' { 'barrier_bind' }
+                'AttachInitialActivationReceiverBarrierAdmission' { 'barrier_admission' }
+                default { 'barrier_close' }
+            }
+        }
+        else {
+            if ($state -cnotin $script:FileTransferCoordinatorReceiverBarrierCatalog.states -or
+                -not [bool]$Operation.stateApplied -or [string]$Operation.authorityId -in @('','(none)') -or
+                [long]$payload.pauseGeneration -le 0 -or
+                ($Operation.operationRole -ceq 'receiver_barrier_current' -and $state -cnotin @('Bound','AdmissionAttached','ClosePrepared')) -or
+                ($Operation.operationRole -ceq 'receiver_barrier_terminal' -and $state -cnotin @('Closed','Invalidated'))) { return $false }
+            $stage = switch -CaseSensitive ($state) { 'Bound' { 'barrier_bind' }; 'AdmissionAttached' { 'barrier_admission' }; default { 'barrier_close' } }
+            $statuses = switch -CaseSensitive ($state) { 'Closed' { @('Applied','Idempotent') }; 'Invalidated' { @('Invalidated') }; default { @('Accepted') } }
+            if ($receipt.receiptStatus -cnotin $statuses) { return $false }
+            if ($state -ceq 'Bound' -and ($payload.admissionFingerprint -cne '(none)' -or $payload.failureOriginFingerprint -cne '(none)')) { return $false }
+            if ($state -in @('AdmissionAttached','ClosePrepared','Closed') -and
+                $payload.admissionFingerprint -cnotmatch '^[0-9a-f]{64}$') { return $false }
+            if ($state -ceq 'AdmissionAttached' -and $payload.failureOriginFingerprint -cne '(none)') { return $false }
+            if ($state -in @('ClosePrepared','Closed') -and $payload.failureOriginFingerprint -cnotmatch '^[0-9a-f]{64}$') { return $false }
+        }
+        foreach ($field in @('admissionFingerprint','failureOriginFingerprint','invalidatingAdmissionFingerprint')) {
+            if ($payload.$field -cne '(none)' -and $payload.$field -cnotmatch '^[0-9a-f]{64}$') { return $false }
+        }
+        if ([long]$payload.replacementPauseGeneration -lt 0 -or
+            (-not $attempt -and $state -cne 'Invalidated' -and
+             ($payload.invalidatingAdmissionFingerprint -cne '(none)' -or [long]$payload.replacementPauseGeneration -ne 0))) { return $false }
+        if (-not $attempt -or $state -in @('Accepted','Idempotent','Invalidated')) {
+            $source = $payload.sourceBoundary
+            if ($source.route -cne 'regular_nkn_v4_fast' -or [int]$source.protocolVersion -ne 4 -or
+                [int]$source.liveRouteEpoch -ne 0 -or [long]$source.transportEpoch -ne 0 -or
+                [int]$source.bridgeRecoveryGeneration -ne 0 -or [int]$source.checkpointGeneration -ne 0 -or
+                $source.checkpointRequestId -cne '(none)' -or [int]$source.routeCommitGeneration -ne 0 -or
+                [int]$source.routePublicationGeneration -le 0 -or [int]$source.runtimeGeneration -le 0 -or
+                [int]$source.legGeneration -le 0 -or [long]$source.dataSessionGeneration -le 0 -or
+                $source.dataSessionIdentity -in @('','(none)') -or $Envelope.direction -cne 'inbound') { return $false }
+        }
+        $effective = if (-not $attempt -and $Operation.operationRole -ceq 'receiver_barrier_terminal' -and $state -ceq 'Closed') {
+            $payload.sourceBoundary
+        } elseif (-not $attempt -and $Operation.afterState -ceq 'None') {
+            $Envelope.aggregate.beforeBoundary
+        } else {
+            $Envelope.aggregate.afterBoundary
+        }
+        if (-not $attempt -and $Operation.operationRole -ceq 'receiver_barrier_current' -and $Operation.afterState -cne 'None' -and
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $Envelope.aggregate.afterBoundary)) { return $false }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.effectiveBoundary $effective) -or
+            $receipt.stage -cne $stage -or [string]::IsNullOrWhiteSpace($receipt.receiptReason) -or
+            [long]$receipt.commandGeneration -ne [long]$Operation.operationGeneration -or
+            [long]$receipt.receiptGeneration -ne [long]$Operation.operationGeneration -or
+            $receipt.commandIdentity -cne $Operation.authorityId -or $receipt.receiptIdentity -cne $Operation.authorityId -or
+            [bool]$receipt.receiptValidated -ne ($receipt.receiptStatus -cin @('Accepted','Applied','Idempotent','Invalidated'))) { return $false }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity','receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
+            if ([string]$receipt.$field -cne [string]$Operation.$field) { return $false }
+        }
+        foreach ($field in @('commandFingerprint','receiptFingerprint')) {
+            if ($receipt.$field -cnotmatch '^(?:[0-9a-f]{64}|fte1-[0-9a-f]{24})$') { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Get-FileTransferCoordinatorReceiverBarrierFailures {
+    param([AllowEmptyCollection()][object[]]$Boundaries, [AllowEmptyCollection()][object[]]$Effects,
+        [AllowEmptyCollection()][object[]]$AggregateEntries)
+    $valid = @{}
+    foreach ($entry in $AggregateEntries) { $valid[[string]$entry.Boundary.boundaryId] = $true }
+    $streams = @{}
+    foreach ($boundary in $Boundaries) {
+        $streamKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)"
+        if (-not $streams.ContainsKey($streamKey)) {
+            $streams[$streamKey] = @{ Current = $null; Known = @{}; LastGeneration = 0L; LastPause = 0L; Hash = $boundary.beforeStateHash }
+        }
+        $stream = $streams[$streamKey]
+        $operations = @($boundary.operations | Where-Object { Test-FileTransferCoordinatorReceiverBarrierMarker $_ })
+        if (-not $valid.ContainsKey([string]$boundary.boundaryId) -or $stream.Hash -cne $boundary.beforeStateHash) {
+            if ($operations.Count -gt 0) { "snapshot_receiver_barrier_history_invalid:$($boundary.evidenceLineIndex)" }
+            continue
+        }
+        $stream.Hash = $boundary.afterStateHash
+        $priorCurrent = $stream.Current
+        $currentRemoval = @($operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_current' -and $_.afterState -ceq 'None' })
+        $terminalEntry = @($operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_terminal' -and $_.beforeState -ceq 'None' })
+        if ($null -ne $priorCurrent -and
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $priorCurrent.receiverBarrier.sourceBoundary $boundary.afterBoundary) -and
+            ($currentRemoval.Count -ne 1 -or $terminalEntry.Count -ne 1 -or $terminalEntry[0].afterState -cne 'Invalidated')) {
+            "snapshot_receiver_barrier_source_replacement_without_invalidation:$($boundary.evidenceLineIndex)"
+        }
+        foreach ($operation in $operations) {
+            $payload = $operation.receiverBarrier
+            $role = [string]$operation.operationRole
+            $key = "$($operation.authorityId)|$($operation.operationGeneration)"
+            $failure = $false
+            if ($role -ceq 'receiver_barrier_attempt') {
+                if ($boundary.decisionStatus -cin @('Rejected','Stale','Idempotent') -and
+                    ($boundary.beforeStateHash -cne $boundary.afterStateHash -or
+                     @($operations | Where-Object { [bool]$_.stateApplied }).Count -ne 0)) { $failure = $true }
+                if (@($Effects | Where-Object { $_.TransitionId -ceq $boundary.boundaryId -and $_.OperationKey -ceq $operation.operationKey }).Count -ne 0) { $failure = $true }
+                if ($boundary.decisionStatus -cin @('Accepted','Invalidated') -and
+                    @($operations | Where-Object { [bool]$_.stateApplied -and $_.authorityId -ceq $operation.authorityId -and $_.operationGeneration -eq $operation.operationGeneration }).Count -eq 0) { $failure = $true }
+                if ($boundary.decisionStatus -ceq 'Idempotent' -and -not $stream.Known.ContainsKey($key)) { $failure = $true }
+            }
+            elseif ($role -ceq 'receiver_barrier_current' -and $operation.beforeState -ceq 'None') {
+                $failure = $null -ne $priorCurrent -or $stream.Known.ContainsKey($key) -or
+                    $operation.afterState -cne 'Bound' -or $boundary.decisionKind -cne 'BindInitialActivationReceiverBarrier' -or
+                    $boundary.decisionStatus -cne 'Accepted' -or [long]$operation.operationGeneration -ne ($stream.LastGeneration + 1L) -or
+                    [long]$payload.pauseGeneration -le $stream.LastPause -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.beforeBoundary) -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $boundary.beforeBoundary $boundary.afterBoundary)
+                if (-not $failure) { $stream.LastGeneration = [long]$operation.operationGeneration; $stream.LastPause = [long]$payload.pauseGeneration }
+            }
+            elseif ($role -ceq 'receiver_barrier_terminal' -and $operation.beforeState -ceq 'None') {
+                $failure = $null -eq $priorCurrent -or $currentRemoval.Count -ne 1 -or $terminalEntry.Count -ne 1
+                if (-not $failure) {
+                    $prior = $priorCurrent
+                    $failure = $prior.authorityId -cne $operation.authorityId -or $prior.operationGeneration -ne $operation.operationGeneration
+                    foreach ($field in @('pauseGeneration','negotiationFingerprint','admissionFingerprint','failureOriginFingerprint')) {
+                        if ([string]$prior.receiverBarrier.$field -cne [string]$payload.$field) { $failure = $true }
+                    }
+                    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $prior.receiverBarrier.sourceBoundary $payload.sourceBoundary)) { $failure = $true }
+                    if ($operation.afterState -ceq 'Closed') {
+                        if ($prior.afterState -cne 'ClosePrepared' -or $boundary.decisionKind -cne 'CommitInitialActivationReceiverBarrierClose' -or
+                            $boundary.decisionStatus -cne 'Accepted' -or $prior.commandFingerprint -cne $operation.commandFingerprint -or
+                            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.afterBoundary)) { $failure = $true }
+                    }
+                    else {
+                        $explicit = $boundary.decisionKind -ceq 'InvalidateInitialActivationReceiverBarrier' -and $boundary.decisionStatus -ceq 'Invalidated'
+                        $replacement = -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.afterBoundary)
+                        $prepared = @($boundary.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.afterState -ceq 'Prepared' -and
+                            [bool]$_.stateApplied -and [bool]$_.receiptValidated -and $null -ne $_.routeTransition -and
+                            (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $_.routeTransition.sourceBoundary $payload.sourceBoundary) }).Count -eq 1
+                        $admissionReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_admission_replaced' -and
+                            $payload.admissionFingerprint -cne '(none)' -and $payload.invalidatingAdmissionFingerprint -cne $payload.admissionFingerprint
+                        $pauseReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_pause_replaced' -and
+                            [long]$payload.replacementPauseGeneration -gt [long]$payload.pauseGeneration
+                        if (($payload.invalidatingAdmissionFingerprint -cne '(none)' -and -not $admissionReplaced) -or
+                            ([long]$payload.replacementPauseGeneration -ne 0 -and -not $pauseReplaced) -or
+                            ($operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_admission_replaced' -and -not $admissionReplaced) -or
+                            ($operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_pause_replaced' -and -not $pauseReplaced) -or
+                            (-not $explicit -and -not ($boundary.decisionStatus -cin @('Accepted','Prepared','Committed') -and
+                                ($replacement -or $prepared -or $admissionReplaced -or $pauseReplaced)))) { $failure = $true }
+                    }
+                }
+            }
+            else {
+                $prior = if ($stream.Known.ContainsKey("$role|$key")) { $stream.Known["$role|$key"] } else { $null }
+                if ($null -eq $prior -or $prior.afterState -cne $operation.beforeState) { $failure = $true }
+                else {
+                    foreach ($field in @('pauseGeneration','failureOriginFingerprint','invalidatingAdmissionFingerprint','replacementPauseGeneration')) {
+                        if ([string]$prior.receiverBarrier.$field -cne [string]$payload.$field -and
+                            -not ($field -ceq 'failureOriginFingerprint' -and $operation.beforeState -ceq 'AdmissionAttached' -and $operation.afterState -ceq 'ClosePrepared')) { $failure = $true }
+                    }
+                    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $prior.receiverBarrier.sourceBoundary $payload.sourceBoundary)) { $failure = $true }
+                    $attach = $role -ceq 'receiver_barrier_current' -and $operation.afterState -ceq 'AdmissionAttached' -and $operation.beforeState -cin @('Bound','AdmissionAttached') -and $boundary.decisionKind -ceq 'AttachInitialActivationReceiverBarrierAdmission' -and $boundary.decisionStatus -ceq 'Accepted'
+                    foreach ($field in @('negotiationFingerprint','admissionFingerprint')) {
+                        if ([string]$prior.receiverBarrier.$field -cne [string]$payload.$field -and -not $attach) { $failure = $true }
+                    }
+                    if ($attach -and $prior.receiverBarrier.admissionFingerprint -cne '(none)' -and
+                        $prior.receiverBarrier.admissionFingerprint -cne $payload.admissionFingerprint) { $failure = $true }
+                    $prepare = $role -ceq 'receiver_barrier_current' -and $operation.beforeState -ceq 'AdmissionAttached' -and $operation.afterState -ceq 'ClosePrepared' -and $boundary.decisionKind -ceq 'PrepareInitialActivationReceiverBarrierClose' -and $boundary.decisionStatus -ceq 'Accepted'
+                    $remove = $operation.afterState -ceq 'None' -and ($role -ceq 'receiver_barrier_terminal' -or $terminalEntry.Count -eq 1)
+                    $carry = $operation.beforeState -ceq $operation.afterState
+                    if (-not ($attach -or $prepare -or $remove -or $carry)) { $failure = $true }
+                    if (-not ($attach -or $prepare)) {
+                        foreach ($field in @('commandFingerprint','receiptFingerprint','receiptStatus')) {
+                            if ([string]$prior.$field -cne [string]$operation.$field) { $failure = $true }
+                        }
+                    }
+                }
+            }
+            if ($failure) { "snapshot_receiver_barrier_lifecycle_invalid:$($boundary.evidenceLineIndex)"; continue }
+            if ($role -cne 'receiver_barrier_attempt') {
+                $stream.Known[$key] = $true
+                $stream.Known["$role|$key"] = $operation
+                if ($role -ceq 'receiver_barrier_current') { $stream.Current = if ($operation.afterState -ceq 'None') { $null } else { $operation } }
+            }
+            $matchingEffects = @($Effects | Where-Object { $_.TransitionId -ceq $boundary.boundaryId -and $_.OperationKey -ceq $operation.operationKey -and $_.CoordinatorInstanceId -ceq $boundary.coordinatorInstanceId })
+            $needsEffect = $role -ceq 'receiver_barrier_terminal' -and $operation.beforeState -ceq 'None' -and $operation.afterState -ceq 'Closed'
+            if (($needsEffect -and ($matchingEffects.Count -ne 1 -or $matchingEffects[0].EffectKind -cne 'receiver_barrier_close_applied' -or
+                    -not (Test-FileTransferCoordinatorSnapshotExactEffectBinding $boundary $operation $matchingEffects[0]))) -or
+                (-not $needsEffect -and $matchingEffects.Count -ne 0)) { "snapshot_receiver_barrier_effect_invalid:$($boundary.evidenceLineIndex)" }
+        }
+    }
 }
 
 function Test-FileTransferCoordinatorSnapshotProofPublicationTerminalTransition {
@@ -8295,6 +8598,21 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     }
 
     $errors = [System.Collections.Generic.List[string]]::new()
+    $selectedCatalogIdentity = $null
+    foreach ($record in $records) {
+        $profileVersion = Get-FileTransferCoordinatorSnapshotLineField -Line $record.Line -Name 'snapshot_catalog_version'
+        $profileHash = Get-FileTransferCoordinatorSnapshotLineField -Line $record.Line -Name 'snapshot_catalog_hash'
+        $profileIdentity = "$profileVersion|$profileHash"
+        if ($null -eq $selectedCatalogIdentity) {
+            $selectedCatalogIdentity = $profileIdentity
+            if ($profileVersion -ceq $script:FileTransferCoordinatorReceiverBarrierCatalogVersion) {
+                $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
+            }
+        }
+        elseif ($selectedCatalogIdentity -cne $profileIdentity) {
+            $errors.Add("snapshot_catalog_profile_conflict:$($record.LineIndex)")
+        }
+    }
     $boundaries = [System.Collections.Generic.List[object]]::new()
     $aggregateEntries = [System.Collections.Generic.List[object]]::new()
     $pressureTerminalRolloverCandidates = @{}
@@ -8364,7 +8682,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         $catalogVersion = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'snapshot_catalog_version'
         $catalogHash = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'snapshot_catalog_hash'
-        if ($catalogVersion -ne $catalog.Version -or $catalogHash -ne $catalog.Hash) {
+        if ($catalogVersion -cne $catalog.Version -or $catalogHash -cne $catalog.Hash) {
             $errors.Add("snapshot_catalog_mismatch:$($record.LineIndex)")
         }
         $selectionMode = Get-FileTransferCoordinatorSnapshotLineField -Line $line -Name 'snapshot_selection_mode'
@@ -8600,6 +8918,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         [string]::IsNullOrWhiteSpace([string]$operation.receiptFingerprint)) {
                         $errors.Add("snapshot_operation_identity_incomplete:$($record.LineIndex)")
                         break
+                    }
+                    if (Test-FileTransferCoordinatorReceiverBarrierMarker $operation) {
+                        if (-not (Test-FileTransferCoordinatorReceiverBarrierOperation $envelope $operation $catalog)) {
+                            $errors.Add("snapshot_receiver_barrier_operation_invalid:$($record.LineIndex)")
+                            break
+                        }
+                        continue
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog `
                             -Envelope $envelope `
@@ -9120,7 +9445,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         if ($effect.Family -in $script:FileTransferCoordinatorSnapshotFamily6 -and
             $script:FileTransferCoordinatorSnapshotFamily6EffectKinds -notcontains
-                [string]$effect.EffectKind) {
+                [string]$effect.EffectKind -and
+            -not ($catalog.Version -ceq $script:FileTransferCoordinatorReceiverBarrierCatalogVersion -and
+                $effect.EffectKind -ceq 'receiver_barrier_close_applied')) {
             $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
             continue
         }
@@ -9162,6 +9489,15 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($matches.Count -ne 1) {
             $errors.Add("snapshot_authority_effect_unbound:$($effect.LineIndex)")
         }
+        elseif ($effect.EffectKind -ceq 'receiver_barrier_close_applied' -and
+            (-not (Test-FileTransferCoordinatorReceiverBarrierMarker $matches[0].Operation) -or
+             $matches[0].Operation.operationRole -cne 'receiver_barrier_terminal' -or
+             $matches[0].Operation.beforeState -cne 'None' -or $matches[0].Operation.afterState -cne 'Closed' -or
+             -not [bool]$matches[0].Operation.stateApplied -or
+             $matches[0].Boundary.decisionKind -cne 'CommitInitialActivationReceiverBarrierClose' -or
+             $matches[0].Boundary.decisionStatus -cne 'Accepted')) {
+            $errors.Add("snapshot_receiver_barrier_effect_without_close:$($effect.LineIndex)")
+        }
         elseif ($effect.Family -ceq 'runtime_unlock_retry_lifecycle' -and
             $effect.EffectKind -ceq 'install_committed' -and
             [string]$matches[0].Operation.operationRole -ceq 'attempt_pending') {
@@ -9175,6 +9511,11 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
              $matches[0].Boundary.decisionStatus -cne 'Accepted')) {
             $errors.Add("snapshot_authority_effect_scope_invalidation_without_application:$($effect.LineIndex)")
         }
+    }
+
+    foreach ($failure in @(Get-FileTransferCoordinatorReceiverBarrierFailures `
+            -Boundaries @($boundaries) -Effects @($effects) -AggregateEntries @($aggregateEntries))) {
+        $errors.Add([string]$failure)
     }
 
     foreach ($boundary in @($boundaries | Where-Object {
@@ -10029,6 +10370,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             })) {
         foreach ($operation in @($boundary.operations | Where-Object {
                     [string]$_.family -ceq 'responder_probe_handoff' -and
+                    -not (Test-FileTransferCoordinatorReceiverBarrierMarker $_) -and
                     [bool]$_.receiptValidated
                 })) {
             $requiredEffect = if (
@@ -10340,7 +10682,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
     $responderEntries = @($operationHistory | Where-Object {
-            [string]$_.Operation.family -ceq 'responder_probe_handoff'
+            [string]$_.Operation.family -ceq 'responder_probe_handoff' -and
+            -not (Test-FileTransferCoordinatorReceiverBarrierMarker $_.Operation)
         })
     $invalidResponderCarryBoundaries = @{}
     foreach ($failure in @(ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `

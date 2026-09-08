@@ -1347,6 +1347,11 @@ public sealed partial class SessionFileTransferService
             previousTransport.FileTransferTransportProbeReceived -= OnFileTransferTransportProbeReceived;
             previousTransport.FileTransferRepairProofReceived -= OnFileTransferRepairProofReceived;
             previousTransport.FileTransferFallbackTailYieldProofReceived -= OnFileTransferFallbackTailYieldProofReceived;
+            if (previousTransport is IInitialActivationReceiverBarrierBridge receiverBarrierBridge)
+            {
+                receiverBarrierBridge.ReceiverBarrierBindingRequested -= OnReceiverBarrierBindingRequested;
+                receiverBarrierBridge.ReceiverBarrierFailureObserved -= OnReceiverBarrierFailureObserved;
+            }
             if (previousTransport is IRuntimeUnlockRetryDispatchAuthorityBridge retryDispatchBridge)
             {
                 retryDispatchBridge

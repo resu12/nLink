@@ -791,6 +791,11 @@ public sealed partial class SessionFileTransferService :
         transport.FileTransferTransportProbeReceived += OnFileTransferTransportProbeReceived;
         transport.FileTransferRepairProofReceived += OnFileTransferRepairProofReceived;
         transport.FileTransferFallbackTailYieldProofReceived += OnFileTransferFallbackTailYieldProofReceived;
+        if (transport is IInitialActivationReceiverBarrierBridge receiverBarrierBridge)
+        {
+            receiverBarrierBridge.ReceiverBarrierBindingRequested += OnReceiverBarrierBindingRequested;
+            receiverBarrierBridge.ReceiverBarrierFailureObserved += OnReceiverBarrierFailureObserved;
+        }
         if (transport is IRuntimeUnlockRetryDispatchAuthorityBridge retryDispatchBridge)
         {
             retryDispatchBridge.RuntimeUnlockInitialActivationPreCommitProbeFailureObserved +=
@@ -3258,6 +3263,8 @@ public sealed partial class SessionFileTransferService :
                     context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
                     context.StatusMessage = "Waiting for V4 file-transfer manifest.";
                 }
+
+                (transport as IInitialActivationReceiverBarrierBridge)?.ObserveReceiverDataSessionAttached(session);
 
                 LogTransferInfo(
                     "filetransfer_session_opened",

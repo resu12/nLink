@@ -4998,6 +4998,7 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_tuna_activation_negotiation_regular_nkn_paused; session_id={SanitizeLogToken(normalizedSessionId)}; reason={normalizedReason}; trigger={SanitizeLogToken(trigger)}; max_pause_ms={(long)FileTransferTunaActivationPauseMax.TotalMilliseconds}");
+        BindOrAttachInitialReceiverBarriers(normalizedSessionId);
         SetFileTransferDataSessionsAvailability(
             isAvailable: false,
             reason: "tuna_activation_negotiating",
@@ -5120,6 +5121,7 @@ public sealed partial class NknSignalingTransport
         }
 
         var coordinatorTransitionBound = false;
+        var coordinatorReceiverBarrierBound = false;
         lock (accelerationGate)
         {
             var boundAuthority =
@@ -5135,11 +5137,19 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            if (!coordinatorTransitionBound)
+            coordinatorReceiverBarrierBound = IsInitialReceiverBarrierPauseBoundUnsafe(normalizedSessionId);
+            if (!coordinatorTransitionBound && !coordinatorReceiverBarrierBound)
             {
                 fileTransferTunaActivationPauseSessionId = null;
                 fileTransferTunaActivationPauseGeneration++;
             }
+        }
+
+        if (coordinatorReceiverBarrierBound)
+        {
+            LocalOperationalLog.Info("NKN.Tuna",
+                $"event=filetransfer_initial_activation_receiver_barrier_release_rejected; session_id={SanitizeLogToken(normalizedSessionId)}; decision_reason=coordinator_receiver_barrier_close_required; authority_effect=none");
+            return false;
         }
 
         if (coordinatorTransitionBound)
@@ -5173,6 +5183,12 @@ public sealed partial class NknSignalingTransport
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
             ? currentSessionSecurityState.SessionId?.Value
             : sessionId.Trim();
+        if (IsInitialReceiverBarrierPauseBound(normalizedSessionId))
+        {
+            LocalOperationalLog.Info("NKN.Tuna",
+                $"event=filetransfer_initial_activation_receiver_barrier_release_rejected; session_id={SanitizeLogToken(normalizedSessionId ?? "none")}; decision_reason=coordinator_receiver_barrier_close_required; authority_effect=none");
+            return;
+        }
         if (IsFileTransferRouteTransitionPauseBound(normalizedSessionId))
         {
             LocalOperationalLog.Info(
@@ -6673,6 +6689,10 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockPeerPreCommitAnswerAcceptanceReceipt receipt)
     {
         var decision = ObserveRuntimeUnlockPeerPreCommitAnswerAcceptance(receipt);
+        if (decision.Status is not RuntimeUnlockPeerPreCommitAnswerAcceptanceStatus.Rejected)
+        {
+            BindOrAttachInitialReceiverBarriers(receipt.SessionId);
+        }
         RuntimeUnlockResponderAnswerProbeConvergenceHold? convergence = null;
         RuntimeUnlockRouteCommitSnapshot? completionSnapshot = null;
         RuntimeUnlockResponderPeerProbeHandoffEvidence?
@@ -13185,6 +13205,7 @@ public sealed partial class NknSignalingTransport
                 e.Reason,
                 out postFallbackProbeFailure);
         RuntimeUnlockInitialActivationPreCommitProbeFailureObservation? initialProbeFailure = null;
+        var receiverBarrierFailures = CaptureInitialReceiverBarrierFailures(e);
         if (!e.IsAvailable && !hasPostFallbackProbeFailure)
         {
             TryCaptureRuntimeUnlockInitialActivationPreCommitProbeFailure(e.Reason, out initialProbeFailure);
@@ -13243,6 +13264,10 @@ public sealed partial class NknSignalingTransport
             {
                 PublishRuntimeUnlockPostFallbackPreCommitProbeFailure(
                     postFallbackProbeFailure);
+            }
+            foreach (var receiverFailure in receiverBarrierFailures)
+            {
+                receiverBarrierFailureObserved?.Invoke(this, receiverFailure);
             }
             if (shouldStartFileTransferFallback)
             {
@@ -38246,6 +38271,7 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_answer_ack_received; session_id={SanitizeLogToken(ack.SessionId)}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes & pendingLanes)}; payer_decision_id={ack.PayerDecisionId}; ack_message_id={SanitizeLogToken(env.MessageId)}; ack_correlation_id={SanitizeLogToken(securePayload.Metadata.RequestId ?? "none")}; ack_frame_fingerprint={SanitizeLogToken(ackFrameFingerprint)}; ack_source_fingerprint={SanitizeLogToken(ackSourceFingerprint)}; pending_answer_ack_generation={pendingAnswerAckGeneration}; authority_mode={SanitizeLogToken(pendingAuthorityMode?.ToString() ?? "none")}");
         if (pendingAuthorityMode is not null)
         {
+            BindOrAttachInitialReceiverBarriers(ack.SessionId);
             if (responderConvergence is { } retained)
             {
                 LogRuntimeUnlockResponderAnswerProbeConvergenceDecision(
