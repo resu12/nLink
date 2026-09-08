@@ -77,7 +77,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                     Authority.Kind: FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6,
                     DispositionReceipt.Status: FileTransferRouteTransitionDispositionApplyStatus.Applied,
                     RetainedFrameApplyReceipt.Status: FileTransferRouteTransitionRetainedFrameApplyStatus.Applied,
-                },
+                } && GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution") is null,
             timeoutMs: 5000);
         var completed = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState");
         var receipt = Assert.IsType<FileTransferFallbackV6ProofBootstrapReceipt>(
@@ -610,7 +610,8 @@ public sealed partial class SessionFileTransferV4SenderTests
     private static async Task<object> CreateCommittedInitialInboundTunaForBootstrapTestAsync(
         SessionFileTransferService service,
         LoopbackFileTransferTransport bridge,
-        InitialBootstrapRecordingDataSession dataSession)
+        InitialBootstrapRecordingDataSession dataSession,
+        bool receiverBarrier = false)
     {
         await Task.Yield();
         const string reason = "test_initial_peer_first_bootstrap";
@@ -618,8 +619,11 @@ public sealed partial class SessionFileTransferV4SenderTests
         var context = CreateRegularNknV4InboundContext(dataSession.TransferId,
             chunkCount: 256, nextChunkIndex: 100,
             durableHighestChunkIndex: 99, creditUntilChunkIndexExclusive: 128);
-        SeedInitialRegularV4RuntimeScopeForTest(context, reason);
-        SeedRuntimeUnlockAdmissionForTest(context, FileTransferDirection.Inbound, reason);
+        if (!receiverBarrier)
+        {
+            SeedInitialRegularV4RuntimeScopeForTest(context, reason);
+            SeedRuntimeUnlockAdmissionForTest(context, FileTransferDirection.Inbound, reason);
+        }
         SetPrivateProperty(context, "DataSession", dataSession);
         SetPrivateProperty(context, "DataSessionGeneration", 1L);
         SetPrivateProperty(context, "V4StateEpoch", 1);
@@ -633,8 +637,16 @@ public sealed partial class SessionFileTransferV4SenderTests
         StartCoordinatorSnapshotStreamForTest(context);
         typeof(SessionFileTransferService).GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        if (receiverBarrier)
+        {
+            PublishInitialReceiverBarrierRegularRouteForTest(service, bridge, context, reason);
+        }
         bridge.SeedRuntimeUnlockRouteCommitProofForTests(dataSession.TransferId, reason,
             transactionGeneration: 3, offerGeneration: 5, leaseGeneration: 7, launchGeneration: 9);
+        if (receiverBarrier)
+        {
+            BindReceiverBarrierBeforeInitialRoutePreparationForTest(service, bridge, context, dataSession);
+        }
         var staged = StageInboundFileTransferRouteTransitionForGapTest(service, context,
             Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(bridge.RuntimeUnlockRouteCommitSnapshot), reason);
         Assert.True(staged.Accepted, staged.Reason);
@@ -660,14 +672,14 @@ public sealed partial class SessionFileTransferV4SenderTests
         return context;
     }
 
-    internal static async Task<string> CreateInboundBootstrapCheckpointEvidenceFixtureAsync()
+    internal static async Task<string> CreateInboundBootstrapCheckpointEvidenceFixtureAsync(bool receiverBarrier = false)
     {
         const string transferId = "inbound_bootstrap_checkpoint_evidence";
         var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
         var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
         using var bridge = new InitialBootstrapCheckpointTransport(dataSession);
-        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession);
+        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession, receiverBarrier);
         var identity = GetPrivateProperty<string>(context, "CoordinatorInstanceId");
         var evidenceIdentity = "fte1-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(identity))).ToLowerInvariant()[..24];

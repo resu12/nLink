@@ -73,6 +73,237 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
         finally { TryDeleteDirectory(directory); }
     }
 
+    private static readonly Lazy<Task<IReadOnlyList<string>>> RoutePreparationEvidence = new(
+        SessionFileTransferV4SenderTests.CreateReceiverBarrierRoutePreparationEvidenceFixtureAsync);
+
+    [Theory]
+    [InlineData("route_prepare")]
+    [InlineData("reordered_operations")]
+    [InlineData("exact_duplicate")]
+    [InlineData("missing_current")]
+    [InlineData("ambiguous_current")]
+    [InlineData("attempted_only")]
+    [InlineData("historical_prepared")]
+    [InlineData("not_applied")]
+    [InlineData("untyped_applied")]
+    [InlineData("target_route")]
+    [InlineData("target_protocol")]
+    [InlineData("rejected_preparation")]
+    [InlineData("wrong_direction")]
+    [InlineData("wrong_key")]
+    [InlineData("wrong_authority")]
+    [InlineData("wrong_command_identity")]
+    [InlineData("wrong_command_generation")]
+    [InlineData("absent_command_fingerprint")]
+    [InlineData("receipt_identity")]
+    [InlineData("receipt_generation")]
+    [InlineData("receipt_status")]
+    [InlineData("receipt_fingerprint")]
+    [InlineData("receipt_validated")]
+    [InlineData("typed_receipt")]
+    [InlineData("checkpoint_zero")]
+    [InlineData("checkpoint_negative")]
+    [InlineData("checkpoint_absent_identity")]
+    [InlineData("checkpoint_wrong_raw_identity")]
+    [InlineData("checkpoint_wrong_projected_identity")]
+    [InlineData("checkpoint_target_generation")]
+    [InlineData("checkpoint_target_identity")]
+    [InlineData("absent_durable_fingerprint")]
+    [InlineData("absent_proof_fingerprint")]
+    [InlineData("source_route")]
+    [InlineData("source_protocol")]
+    [InlineData("source_epoch")]
+    [InlineData("source_publication")]
+    [InlineData("source_runtime")]
+    [InlineData("source_leg")]
+    [InlineData("source_transport")]
+    [InlineData("source_bridge")]
+    [InlineData("source_data_identity")]
+    [InlineData("source_data_generation")]
+    [InlineData("barrier_admission")]
+    [InlineData("barrier_negotiation")]
+    [InlineData("barrier_pause")]
+    [InlineData("missing_barrier_removal")]
+    [InlineData("duplicate_barrier_terminal")]
+    [InlineData("forged_close_effect")]
+    [InlineData("generation_gap")]
+    [InlineData("conflicting_duplicate")]
+    public async Task ReceiverBarrierSnapshot_RoutePreparationEnvelopesRemainStrict(string mutation)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var evidence = await RoutePreparationEvidence.Value;
+        var directory = Path.Combine(Path.GetTempPath(), "nlink-receiver-preparation-evidence-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "service-evidence.log");
+            await File.WriteAllLinesAsync(path, evidence, new UTF8Encoding(false));
+            var result = await RunPowerShellScriptTextAsync(RoutePreparationHarness, [FindRepoRoot(), path, mutation]);
+            Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+            Assert.Equal("receiver-preparation-evidence-ok", result.Stdout.Trim());
+        }
+        finally { TryDeleteDirectory(directory); }
+    }
+
+    private const string RoutePreparationHarness = """
+        param([string]$RepoRoot, [string]$InputPath, [string]$Case)
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
+        $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1'
+        $capturedLines = [IO.File]::ReadAllLines($InputPath)
+        $preparations = @(for ($i = 0; $i -lt $capturedLines.Count; $i++) {
+            if ([string]::IsNullOrWhiteSpace($capturedLines[$i])) { continue }
+            if ((Get-FileTransferCoordinatorSnapshotEventName $capturedLines[$i]) -cne 'filetransfer_coordinator_transition_snapshot') { continue }
+            $decoded = ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField $capturedLines[$i] 'snapshot_payload')
+            if ($decoded.Value.decisionKind -ceq 'PrepareFileTransferRouteTransition' -and
+                @($decoded.Value.aggregate.operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_terminal' -and $_.afterState -ceq 'Invalidated' }).Count -eq 1) {
+                [pscustomobject]@{ Index=$i; Envelope=$decoded.Value }
+            }
+        })
+        if ($preparations.Count -ne 1) { throw 'Expected one genuine service receiver-barrier route preparation.' }
+        $preparationIndex = $preparations[0].Index
+        $preparation = $preparations[0].Envelope
+        $originalPreparation = $capturedLines[$preparationIndex]
+        $current = @($preparation.aggregate.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'current' })[0]
+        $terminal = @($preparation.aggregate.operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_terminal' })[0]
+        $source = $current.routeTransition.sourceBoundary
+        function Copy-Operation($Operation) { ConvertFrom-Json (ConvertTo-Json -InputObject $Operation -Depth 64 -Compress) }
+        switch -CaseSensitive ($Case) {
+            'reordered_operations' { [array]::Reverse($preparation.aggregate.operations) }
+            'missing_current' { $preparation.aggregate.operations = @($preparation.aggregate.operations | Where-Object { $_ -ne $current }) }
+            'ambiguous_current' {
+                $other = Copy-Operation $current
+                $other.authorityId = 'second-preparation-authority'
+                $other.commandIdentity = $other.authorityId
+                $other.operationKey = "route_transition|current|$($other.authorityId)|$($other.operationGeneration)|RegularV4ToTunaV4"
+                $preparation.aggregate.operations += $other
+            }
+            'attempted_only' { $current.operationRole = 'inbound'; $current.routeTransition.role = 'inbound'; $current.stateApplied = $false }
+            'historical_prepared' { $current.beforeState = 'Prepared' }
+            'not_applied' { $current.stateApplied = $false }
+            'untyped_applied' { $current.stateApplied = 'true' }
+            'target_route' { $current.routeTransition.targetBoundary.route = 'regular_nkn_v4_fast' }
+            'target_protocol' { $current.routeTransition.targetBoundary.protocolVersion = 6 }
+            'rejected_preparation' { $preparation.decisionStatus = 'Rejected' }
+            'wrong_direction' { $preparation.direction = 'outbound' }
+            'wrong_key' { $current.operationKey = 'unrelated-key' }
+            'wrong_authority' { $current.authorityId = '(none)' }
+            'wrong_command_identity' { $current.commandIdentity = 'unrelated-command' }
+            'wrong_command_generation' { $current.commandGeneration++ }
+            'absent_command_fingerprint' { $current.commandFingerprint = '(none)' }
+            'receipt_identity' { $current.receiptIdentity = $current.authorityId }
+            'receipt_generation' { $current.receiptGeneration = 1 }
+            'receipt_status' { $current.receiptStatus = 'Installed' }
+            'receipt_fingerprint' { $current.receiptFingerprint = 'a' * 64 }
+            'receipt_validated' { $current.receiptValidated = $true }
+            'typed_receipt' {
+                $current.routeTransition.receipts = @([pscustomobject]@{
+                    stage='pause_bind'; commandIdentity=$current.commandIdentity; commandGeneration=$current.commandGeneration
+                    commandFingerprint=$current.commandFingerprint; receiptIdentity=$current.authorityId
+                    receiptGeneration=$current.operationGeneration; receiptStatus='Installed'; receiptReason='fabricated'
+                    receiptFingerprint=('a' * 64); receiptValidated=$true
+                })
+            }
+            'checkpoint_zero' { $source.checkpointGeneration = 0 }
+            'checkpoint_negative' { $source.checkpointGeneration = -1 }
+            'checkpoint_absent_identity' { $source.checkpointRequestId = '(none)' }
+            'checkpoint_wrong_raw_identity' { $source.checkpointRequestId = "checkpoint:$([long]$source.checkpointGeneration + 1L)" }
+            'checkpoint_wrong_projected_identity' { $source.checkpointRequestId = 'fte1-' + ('a' * 24) }
+            'checkpoint_target_generation' { $current.routeTransition.targetBoundary.checkpointGeneration++ }
+            'checkpoint_target_identity' { $current.routeTransition.targetBoundary.checkpointRequestId = 'checkpoint:999' }
+            'absent_durable_fingerprint' { $current.routeTransition.durableCheckpointFingerprint = '(none)' }
+            'absent_proof_fingerprint' { $current.routeTransition.proofBoundaryFingerprint = '(none)' }
+            'source_route' { $source.route = 'file_tuna_v4' }
+            'source_protocol' { $source.protocolVersion = 6 }
+            'source_epoch' { $source.liveRouteEpoch = 1 }
+            'source_publication' { $source.routePublicationGeneration++ }
+            'source_runtime' { $source.runtimeGeneration++ }
+            'source_leg' { $source.legGeneration++ }
+            'source_transport' { $source.transportEpoch = 1 }
+            'source_bridge' { $source.bridgeRecoveryGeneration = 1 }
+            'source_data_identity' { $source.dataSessionIdentity = 'unrelated-data-session' }
+            'source_data_generation' { $source.dataSessionGeneration++ }
+            'barrier_admission' { $terminal.receiverBarrier.admissionFingerprint = 'a' * 64 }
+            'barrier_negotiation' { $terminal.receiverBarrier.negotiationFingerprint = 'a' * 64 }
+            'barrier_pause' { $terminal.receiverBarrier.pauseGeneration++ }
+            'missing_barrier_removal' { $preparation.aggregate.operations = @($preparation.aggregate.operations | Where-Object { $_.operationRole -cne 'receiver_barrier_current' }) }
+            'duplicate_barrier_terminal' { $preparation.aggregate.operations += (Copy-Operation $terminal) }
+            'generation_gap' { $preparation.aggregate.afterStateGeneration++ }
+        }
+        function Set-EnvelopeOnOriginalLine($Envelope) {
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $Envelope -Depth 64 -Compress))
+            $hash = Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes
+            $payload = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $line = $originalPreparation.Replace(
+                (Get-FileTransferCoordinatorSnapshotLineField $originalPreparation 'snapshot_sha256'), $hash).Replace(
+                (Get-FileTransferCoordinatorSnapshotLineField $originalPreparation 'snapshot_payload'), $payload)
+            if ($Case -ceq 'generation_gap') {
+                $line = $line.Replace("after_state_generation=$($Envelope.aggregate.afterStateGeneration - 1);",
+                    "after_state_generation=$($Envelope.aggregate.afterStateGeneration);")
+            }
+            $line
+        }
+        $lines = [Collections.Generic.List[string]]::new()
+        $lines.Add("event=unrelated_fixture_diagnostic; note=before_stream")
+        for ($i = 0; $i -lt $capturedLines.Count; $i++) {
+            $line = $capturedLines[$i]
+            if ($i -eq $preparationIndex -and $Case -cnotin @('route_prepare','exact_duplicate','conflicting_duplicate','forged_close_effect')) {
+                $line = Set-EnvelopeOnOriginalLine $preparation
+            }
+            $lines.Add($line)
+            if ($i -ne $preparationIndex) { continue }
+            if ($Case -ceq 'exact_duplicate') { $lines.Add($line) }
+            if ($Case -ceq 'conflicting_duplicate') {
+                $changed = Copy-Operation $preparation
+                $changed.decisionReason = 'conflicting-preparation'
+                $lines.Add((Set-EnvelopeOnOriginalLine $changed))
+            }
+            if ($Case -ceq 'forged_close_effect') {
+                $scopeFields = @('snapshot_contract_version','snapshot_selection_mode','snapshot_catalog_version',
+                    'snapshot_catalog_hash','coordinator_instance_id','session_id','transfer_id','direction','log_writer_id')
+                $scope = (@($scopeFields | ForEach-Object {
+                    "$_=$(Get-FileTransferCoordinatorSnapshotLineField $originalPreparation $_)"
+                }) -join '; ')
+                $receipt = $terminal.receiverBarrier.receipts[0]
+                $barrierSource = $terminal.receiverBarrier.sourceBoundary
+                $lines.Add("event=filetransfer_coordinator_authority_effect; $scope; transition_id=$($preparation.transitionId); coordinator_state_generation=$($preparation.aggregate.afterStateGeneration); operation_family=responder_probe_handoff; operation_key=$($terminal.operationKey); operation_authority_id=$($terminal.authorityId); operation_generation=$($terminal.operationGeneration); effect_kind=receiver_barrier_close_applied; effect_identity=forged-close-effect; effect_generation=1; receipt_identity=$($receipt.receiptIdentity); receipt_generation=$($receipt.receiptGeneration); receipt_status=$($receipt.receiptStatus); receipt_fingerprint=$($receipt.receiptFingerprint); route=$($barrierSource.route); protocol_version=$($barrierSource.protocolVersion); live_route_epoch=$($barrierSource.liveRouteEpoch); route_publication_generation=$($barrierSource.routePublicationGeneration); route_commit_generation=$($barrierSource.routeCommitGeneration); runtime_generation=$($barrierSource.runtimeGeneration); terminal_generation=$($barrierSource.terminalGeneration); leg_generation=$($barrierSource.legGeneration); transport_epoch=$($barrierSource.transportEpoch); bridge_recovery_generation=$($barrierSource.bridgeRecoveryGeneration); checkpoint_generation=$($barrierSource.checkpointGeneration); checkpoint_request_id=$($barrierSource.checkpointRequestId); data_session_identity=$($barrierSource.dataSessionIdentity); data_session_generation=$($barrierSource.dataSessionGeneration); authority_effect=applied")
+            }
+        }
+        $compactRecords = @(for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
+            $eventName = Get-FileTransferCoordinatorSnapshotEventName $lines[$i]
+            if ($catalog.SnapshotAuthorityV1 -contains $eventName -or $catalog.GenerationStampedEffects -contains $eventName) {
+                [pscustomobject]@{ Line=$lines[$i]; LineIndex=$i }
+            }
+        })
+        if ($compactRecords.Count -ge $lines.Count) { throw 'Fixture compact input was not independently filtered.' }
+        $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines.ToArray()
+        $compact = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords $compactRecords
+        $expected = if ($Case -cin @('route_prepare','reordered_operations','exact_duplicate')) { 'pass' } else { 'fail' }
+        if ($full.ArtifactEvidenceVerdict -cne $expected -or $compact.ArtifactEvidenceVerdict -cne $expected) {
+            throw "case=$Case; expected=$expected; full=$($full.ArtifactEvidenceFailureReason); compact=$($compact.ArtifactEvidenceFailureReason)"
+        }
+        $parity = Compare-FileTransferCoordinatorSnapshotEvaluations -Full $full -Compact $compact
+        if ($parity.Verdict -cne 'pass' -or
+            (ConvertTo-Json -InputObject @($full.Boundaries) -Depth 100 -Compress) -cne
+            (ConvertTo-Json -InputObject @($compact.Boundaries) -Depth 100 -Compress)) { throw "Boundary parity failed: $($parity.FailureReason)" }
+        $capturedTransitions = @($capturedLines | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and
+                (Get-FileTransferCoordinatorSnapshotEventName $_) -ceq 'filetransfer_coordinator_transition_snapshot'
+        }).Count
+        $capturedEffects = @($capturedLines | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and
+                (Get-FileTransferCoordinatorSnapshotEventName $_) -ceq 'filetransfer_coordinator_authority_effect'
+        }).Count
+        if ($expected -ceq 'pass' -and (-not $full.StreamComplete -or $full.LegacySelectionCount -ne 0 -or
+            $full.TransitionCount -ne $capturedTransitions -or $capturedEffects -le 0 -or
+            $full.EffectCount -ne $capturedEffects)) { throw 'Preparation fixture lost genuine service evidence.' }
+        # All service effects remain byte-identical except the named forged-effect mutation.
+        # Cross-host shared-GUI and route-consistency acceptance remain separate gates.
+        Write-Output 'receiver-preparation-evidence-ok'
+        """;
+
     private const string Harness = """
         param([string]$RepoRoot, [string]$EnvelopePath, [string]$Case)
         Set-StrictMode -Version Latest

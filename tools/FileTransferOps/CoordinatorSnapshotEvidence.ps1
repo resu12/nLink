@@ -1267,6 +1267,63 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
     catch { return $false }
 }
 
+function Test-FileTransferCoordinatorReceiverBarrierRoutePreparation {
+    param($Boundary, $Source)
+
+    if ($Boundary.decisionKind -cne 'PrepareFileTransferRouteTransition' -or
+        $Boundary.decisionStatus -cne 'Prepared' -or
+        [long]$Boundary.afterStateGeneration -ne ([long]$Boundary.beforeStateGeneration + 1L) -or
+        $Boundary.beforeStateHash -ceq $Boundary.afterStateHash -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Source $Boundary.beforeBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Source $Boundary.afterBoundary)) { return $false }
+
+    $current = @($Boundary.operations | Where-Object {
+        $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'current' -and
+            $_.stateApplied -is [bool] -and $_.stateApplied
+    })
+    if ($current.Count -ne 1) { return $false }
+    $operation = $current[0]
+    $transition = $operation.routeTransition
+    if ($operation.operationKind -cne 'RegularV4ToTunaV4' -or
+        $operation.beforeState -cne 'None' -or $operation.afterState -cne 'Prepared' -or
+        $operation.authorityId -in @('', '(none)') -or [long]$operation.operationGeneration -le 0 -or
+        $operation.operationKey -cne "route_transition|current|$($operation.authorityId)|$($operation.operationGeneration)|RegularV4ToTunaV4" -or
+        $operation.commandIdentity -cne $operation.authorityId -or
+        [long]$operation.commandGeneration -ne [long]$operation.operationGeneration -or
+        $operation.commandFingerprint -cnotmatch '^(?:[0-9a-f]{64}|fte1-[0-9a-f]{24})$' -or
+        $null -eq $transition) { return $false }
+
+    # Prepared authors a command, not a pause/drain application receipt.
+    if ($operation.receiptIdentity -cne '(none)' -or [long]$operation.receiptGeneration -ne 0 -or
+        $operation.receiptStatus -cne '(none)' -or $operation.receiptFingerprint -cne '(none)' -or
+        [bool]$operation.receiptValidated -or @($transition.receipts).Count -ne 0 -or
+        $transition.role -cne 'current' -or $transition.transitionKind -cne 'RegularV4ToTunaV4' -or
+        $transition.sourceTransport -cne 'RegularNkn' -or $transition.targetTransport -cne 'Tuna' -or
+        $transition.targetRoute -cne 'file_tuna_v4' -or [int]$transition.targetProtocolVersion -ne 4 -or
+        $transition.targetBoundary.route -cne 'file_tuna_v4' -or [int]$transition.targetBoundary.protocolVersion -ne 4 -or
+        $transition.handoffKind -cne 'NormalToTunaActivation' -or
+        $transition.proofBoundaryKind -cne 'FileTransferTunaActivationTransitionProofBoundary' -or
+        $transition.proofAdmissionMode -cne 'runtime_unlock_precommit' -or
+        $transition.proofBoundaryFingerprint -cnotmatch '^(?:[0-9a-f]{64}|fte1-[0-9a-f]{24})$' -or
+        $transition.durableCheckpointFingerprint -cnotmatch '^(?:[0-9a-f]{64}|fte1-[0-9a-f]{24})$') { return $false }
+
+    # Its durable checkpoint is distinct from the receiver barrier's prior
+    # checkpoint lease. Keep every other initial source field exact.
+    $captured = $transition.sourceBoundary
+    $checkpoint = [long]$captured.checkpointGeneration
+    $checkpointIdentity = [string]$captured.checkpointRequestId
+    $checkpointCommandIdentity = "checkpoint:$checkpoint"
+    # The existing service projector transforms the source identity only;
+    # the typed target retains the canonical command identity.
+    $projectedCheckpointIdentity = 'fte1-' + (Get-FileTransferCoordinatorSnapshotSha256 `
+        -Bytes ([Text.Encoding]::UTF8.GetBytes($checkpointCommandIdentity))).Substring(0, 24)
+    return (Test-FileTransferCoordinatorSnapshotRouteTransitionSourceCurrent $captured $Source) -and
+        [long]$captured.transportEpoch -eq 0 -and [long]$captured.bridgeRecoveryGeneration -eq 0 -and
+        $checkpoint -gt 0 -and [long]$transition.targetBoundary.checkpointGeneration -eq $checkpoint -and
+        $transition.targetBoundary.checkpointRequestId -ceq $checkpointCommandIdentity -and
+        ($checkpointIdentity -ceq $checkpointCommandIdentity -or $checkpointIdentity -ceq $projectedCheckpointIdentity)
+}
+
 function Get-FileTransferCoordinatorReceiverBarrierFailures {
     param([AllowEmptyCollection()][object[]]$Boundaries, [AllowEmptyCollection()][object[]]$Effects,
         [AllowEmptyCollection()][object[]]$AggregateEntries)
@@ -1333,9 +1390,8 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                     else {
                         $explicit = $boundary.decisionKind -ceq 'InvalidateInitialActivationReceiverBarrier' -and $boundary.decisionStatus -ceq 'Invalidated'
                         $replacement = -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.afterBoundary)
-                        $prepared = @($boundary.operations | Where-Object { $_.family -ceq 'route_transition' -and $_.afterState -ceq 'Prepared' -and
-                            [bool]$_.stateApplied -and [bool]$_.receiptValidated -and $null -ne $_.routeTransition -and
-                            (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $_.routeTransition.sourceBoundary $payload.sourceBoundary) }).Count -eq 1
+                        $prepared = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_source_boundary_invalidated' -and
+                            (Test-FileTransferCoordinatorReceiverBarrierRoutePreparation $boundary $payload.sourceBoundary)
                         $admissionReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_admission_replaced' -and
                             $payload.admissionFingerprint -cne '(none)' -and $payload.invalidatingAdmissionFingerprint -cne $payload.admissionFingerprint
                         $pauseReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_pause_replaced' -and
@@ -1375,7 +1431,15 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                     }
                 }
             }
-            if ($failure) { "snapshot_receiver_barrier_lifecycle_invalid:$($boundary.evidenceLineIndex)"; continue }
+            if ($failure) {
+                $reason = 'snapshot_receiver_barrier_lifecycle_invalid'
+                if ($role -ceq 'receiver_barrier_terminal' -and $operation.beforeState -ceq 'None' -and
+                    $operation.afterState -ceq 'Invalidated' -and $boundary.decisionKind -ceq 'PrepareFileTransferRouteTransition') {
+                    $reason += '|receiver_barrier_route_preparation_invalidation_binding_invalid'
+                }
+                "$reason`:$($boundary.evidenceLineIndex)"
+                continue
+            }
             if ($role -cne 'receiver_barrier_attempt') {
                 $stream.Known[$key] = $true
                 $stream.Known["$role|$key"] = $operation
