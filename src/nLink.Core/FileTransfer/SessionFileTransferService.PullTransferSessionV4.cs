@@ -16045,10 +16045,28 @@ public sealed partial class SessionFileTransferService
             {
                 if (fallbackFrontierContractNewlyIssued)
                 {
-                    TrySettleFallbackFrontierRepairContract(
+                    var settled = TrySettleFallbackFrontierRepairContract(
                         fallbackFrontierContract,
                         FallbackFrontierRepairSettlementOutcome.MissingDispatch,
                         $"repair_queue_suppressed_{suppressionReason}");
+                    if (settled &&
+                        suppressionReason == "recently_sent" &&
+                        fallbackFrontierContract is not null)
+                    {
+                        context.LastSettledFallbackFrontierRepairAuthority =
+                            fallbackFrontierContract.Authority;
+                        context.LastSettledFallbackFrontierRepairOutcome =
+                            nameof(FallbackFrontierRepairSettlementOutcome.MissingDispatch);
+                        context.LastSettledFallbackFrontierRepairUtcMs =
+                            now.ToUnixTimeMilliseconds();
+                        if (context.CoordinatorPersistentState.FallbackTailYield
+                                .CurrentRetryDispatchHold is { } hold)
+                        {
+                            TryQueueFallbackTailYieldRetryDispatchUnblockRecheckLocked(
+                                context,
+                                hold.Release);
+                        }
+                    }
                 }
 
                 if (shouldLogFallbackFrontierRepairProof &&

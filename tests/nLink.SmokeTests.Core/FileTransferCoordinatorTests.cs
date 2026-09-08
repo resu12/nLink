@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using NLink.Core.FileTransfer;
 
 namespace NLink.SmokeTests;
@@ -15046,8 +15047,26 @@ public sealed partial class FileTransferCoordinatorTests
     [Fact]
     public void FallbackTailUnblockRecheck_ExactRepairSuccessorCarriesHeldRequestOnce()
     {
+        var source = ActiveFallbackStateWithoutCheckpoint();
+        AssertFallbackTailUnblockRecheckExactRepairSuccessor(source);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertFallbackTailUnblockRecheckExactRepairSuccessor(
+        FileTransferCoordinatorState source)
+    {
+        source = source with
+        {
+            CurrentDataSessionIdentity = "fallback-retry-data-session",
+            CurrentDataSessionGeneration = Math.Max(1, source.CurrentDataSessionGeneration + 1),
+            PersistentState = source.PersistentState with
+            {
+                CoordinatorInstanceId = "fallback-successor-recheck-snapshot",
+            },
+        };
         var (pairedState, request, _) =
-            AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource(
+                source, preserveSnapshotStream: true);
         var predecessorDecision = FileTransferCoordinator.AuthorizeAction(
             pairedState,
             RecoveryActionRequest(
