@@ -793,6 +793,8 @@ public sealed partial class SessionFileTransferService :
         transport.FileTransferFallbackTailYieldProofReceived += OnFileTransferFallbackTailYieldProofReceived;
         if (transport is IRuntimeUnlockRetryDispatchAuthorityBridge retryDispatchBridge)
         {
+            retryDispatchBridge.RuntimeUnlockInitialActivationPreCommitProbeFailureObserved +=
+                OnRuntimeUnlockInitialActivationPreCommitProbeFailureObserved;
             retryDispatchBridge
                     .RuntimeUnlockPostFallbackPairedRetryOfferBindingRequested +=
                 OnRuntimeUnlockPostFallbackPairedRetryOfferBindingRequested;

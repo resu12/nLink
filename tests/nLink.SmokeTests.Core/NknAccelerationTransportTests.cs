@@ -18,7 +18,7 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("Area", "Core")]
-public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposable
+public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposable
 {
     public NknAccelerationTransportTests()
     {

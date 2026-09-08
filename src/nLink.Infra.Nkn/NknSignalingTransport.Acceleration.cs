@@ -9493,9 +9493,18 @@ public sealed partial class NknSignalingTransport
         FileTransferRoutePublicationAuthority sourcePublicationAuthority,
         out RuntimeUnlockRetryNegotiationSourceScope sourceScope,
         out TransportFileTransferDataSession? capturedDataSession)
+        => TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+            sourcePublicationAuthority, out sourceScope, out capturedDataSession, out _);
+
+    private bool TryCaptureRuntimeUnlockRetryNegotiationSourceScope(
+        FileTransferRoutePublicationAuthority sourcePublicationAuthority,
+        out RuntimeUnlockRetryNegotiationSourceScope sourceScope,
+        out TransportFileTransferDataSession? capturedDataSession,
+        out int checkpointGeneration)
     {
         sourceScope = default;
         capturedDataSession = null;
+        checkpointGeneration = 0;
         lock (gate)
         {
             var key = CreateFileTransferRouteHintKey(
@@ -9533,6 +9542,7 @@ public sealed partial class NknSignalingTransport
             }
 
             capturedDataSession = dataSession;
+            checkpointGeneration = routeHint.FallbackCheckpointGeneration;
             sourceScope = new RuntimeUnlockRetryNegotiationSourceScope(
                 sourcePublicationAuthority,
                 routeHint.FallbackTransportEpoch,
@@ -9943,8 +9953,12 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private bool FailRuntimeUnlockTunaPathProbeForSidecarDropIfActive(string? sessionId, string sidecarReason)
+    private bool FailRuntimeUnlockTunaPathProbeForSidecarDropIfActive(
+        string? sessionId,
+        string sidecarReason,
+        out RuntimeUnlockRouteCommitSnapshot? failedStartedProbe)
     {
+        failedStartedProbe = null;
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
         var normalizedSidecarReason = SanitizeLogToken(sidecarReason);
         RuntimeUnlockTransactionSnapshot? previous = null;
@@ -9962,6 +9976,9 @@ public sealed partial class NknSignalingTransport
             }
 
             previous = current;
+            var started = runtimeUnlockPreCommitProbeStartedSnapshot;
+            var exactStarted = started is not null &&
+                RuntimeUnlockInitialActivationFailureProbeMatchesTransactionUnsafe(started, failed: false);
             decision = ApplyRuntimeUnlockTransactionUnsafe(
                 RuntimeUnlockTransactionEventKind.PathProbeFailed,
                 current.SessionId,
@@ -9972,6 +9989,11 @@ public sealed partial class NknSignalingTransport
                 pathProbeTransport: current.PathProbeTransport == FileTransferTransportKind.Unknown
                     ? FileTransferTransportKind.Tuna
                     : current.PathProbeTransport);
+            if (exactStarted &&
+                RuntimeUnlockInitialActivationFailureProbeMatchesTransactionUnsafe(started!, failed: true))
+            {
+                failedStartedProbe = started;
+            }
         }
 
         if (previous is null || decision is null)
@@ -13162,6 +13184,11 @@ public sealed partial class NknSignalingTransport
             TryCaptureRuntimeUnlockPostFallbackPreCommitProbeFailure(
                 e.Reason,
                 out postFallbackProbeFailure);
+        RuntimeUnlockInitialActivationPreCommitProbeFailureObservation? initialProbeFailure = null;
+        if (!e.IsAvailable && !hasPostFallbackProbeFailure)
+        {
+            TryCaptureRuntimeUnlockInitialActivationPreCommitProbeFailure(e.Reason, out initialProbeFailure);
+        }
         var shouldRearmRuntimeUnlockListener = !hasPostFallbackProbeFailure &&
                                                !e.IsAvailable &&
                                                TryCaptureRuntimeUnlockListenerRearmAfterSidecarDrop(
@@ -13206,7 +13233,12 @@ public sealed partial class NknSignalingTransport
                 failTransaction: false);
             FailRuntimeUnlockTunaPathProbeForSidecarDropIfActive(
                 currentSessionSecurityState.SessionId?.Value,
-                resetReason);
+                resetReason,
+                out var failedStartedProbe);
+            if (initialProbeFailure is not null && failedStartedProbe == initialProbeFailure.Probe)
+            {
+                PublishRuntimeUnlockInitialActivationPreCommitProbeFailure(initialProbeFailure);
+            }
             if (postFallbackProbeFailure is not null)
             {
                 PublishRuntimeUnlockPostFallbackPreCommitProbeFailure(

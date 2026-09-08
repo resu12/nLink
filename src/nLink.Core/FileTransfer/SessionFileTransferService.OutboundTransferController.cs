@@ -1355,6 +1355,8 @@ public sealed partial class SessionFileTransferService
                 retryDispatchBridge
                         .RuntimeUnlockPostFallbackPreCommitProbeFailureObserved -=
                     OnRuntimeUnlockPostFallbackPreCommitProbeFailureObserved;
+                retryDispatchBridge.RuntimeUnlockInitialActivationPreCommitProbeFailureObserved -=
+                    OnRuntimeUnlockInitialActivationPreCommitProbeFailureObserved;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchInitialEvaluationRequested -=
                     OnRuntimeUnlockRetryDispatchInitialEvaluationRequested;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested -=
