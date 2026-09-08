@@ -22755,6 +22755,14 @@ public sealed partial class SessionFileTransferService :
             requestId,
             reason);
         MarkLiveRouteEpochRecoveredFromFallbackCheckpointIfCurrent(context, currentLeg);
+        // Refresh the capture scope from the adopted leg without issuing a new
+        // publication or admission. The paired-offer callback still validates it.
+        TryPublishRouteHintIfAuthorizedLocked(
+            context,
+            "fallback_checkpoint_accepted",
+            reason,
+            "fallback_checkpoint_accepted",
+            routePublicationToken: context.CurrentRoutePublicationToken);
         if (context.CoordinatorPersistentState.FallbackTailYield
                 .PendingPeerProofBeforeLocalYield is not null)
         {

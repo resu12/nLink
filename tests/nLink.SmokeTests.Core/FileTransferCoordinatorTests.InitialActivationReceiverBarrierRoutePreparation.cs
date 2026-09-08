@@ -17,7 +17,8 @@ public sealed partial class FileTransferCoordinatorTests
         => CreateReceiverBarrierRoutePreparationFixture(completeLifecycle: true);
 
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
-        CreateReceiverBarrierRoutePreparationFixture(bool completeLifecycle = false)
+        CreateReceiverBarrierRoutePreparationFixture(bool completeLifecycle = false,
+            Func<FileTransferCoordinatorState, Action<FileTransferCoordinatorTransitionEnvelope>, FileTransferCoordinatorState>? prepareSource = null)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
@@ -32,6 +33,13 @@ public sealed partial class FileTransferCoordinatorTests
         }
 
         var fixture = CreateReceiverBarrierFixture();
+        if (prepareSource is not null)
+        {
+            var state = prepareSource(fixture.State, Capture);
+            var source = FileTransferCoordinator.CreateInitialActivationReceiverBarrierSource(state, fixture.Source.DataSession);
+            Assert.NotNull(source);
+            fixture = (state, source!, fixture.Negotiation);
+        }
         // These are the retained transaction/offer and payer observations used by
         // the existing real pending-probe/initial-responder fixture below.
         var negotiation = fixture.Negotiation with

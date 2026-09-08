@@ -1152,6 +1152,38 @@ function Test-FileTransferCoordinatorReceiverBarrierMarker {
         [string]$Operation.operationRole -in $script:FileTransferCoordinatorReceiverBarrierCatalog.operationRoles
 }
 
+function Test-FileTransferCoordinatorReceiverBarrierSourceProjection {
+    param($Source, $Aggregate, [AllowEmptyCollection()][object[]]$RecoveryOperations = @(), [switch]$StructureOnly)
+
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Source) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $Aggregate)) { return $false }
+    if (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Source $Aggregate) { return $true }
+    if ($Source.route -cne 'regular_nkn_v4_fast' -or [int]$Source.protocolVersion -ne 4 -or
+        [long]$Source.bridgeRecoveryGeneration -ne 0 -or [long]$Aggregate.bridgeRecoveryGeneration -le 0) { return $false }
+
+    # The barrier owns the leg's bridge generation. The aggregate projects
+    # CurrentOperation.Authority.BridgeRecoveryDecision.BridgeDecisionGeneration.
+    # Only this directional projection may differ; no other scope field is optional.
+    $projected = $Source | Select-Object *
+    $projected.bridgeRecoveryGeneration = $Aggregate.bridgeRecoveryGeneration
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $projected $Aggregate)) { return $false }
+    # Parsing admits the shape provisionally. The validated history reducer
+    # below must establish its exact current recovery authority before acceptance.
+    if ($StructureOnly) { return $true }
+    $matches = @($RecoveryOperations | Where-Object {
+        $null -ne $_ -and $_.family -ceq 'receive_recovery' -and $_.operationRole -ceq 'operation_current' -and
+        $_.operationKind -ceq 'BridgeReceiveStallRecovery' -and $_.afterState -cne 'None' -and
+        $_.stateApplied -is [bool] -and $_.stateApplied -and $_.authorityId -cnotin @('', '(none)') -and
+        [long]$_.operationGeneration -gt 0 -and $null -ne $_.receiveRecovery -and
+        $_.receiveRecovery.role -ceq 'operation_current' -and
+        $_.receiveRecovery.recoveryKind -ceq 'BridgeReceiveStallRecovery' -and
+        [long]$_.receiveRecovery.bridgeDecisionGeneration -eq [long]$Aggregate.bridgeRecoveryGeneration -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $_.receiveRecovery.sourceBoundary $Source) -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $_.receiveRecovery.effectiveBoundary $Source)
+    })
+    return @($RecoveryOperations).Count -eq 1 -and $matches.Count -eq 1
+}
+
 function Test-FileTransferCoordinatorReceiverBarrierOperation {
     param($Envelope, $Operation, $Catalog)
     try {
@@ -1249,7 +1281,7 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
             $Envelope.aggregate.afterBoundary
         }
         if (-not $attempt -and $Operation.operationRole -ceq 'receiver_barrier_current' -and $Operation.afterState -cne 'None' -and
-            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $Envelope.aggregate.afterBoundary)) { return $false }
+            -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $payload.sourceBoundary $Envelope.aggregate.afterBoundary -StructureOnly)) { return $false }
         if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.effectiveBoundary $effective) -or
             $receipt.stage -cne $stage -or [string]::IsNullOrWhiteSpace($receipt.receiptReason) -or
             [long]$receipt.commandGeneration -ne [long]$Operation.operationGeneration -or
@@ -1268,14 +1300,15 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
 }
 
 function Test-FileTransferCoordinatorReceiverBarrierRoutePreparation {
-    param($Boundary, $Source)
+    param($Boundary, $Source, [AllowEmptyCollection()][object[]]$BeforeRecoveryOperations = @(),
+        [AllowEmptyCollection()][object[]]$AfterRecoveryOperations = @())
 
     if ($Boundary.decisionKind -cne 'PrepareFileTransferRouteTransition' -or
         $Boundary.decisionStatus -cne 'Prepared' -or
         [long]$Boundary.afterStateGeneration -ne ([long]$Boundary.beforeStateGeneration + 1L) -or
         $Boundary.beforeStateHash -ceq $Boundary.afterStateHash -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Source $Boundary.beforeBoundary) -or
-        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $Source $Boundary.afterBoundary)) { return $false }
+        -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $Source $Boundary.beforeBoundary $BeforeRecoveryOperations) -or
+        -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $Source $Boundary.afterBoundary $AfterRecoveryOperations)) { return $false }
 
     $current = @($Boundary.operations | Where-Object {
         $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'current' -and
@@ -1333,7 +1366,8 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
     foreach ($boundary in $Boundaries) {
         $streamKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)"
         if (-not $streams.ContainsKey($streamKey)) {
-            $streams[$streamKey] = @{ Current = $null; Known = @{}; LastGeneration = 0L; LastPause = 0L; Hash = $boundary.beforeStateHash }
+            $streams[$streamKey] = @{ Current = $null; Known = @{}; Recovery = @{}; RecoverySeen = @{};
+                RecoveryValid = $true; LastGeneration = 0L; LastPause = 0L; Hash = $boundary.beforeStateHash }
         }
         $stream = $streams[$streamKey]
         $operations = @($boundary.operations | Where-Object { Test-FileTransferCoordinatorReceiverBarrierMarker $_ })
@@ -1341,12 +1375,67 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
             if ($operations.Count -gt 0) { "snapshot_receiver_barrier_history_invalid:$($boundary.evidenceLineIndex)" }
             continue
         }
-        $stream.Hash = $boundary.afterStateHash
+        $beforeRecoveryOperations = @(if ($stream.RecoveryValid) { $stream.Recovery.Values })
+        $nextRecovery = $stream.Recovery.Clone()
+        $nextRecoverySeen = $stream.RecoverySeen.Clone()
+        $recoveryValid = $stream.RecoveryValid
+        $changedRecoveryKeys = @{}
+        foreach ($operation in $boundary.operations) {
+            if ($operation.family -cne 'receive_recovery' -or $operation.operationRole -cne 'operation_current') { continue }
+            if ($operation.stateApplied -isnot [bool]) { $recoveryValid = $false; continue }
+            if (-not $operation.stateApplied) { continue }
+            $recoveryKey = [string]$operation.operationKey
+            if ($changedRecoveryKeys.ContainsKey($recoveryKey)) { $recoveryValid = $false }
+            $changedRecoveryKeys[$recoveryKey] = $true
+            if ($operation.beforeState -ceq 'None') {
+                if ($operation.afterState -cne 'Issued:None' -or
+                    $boundary.decisionStatus -cnotin @('Accepted', 'Committed') -or
+                    $nextRecoverySeen.ContainsKey([string]$operation.authorityId)) { $recoveryValid = $false }
+                $nextRecoverySeen[[string]$operation.authorityId] = $true
+            }
+            elseif (-not $stream.Recovery.ContainsKey($recoveryKey)) { $recoveryValid = $false }
+            else {
+                $priorRecovery = $stream.Recovery[$recoveryKey]
+                if ($operation.beforeState -cne $priorRecovery.afterState -or
+                    [long]$operation.receiveRecovery.bridgeDecisionGeneration -ne [long]$priorRecovery.receiveRecovery.bridgeDecisionGeneration -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.receiveRecovery.sourceBoundary $priorRecovery.receiveRecovery.sourceBoundary) -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $operation.receiveRecovery.effectiveBoundary $priorRecovery.receiveRecovery.effectiveBoundary)) { $recoveryValid = $false }
+                foreach ($field in @('authorityId','operationGeneration','operationKind','predecessorAuthorityId',
+                        'commandIdentity','commandGeneration','commandFingerprint')) {
+                    if ([string]$operation.$field -cne [string]$priorRecovery.$field) { $recoveryValid = $false }
+                }
+            }
+            if ($operation.afterState -ceq 'None') { $nextRecovery.Remove($recoveryKey) }
+            else { $nextRecovery[$recoveryKey] = $operation }
+        }
+        if ($nextRecovery.Count -gt 1) { $recoveryValid = $false }
+        $afterRecoveryOperations = @(if ($recoveryValid) { $nextRecovery.Values })
         $priorCurrent = $stream.Current
+        $projectionInvalid = $false
+        foreach ($operation in @($operations) + @($priorCurrent)) {
+            if ($null -eq $operation) { continue }
+            $source = $operation.receiverBarrier.sourceBoundary
+            foreach ($side in @('before', 'after')) {
+                $scope = if ($side -ceq 'before') { $boundary.beforeBoundary } else { $boundary.afterBoundary }
+                $recovery = if ($side -ceq 'before') { $beforeRecoveryOperations } else { $afterRecoveryOperations }
+                if ((Test-FileTransferCoordinatorReceiverBarrierSourceProjection $source $scope -StructureOnly) -and
+                    -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $source $scope @($recovery))) {
+                    $projectionInvalid = $true
+                }
+            }
+        }
+        if ($projectionInvalid) {
+            'snapshot_receiver_barrier_history_invalid|receiver_barrier_leg_bridge_generation_compared_with_recovery_decision_generation:' + $boundary.evidenceLineIndex
+            continue
+        }
+        $stream.Hash = $boundary.afterStateHash
+        $stream.Recovery = $nextRecovery
+        $stream.RecoverySeen = $nextRecoverySeen
+        $stream.RecoveryValid = $recoveryValid
         $currentRemoval = @($operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_current' -and $_.afterState -ceq 'None' })
         $terminalEntry = @($operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_terminal' -and $_.beforeState -ceq 'None' })
         if ($null -ne $priorCurrent -and
-            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $priorCurrent.receiverBarrier.sourceBoundary $boundary.afterBoundary) -and
+            -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $priorCurrent.receiverBarrier.sourceBoundary $boundary.afterBoundary $afterRecoveryOperations) -and
             ($currentRemoval.Count -ne 1 -or $terminalEntry.Count -ne 1 -or $terminalEntry[0].afterState -cne 'Invalidated')) {
             "snapshot_receiver_barrier_source_replacement_without_invalidation:$($boundary.evidenceLineIndex)"
         }
@@ -1369,7 +1458,7 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                     $operation.afterState -cne 'Bound' -or $boundary.decisionKind -cne 'BindInitialActivationReceiverBarrier' -or
                     $boundary.decisionStatus -cne 'Accepted' -or [long]$operation.operationGeneration -ne ($stream.LastGeneration + 1L) -or
                     [long]$payload.pauseGeneration -le $stream.LastPause -or
-                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.beforeBoundary) -or
+                    -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $payload.sourceBoundary $boundary.beforeBoundary $beforeRecoveryOperations) -or
                     -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $boundary.beforeBoundary $boundary.afterBoundary)
                 if (-not $failure) { $stream.LastGeneration = [long]$operation.operationGeneration; $stream.LastPause = [long]$payload.pauseGeneration }
             }
@@ -1385,13 +1474,13 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                     if ($operation.afterState -ceq 'Closed') {
                         if ($prior.afterState -cne 'ClosePrepared' -or $boundary.decisionKind -cne 'CommitInitialActivationReceiverBarrierClose' -or
                             $boundary.decisionStatus -cne 'Accepted' -or $prior.commandFingerprint -cne $operation.commandFingerprint -or
-                            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.afterBoundary)) { $failure = $true }
+                            -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $payload.sourceBoundary $boundary.afterBoundary $afterRecoveryOperations)) { $failure = $true }
                     }
                     else {
                         $explicit = $boundary.decisionKind -ceq 'InvalidateInitialActivationReceiverBarrier' -and $boundary.decisionStatus -ceq 'Invalidated'
-                        $replacement = -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $boundary.afterBoundary)
+                        $replacement = -not (Test-FileTransferCoordinatorReceiverBarrierSourceProjection $payload.sourceBoundary $boundary.afterBoundary $afterRecoveryOperations)
                         $prepared = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_source_boundary_invalidated' -and
-                            (Test-FileTransferCoordinatorReceiverBarrierRoutePreparation $boundary $payload.sourceBoundary)
+                            (Test-FileTransferCoordinatorReceiverBarrierRoutePreparation $boundary $payload.sourceBoundary $beforeRecoveryOperations $afterRecoveryOperations)
                         $admissionReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_admission_replaced' -and
                             $payload.admissionFingerprint -cne '(none)' -and $payload.invalidatingAdmissionFingerprint -cne $payload.admissionFingerprint
                         $pauseReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_pause_replaced' -and
