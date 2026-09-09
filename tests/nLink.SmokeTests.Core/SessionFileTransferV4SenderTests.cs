@@ -26370,6 +26370,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockResponderPeerProbe")]
     public async Task RuntimeUnlockResponderPeerProbeAvailability_UsesLiveInboundFallbackContextWithoutSecondPhase2Release()
+        => await RunInboundResponderHandoffWithFallbackRepairAsync(stalledSuccessor: false);
+
+    private async Task RunInboundResponderHandoffWithFallbackRepairAsync(bool stalledSuccessor)
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -26377,7 +26380,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "transfer_runtime_unlock_responder_peer_probe_inbound_handoff";
         var sessionId = $"session_{transferId}";
         var context = CreatePostTunaFallbackV6InboundContext(transferId);
-        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 99);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", stalledSuccessor ? 255 : 99);
         var leg = Assert.IsType<FileTransferLeg>(
             GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         SeedPairedFallbackTailYieldForTest(context, leg);
@@ -26496,6 +26499,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             GetPrivateProperty<string>(context, "TransferId"));
         Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
 
+        var repairLineage = stalledSuccessor
+            ? await CreateStalledInboundRepairSuccessorForHandoffAsync(service, context)
+            : null;
+
         var availabilityHandler = serviceType.GetMethod(
             "HandleDataSessionAvailabilityChangedAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -26549,17 +26556,18 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             new System.Collections.BitArray(256));
         using var sparseWrite = new BlockingSparseWriteStream();
         var sparseChunkBytes = new byte[21 * 1024];
+        var sparseChunkIndex = stalledSuccessor ? 120 : 100;
         var sparseBatch = new FileTransferChunkBatchFrameV6
         {
             SessionId = sessionId,
             TransferId = transferId,
             TransportEpoch = leg.TransportEpochId,
-            StartChunkIndex = 100,
+            StartChunkIndex = sparseChunkIndex,
             ChunkCount = 1,
             DataSegments = [sparseChunkBytes],
         };
         IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> sparseChunks =
-            [(100, sparseChunkBytes)];
+            [(sparseChunkIndex, sparseChunkBytes)];
         var sparseWriteTask = Assert.IsAssignableFrom<Task>(serviceType
             .GetMethod(
                 "HandleInboundV6SparseChunkBatchAsync",
@@ -26579,7 +26587,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             GetPrivatePropertyValue(
                 context,
                 "ReceiverSparseChunksPendingWrite"));
-        Assert.Contains(100, pendingSparseWrites);
+        Assert.Contains(sparseChunkIndex, pendingSparseWrites);
         var logStart = GetOperationalLogLength();
         await Assert.IsAssignableFrom<Task>(availabilityHandler.Invoke(
             service,
@@ -26761,7 +26769,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             $"chunks={checkpoint.ChunkCount}; " +
             $"generation={checkpoint.CheckpointGeneration}");
         Assert.Equal(100, checkpoint.ContiguousCommittedChunkIndex);
-        Assert.Equal(99, checkpoint.DurableHighestChunkIndex);
+        Assert.Equal(stalledSuccessor ? 255 : 99, checkpoint.DurableHighestChunkIndex);
         Assert.False(
             heldRequest.ProofBoundary.IsDefault,
             $"proof boundary default: admission={heldAdmission.IsDefault}; " +
@@ -26880,7 +26888,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "decision_reason=paired_fallback_tail_yield_missing",
             log,
             StringComparison.Ordinal);
-
+        if (repairLineage is not null)
+        {
+            AssertStalledInboundRepairLineageRetiredByHandoff(context, repairLineage, persistent, log);
+        }
     }
 
     [Fact]

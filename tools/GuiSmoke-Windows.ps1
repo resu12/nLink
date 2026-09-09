@@ -5474,6 +5474,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         FallbackFrontierCheckpointAcceptanceRecheckMissing = $false
         CheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptance = $false
         FallbackFrontierStallGraceRecheckMissing = $false
+        FallbackFrontierStallDiagnostic = $null
         FallbackFrontierRecentProgressGraceRecheckMissing = $false
         PostTunaFallbackDuplicateStateReplayAmplification = $false
         PostTunaFallbackExactFrontierRepairPreemption = $false
@@ -15125,6 +15126,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $episodeResult = [pscustomobject]@{
                 Event = $candidate.Line; RawEvents = $candidate.RawEvents.ToArray()
                 Recovered = $false; Excluded = $false; RecoveryEvent = $null
+                UnresolvedDiagnostic = $null
             }
             $audit.Add($episodeResult)
             if ($null -eq (Get-Variable -Name currentSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
@@ -15625,10 +15627,27 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $episodeResult.Recovered = $recovered
             $episodeResult.RecoveryEvent = if ($null -ne $stallHandoffClosure) { $stallHandoffClosure } else { $recoveryEvent }
         }
+        foreach ($episodeResult in $audit) {
+            if (-not $episodeResult.Recovered -and -not $episodeResult.Excluded) {
+                $episodeResult.UnresolvedDiagnostic = Get-FileTransferStallGraceUnresolvedDiagnostic `
+                    -Index $currentSourceIndex `
+                    -Candidate ([pscustomobject]@{ Fields = $episodeResult.Event.Fields; Sequence = (Get-GuiStallSequence $episodeResult.Event) })
+            }
+        }
         [object[]]$first = @($unresolved | Sort-Object Sequence | Select-Object -First 1)
+        $firstUnresolvedDiagnostic = $null
+        if ($first.Count -eq 1) {
+            foreach ($episodeResult in $audit) {
+                if ([object]::ReferenceEquals($episodeResult.Event, $first[0].Line)) {
+                    $firstUnresolvedDiagnostic = $episodeResult.UnresolvedDiagnostic
+                    break
+                }
+            }
+        }
         $result = [pscustomobject]@{
             Unresolved = $first.Count -eq 1
             FirstSequence = if ($first.Count -eq 1) { [long]$first[0].Sequence } else { [long]::MaxValue }
+            FirstUnresolvedDiagnostic = $firstUnresolvedDiagnostic
             ParsedRecords = $visits
         }
         if ($IncludeEpisodeAudit) { $result | Add-Member -NotePropertyName EpisodeAudit -NotePropertyValue $audit.ToArray() }
@@ -23047,6 +23066,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -EvidenceLookupCount 0L `
             -ClassificationElapsedMilliseconds $classificationStopwatch.ElapsedMilliseconds
         $result.FallbackFrontierStallGraceRecheckMissing = $true
+        $result.FallbackFrontierStallDiagnostic = $fallbackFrontierStallGraceRecheckFastPath.FirstUnresolvedDiagnostic
         $result.FailureVariant =
             'settled_frontier_progress_successor_not_rechecked_after_stall_grace'
         return $result

@@ -6,7 +6,7 @@ function New-FileTransferStallGracePublishedSourceIndex {
     $timelines = @{}
     foreach ($key in $transfers.Keys) {
         if ($key -cin @('__conflicts', '__CheckpointRepairContinuitySnapshotEvidence',
-                '__CheckpointRepairContinuityDiagnostics')) { continue }
+                '__CheckpointRepairContinuityDiagnostics', '__StallGraceDiagnosticRouteIndex')) { continue }
         $timelines[$key] = @($transfers[$key] | Where-Object {
             [string]$_.Fields['event'] -in @('filetransfer_route_hint_authorized_publication_accepted',
                 'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered',
@@ -1143,7 +1143,8 @@ function Get-FileTransferStallGraceStaleHighestProgressClosure {
 # A dispatched wake can be fulfilled by independent committed traffic. This
 # closes only the stall obligation; it does not settle the repair authority.
 function Get-FileTransferStallGraceDispatchedProgressClosure {
-    param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode)
+    param([object[]]$Events, [Parameter(Mandatory = $true)]$Episode,
+        [switch]$DiagnosticDispatchEvidenceOnly)
 
     function Field($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
     function Number($Event, [string]$Name) {
@@ -1273,6 +1274,11 @@ function Get-FileTransferStallGraceDispatchedProgressClosure {
         $ticks = Number $event 'log_writer_attempt_utc_ticks'
         if ($ticks -lt $priorTicks) { return $null }
         $priorTicks = $ticks
+    }
+
+    if ($DiagnosticDispatchEvidenceOnly) {
+        return [pscustomobject]@{ Grant = $grant; Wake = $recheck; Events = @($scoped)
+            Conflicts = @($conflicts); ScopeFields = $completeScope; RepairFields = $repair }
     }
 
     $advances = @(Named 'filetransfer_v6_frontier_request_deferred' | Where-Object {
@@ -1445,6 +1451,290 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         if (-not $poisoned) { return $state }
     }
     return $null
+}
+
+# This describes an unresolved request; source supersession is not recovery.
+function Get-FileTransferStallGraceUnresolvedDiagnostic {
+    param([hashtable]$Index, $Candidate)
+    function F($Event, [string]$Name) { return [string]$Event.Fields[$Name] }
+    function N($Event, [string]$Name) {
+        $value = 0L
+        if (-not [long]::TryParse((F $Event $Name), [ref]$value)) { return -1L }
+        return $value
+    }
+    function P($Object, [string]$Name, $Default = $null) {
+        if ($null -eq $Object -or $null -eq $Object.PSObject.Properties[$Name]) { return $Default }
+        return $Object.$Name
+    }
+    function Equal($Left, $Right, [string[]]$Names) {
+        foreach ($name in $Names) {
+            if ([string]::IsNullOrWhiteSpace((F $Left $name)) -or (F $Left $name) -cne (F $Right $name)) { return $false }
+        }
+        return $true
+    }
+    function Project([string]$Raw) {
+        if ($Raw -cnotmatch '^fta2-filetransfer_route_transition-[0-9a-f]{24}$') { return '' }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Raw))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        return 'fte1-' + $hash.Substring(0, 24)
+    }
+    if ($null -eq $Index -or $null -eq $Candidate -or
+        (F $Candidate 'event') -cne 'filetransfer_v6_frontier_request_deferred' -or
+        (F $Candidate 'authority_effect') -cne 'none' -or (N $Candidate 'elapsed_ms') -ne 0 -or
+        (F $Candidate 'log_writer_sequence') -cnotmatch '^[1-9][0-9]*$') { return $null }
+    $key = '{0}|{1}|{2}' -f (F $Candidate 'log_writer_id'), (F $Candidate 'session_id'), (F $Candidate 'transfer_id')
+    if (-not $Index.ContainsKey($key) -or -not $Index.ContainsKey('__conflicts') -or
+        $Index['__conflicts'].ContainsKey("$(F $Candidate 'log_writer_id')|$(F $Candidate 'log_writer_sequence')")) { return $null }
+    $dispatch = Get-FileTransferStallGraceDispatchedProgressClosure -Events $Index[$key] `
+        -Episode ([pscustomobject]@{ Event = $Candidate }) -DiagnosticDispatchEvidenceOnly
+    if ($null -eq $dispatch) { return $null }
+    $grant = $dispatch.Grant; $wake = $dispatch.Wake; $events = @($dispatch.Events)
+    $scope = @($dispatch.ScopeFields); $repair = @($dispatch.RepairFields)
+    if ((F $grant 'authority_schema') -cne '2' -or
+        (F $grant 'authority_id') -cnotmatch '^fta2-repair_replay-[0-9a-f]{24}$' -or
+        (F $grant 'range_fingerprint') -cnotmatch '^frng-[0-9a-f]{24}$' -or
+        (N $grant 'requested_chunk_count') -le 0 -or (N $grant 'range_count') -le 0 -or
+        (F $grant 'repair_request_key') -cne "fallback-frontier:$(F $grant 'frontier_chunk_index'):$(F $grant 'requested_chunk_count'):$(F $grant 'range_fingerprint')") { return $null }
+    $settlements = @($events | Where-Object {
+        (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+        (F $_ 'authority_id') -ceq (F $grant 'authority_id')
+    })
+    if ($settlements.Count -ne 1) { return $null }
+    $settlement = $settlements[0]
+    if ([long]$settlement.Sequence -le [long]$wake.Sequence -or -not (Equal $settlement $grant ($repair + @('authority_schema'))) -or
+        (F $settlement 'settlement_outcome') -cne 'SettledStalled' -or (F $settlement 'dispatch_observed') -cne '1' -or
+        (F $settlement 'successor_authority_id') -cne '(none)' -or
+        (F $settlement 'protocol_repair_request_id') -cne (F $grant 'primary_protocol_repair_request_id') -or
+        (F $settlement 'request_correlation_id') -cne (F $grant 'primary_request_correlation_id') -or
+        (N $settlement 'log_writer_attempt_utc_ticks') -lt (N $wake 'log_writer_attempt_utc_ticks')) { return $null }
+    $scopeEvents = @('filetransfer_v6_frontier_request_deferred', 'filetransfer_v6_frontier_stall_grace_recheck_decided',
+        'filetransfer_fallback_frontier_repair_authority_granted', 'filetransfer_fallback_frontier_repair_contract_settled',
+        'filetransfer_fallback_frontier_repair_progress_observed', 'filetransfer_fallback_frontier_repair_dispatched',
+        'filetransfer_v6_frontier_request_sent', 'filetransfer_control_plane_delivery_observed',
+        'filetransfer_v6_receiver_state_sent', 'filetransfer_v6_sparse_write_committed',
+        'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered', 'filetransfer_route_hint_authorized_publication_accepted')
+    function Poisoned($End, $Commit = $null) {
+        foreach ($event in $events) {
+            if ([long]$event.Sequence -gt [long]$End.Sequence) { continue }
+            $writerKey = "$(F $event 'log_writer_id')|$(F $event 'log_writer_sequence')"
+            if ((F $event 'log_writer_sequence') -cnotmatch '^[1-9][0-9]*$' -or $Index['__conflicts'].ContainsKey($writerKey) -or
+                (F $event 'event') -cin @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
+                    'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_removed', 'filetransfer_data_session_recreated') -or
+                (F $event 'transfer_paused') -ceq '1') { return $true }
+            if ((F $event 'event') -ceq 'filetransfer_route_transition_committed') {
+                if ($null -eq $Commit -or [long]$event.Sequence -ne [long]$Commit.Sequence) { return $true }
+                continue
+            }
+            if ((F $event 'event') -cnotin $scopeEvents) { continue }
+            $targetProjection = $null -ne $Commit -and [long]$event.Sequence -gt [long]$Commit.Sequence -and
+                (F $event 'event') -cin @('filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered', 'filetransfer_route_hint_authorized_publication_accepted') -and
+                (F $event 'route_publication_action_kind') -ceq 'RouteCommitPublication'
+            if ($targetProjection) {
+                foreach ($name in @('route', 'protocol_version', 'live_route_epoch', 'runtime_generation', 'terminal_generation',
+                        'leg_generation', 'route_commit_generation', 'route_publication_generation')) {
+                    if ((F $event $name) -cne (F $Commit "target_$name")) { $targetProjection = $false; break }
+                }
+            }
+            if ($targetProjection) {
+                $targetScope = @{
+                    data_session_identity = F $Candidate 'data_session_identity'
+                    data_session_generation = F $Candidate 'data_session_generation'
+                    transport_epoch = $typed.targetBoundary.transportEpoch
+                    bridge_recovery_generation = $typed.targetBoundary.bridgeRecoveryGeneration
+                    bridge_decision_generation = F $Candidate 'bridge_decision_generation'
+                    checkpoint_request_id = $typed.targetBoundary.checkpointRequestId
+                    checkpoint_generation = $typed.targetBoundary.checkpointGeneration
+                }
+                foreach ($name in $targetScope.Keys) {
+                    if ($event.Fields.ContainsKey($name) -and (F $event $name) -cne [string]$targetScope[$name]) { return $true }
+                }
+                continue
+            }
+            foreach ($name in $scope) {
+                if ($event.Fields.ContainsKey($name) -and (F $event $name) -cne (F $Candidate $name)) { return $true }
+            }
+            if ((F $event 'event') -ceq 'filetransfer_v6_receiver_state_sent' -and
+                (N $event 'contiguous_committed_chunk_index') -ne (N $Candidate 'frontier_chunk_index')) { return $true }
+        }
+        return $false
+    }
+    if (Poisoned $settlement) { return $null }
+    $result = [pscustomobject][ordered]@{
+        Kind = 'DispatchedStalled'; WakeWriterSequence = N $wake 'log_writer_sequence'
+        RepairAuthorityId = F $grant 'authority_id'; RepairGeneration = N $grant 'repair_generation'
+        SettlementWriterSequence = N $settlement 'log_writer_sequence'; SourceDisposition = 'Unproven'
+        SupersedingTransitionId = '(none)'; SupersedingTransitionGeneration = 0L
+        RetirementWriterSequence = 0L; PublicationWriterSequence = 0L; ObligationDisposition = 'Unresolved'
+    }
+    # The shared snapshot was evaluated by the caller. Cache only its existing
+    # validated Family1 history; never reevaluate or reconstruct an authority.
+    if (-not $Index.ContainsKey('__StallGraceDiagnosticRouteIndex')) {
+        $cache = @{ Commits = @{}; Dispositions = @{}; BoundariesByWriter = @{} }
+        $Index['__StallGraceDiagnosticRouteIndex'] = $cache
+        $snapshot = if ($Index.ContainsKey('__CheckpointRepairContinuitySnapshotEvidence')) { $Index['__CheckpointRepairContinuitySnapshotEvidence'] } else { $null }
+        if ((P $snapshot 'Mode') -ceq 'SnapshotV1Authoritative' -and (P $snapshot 'ArtifactEvidenceVerdict') -ceq 'pass' -and
+            (P $snapshot 'StreamComplete') -eq $true -and 'route_transition' -cin @(P $snapshot 'AuthoritativeFamilies' @())) {
+            foreach ($boundary in @(P $snapshot 'Boundaries' @())) {
+                if ((P $boundary 'verdict') -cne 'pass') { continue }
+                $writer = [string](P $boundary 'writer' '')
+                if (-not $cache.BoundariesByWriter.ContainsKey($writer)) { $cache.BoundariesByWriter[$writer] = [Collections.Generic.List[object]]::new() }
+                $cache.BoundariesByWriter[$writer].Add($boundary)
+                $kind = P $boundary 'decisionKind'
+                if ($kind -cnotin @('CommitFileTransferRouteTransition', 'ApplyFileTransferRouteTransitionDispositionReceipt') -or
+                    (P $boundary 'decisionStatus') -cne 'Committed') { continue }
+                foreach ($operation in @(P $boundary 'operations' @())) {
+                    if ((P $operation 'family') -cne 'route_transition' -or (P $operation 'operationRole') -cne 'terminal' -or
+                        (P $operation 'afterState') -cne 'Committed' -or (P $operation 'receiptValidated') -ne $true -or
+                        (P $operation 'operationKind') -cne 'PostTunaFallbackV6ToTunaV4') { continue }
+                    $entryKey = "$writer|$(P $operation 'authorityId')|$(P $operation 'operationGeneration')"
+                    $map = if ($kind -ceq 'CommitFileTransferRouteTransition') { $cache.Commits } else { $cache.Dispositions }
+                    if (-not $map.ContainsKey($entryKey)) { $map[$entryKey] = [Collections.Generic.List[object]]::new() }
+                    $map[$entryKey].Add([pscustomobject]@{ Boundary = $boundary; Operation = $operation })
+                }
+            }
+        }
+    }
+    $cache = $Index['__StallGraceDiagnosticRouteIndex']
+    $closures = [Collections.Generic.List[object]]::new()
+    $commits = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_route_transition_committed' -and
+        [long]$_.Sequence -gt [long]$settlement.Sequence })
+    foreach ($commit in $commits) {
+        $projected = Project (F $commit 'authority_id'); $generation = N $commit 'transition_generation'
+        $entryKey = "$(F $commit 'log_writer_id')|$projected|$generation"
+        if ($projected -ceq '' -or $generation -le 0 -or -not $cache.Commits.ContainsKey($entryKey) -or
+            $cache.Commits[$entryKey].Count -ne 1 -or -not $cache.Dispositions.ContainsKey($entryKey) -or
+            $cache.Dispositions[$entryKey].Count -ne 1) { continue }
+        $entry = $cache.Commits[$entryKey][0]; $applied = $cache.Dispositions[$entryKey][0]
+        $boundary = $entry.Boundary; $typed = $entry.Operation.routeTransition
+        if ((F $commit 'authority_schema') -cne '2' -or (F $commit 'decision_status') -cne 'Committed' -or
+            (F $commit 'transition_kind') -cne 'PostTunaFallbackV6ToTunaV4' -or
+            (F $commit 'target_route') -cne 'file_tuna_v4' -or (F $commit 'target_protocol_version') -cne '4' -or
+            (F $commit 'target_transport') -cne 'tuna' -or (F $commit 'source_transport') -cne 'regular_nkn' -or
+            -not (Equal $commit $Candidate @('direction', 'checkpoint_request_id', 'checkpoint_generation', 'data_session_identity')) -or
+            (N $commit 'source_data_session_generation') -ne (N $Candidate 'data_session_generation') -or
+            (N $commit 'checkpoint_contiguous_frontier') -ne (N $Candidate 'frontier_chunk_index') -or
+            (N $commit 'checkpoint_durable_highest') -lt (N $Candidate 'highest_received_chunk_index') -or
+            (F $Candidate 'continuity_coordinator_id') -cnotmatch '^fte1-[0-9a-f]{24}$' -or
+            (F $Candidate 'continuity_coordinator_id') -cne [string]$boundary.coordinatorInstanceId -or
+            (F $grant 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id') -or
+            $boundary.coordinatorInstanceId -cne $applied.Boundary.coordinatorInstanceId -or
+            $boundary.sessionId -cne $applied.Boundary.sessionId -or $boundary.transferId -cne $applied.Boundary.transferId -or
+            $boundary.direction -cne 'inbound' -or $boundary.afterStateGeneration -ne ($boundary.beforeStateGeneration + 1) -or
+            $boundary.beforeStateHash -ceq $boundary.afterStateHash -or
+            $typed.dispositionKind -cne 'Committed' -or $typed.sourceTransport -cne 'RegularNkn' -or $typed.targetTransport -cne 'Tuna' -or
+            $entry.Operation.receiptStatus -cne 'Committed' -or $applied.Operation.receiptStatus -cne 'Applied' -or
+            @($typed.receipts | Where-Object { $_.stage -ceq 'commit' -and $_.receiptStatus -ceq 'Committed' -and $_.receiptValidated }).Count -ne 1 -or
+            @($applied.Operation.routeTransition.receipts | Where-Object { $_.stage -ceq 'disposition' -and $_.receiptStatus -ceq 'Applied' -and $_.receiptValidated }).Count -ne 1) { continue }
+        $mapping = [ordered]@{ route='route'; protocol_version='protocolVersion'; live_route_epoch='liveRouteEpoch'
+            runtime_generation='runtimeGeneration'; terminal_generation='terminalGeneration'; leg_generation='legGeneration'
+            route_commit_generation='routeCommitGeneration'; route_publication_generation='routePublicationGeneration'
+            transport_epoch='transportEpoch'; bridge_recovery_generation='bridgeRecoveryGeneration' }
+        $matches = $true
+        foreach ($name in $mapping.Keys) {
+            if ((F $commit "source_$name") -cne (F $Candidate $name) -or
+                (F $commit "source_$name") -cne [string]$typed.sourceBoundary.($mapping[$name])) { $matches = $false; break }
+        }
+        # The route payload retains a historical checkpoint and an unprojected
+        # target data identity. Neither is the current diagnostic checkpoint.
+        $targetNames = @('route', 'protocol_version', 'live_route_epoch', 'runtime_generation', 'terminal_generation',
+            'leg_generation', 'route_commit_generation', 'route_publication_generation', 'transport_epoch')
+        foreach ($name in $targetNames) {
+            if ((F $commit "target_$name") -cne [string]$typed.targetBoundary.($mapping[$name])) { $matches = $false; break }
+        }
+        foreach ($name in @('route', 'protocolVersion', 'liveRouteEpoch', 'runtimeGeneration', 'terminalGeneration',
+                'legGeneration', 'routeCommitGeneration', 'routePublicationGeneration', 'dataSessionGeneration')) {
+            if ([string]$typed.sourceBoundary.$name -cne [string]$boundary.beforeBoundary.$name -or
+                [string]$typed.targetBoundary.$name -cne [string]$boundary.afterBoundary.$name) { $matches = $false; break }
+        }
+        if (-not $matches -or $typed.sourceBoundary.dataSessionIdentity -cne $boundary.beforeBoundary.dataSessionIdentity -or
+            $boundary.beforeBoundary.dataSessionIdentity -cne $boundary.afterBoundary.dataSessionIdentity -or
+            $typed.sourceBoundary.dataSessionGeneration -ne (N $Candidate 'data_session_generation') -or
+            $boundary.beforeBoundary.dataSessionGeneration -ne $boundary.afterBoundary.dataSessionGeneration -or
+            $typed.durableCheckpointFingerprint -cne $applied.Operation.routeTransition.durableCheckpointFingerprint -or
+            $typed.proofBoundaryFingerprint -cne $applied.Operation.routeTransition.proofBoundaryFingerprint -or
+            [long]$boundary.writerSequence -ge (N $commit 'log_writer_sequence') -or
+            [long]$applied.Boundary.writerSequence -le [long]$boundary.writerSequence) { continue }
+        $retirements = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+            [long]$_.Sequence -gt [long]$settlement.Sequence -and [long]$_.Sequence -lt [long]$commit.Sequence -and
+            (F $_ 'settlement_outcome') -ceq 'StaleRejected' -and
+            (F $_ 'decision_reason') -ceq 'tuna_reactivation_replaced_fallback_owner' })
+        if ($retirements.Count -ne 1) { continue }
+        $retirement = $retirements[0]
+        $lastGrants = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+            (F $_ 'authority_id') -ceq (F $retirement 'authority_id') })
+        if ($lastGrants.Count -ne 1 -or -not (Equal $retirement $lastGrants[0] ($repair + @('authority_schema'))) -or
+            -not (Equal $retirement $grant @($scope | Where-Object { $_ -cnotin @('checkpoint_generation', 'data_session_identity', 'data_session_generation') })) -or
+            (F $retirement 'dispatch_observed') -cne '1' -or (F $retirement 'successor_authority_id') -cne '(none)' -or
+            (F $retirement 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id') -or
+            (F $lastGrants[0] 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id') -or
+            (F $retirement 'frontier_chunk_index') -cne (F $grant 'frontier_chunk_index') -or
+            (F $retirement 'protocol_repair_request_id') -cne (F $retirement 'primary_protocol_repair_request_id') -or
+            (F $retirement 'request_correlation_id') -cne (F $retirement 'primary_request_correlation_id') -or
+            [long]$lastGrants[0].Sequence -le [long]$settlement.Sequence -or [long]$lastGrants[0].Sequence -ge [long]$retirement.Sequence -or
+            (N $retirement 'repair_generation') -le (N $grant 'repair_generation') -or
+            @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+                (F $_ 'authority_id') -ceq (F $retirement 'authority_id') }).Count -ne 1 -or
+            @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+                [long]$_.Sequence -gt [long]$lastGrants[0].Sequence -and [long]$_.Sequence -lt [long]$retirement.Sequence }).Count -ne 0) { continue }
+        $dispositions = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_route_transition_disposition_applied' -and
+            (F $_ 'authority_schema') -ceq '2' -and (F $_ 'authority_id') -ceq (F $commit 'authority_id') })
+        $publications = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_live_route_epoch_recovered' -and
+            (F $_ 'transition_generation') -ceq (F $commit 'transition_generation') })
+        if ($dispositions.Count -ne 1 -or $publications.Count -ne 1) { continue }
+        $disposition = $dispositions[0]; $publication = $publications[0]
+        if ([long]$disposition.Sequence -le [long]$commit.Sequence -or [long]$publication.Sequence -le [long]$disposition.Sequence -or
+            [long]$applied.Boundary.writerSequence -ge (N $disposition 'log_writer_sequence') -or
+            (F $disposition 'decision_status') -cne 'Applied' -or (F $disposition 'decision_reason') -cne 'filetransfer_route_transition_committed' -or
+            -not (Equal $disposition $commit @('transition_generation', 'transition_kind', 'checkpoint_request_id', 'checkpoint_generation', 'data_session_identity')) -or
+            (F $publication 'projection_source') -cne 'coordinator_route_transition' -or
+            (F $publication 'reason') -cne 'filetransfer_route_transition_committed' -or
+            (F $publication 'route_publication_action_kind') -cne 'RouteCommitPublication') { continue }
+        foreach ($name in $mapping.Keys) {
+            if ((F $disposition "source_$name") -cne (F $commit "source_$name")) { $matches = $false; break }
+        }
+        foreach ($name in @('target_route', 'target_protocol_version', 'target_transport', 'source_data_session_generation')) {
+            if ((F $disposition $name) -cne (F $commit $name)) { $matches = $false; break }
+        }
+        foreach ($name in @('live_route_epoch', 'runtime_generation', 'terminal_generation', 'leg_generation', 'route_commit_generation', 'route_publication_generation')) {
+            if ((F $disposition "resulting_$name") -cne (F $commit "target_$name") -or
+                (F $publication $name) -cne (F $commit "target_$name")) { $matches = $false; break }
+        }
+        foreach ($name in @('route', 'protocol_version')) {
+            if ((F $publication $name) -cne (F $commit "target_$name")) { $matches = $false; break }
+        }
+        if (-not $matches -or (Poisoned $publication $commit)) { continue }
+        foreach ($prior in $cache.BoundariesByWriter[[string]$boundary.writer]) {
+            if ($prior.coordinatorInstanceId -cne $boundary.coordinatorInstanceId -or
+                [long]$prior.writerSequence -le (N $Candidate 'log_writer_sequence') -or [long]$prior.writerSequence -ge [long]$boundary.writerSequence) { continue }
+            foreach ($name in @('route', 'protocolVersion', 'liveRouteEpoch', 'runtimeGeneration', 'terminalGeneration',
+                    'legGeneration', 'routeCommitGeneration', 'routePublicationGeneration', 'dataSessionIdentity', 'dataSessionGeneration')) {
+                if ([string]$prior.beforeBoundary.$name -cne [string]$boundary.beforeBoundary.$name -or
+                    [string]$prior.afterBoundary.$name -cne [string]$boundary.beforeBoundary.$name) { $matches = $false; break }
+            }
+            foreach ($operation in $prior.operations) {
+                if (-not $operation.stateApplied -or $operation.beforeState -ceq $operation.afterState) { continue }
+                if (($operation.family -ceq 'route_runtime' -and $operation.operationRole -cin @(
+                            'runtime_owner', 'route_commit', 'route_publication', 'checkpoint_acceptance_retained')) -or
+                    ($operation.family -ceq 'route_transition' -and
+                        ($operation.afterState -cin @('Invalidated', 'Failed', 'Cancelled', 'Superseded') -or
+                            ($operation.operationRole -ceq 'current' -and $operation.authorityId -cne $projected)))) {
+                    $matches = $false; break
+                }
+            }
+            if (-not $matches) { break }
+        }
+        # TransitionId names the snapshot commit boundary. Generation belongs
+        # to its route authority; that authority's projected id is join-only.
+        if ($matches) { $closures.Add([pscustomobject]@{ Id=$boundary.boundaryId; Generation=$generation; Retirement=$retirement; Publication=$publication }) }
+    }
+    if ($closures.Count -eq 1) {
+        $result.Kind = 'SourceSuperseded'; $result.SourceDisposition = 'Superseded'
+        $result.SupersedingTransitionId = $closures[0].Id; $result.SupersedingTransitionGeneration = $closures[0].Generation
+        $result.RetirementWriterSequence = N $closures[0].Retirement 'log_writer_sequence'
+        $result.PublicationWriterSequence = N $closures[0].Publication 'log_writer_sequence'
+    }
+    return $result
 }
 
 # This closes a fulfilled wake/request obligation, not an absent wake or a repair

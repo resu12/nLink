@@ -60515,6 +60515,11 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         if (-not $recovered) { $unresolvedRecords.Add($record) | Out-Null }
     }
 
+    foreach ($record in $unresolvedRecords) {
+        $record | Add-Member -NotePropertyName UnresolvedDiagnostic -NotePropertyValue (
+            Get-FileTransferStallGraceUnresolvedDiagnostic -Index $currentSourceIndex -Candidate $record.Event)
+    }
+
     return [pscustomobject]@{
         RawCount = $rawCount
         DistinctCount = $records.Count
@@ -71381,6 +71386,7 @@ function Get-FileTransferRecoveryFailureClassification {
     }
 
     $failureVariant = '(none)'
+    $fallbackFrontierStallDiagnostic = $null
     if ($null -ne $firstProofChainFailure -and
         [string]$firstProofChainFailure.Class -eq
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' -and
@@ -71495,6 +71501,9 @@ function Get-FileTransferRecoveryFailureClassification {
         )
         if ($matchingVariantRecord.Count -eq 1) {
             $failureVariant = [string]$matchingVariantRecord[0].Variant
+            if ($null -ne $matchingVariantRecord[0].PSObject.Properties['UnresolvedDiagnostic']) {
+                $fallbackFrontierStallDiagnostic = $matchingVariantRecord[0].UnresolvedDiagnostic
+            }
         }
     }
     elseif ($null -ne $firstProofChainFailure -and
@@ -71561,6 +71570,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $classification = [pscustomobject]@{
         Class = $class
         FailureVariant = $failureVariant
+        FallbackFrontierStallDiagnostic = $fallbackFrontierStallDiagnostic
         FirstProofChainFailureClass = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Class } else { '(none)' }
         FirstProofChainFailureEvent = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Event } else { '(none)' }
         FirstProofChainFailureReason = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Reason } else { '(none)' }
@@ -72725,6 +72735,9 @@ function New-FileTransferInvariantLedgerObject {
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
         failure_variant = $recoveryClassification.FailureVariant
+        fallback_frontier_stall_diagnostic = if ($null -ne $recoveryClassification.PSObject.Properties['FallbackFrontierStallDiagnostic']) {
+            ConvertTo-Json -InputObject $recoveryClassification.FallbackFrontierStallDiagnostic -Depth 4 -Compress
+        } else { 'null' }
         runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingRawCount
         runtime_unlock_retry_regular_v4_recovery_settlement_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingDistinctCount
         runtime_unlock_retry_regular_v4_recovery_settlement_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingRecoveredCount
@@ -74101,6 +74114,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("late_frame_classification={0}" -f $invariantLedger.late_frame_classification),
         ("recovery_failure_class={0}" -f $recoveryClassification.Class),
         ("failure_variant={0}" -f $recoveryClassification.FailureVariant),
+        ("fallback_frontier_stall_diagnostic={0}" -f $(if ($null -ne $recoveryClassification.PSObject.Properties['FallbackFrontierStallDiagnostic']) {
+            ConvertTo-Json -InputObject $recoveryClassification.FallbackFrontierStallDiagnostic -Depth 4 -Compress
+        } else { 'null' })),
         ("first_proof_chain_failure_class={0}" -f $recoveryClassification.FirstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $recoveryClassification.FirstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $recoveryClassification.FirstProofChainFailureReason),
