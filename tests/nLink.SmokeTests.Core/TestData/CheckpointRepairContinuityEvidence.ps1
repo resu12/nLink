@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$InputPath, [switch]$CommittedRetirement)
+param([string]$RepoRoot, [string]$InputPath, [switch]$CommittedRetirement, [switch]$DelayedDisposition)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
@@ -301,11 +301,17 @@ if ($CommittedRetirement) {
     return
 }
 $hold = One $captured 'filetransfer_v6_frontier_request_deferred'
-$grant = One $captured 'filetransfer_fallback_frontier_repair_authority_granted'
-$published = One $captured 'filetransfer_route_hint_authorized_publication_accepted'
-$requestSent = One $captured 'filetransfer_v6_frontier_request_sent'
-$forced = One $captured 'filetransfer_v6_fallback_frontier_repair_progress_state_forced'
-$receiverState = One $captured 'filetransfer_v6_receiver_state_sent'
+$recoveryCaptured = if ($DelayedDisposition) { @($captured | Where-Object { -not [string]::IsNullOrWhiteSpace((Field $_ 'continuity_receipt_id')) }) } else { $captured }
+$grant = One $recoveryCaptured 'filetransfer_fallback_frontier_repair_authority_granted'
+$publicationCaptured = if ($DelayedDisposition) { @($captured | Where-Object {
+    (Field $_ 'route_publication_generation') -ceq (Field $hold 'route_publication_generation') -and
+    (Field $_ 'runtime_generation') -ceq (Field $hold 'runtime_generation') -and
+    (Field $_ 'route') -ceq (Field $hold 'route')
+}) } else { $captured }
+$published = One $publicationCaptured 'filetransfer_route_hint_authorized_publication_accepted'
+$requestSent = One $recoveryCaptured 'filetransfer_v6_frontier_request_sent'
+$forced = One $recoveryCaptured 'filetransfer_v6_fallback_frontier_repair_progress_state_forced'
+$receiverState = One $recoveryCaptured 'filetransfer_v6_receiver_state_sent'
 $admissionDenied = @($captured | Where-Object {
     (Name $_) -ceq 'filetransfer_runtime_unlock_admission_denied' -and
     (Field $_ 'session_id') -ceq (Field $hold 'session_id') -and
@@ -313,7 +319,7 @@ $admissionDenied = @($captured | Where-Object {
     [long](Field $_ 'log_writer_sequence') -gt [long](Field $hold 'log_writer_sequence') -and
     [long](Field $_ 'log_writer_sequence') -lt [long](Field $receiverState 'log_writer_sequence')
 })
-if ($admissionDenied.Count -eq 0) { throw 'Fixture lost the real intervening admission-denied diagnostic' }
+if (-not $DelayedDisposition -and $admissionDenied.Count -eq 0) { throw 'Fixture lost the real intervening admission-denied diagnostic' }
 $streamStarted = One $captured 'filetransfer_coordinator_snapshot_stream_started'
 $streamCompleted = One $captured 'filetransfer_coordinator_snapshot_stream_completed'
 if ([array]::IndexOf($captured, $streamStarted) -ge [array]::IndexOf($captured, $streamCompleted) -or
@@ -330,6 +336,77 @@ $operation = @($attempt.aggregate.operations | Where-Object { $_.operationRole -
 if ($operation.stateApplied -or $attempt.aggregate.beforeStateGeneration -ne $attempt.aggregate.afterStateGeneration -or
     $attempt.aggregate.beforeStateFingerprint -cne $attempt.aggregate.afterStateFingerprint) { throw 'Read-only validation changed runtime state' }
 
+$dispositionMutations = [ordered]@{}
+$delayedOutputs = [Collections.Generic.List[object]]::new()
+if ($DelayedDisposition) {
+    $disposition = One @($captured | Where-Object {
+        (Field $_ 'authority_schema') -ceq '2' -and (Field $_ 'proof_boundary_kind') -ceq 'fallback_peer_proof'
+    }) 'filetransfer_route_transition_disposition_applied'
+    if ([long](Field $disposition 'log_writer_sequence') -le [long](Field $hold 'log_writer_sequence') -or
+        [long](Field $disposition 'log_writer_sequence') -ge [long](Field $grant 'log_writer_sequence') -or
+        (Field $disposition 'data_session_identity') -cne '(none)' -or
+        (Field $disposition 'checkpoint_request_id') -cne '(none)' -or
+        (Field $disposition 'decision_status') -cne 'Applied' -or
+        (Field $disposition 'transition_kind') -cne 'TunaV4ToPostTunaFallbackV6') {
+        throw 'Fixture did not preserve the real delayed fallback-disposition activation metadata collision'
+    }
+    $dispositionMutations = [ordered]@{
+        disposition_authority = @{ authority_id='fta2-filetransfer_route_transition-forged' }
+        disposition_generation = @{ transition_generation='999' }
+        disposition_kind = @{ transition_kind='PostTunaFallbackV6ToTunaV4' }
+        disposition_proof = @{ proof_boundary_kind='tuna_activation' }
+        disposition_status = @{ decision_status='Rejected' }
+        disposition_reason = @{ decision_reason='not_the_route_commit_reason' }
+        disposition_target_route = @{ target_route='file_tuna_v4' }
+        disposition_target_protocol = @{ target_protocol_version='4' }
+        disposition_target_transport = @{ target_transport='tuna' }
+        disposition_transport_epoch = @{ target_transport_epoch='999' }
+        disposition_result_epoch = @{ resulting_live_route_epoch='999' }
+        disposition_result_runtime = @{ resulting_runtime_generation='999' }
+        disposition_result_terminal = @{ resulting_terminal_generation='999' }
+        disposition_result_leg = @{ resulting_leg_generation='999' }
+        disposition_result_commit = @{ resulting_route_commit_generation='999' }
+        disposition_result_publication = @{ resulting_route_publication_generation='999' }
+        disposition_source_data_generation = @{ source_data_session_generation='999' }
+        disposition_activation_mode = @{ activation_authority_mode='responder' }
+        disposition_activation_generation = @{ offer_generation='1' }
+        disposition_activation_identity = @{ data_session_identity='forged-activation-data-session' }
+        disposition_activation_checkpoint = @{ checkpoint_request_id='forged-activation-checkpoint' }
+        disposition_explicit_current_scope = @{ runtime_generation='999' }
+    }
+    $dispositionAuthority = 'fte1-' + (Get-FileTransferCoordinatorSnapshotSha256 -Bytes (
+        [Text.Encoding]::UTF8.GetBytes((Field $disposition 'authority_id')))).Substring(0,24)
+    $dispositionSnapshots = @($captured | Where-Object {
+        if ((Name $_) -cne 'filetransfer_coordinator_transition_snapshot') { return $false }
+        $value = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Field $_ 'snapshot_payload')).Value
+        return $value.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and
+            @($value.aggregate.operations | Where-Object {
+                $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'inbound' -and $_.authorityId -ceq $dispositionAuthority
+            }).Count -eq 1
+    })
+    if ($dispositionSnapshots.Count -ne 1) { throw 'Missing exact normal Family1 disposition receipt subject' }
+    $dispositionSnapshotLine = $dispositionSnapshots[0]
+    $originSnapshots = @($captured | Where-Object {
+        if ((Name $_) -cne 'filetransfer_coordinator_transition_snapshot') { return $false }
+        $value = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Field $_ 'snapshot_payload')).Value
+        return $value.decisionKind -ceq 'FallbackCheckpointAccepted' -and
+            [long]$value.aggregate.afterStateGeneration -eq [long]$operation.checkpointRepairContinuity.acceptedStateGeneration
+    })
+    if ($originSnapshots.Count -ne 1) { throw 'Missing exact checkpoint acceptance snapshot' }
+    $originSnapshotLine = $originSnapshots[0]
+    $originValue = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Field $originSnapshotLine 'snapshot_payload')).Value
+    if (@($originValue.aggregate.operations | Where-Object {
+        $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' -and $_.authorityId -ceq $dispositionAuthority
+    }).Count -ne 1) { throw 'Checkpoint origin does not carry the exact fallback terminal subject' }
+    $dispositionEffects = @($captured | Where-Object {
+        (Name $_) -ceq 'filetransfer_coordinator_authority_effect' -and
+        (Field $_ 'operation_authority_id') -ceq $dispositionAuthority -and
+        (Field $_ 'effect_kind') -ceq 'route_transition_disposition_applied'
+    })
+    if ($dispositionEffects.Count -ne 1) { throw 'Missing exact normal Family1 disposition effect' }
+    $dispositionEffectLine = $dispositionEffects[0]
+}
+
 $copiedStampMutations = [ordered]@{
     copied_stamp_authority = @{ authority_id = 'forged-authority' }
     copied_stamp_predecessor = @{ predecessor_authority_id = 'forged-predecessor' }
@@ -342,12 +419,39 @@ $copiedStampMutations = [ordered]@{
     copied_stamp_data_session = @{ data_session_identity = 'forged-data-session' }
     copied_stamp_data_generation = @{ data_session_generation = '99' }
 }
-foreach ($case in @('exact','exact_duplicate','missing_source_stamp','missing_repair_stamp','wrong_source_stamp','wrong_receipt_stamp',
+$cases = if ($DelayedDisposition) {
+    @('exact','exact_duplicate','unstamped_alias','disposition_duplicate','disposition_conflict','disposition_typed_receipt',
+        'origin_terminal_missing','missing_disposition_effect',
+        'missing_source_stamp','missing_repair_stamp','wrong_receipt_stamp','wrong_data_session',
+        'missing_forced_state','missing_send','source_aba','current_data_session_removed','current_pause') + @($dispositionMutations.Keys)
+} else { @('exact','exact_duplicate','missing_source_stamp','missing_repair_stamp','wrong_source_stamp','wrong_receipt_stamp',
     'wrong_request_stamp','wrong_data_session','missing_forced_state','missing_send','old_base_profile','old_receiver_profile',
-    'unknown_profile','forged_effect','source_aba') + @($copiedStampMutations.Keys)) {
+    'unknown_profile','forged_effect','source_aba') + @($copiedStampMutations.Keys) }
+foreach ($case in $cases) {
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($original in $captured) {
         $line = $original
+        if ($case -ceq 'missing_disposition_effect' -and $original -ceq $dispositionEffectLine) { continue }
+        if ($DelayedDisposition -and $dispositionMutations.Contains($case) -and $original -ceq $disposition) {
+            foreach ($field in $dispositionMutations[$case].Keys) { $line = Set-Field $line $field $dispositionMutations[$case][$field] }
+        }
+        if (($case -ceq 'disposition_typed_receipt' -and $original -ceq $dispositionSnapshotLine) -or
+            ($case -ceq 'origin_terminal_missing' -and $original -ceq $originSnapshotLine)) {
+            $value = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Field $line 'snapshot_payload')).Value
+            if ($case -ceq 'origin_terminal_missing') {
+                $value.aggregate.operations = @($value.aggregate.operations | Where-Object {
+                    -not ($_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' -and $_.authorityId -ceq $dispositionAuthority)
+                })
+            } else {
+                $subject = @($value.aggregate.operations | Where-Object {
+                    $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'inbound' -and $_.authorityId -ceq $dispositionAuthority
+                })[0]
+                $subject.receiptFingerprint = 'fte1-' + ('f' * 24)
+            }
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $value -Depth 64 -Compress))
+            $line = Set-Field $line 'snapshot_sha256' (Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes)
+            $line = Set-Field $line 'snapshot_payload' ([Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_'))
+        }
         if ($case -ceq 'missing_source_stamp' -and $original -ceq $hold) { $line = [regex]::Replace($line, '; continuity_source_fingerprint=[^;]+', '') }
         if ($case -ceq 'missing_repair_stamp' -and $original -ceq $grant) { $line = [regex]::Replace($line, '; continuity_receipt_id=[^;]+', '') }
         if ($case -ceq 'wrong_source_stamp' -and $original -ceq $hold) { $line = Set-Field $line 'continuity_source_fingerprint' ('fte1-' + ('a' * 24)) }
@@ -372,6 +476,27 @@ foreach ($case in @('exact','exact_duplicate','missing_source_stamp','missing_re
         }
         $lines.Add($line)
         if ($case -ceq 'exact_duplicate' -and $original -ceq $grant) { $lines.Add($line) }
+        if ($case -ceq 'unstamped_alias' -and $original -ceq $requestSent) {
+            # Diagnostic noise only: keep the genuine primary authority tuple,
+            # but give this unstamped wire alias no continuity receipt authority.
+            $alias = [regex]::Replace($line, '; continuity_[^=;]+=[^;]*', '')
+            foreach ($field in @('repair_request_id','protocol_repair_request_id')) {
+                $alias = Set-Field $alias $field ((Field $requestSent 'repair_request_id') + ':alias')
+            }
+            $alias = Set-Field $alias 'request_correlation_id' ((Field $requestSent 'request_correlation_id') + '-alias')
+            $alias = Set-Field $alias 'log_writer_attempt_utc_ticks' ([string]([long](Field $requestSent 'log_writer_attempt_utc_ticks') + 1))
+            $lines.Add($alias)
+        }
+        if ($case -ceq 'disposition_duplicate' -and $original -ceq $disposition) { $lines.Add($line) }
+        if ($case -ceq 'disposition_conflict' -and $original -ceq $disposition) {
+            $lines.Add((Set-Field $line 'resulting_runtime_generation' '999'))
+        }
+        if ($case -cin @('current_data_session_removed','current_pause') -and $original -ceq $grant) {
+            $poison = Set-Field $hold 'event' $(if ($case -ceq 'current_pause') { 'filetransfer_v6_receiver_state_sent' } else { 'filetransfer_data_session_removed' })
+            $poison = Set-Field $poison 'log_writer_attempt_utc_ticks' ([string]([long](Field $grant 'log_writer_attempt_utc_ticks') + 1))
+            if ($case -ceq 'current_pause') { $poison = Set-Field $poison 'transfer_paused' '1' }
+            $lines.Add($poison)
+        }
         if ($case -ceq 'source_aba' -and $original -ceq $grant) {
             $sequence = [long](Field $grant 'log_writer_sequence')
             $replacement = Set-Field $published 'route_publication_generation' ([string]([long](Field $published 'route_publication_generation') + 1))
@@ -396,7 +521,7 @@ foreach ($case in @('exact','exact_duplicate','missing_source_stamp','missing_re
     }
     $fullLines = @(for ($i=0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
-        if ($case -ceq 'source_aba') { $line = Set-Field $line 'log_writer_sequence' ([string]($i+1)) }
+        if ($case -cin @('source_aba','unstamped_alias','current_data_session_removed','current_pause')) { $line = Set-Field $line 'log_writer_sequence' ([string]($i+1)) }
         $line + "; gui_evidence_sequence=$($i+1)"
     })
     $names = @(Get-FileTransferFallbackFrontierGraceCorrelationEventNames) + @($catalog.SnapshotAuthorityV1) + @($catalog.GenerationStampedEffects)
@@ -412,17 +537,35 @@ foreach ($case in @('exact','exact_duplicate','missing_source_stamp','missing_re
         (ConvertTo-Json -InputObject @($compactSnapshots.Boundaries) -Depth 64 -Compress)) {
         throw "$case full/compact snapshot boundary JSON/hash differs"
     }
-    $snapshotExpected = if ($case -cin @('old_base_profile','old_receiver_profile','unknown_profile','forged_effect')) { 'fail' } else { 'pass' }
+    $snapshotExpected = if ($case -cin @('old_base_profile','old_receiver_profile','unknown_profile','forged_effect','disposition_typed_receipt')) { 'fail' } else { 'pass' }
     foreach ($snapshot in @($fullSnapshots,$compactSnapshots)) {
         if ($snapshot.ArtifactEvidenceVerdict -cne $snapshotExpected) {
             throw "$case snapshot expected $snapshotExpected, got $($snapshot.ArtifactEvidenceVerdict): $($snapshot.ArtifactEvidenceFailureReason)"
+        }
+    }
+    if ($DelayedDisposition -and $case -ceq 'exact') {
+        foreach ($snapshot in @($fullSnapshots,$compactSnapshots)) {
+            if (@($snapshot.Boundaries | Where-Object {
+                $_.verdict -ceq 'fail' -and @($_.operations | Where-Object {
+                    $_.family -ceq 'route_transition' -and $_.authorityId -ceq $dispositionAuthority
+                }).Count -gt 0
+            }).Count -ne 0) { throw 'Exact fixture already has a failed Family1 boundary for its fallback disposition authority' }
+        }
+    }
+    if ($case -ceq 'missing_disposition_effect') {
+        foreach ($snapshot in @($fullSnapshots,$compactSnapshots)) {
+            $unresolvedRoute = @($snapshot.Boundaries | Where-Object {
+                $_.verdict -ceq 'fail' -and $_.taxonomyClass -ceq 'filetransfer_route_transition_incomplete' -and
+                @($_.operations | Where-Object { $_.authorityId -ceq $dispositionAuthority }).Count -gt 0
+            })
+            if ($unresolvedRoute.Count -eq 0) { throw 'Missing disposition effect lost its independent Family1 route failure' }
         }
     }
     $full = Retained $fullLines 'generated-full.log' $fullSnapshots
     $compact = Retained $compactLines 'regenerated-compact.log' $compactSnapshots
     $guiFull = Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $fullLines -IncludeEpisodeAudit -SnapshotEvidence $fullSnapshots
     $guiCompact = Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $compactLines -IncludeEpisodeAudit -SnapshotEvidence $compactSnapshots
-    $recovered = $case -cin @('exact','exact_duplicate')
+    $recovered = $case -cin @('exact','exact_duplicate','unstamped_alias','disposition_duplicate','missing_disposition_effect')
     $expected = if ($recovered) { '1/1/1/0' } else { '1/1/0/1' }
     foreach ($result in @($full,$compact)) {
         if ((Quartet $result) -cne $expected) { throw "$case expected $expected, got $(Quartet $result)" }
@@ -460,6 +603,38 @@ foreach ($case in @('exact','exact_duplicate','missing_source_stamp','missing_re
             throw "$case normalized metadata JSON/hash differs"
         }
     }
+    if ($DelayedDisposition -and $case -ceq 'exact') {
+        $events = @(Parse $fullLines 'partition-control.log')
+        $index = New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $events -SnapshotEvidence $fullSnapshots
+        $owned = [Collections.Generic.HashSet[object]]::new()
+        $actualHold = @($events | Where-Object { $_.EventName -ceq 'filetransfer_v6_frontier_request_deferred' })
+        if ($actualHold.Count -ne 1) { throw 'Partition control must own only the genuine single hold' }
+        [void]$owned.Add($actualHold[0])
+        $transferKey = Get-FileTransferFallbackFrontierGraceTransferKey -Event $actualHold[0]
+        $frontier = [long](Field $hold 'frontier_chunk_index')
+        $publishedFrontier = [long](Field $receiverState 'contiguous_committed_chunk_index')
+        foreach ($selection in @(
+            [pscustomobject]@{ Name='outside'; Frontiers=[long[]]@($frontier) },
+            [pscustomobject]@{ Name='inside'; Frontiers=[long[]]@($frontier,$publishedFrontier) })) {
+            $slice = @(Get-FileTransferFallbackFrontierGracePartitionSlice -Index $index -TransferKey $transferKey -Frontiers $selection.Frontiers)
+            if (@($slice | Where-Object { $_.EventName -ceq 'filetransfer_v6_receiver_state_sent' -and
+                $_.Fields['log_writer_sequence'] -ceq (Field $receiverState 'log_writer_sequence') }).Count -ne 1) {
+                throw "Partition $($selection.Name) lost the exact stamped receiver publication"
+            }
+            $result = & $script:FileTransferFallbackFrontierStallGraceLegacyCorrelation -Events $slice -OwnedCandidateEvents $owned -SnapshotEvidence $fullSnapshots
+            if ((Quartet $result) -cne '1/1/1/0' -or @($result.CandidateRecords).Count -ne 1 -or
+                (Metadata $result.CandidateRecords[0]) -cne $boundary) { throw "Partition $($selection.Name) changed the actual hold's normalized recovery" }
+            "pass partition_receiver_$($selection.Name)"
+        }
+    }
+    if ($DelayedDisposition) {
+        $delayedOutputs.Add([ordered]@{ Case=$case; SnapshotVerdict=$fullSnapshots.ArtifactEvidenceVerdict;
+            SnapshotBoundaryHash=$fullSnapshots.BoundaryHash; Metadata=$boundary; MetadataHash=$boundaryHash; Quartet=(Quartet $full) })
+    }
     "pass $case"
+}
+if ($DelayedDisposition) {
+    'checkpoint-delayed-disposition-normalized=' + (ConvertTo-Json -InputObject $delayedOutputs.ToArray() -Depth 16 -Compress)
+    'checkpoint-delayed-disposition-evidence-ok'
 }
 'checkpoint-continuity-evidence-ok'

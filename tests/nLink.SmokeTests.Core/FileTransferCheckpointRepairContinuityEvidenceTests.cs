@@ -10,6 +10,52 @@ public sealed class FileTransferCheckpointRepairContinuityEvidenceTests : FileTr
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "CheckpointRepairContinuity")]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    [Trait("OpsSuite", "GuiHarness")]
+    public async Task CheckpointRepairContinuity_DelayedFallbackDispositionHasExactCrossHostConsumerParity()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var directory = Path.Combine(Path.GetTempPath(), "nlink-checkpoint-disposition-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "delayed-disposition.log");
+        try
+        {
+            await File.WriteAllLinesAsync(path,
+                await SessionFileTransferV4SenderTests.CreateCheckpointRepairContinuityDelayedDispositionEvidenceFixtureAsync(),
+                new UTF8Encoding(false));
+            const string script = """
+                param([string]$RepoRoot, [string]$InputPath)
+                & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/CheckpointRepairContinuityEvidence.ps1') -RepoRoot $RepoRoot -InputPath $InputPath -DelayedDisposition
+                """;
+            string? firstHostOutput = null;
+            foreach (var host in new[] { "powershell", "pwsh" })
+            {
+                var result = await RunPowerShellScriptTextAsync(script, [repoRoot, path], host);
+                Assert.True(result.ExitCode == 0, $"{host} STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+                Assert.Contains("checkpoint-delayed-disposition-evidence-ok", result.Stdout, StringComparison.Ordinal);
+                var normalized = Assert.Single(result.Stdout.Split('\n').Select(line => line.Trim()).Where(line =>
+                    line.StartsWith("checkpoint-delayed-disposition-normalized=", StringComparison.Ordinal)));
+                if (firstHostOutput is not null) { Assert.Equal(firstHostOutput, normalized); }
+                firstHostOutput = normalized;
+            }
+        }
+        catch
+        {
+            if (File.Exists(path))
+            {
+                var failureDirectory = Path.Combine(repoRoot, "artifacts", "validation", "consolidation-bounded-20260907",
+                    "rca-frontier6804", "failed-fixture-inputs");
+                Directory.CreateDirectory(failureDirectory);
+                File.Copy(path, Path.Combine(failureDirectory, $"delayed-disposition-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffffZ}.log"));
+            }
+            throw;
+        }
+        finally { TryDeleteDirectory(directory); }
+    }
+
+    [Fact]
+    [Trait("FileTransferCoordinatorSuite", "CheckpointRepairContinuity")]
     [Trait("OpsSuite", "CoordinatorSnapshots")]
     [Trait("OpsSuite", "GuiHarness")]
     public async Task CheckpointRepairContinuity_CommittedRetirementHasExactCrossHostConsumerParity()

@@ -13,6 +13,17 @@ public sealed partial class SessionFileTransferV4SenderTests
         => await CreateCheckpointRepairContinuityEvidenceFixtureAsync();
 
     internal static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityEvidenceFixtureAsync()
+        => await CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(delayedDisposition: false);
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "CheckpointRepairContinuity")]
+    public async Task CheckpointRepairContinuity_DelayedFallbackDispositionPreservesExactSparseRecovery()
+        => await CreateCheckpointRepairContinuityDelayedDispositionEvidenceFixtureAsync();
+
+    internal static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityDelayedDispositionEvidenceFixtureAsync()
+        => await CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(delayedDisposition: true);
+
+    private static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(bool delayedDisposition)
     {
         var transferId = "transfer_checkpoint_continuity_" + Guid.NewGuid().ToString("N");
         var sessionId = "session_" + transferId;
@@ -50,6 +61,19 @@ public sealed partial class SessionFileTransferV4SenderTests
         leg.TransportEpochId = 3;
         leg.BridgeRecoveryGeneration = 1;
         serviceType.GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(service, context);
+        if (delayedDisposition)
+        {
+            // Establish actual Tuna authority before the captured stream; no
+            // fallback/continuity decision is hidden in this setup boundary.
+            ApplyRuntime(FileTransferCoordinatorTests.CreateCheckpointContinuityTunaServiceSource(sessionId, transferId),
+                forwardPublication: false, adopt: false);
+            var written = new System.Collections.BitArray(256);
+            for (var index = 0; index < 100; index++) { written[index] = true; }
+            written[255] = true;
+            SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
+            SetPrivateProperty(context, "V4CreditUntilChunkIndexExclusive", 256);
+            SetPrivateProperty(context, "V6SparseAcceptWindowEndExclusive", 256);
+        }
 
         // The constructor already emitted an empty-context start. Close that
         // uncaptured setup stream, then let a fresh production emitter describe
@@ -75,6 +99,19 @@ public sealed partial class SessionFileTransferV4SenderTests
         var initialState = CreateCoordinatorStateForTest(context);
         Assert.Equal(FileTransferCoordinator.CalculateSnapshotStateFingerprint(initialState),
             initialState.PersistentState.SnapshotStateFingerprint);
+        FileTransferRouteTransitionAuthority? delayedAuthority = null;
+        FileTransferRouteTransitionDispositionCommand? delayedCommand = null;
+        if (delayedDisposition)
+        {
+            var fallback = FileTransferCoordinatorTests.CreateCheckpointContinuityFallbackBeforeDisposition(initialState,
+                envelope => FileTransferCheckpointResponderCoexistenceEvidenceTests.EnqueueIntoContext(context, envelope));
+            ApplyRuntime(fallback.RuntimeDecision, forwardPublication: false, adopt: false);
+            SetPrivateProperty(context, "CoordinatorPersistentState", fallback.RuntimeDecision.State.PersistentState);
+            delayedAuthority = fallback.Authority;
+            delayedCommand = fallback.Disposition;
+            leg = GetPrivateProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+            Assert.Equal(route, CreateCoordinatorStateForTest(context).RouteSelection);
+        }
 
         // Exercise the production Infra publication observer with an actual Coordinator
         // publication projection; this fake client never connects or starts live NKN.
@@ -108,6 +145,27 @@ public sealed partial class SessionFileTransferV4SenderTests
                 accepted.State.PersistentState.SnapshotStateGeneration);
             Assert.NotNull(accepted.State.PersistentState.CheckpointRepairContinuityOrigin);
             Assert.Null(accepted.State.CurrentFallbackCheckpointLease);
+            if (delayedDisposition)
+            {
+                var beforeDisposition = CreateCoordinatorStateForTest(context);
+                var disposition = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(beforeDisposition,
+                    new(delayedCommand!.Value, FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                        "filetransfer_route_transition_committed"));
+                Assert.True(disposition.Status == FileTransferRouteTransitionDecisionStatus.Committed, disposition.Reason);
+                FileTransferCheckpointResponderCoexistenceEvidenceTests.EnqueueIntoContext(context, disposition.SnapshotEnvelope!);
+                SetPrivateProperty(context, "CoordinatorPersistentState", disposition.State.PersistentState);
+                Assert.Same(beforeDisposition.PersistentState.CheckpointRepairContinuityOrigin,
+                    disposition.State.PersistentState.CheckpointRepairContinuityOrigin);
+                Assert.Equal(beforeDisposition.CurrentRuntimeOwner, disposition.State.CurrentRuntimeOwner);
+                Assert.Equal(beforeDisposition.CurrentRoutePublicationToken, disposition.State.CurrentRoutePublicationToken);
+                // This is the production event-specific logger. Its unprefixed
+                // activation data-session/checkpoint identities are legitimately absent.
+                serviceType.GetMethod("LogFileTransferRouteTransitionDecision", BindingFlags.Static | BindingFlags.NonPublic)!
+                    .Invoke(null, ["filetransfer_route_transition_disposition_applied", sessionId, transferId,
+                        FileTransferDirection.Inbound, delayedAuthority, "Applied", "filetransfer_route_transition_committed",
+                        0, 0, null, null, disposition.State.CurrentRoutePublicationToken, disposition.State.CurrentRouteCommit,
+                        null, 0]);
+            }
         }
 
         var frozenSource = GetPrivateProperty<CheckpointContinuitySourceStamp>(wake, "CheckpointContinuitySource");
@@ -139,19 +197,39 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(authority.ProtocolRepairRequestId,
             Assert.IsType<FileTransferFrontierRequestFrameV6>(delivery.LastRequest!.Frame).RepairRequestId);
 
-        object progress;
-        lock (GetServiceGate(service))
+        if (delayedDisposition)
         {
-            SetPrivateProperty(context, "NextChunkIndex", 101);
-            progress = serviceType.GetMethod("TrySettleInboundFallbackFrontierProgressLocked",
-                BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null,
-                [context, contract, authority.ProtocolRepairRequestId, authority.TransportEpoch,
-                    FileTransferTransportKind.RegularNkn, 100, 101, "chunk_batch_committed"])!;
-            Assert.NotNull(progress);
+            using var destination = new MemoryStream(new byte[256 * chunkSize], writable: true);
+            var chunk = Enumerable.Repeat((byte)0xa5, chunkSize).ToArray();
+            var batch = new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId, TransferId = transferId, TransportEpoch = authority.TransportEpoch,
+                StartChunkIndex = 100, ChunkCount = 1, RepairRequestId = authority.ProtocolRepairRequestId,
+                BatchId = "continuity-sparse-progress", DataSegments = [chunk],
+            };
+            await Assert.IsAssignableFrom<Task>(serviceType.GetMethod("HandleInboundV6SparseChunkBatchAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
+                [context, batch, new List<(int ChunkIndex, byte[] ChunkBytes)> { (100, chunk) }, destination,
+                    FileTransferTransportKind.RegularNkn, contract]));
+            Assert.Equal(101, GetPrivateProperty<int>(context, "NextChunkIndex"));
+            Assert.Equal(chunk, destination.ToArray().Skip(100 * chunkSize).Take(chunkSize));
         }
-        Assert.True(await Assert.IsAssignableFrom<Task<bool>>(serviceType.GetMethod("SendInboundV6ReceiverStateAsync",
-            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
-            [context, "chunk_batch_committed", true, false, progress])));
+        else
+        {
+            object progress;
+            lock (GetServiceGate(service))
+            {
+                SetPrivateProperty(context, "NextChunkIndex", 101);
+                progress = serviceType.GetMethod("TrySettleInboundFallbackFrontierProgressLocked",
+                    BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null,
+                    [context, contract, authority.ProtocolRepairRequestId, authority.TransportEpoch,
+                        FileTransferTransportKind.RegularNkn, 100, 101, "chunk_batch_committed"])!;
+                Assert.NotNull(progress);
+            }
+            Assert.True(await Assert.IsAssignableFrom<Task<bool>>(serviceType.GetMethod("SendInboundV6ReceiverStateAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
+                [context, "chunk_batch_committed", true, false, progress])));
+        }
         service.Dispose();
         Assert.True(SpinWait.SpinUntil(() => ReadOperationalLogTail(logStart).Contains(
             "event=filetransfer_coordinator_snapshot_stream_completed;", StringComparison.Ordinal), TimeSpan.FromSeconds(3)));
@@ -162,7 +240,8 @@ public sealed partial class SessionFileTransferV4SenderTests
             line.Contains("; log_writer_sequence=", StringComparison.Ordinal) &&
             line.Contains("; log_writer_attempt_utc_ticks=", StringComparison.Ordinal),
             $"Fixture requires persisted operational log capture, not the unstamped recent ring: {LocalOperationalLog.LogFilePath}"));
-        var holdLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_request_deferred;", StringComparison.Ordinal));
+        var holdLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_request_deferred;", StringComparison.Ordinal) &&
+            (!delayedDisposition || GetDelimitedLogField(line, "frontier_chunk_index") == "100"));
         var staleLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal));
         Assert.Contains("authority_effect=none;", staleLine, StringComparison.Ordinal);
         Assert.Contains("decision_status=stale;", staleLine, StringComparison.Ordinal);
@@ -181,7 +260,27 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.Contains(lines, line => line.Contains("event=" + name + ";", StringComparison.Ordinal) &&
                 line.Contains("continuity_source_fingerprint=fte1-", StringComparison.Ordinal));
         }
+        if (delayedDisposition)
+        {
+            var applied = Assert.Single(lines, line => line.Contains("event=filetransfer_route_transition_disposition_applied;", StringComparison.Ordinal) &&
+                line.Contains("authority_schema=2;", StringComparison.Ordinal));
+            Assert.Equal("fallback_peer_proof", GetDelimitedLogField(applied, "proof_boundary_kind"));
+            Assert.Equal("(none)", GetDelimitedLogField(applied, "data_session_identity"));
+            Assert.Equal("(none)", GetDelimitedLogField(applied, "checkpoint_request_id"));
+            Assert.True(Array.IndexOf(lines, holdLine) < Array.IndexOf(lines, applied));
+            var sparseIndex = Array.FindIndex(lines, line => line.Contains("event=filetransfer_v6_sparse_write_committed;", StringComparison.Ordinal));
+            var forcedIndex = Array.FindIndex(lines, line => line.Contains("event=filetransfer_v6_fallback_frontier_repair_progress_state_forced;", StringComparison.Ordinal));
+            var publishedIndex = Array.FindIndex(lines, line => line.Contains("event=filetransfer_v6_receiver_state_sent;", StringComparison.Ordinal) &&
+                line.Contains("continuity_source_fingerprint=fte1-", StringComparison.Ordinal));
+            Assert.True(sparseIndex >= 0 && sparseIndex < forcedIndex && forcedIndex < publishedIndex);
+        }
         return Array.AsReadOnly(lines);
+
+        void ApplyRuntime(FileTransferCoordinatorDecision decision, bool forwardPublication, bool adopt)
+            => serviceType.GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(method => method.Name == "ApplyCoordinatorDecisionToContextLocked" &&
+                    method.GetParameters().Length == 4 && method.GetParameters()[0].ParameterType == contextType)
+                .Invoke(null, [context, decision, forwardPublication, adopt]);
 
         FileTransferCoordinatorDecision ApplyCheckpoint(FileTransferCoordinatorEventKind kind,
             FileTransferLegState legState, bool canSend, string requestId)

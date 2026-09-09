@@ -43,7 +43,6 @@ public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : Fi
     internal static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
     {
         const BindingFlags instance = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
-        const BindingFlags statics = BindingFlags.NonPublic | BindingFlags.Static;
         var service = typeof(SessionFileTransferService);
         var emitterType = service.GetNestedType("CoordinatorSnapshotStreamEmitter", BindingFlags.NonPublic)!;
         var emitter = Activator.CreateInstance(emitterType, nonPublic: true)!;
@@ -67,18 +66,47 @@ public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : Fi
         {
             contextType.GetField($"<{name}>k__BackingField", instance)!.SetValue(context, value);
         }
+        foreach (var envelope in envelopes) { EnqueueIntoContext(context, envelope); }
+        emitterType.GetMethod("Complete", instance)!.Invoke(emitter,
+            [first.CoordinatorInstanceId, first.SessionId, first.TransferId, direction]);
+        var queue = (ConcurrentQueue<string>)emitterType.GetField("pending", instance)!.GetValue(emitter)!;
+        return queue.Select((line, index) => SensitiveDataRedactor.Redact(
+            $"{line}; log_writer_id=checkpoint-coexistence-fixture; log_writer_sequence={index + 1}")).ToArray();
+    }
+
+    internal static void EnqueueIntoContext(object context, FileTransferCoordinatorTransitionEnvelope envelope)
+    {
+        const BindingFlags instance = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+        const BindingFlags statics = BindingFlags.NonPublic | BindingFlags.Static;
+        var service = typeof(SessionFileTransferService);
+        var contextType = service.GetNestedType("InboundTransferContext", BindingFlags.NonPublic)!;
+        Assert.Equal(contextType, context.GetType());
+        var emitter = contextType.GetProperty("CoordinatorSnapshotEmitter", instance)!.GetValue(context)!;
+        var emitterType = emitter.GetType();
+        var direction = Enum.Parse<FileTransferDirection>(envelope.Direction, ignoreCase: true);
+        Assert.Equal(FileTransferDirection.Inbound, direction);
+        // Project into the existing stream through a generation-specific sink.
+        // Never replace the real service context's persistent authority graph.
+        var sink = RuntimeHelpers.GetUninitializedObject(contextType);
+        foreach (var (name, value) in new (string, object)[]
+        {
+            ("CoordinatorInstanceId", envelope.CoordinatorInstanceId), ("SessionId", envelope.SessionId),
+            ("TransferId", envelope.TransferId), ("CoordinatorSnapshotEmitter", emitter),
+        })
+        {
+            contextType.GetField($"<{name}>k__BackingField", instance)!.SetValue(sink, value);
+        }
+        contextType.GetProperty("CoordinatorPersistentState", instance)!.SetValue(sink,
+            new FileTransferCoordinatorPersistentState { SnapshotStateGeneration = envelope.Aggregate.AfterStateGeneration });
         var responder = service.GetMethod("EnqueueResponderProbeHandoffDecisionAuthorityEffect", statics)!;
         var pressure = service.GetMethods(statics).Single(method =>
             method.Name == "EnqueueRegularV4PressureDecisionAuthorityEffect" && method.GetParameters()[0].ParameterType == emitterType);
         var fallback = service.GetMethods(statics).Single(method =>
             method.Name == "EnqueueFallbackTailYieldDecisionAuthorityEffect" && method.GetParameters()[0].ParameterType == emitterType);
         var enqueueEffect = emitterType.GetMethod("EnqueueAuthorityEffect", instance)!;
-        foreach (var envelope in envelopes)
         {
             emitterType.GetMethod("Enqueue", instance)!.Invoke(emitter, [envelope]);
-            contextType.GetProperty("CoordinatorPersistentState", instance)!.SetValue(context,
-                new FileTransferCoordinatorPersistentState { SnapshotStateGeneration = envelope.Aggregate.AfterStateGeneration });
-            responder.Invoke(null, [context, envelope]);
+            responder.Invoke(null, [sink, envelope]);
             object?[] common = [emitter, envelope.CoordinatorInstanceId, envelope.SessionId,
                 envelope.TransferId, direction, envelope.Aggregate.AfterStateGeneration, envelope];
             pressure.Invoke(null, common);
@@ -104,12 +132,12 @@ public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : Fi
                     kinds = envelope.DecisionKind switch
                     {
                         "BeginFileTransferRouteTransitionPhysicalDrain" when operation.OperationRole == "current" => ["pause_installed"],
-                        "CommitFileTransferRouteTransition" when operation.OperationRole == first.Direction => ["completed_drain_receipt"],
+                        "CommitFileTransferRouteTransition" when operation.OperationRole == envelope.Direction => ["completed_drain_receipt"],
                         "CommitFileTransferRouteTransition" when operation.OperationRole == "terminal" &&
                             operation.BeforeState == "None" && operation.AfterState == "Committed" => ["route_commit_adopted", "target_runtime_leg_installed"],
-                        "ApplyFileTransferRouteTransitionDispositionReceipt" when operation.OperationRole == first.Direction =>
+                        "ApplyFileTransferRouteTransitionDispositionReceipt" when operation.OperationRole == envelope.Direction =>
                             ["route_transition_disposition_applied", "transition_pause_released", "recovered_epoch_publication"],
-                        "ApplyFileTransferRouteTransitionRetainedFrameReceipt" when operation.OperationRole == first.Direction =>
+                        "ApplyFileTransferRouteTransitionRetainedFrameReceipt" when operation.OperationRole == envelope.Direction =>
                             ["retained_frame_response", "retained_frame_applied"],
                         _ => [],
                     };
@@ -145,10 +173,5 @@ public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : Fi
                         Read("ReceiptFingerprint"), kind, $"{operation.OperationKey}:{kind}", Math.Max(1, generation), operation.OperationKey]);
             }
         }
-        emitterType.GetMethod("Complete", instance)!.Invoke(emitter,
-            [first.CoordinatorInstanceId, first.SessionId, first.TransferId, direction]);
-        var queue = (ConcurrentQueue<string>)emitterType.GetField("pending", instance)!.GetValue(emitter)!;
-        return queue.Select((line, index) => SensitiveDataRedactor.Redact(
-            $"{line}; log_writer_id=checkpoint-coexistence-fixture; log_writer_sequence={index + 1}")).ToArray();
     }
 }

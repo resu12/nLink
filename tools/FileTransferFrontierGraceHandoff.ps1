@@ -295,6 +295,76 @@ function Get-FileTransferStallGraceCheckpointContinuityRecovery {
         }
         return $true
     }
+    function MatchesRetainedFallbackDisposition($Event) {
+        # This logger's unprefixed checkpoint/data-session fields belong to
+        # activation proofs, not the committed fallback scope. Bind the event
+        # to the already validated terminal at the continuity origin instead.
+        foreach ($entry in @(@('authority_schema','2'), @('transition_kind','TunaV4ToPostTunaFallbackV6'),
+                @('handoff_kind','tuna_to_normal_fallback'), @('proof_boundary_kind','fallback_peer_proof'),
+                @('decision_status','Applied'), @('decision_reason','filetransfer_route_transition_committed'),
+                @('activation_authority_mode','none'), @('responder_transition_mode','none'),
+                @('checkpoint_request_id','(none)'), @('data_session_identity','(none)'),
+                @('fallback_yield_authority_id','(none)'), @('pair_key','(none)'), @('responder_handoff_authority_id','(none)'),
+                @('target_route','post_tuna_fallback_v6'), @('target_protocol_version','6'),
+                @('target_transport','regular_nkn'), @('source_route','file_tuna_v4'),
+                @('source_protocol_version','4'), @('source_transport','tuna'))) {
+            if ((F $Event $entry[0]) -cne $entry[1]) { return $false }
+        }
+        foreach ($name in @('admission_generation','pending_precommit_generation','transaction_generation','offer_generation',
+                'launch_generation','tuna_path_lease_generation','retry_install_generation','fallback_yield_generation',
+                'pairing_generation','responder_handoff_generation')) {
+            if ((N $Event $name) -ne 0) { return $false }
+        }
+        if (-not (Equal $Event $Candidate @('log_writer_id','session_id','transfer_id','direction')) -or
+            (N $Event 'target_transport_epoch') -ne [long]$payload.currentScope.boundary.transportEpoch) { return $false }
+        $subject = $null
+        foreach ($operation in $binding.Origin.Boundary.operations) {
+            if ($operation.family -cne 'route_transition' -or $operation.operationRole -cne 'terminal' -or
+                -not (MatchesProjectedIdentity (F $Event 'authority_id') ([string]$operation.authorityId))) { continue }
+            if ($null -ne $subject) { return $false }
+            $subject = $operation
+        }
+        if ($null -eq $subject -or $subject.operationKind -cne 'TunaV4ToPostTunaFallbackV6' -or
+            $subject.beforeState -cne 'Committed' -or $subject.afterState -cne 'Committed' -or
+            -not $subject.receiptValidated -or [long]$subject.operationGeneration -le 0 -or
+            (N $Event 'transition_generation') -ne [long]$subject.operationGeneration -or
+            -not (MatchesProjectedIdentity (F $Event 'predecessor_authority_id') ([string]$subject.predecessorAuthorityId))) { return $false }
+        $route = $subject.routeTransition
+        if ($null -eq $route -or $route.role -cne 'terminal' -or
+            $route.transitionKind -cne 'TunaV4ToPostTunaFallbackV6' -or $route.dispositionKind -cne 'Committed' -or
+            $route.handoffKind -cne 'TunaToNormalFallback' -or $route.proofAdmissionMode -cne 'fallback_v6_peer_proof' -or
+            $route.proofBoundaryKind -cne 'FileTransferFallbackTransitionProofBoundary' -or
+            $route.sourceTransport -cne 'Tuna' -or $route.targetTransport -cne 'RegularNkn' -or
+            $route.targetRoute -cne 'post_tuna_fallback_v6' -or [long]$route.targetProtocolVersion -ne 6) { return $false }
+        $commits = @($route.receipts | Where-Object { $_.stage -ceq 'commit' })
+        if ($commits.Count -ne 1 -or -not $commits[0].receiptValidated -or
+            $commits[0].receiptStatus -cne 'Committed') { return $false }
+        $source = $route.sourceBoundary; $target = $route.targetBoundary
+        $current = $payload.currentScope.boundary
+        if ($source.route -cne 'file_tuna_v4' -or [long]$source.protocolVersion -ne 4 -or
+            $target.route -cne $current.route -or [long]$target.protocolVersion -ne [long]$current.protocolVersion -or
+            $source.dataSessionIdentity -cne $current.dataSessionIdentity -or
+            [long]$target.dataSessionGeneration -ne [long]$current.dataSessionGeneration) { return $false }
+        $sourceFields = [ordered]@{
+            live_route_epoch='liveRouteEpoch'; runtime_generation='runtimeGeneration'; terminal_generation='terminalGeneration'
+            leg_generation='legGeneration'; route_commit_generation='routeCommitGeneration'
+            route_publication_generation='routePublicationGeneration'; transport_epoch='transportEpoch'
+            bridge_recovery_generation='bridgeRecoveryGeneration'; data_session_generation='dataSessionGeneration'
+        }
+        foreach ($name in $sourceFields.Keys) {
+            if ((N $Event "source_$name") -ne [long]$source.($sourceFields[$name])) { return $false }
+        }
+        # Resulting route ownership is aggregate scope; target_transport_epoch
+        # above is the physical fallback leg. Historical source checkpoint
+        # arguments are optional logger metadata and are not current authority.
+        foreach ($name in @('live_route_epoch','runtime_generation','terminal_generation','leg_generation',
+                'route_commit_generation','route_publication_generation')) {
+            $property = $sourceFields[$name]
+            if ((N $Event "resulting_$name") -ne [long]$target.$property -or
+                [long]$target.$property -ne [long]$current.$property) { return $false }
+        }
+        return $true
+    }
     if (-not $Index.ContainsKey('__CheckpointRepairContinuitySnapshotEvidence') -or
         $null -eq $Index['__CheckpointRepairContinuitySnapshotEvidence']) { return $null }
     $snapshot = $Index['__CheckpointRepairContinuitySnapshotEvidence']
@@ -427,9 +497,18 @@ function Get-FileTransferStallGraceCheckpointContinuityRecovery {
         # Attempted/denied diagnostics can describe an absent requested scope.
         # Only current-source evidence contradicts it; snapshot retirement stays authoritative.
         if ((F $event 'event') -cnotin $scopeEvidenceNames) { continue }
+        $activationMetadata = (F $event 'event') -ceq 'filetransfer_route_transition_disposition_applied' -and
+            ($event.Fields.ContainsKey('authority_schema') -or $event.Fields.ContainsKey('activation_authority_mode') -or
+                $event.Fields.ContainsKey('data_session_identity') -or $event.Fields.ContainsKey('checkpoint_request_id'))
+        if ($activationMetadata) {
+            $writerKey = '{0}|{1}' -f (F $event 'log_writer_id'), (F $event 'log_writer_sequence')
+            if ($Index['__conflicts'].ContainsKey($writerKey) -or
+                -not (MatchesRetainedFallbackDisposition $event)) { return $null }
+        }
         foreach ($field in @('direction','route','protocol_version','live_route_epoch','runtime_generation','terminal_generation',
                 'leg_generation','transport_epoch','bridge_recovery_generation','bridge_decision_generation',
                 'route_publication_generation','route_commit_generation','data_session_identity','data_session_generation')) {
+            if ($activationMetadata -and $field -ceq 'data_session_identity') { continue }
             if ($event.Fields.ContainsKey($field) -and (F $event $field) -cne (F $Candidate $field)) { return $null }
         }
     }
