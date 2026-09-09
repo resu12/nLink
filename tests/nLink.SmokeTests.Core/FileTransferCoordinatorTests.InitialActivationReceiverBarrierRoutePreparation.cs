@@ -18,7 +18,8 @@ public sealed partial class FileTransferCoordinatorTests
 
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateReceiverBarrierRoutePreparationFixture(bool completeLifecycle = false,
-            Func<FileTransferCoordinatorState, Action<FileTransferCoordinatorTransitionEnvelope>, FileTransferCoordinatorState>? prepareSource = null)
+            Func<FileTransferCoordinatorState, Action<FileTransferCoordinatorTransitionEnvelope>, FileTransferCoordinatorState>? prepareSource = null,
+            Action<FileTransferCoordinatorState>? observeInitialCommit = null)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
@@ -114,23 +115,31 @@ public sealed partial class FileTransferCoordinatorTests
             var committed = CommitEmptyFileTransferRouteTransitionForTest(
                 beforePreparation, request, setup.FinalProof, capture: Capture);
             Assert.Equal(FileTransferRoute.FileTunaV4, committed.State.RouteSelection.Route);
-            var fallback = FallBack(committed.State,
-                FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6),
-                committedChunk: 8, transportEpoch: 1, capture: Capture);
-            var checkpoint = RequestFallbackCheckpoint(fallback.State, fallback.State.RouteSelection,
-                "receiver-barrier-carry-checkpoint", transportEpoch: 1);
-            Assert.Null(checkpoint.MutationRejectedReason);
-            Capture(checkpoint.SnapshotEnvelope!);
-            var checkpointAccepted = AcceptFallbackCheckpoint(checkpoint.State, fallback.State.RouteSelection,
-                "receiver-barrier-carry-checkpoint", transportEpoch: 1, committedChunk: 8, highestObservedChunk: 8);
-            Assert.Null(checkpointAccepted.MutationRejectedReason);
-            Capture(checkpointAccepted.SnapshotEnvelope!);
-            var terminal = FileTransferCoordinator.Apply(
-                CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, fallback.State.RouteSelection,
-                    reason: "receiver_barrier_preparation_fixture_complete"), checkpointAccepted.State);
-            Capture(terminal.SnapshotEnvelope!);
-            Assert.True(terminal.State.IsTerminal);
-            after = terminal.State;
+            if (observeInitialCommit is not null)
+            {
+                observeInitialCommit(committed.State);
+                after = committed.State;
+            }
+            else
+            {
+                var fallback = FallBack(committed.State,
+                    FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6),
+                    committedChunk: 8, transportEpoch: 1, capture: Capture);
+                var checkpoint = RequestFallbackCheckpoint(fallback.State, fallback.State.RouteSelection,
+                    "receiver-barrier-carry-checkpoint", transportEpoch: 1);
+                Assert.Null(checkpoint.MutationRejectedReason);
+                Capture(checkpoint.SnapshotEnvelope!);
+                var checkpointAccepted = AcceptFallbackCheckpoint(checkpoint.State, fallback.State.RouteSelection,
+                    "receiver-barrier-carry-checkpoint", transportEpoch: 1, committedChunk: 8, highestObservedChunk: 8);
+                Assert.Null(checkpointAccepted.MutationRejectedReason);
+                Capture(checkpointAccepted.SnapshotEnvelope!);
+                var terminal = FileTransferCoordinator.Apply(
+                    CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, fallback.State.RouteSelection,
+                        reason: "receiver_barrier_preparation_fixture_complete"), checkpointAccepted.State);
+                Capture(terminal.SnapshotEnvelope!);
+                Assert.True(terminal.State.IsTerminal);
+                after = terminal.State;
+            }
         }
         else
         {

@@ -157,8 +157,61 @@ function Assert-CheckpointParity([string[]]$lines, [bool]$valid, [string]$varian
     if ((Normalized-Json $guiEvaluation) -cne (Normalized-Json $full) -or
         $guiEvaluation.BoundaryHash -cne $full.BoundaryHash) { throw 'Independent GUI-file evaluation differs.' }
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    if ($valid) { if ($null -ne $gui) { throw 'GUI invented a checkpoint boundary.' }; return }
     $boundary = $full.FirstUnresolvedBoundary
+    if ($valid) {
+        # These focused fixtures begin on an established fallback route without
+        # its earlier publication history. Snapshot validity stays 0/0/0/0;
+        # the shared GUI must retain the independently proven partial-route stop.
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        if ((Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass' -or
+            $route.BoundaryHash -cne $compactRoute.BoundaryHash) { throw 'Checkpoint partial-route parity changed.' }
+        $publications = @{}
+        foreach ($envelope in $envelopes) {
+            foreach ($operation in @($envelope.aggregate.operations | Where-Object {
+                $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_publication' -and $_.afterState -ceq 'Published'
+            })) {
+                $generation = [long]$operation.operationGeneration
+                if ($publications.ContainsKey($generation)) { throw 'Checkpoint publication origin is ambiguous.' }
+                $publications[$generation] = [pscustomobject]@{ Envelope=$envelope; Operation=$operation }
+            }
+        }
+        $expectedRouteBoundaryId = $envelopes[0].transitionId
+        $expectedFindings = @('snapshot authoritative route stream contains no route publications')
+        if ($hasOldTerminal) {
+            $firstGeneration = if ($first.direction -ceq 'inbound') { 4L } else { 5L }
+            $nextGeneration = $firstGeneration + 1L
+            if ($publications.Count -ne 2 -or -not $publications.ContainsKey($firstGeneration) -or
+                -not $publications.ContainsKey($nextGeneration)) { throw 'Checkpoint partial-route publication generations changed.' }
+            $expectedRouteBoundaryId = $publications[$firstGeneration].Envelope.transitionId
+            $scope = "$($first.coordinatorInstanceId)|fixture-writer|$($first.sessionId)|$($first.transferId)|$($first.direction)"
+            $expectedFindings = @("snapshot route publication generation is not contiguous: scope=$scope; generation=$firstGeneration")
+            if ($first.direction -ceq 'outbound') {
+                $expectedFindings += 'snapshot initial route publication has invalid kind or predecessor'
+            }
+            $expectedFindings += "snapshot route publication generation is not contiguous: scope=$scope; generation=$nextGeneration"
+            if ($first.direction -ceq 'inbound') {
+                $expectedFindings += 'snapshot route publication has no unique runtime owner entrant: route=post_tuna_fallback_v6'
+                $expectedFindings += 'snapshot same-route publication has no exact fallback owner successor contract'
+            }
+            else {
+                $expectedFindings += "snapshot route publication has no exact committed predecessor transition: route=post_tuna_fallback_v6; operation_key=$($publications[$nextGeneration].Operation.operationKey)"
+            }
+        }
+        elseif ($publications.Count -ne 0) { throw 'Checkpoint no-prior fixture unexpectedly contains publication history.' }
+        $expectedBoundaries = @($full.Boundaries | Where-Object boundaryId -CEQ $expectedRouteBoundaryId)
+        $boundary = $route.FirstUnresolvedBoundary
+        if ($route.Verdict -cne 'fail' -or $expectedBoundaries.Count -ne 1 -or $null -eq $boundary -or
+            (ConvertTo-Json -InputObject @($route.Findings) -Compress) -cne
+                (ConvertTo-Json -InputObject $expectedFindings -Compress) -or
+            $boundary.boundaryId -cne $expectedRouteBoundaryId -or $boundary.boundaryHash -cne $expectedBoundaries[0].boundaryHash -or
+            $boundary.taxonomyClass -cne 'filetransfer_route_consistency_analysis_parity_invalid' -or
+            $boundary.variant -cne 'snapshot_authoritative_route_boundary_invalid' -or
+            $boundary.rawCount -ne 1 -or $boundary.distinctCount -ne 1 -or $boundary.recoveredCount -ne 0 -or $boundary.unresolvedCount -ne 1 -or
+            $gui.ClassificationSource -cne 'coordinator_snapshot_authority_v1_route_consistency') {
+            throw 'Checkpoint scoped partial-route findings or selected origin changed.'
+        }
+    }
     if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
         $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
         $gui.FailureClass -cne $boundary.taxonomyClass -or $gui.FailureVariant -cne $boundary.variant -or

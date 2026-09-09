@@ -100,7 +100,7 @@ function Add-FileTransferFallbackFrontierGraceIndexedEvent {
 }
 
 function New-FileTransferFallbackFrontierGraceCorrelationIndex {
-    param([AllowEmptyCollection()][object[]]$Events = @())
+    param([AllowEmptyCollection()][object[]]$Events = @(), [AllowNull()]$SnapshotEvidence = $null)
 
     $catalog = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
@@ -211,6 +211,7 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
         EventsByWriterSequence = $eventsByWriterSequence
         EventsByWriterIdentity = $eventsByWriterIdentity
         SourceBoundariesByTransfer = $sourceBoundariesByTransfer
+        __CheckpointRepairContinuitySnapshotEvidence = $SnapshotEvidence
         IndexBuildVisitCount = [int64]$relevant.Count
         BoundedLookupVisitCount = 0L
     }
@@ -530,6 +531,20 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
     foreach ($event in @($selected.Values)) {
         $authority = Get-FileTransferEventField -Event $event -Name 'authority_id' -Default ''
         if ($authority -notin @('', '(none)', 'none')) { [void]$authorities.Add($authority) }
+        if ($event.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and
+            (Get-FileTransferEventField -Event $event -Name 'source_kind' -Default '') -ceq 'ReceiverRequest') {
+            # A published-source obligation has no predecessor-progress event.
+            # Retain its grant's exact one-hop authority subject without admitting
+            # that predecessor's unrelated frontier obligations.
+            $predecessor = Get-FileTransferEventField -Event $event -Name 'predecessor_authority_id' -Default ''
+            $predecessorKey = "$TransferKey|$predecessor"
+            if ($predecessor -notin @('', '(none)', 'none') -and $Index.EventsByTransferAndAuthority.ContainsKey($predecessorKey)) {
+                $Index.BoundedLookupVisitCount++
+                & $addEvents @($Index.EventsByTransferAndAuthority[$predecessorKey] | Where-Object {
+                    $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted'
+                }) -IncludeWriterCopies
+            }
+        }
     }
     foreach ($authority in $authorities) {
         $authorityKey = "$TransferKey|$authority"
@@ -706,10 +721,14 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('stall', 'recent_progress')][string]$Kind,
         [AllowEmptyCollection()][object[]]$Events = @(),
-        [AllowNull()]$Index = $null)
+        [AllowNull()]$Index = $null,
+        [AllowNull()]$SnapshotEvidence = $null)
 
     $scopeKey = ''
-    $useScopeCache = $null -eq $Index
+    $useScopeCache = $null -eq $Index -and $null -eq $SnapshotEvidence
+    if ($null -eq $Index -and $null -ne $SnapshotEvidence) {
+        $Index = New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $Events -SnapshotEvidence $SnapshotEvidence
+    }
     if ($useScopeCache) {
         $scopeKey = Get-FileTransferFallbackFrontierGraceCorrelationScopeKey -Events $Events
         if ($script:FileTransferFallbackFrontierGraceCachedScope -ne $scopeKey -or
@@ -795,7 +814,16 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
             }
             # Successor deferrals remain evidence, but only their own partition
             # may open/count them as obligations. Do not prefer a recovered copy.
-            $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates)) | Out-Null
+            if ($Kind -ceq 'stall') {
+                $snapshotInput = if ($null -ne $SnapshotEvidence) { $SnapshotEvidence }
+                    elseif ($Index.PSObject.Properties.Name -contains '__CheckpointRepairContinuitySnapshotEvidence') {
+                        $Index.__CheckpointRepairContinuitySnapshotEvidence
+                    } else { $null }
+                $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates -SnapshotEvidence $snapshotInput)) | Out-Null
+            }
+            else {
+                $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates)) | Out-Null
+            }
         }
     }
     $mergedResult = Merge-FileTransferFallbackFrontierGraceCorrelationResults `
@@ -809,10 +837,11 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
 function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
     param(
         [object[]]$Events = @(),
-        [AllowNull()]$Index = $null)
+        [AllowNull()]$Index = $null,
+        [AllowNull()]$SnapshotEvidence = $null)
 
     return Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation `
-        -Kind 'stall' -Events $Events -Index $Index
+        -Kind 'stall' -Events $Events -Index $Index -SnapshotEvidence $SnapshotEvidence
 }
 
 function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {

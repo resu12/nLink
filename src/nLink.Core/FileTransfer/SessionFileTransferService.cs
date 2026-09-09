@@ -893,6 +893,7 @@ public sealed partial class SessionFileTransferService :
 
             if (inbound is not null)
             {
+                InvalidateCheckpointRepairContinuityLocked(inbound, "reset_session_state");
                 _ = TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
                     inbound,
                     "reset_session_state");
@@ -1919,6 +1920,7 @@ public sealed partial class SessionFileTransferService :
                 }
 
                 inboundTransfer.UserPaused = true;
+                InvalidateCheckpointRepairContinuityLocked(inboundTransfer, "user_paused");
                 inboundTransfer.UserPauseReason = normalizedReason;
                 inboundTransfer.UserPausedSinceUtc = DateTimeOffset.UtcNow;
                 inboundTransfer.StatusMessage = "Transfer paused.";
@@ -2285,6 +2287,13 @@ public sealed partial class SessionFileTransferService :
         }
 
         disposed = true;
+        lock (gate)
+        {
+            if (inboundTransfer is { } currentInbound)
+            {
+                InvalidateCheckpointRepairContinuityLocked(currentInbound, "disposed");
+            }
+        }
         DetachTransportCore(markActiveTransfersFailed: false, failureCode: DetachedErrorCode, failureMessage: "Service disposed.");
 
         InboundTransferContext? inbound;
@@ -19333,12 +19342,13 @@ public sealed partial class SessionFileTransferService :
     private static void LogFileTransferControlPlaneDeliveryResult(
         FileTransferControlPlaneDeliveryRequest request,
         FileTransferControlPlaneDeliveryResult result,
-        bool diagnosticOnly = false)
+        bool diagnosticOnly = false,
+        CheckpointRepairContinuityStamp? checkpointContinuityStamp = null)
     {
         var frameCorrelation = FormatControlPlaneFrameCorrelationSuffix(request.Frame);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_control_plane_delivery_observed; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; authority_id={request.AuthorityId}; authority_schema={request.AuthoritySchema}; control_plane_generation={request.ControlPlaneGeneration}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}");
+            $"event=filetransfer_control_plane_delivery_observed; {FormatCheckpointRepairContinuity(checkpointContinuityStamp)}direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; authority_id={request.AuthorityId}; authority_schema={request.AuthoritySchema}; control_plane_generation={request.ControlPlaneGeneration}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}");
         if (!result.AcceptedAny)
         {
             LocalOperationalLog.Warn(
@@ -20109,7 +20119,8 @@ public sealed partial class SessionFileTransferService :
         InboundTransferContext context,
         IFileTransferDataSession dataSession,
         FileTransferControlPlaneDeliveryRequest request,
-        CancellationToken ct)
+        CancellationToken ct,
+        CheckpointRepairContinuityStamp? checkpointContinuityStamp = null)
     {
         FallbackControlPlaneDeliveryContract? deliveryContract = null;
         Task? dataSessionFallbackSendTask = null;
@@ -20165,7 +20176,8 @@ public sealed partial class SessionFileTransferService :
                     }
                 }
 
-                LogFileTransferControlPlaneDeliveryResult(request, result);
+                LogFileTransferControlPlaneDeliveryResult(request, result,
+                    checkpointContinuityStamp: checkpointContinuityStamp);
                 if (!result.AcceptedAny)
                 {
                     return (false, result);
@@ -24907,6 +24919,8 @@ public sealed partial class SessionFileTransferService :
 
         public required FallbackFrontierRepairAuthority Authority { get; init; }
 
+        public CheckpointRepairContinuityStamp? CheckpointContinuityStamp { get; set; }
+
         public required FileTransferAuthorityLifecycle<FallbackFrontierRepairSettlementOutcome> Lifecycle { get; init; }
 
         public List<FallbackFrontierRepairAlias> Aliases { get; } = [];
@@ -25129,7 +25143,10 @@ public sealed partial class SessionFileTransferService :
         int CheckpointGeneration,
         IFileTransferDataSession DataSession,
         string DataSessionIdentity,
-        long DataSessionGeneration);
+        long DataSessionGeneration)
+    {
+        public CheckpointContinuitySourceStamp? CheckpointContinuitySource { get; init; }
+    }
 
     private sealed record InboundV6FrontierRecentProgressGraceWake(
         long WakeGeneration,

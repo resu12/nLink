@@ -4453,7 +4453,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
         writers = @($finalWriters)
     }
     $coordinatorEvidenceCatalog = Get-FileTransferCoordinatorEvidenceCatalog `
-        -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1'
+        -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1'
     $evidence = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_gui_log_ledger'
@@ -14869,7 +14869,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     function Get-TunaGuiFallbackFrontierStallGraceRecheckFailure {
         param(
             [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
-            [switch]$IncludeEpisodeAudit
+            [switch]$IncludeEpisodeAudit,
+            [AllowNull()]$SnapshotEvidence = $null
         )
 
         $byEvent = @{}
@@ -15127,11 +15128,16 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
             $audit.Add($episodeResult)
             if ($null -eq (Get-Variable -Name currentSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
-                $currentSourceIndex = New-FileTransferStallGraceCurrentSourceIndex -Events $handoffEvents
+                $currentSourceIndex = New-FileTransferStallGraceCurrentSourceIndex -Events $handoffEvents -SnapshotEvidence $SnapshotEvidence
             }
             $currentSourceRecovery = Get-FileTransferStallGraceCurrentSourceRecovery -Index $currentSourceIndex `
                 -Candidate ([pscustomobject]@{ Fields = $candidate.Line.Fields; Sequence = $candidate.Sequence }) `
                 -HistoricalProgress ([pscustomobject]@{ Fields = $candidate.Progress.Fields; Sequence = (Get-GuiStallSequence $candidate.Progress) })
+            if ($null -eq $currentSourceRecovery -and $null -ne $candidate.PSObject.Properties['PublishedSource']) {
+                $currentSourceRecovery = Get-FileTransferStallGraceCheckpointScopeOwnership `
+                    -CurrentSourceIndex $currentSourceIndex -PublishedSourceIndex $publishedSourceIndex `
+                    -Candidate ([pscustomobject]@{ Fields = $candidate.Line.Fields; Sequence = $candidate.Sequence })
+            }
             if ($null -ne $currentSourceRecovery) {
                 if ($null -eq $currentSourceRecovery.RecoveryEvent) { $unresolved.Add($candidate) }
                 $episodeResult.Recovered = $null -ne $currentSourceRecovery.RecoveryEvent
@@ -15578,6 +15584,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     Progress = $candidate.Progress; Writer = $candidate.Writer; Session = $candidate.Session
                     Transfer = $candidate.Transfer; Frontier = $candidate.Frontier
                     DataSessionIdentity = $candidate.DataSessionIdentity; DataSessionGeneration = $candidate.DataSessionGeneration
+                }
+                if ($null -ne $candidate.PSObject.Properties['PublishedSource']) {
+                    $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex `
+                        -Candidate $episode.Event
+                    if ($null -ne $admission -and $admission.Admitted) { $episode = $admission.Episode }
                 }
                 $stallHandoffClosure = Get-FileTransferStallGraceTunaHandoffClosure -Events $handoffEvents -Episode $episode
                 $recovered = $null -ne $stallHandoffClosure
@@ -22283,7 +22294,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
     $fallbackFrontierStallGraceRecheckFastPath =
         Get-TunaGuiFallbackFrontierStallGraceRecheckFailure `
-            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
+            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray()) `
+            -SnapshotEvidence $coordinatorSnapshotEvaluation
     $fallbackFrontierRecentProgressGraceRecheckFastPath =
         Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())

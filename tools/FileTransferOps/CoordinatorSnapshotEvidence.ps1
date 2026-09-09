@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'CheckpointRepairContinuityEvidence.ps1')
+
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
 $script:FileTransferCoordinatorSnapshotCatalogHash = '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2'
@@ -528,6 +530,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion) {
+        return Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog
+    }
     if ($ProfileVersion -cne $script:FileTransferCoordinatorSnapshotCatalogVersion) {
         if ($ProfileVersion -cne $script:FileTransferCoordinatorReceiverBarrierCatalogVersion) {
             throw "coordinator_snapshot_catalog_version_unknown:$ProfileVersion"
@@ -931,6 +936,7 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
         [Parameter(Mandatory = $true)]$Effect
     )
 
+    if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) { return $false }
     $scope = if ($Operation.PSObject.Properties.Name -contains 'routeRuntime' -and
         $null -ne $Operation.routeRuntime) {
         $Operation.routeRuntime.boundary
@@ -1003,6 +1009,7 @@ function Test-FileTransferCoordinatorSnapshotEffectReceipt {
         [Parameter(Mandatory = $true)]$Effect
     )
 
+    if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) { return $false }
     if ([bool]$Operation.receiptValidated -and
         [string]$Operation.receiptIdentity -ceq
             [string]$Effect.ReceiptIdentity -and
@@ -1187,7 +1194,7 @@ function Test-FileTransferCoordinatorReceiverBarrierSourceProjection {
 function Test-FileTransferCoordinatorReceiverBarrierOperation {
     param($Envelope, $Operation, $Catalog)
     try {
-        if ($Catalog.Version -cne $script:FileTransferCoordinatorReceiverBarrierCatalogVersion -or
+        if (-not (Test-FileTransferCoordinatorReceiverBarrierCatalogCapability $Catalog) -or
             $Operation.family -cne 'responder_probe_handoff' -or
             $Operation.operationKind -cne 'InitialActivationReceiverBarrier' -or
             $Operation.operationRole -cnotin $script:FileTransferCoordinatorReceiverBarrierCatalog.operationRoles -or
@@ -1203,6 +1210,9 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
             @($fields | Where-Object { $payload.PSObject.Properties.Name -cnotcontains $_ }).Count -ne 0 -or
             $payload.role -cne $Operation.operationRole -or
             $Operation.operationKey -cne "responder_probe_handoff|$($Operation.operationRole)|$($Operation.authorityId)|$($Operation.operationGeneration)|InitialActivationReceiverBarrier" -or
+            @($Envelope.aggregate.operations | Where-Object {
+                $_.family -ceq 'responder_probe_handoff' -and $_.operationKey -ceq $Operation.operationKey
+            }).Count -ne 1 -or
             $Operation.predecessorAuthorityId -cne '(none)' -or
             [long]$Operation.operationGeneration -le 0 -or
             -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $payload.sourceBoundary) -or
@@ -1801,7 +1811,11 @@ function Test-FileTransferCoordinatorSnapshotCheckpointResponderCarry {
         if ($payload.PSObject.Properties.Name -notcontains $name) { return $false }
     }
     $receipts = @($payload.receipts)
-    if (@($Envelope.aggregate.operations | Where-Object { $_.family -ceq 'responder_probe_handoff' }).Count -ne 1 -or
+    if (@($Envelope.aggregate.operations | Where-Object {
+            $_.family -ceq 'responder_probe_handoff' -and
+            $_.operationRole -ceq 'handoff_terminal' -and
+            $_.operationKind -ceq 'ResponderPeerProbeRouteTransitionHandoff'
+        }).Count -ne 1 -or
         $payload.role -cne 'handoff_terminal' -or $payload.transitionMode -cne 'post_fallback_v6_paired' -or
         $payload.handoffAuthorityId -cne $Operation.authorityId -or
         [long]$payload.handoffGeneration -ne [long]$Operation.operationGeneration -or
@@ -2187,7 +2201,8 @@ function Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry {
         [string]$Operation.family -cne 'route_transition') { return $false }
 
     $routes = @($aggregate.operations | Where-Object {
-        $_.family -in @('route_runtime', 'route_transition')
+        $_.family -in @('route_runtime', 'route_transition') -and
+        -not (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_)
     })
     if ($routes.Count -ne 2 -or
         @($routes | Where-Object operationRole -CEQ 'terminal').Count -ne 1 -or
@@ -3059,10 +3074,20 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
         [object[]]$Operations
     )
 
+    if ($Operations.Count -eq 4) {
+        foreach ($operation in $Operations) {
+            foreach ($name in @('family', 'operationRole', 'operationKind', 'operationKey', 'authorityId',
+                    'operationGeneration', 'beforeState', 'afterState', 'stateApplied', 'fallbackTailYield',
+                    'commandIdentity', 'commandGeneration', 'commandFingerprint', 'receiptIdentity',
+                    'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+                if ($null -eq $operation -or $operation.PSObject.Properties.Name -notcontains $name) { return $null }
+            }
+        }
+    }
     $family4Operations = @($Operations | Where-Object {
             [string]$_.family -ceq 'fallback_tail_yield'
         })
-    if ($Operations.Count -ne 3 -or $family4Operations.Count -ne 3) {
+    if ($Operations.Count -notin @(3, 4) -or $family4Operations.Count -ne $Operations.Count) {
         return $null
     }
 
@@ -3095,6 +3120,55 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
     $prior = $failedCurrent[0]
     $successor = $quiescentCurrent[0]
     $terminal = $failedTerminal[0]
+    $displaced = $null
+    if ($Operations.Count -eq 4) {
+        $retirements = @($family4Operations | Where-Object {
+                $_.operationRole -ceq 'yield_terminal' -and $_.operationKind -ceq 'Quiescent' -and
+                $_.beforeState -ceq 'Invalidated' -and $_.afterState -ceq 'None' -and $_.stateApplied
+            })
+        if ($retirements.Count -ne 1) { return $null }
+        $displaced = $retirements[0]
+        $typed = $displaced.fallbackTailYield
+        foreach ($name in @('role', 'yieldKind', 'pairingState', 'sourceBoundary', 'effectiveBoundary', 'targetBoundary', 'receipts')) {
+            if ($null -eq $typed -or $typed.PSObject.Properties.Name -notcontains $name) { return $null }
+        }
+        $successorScope = Get-FileTransferCoordinatorSnapshotObjectProperty `
+            -InputObject $successor.fallbackTailYield -Name 'sourceBoundary' -Default $null
+        if ($null -eq $successorScope -or -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $successorScope)) { return $null }
+        foreach ($receipt in @($typed.receipts)) {
+            foreach ($name in @('stage', 'commandIdentity', 'commandGeneration', 'commandFingerprint',
+                    'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+                if ($null -eq $receipt -or $receipt.PSObject.Properties.Name -notcontains $name) { return $null }
+            }
+        }
+        if ($displaced.stateApplied -isnot [bool] -or $displaced.receiptValidated -isnot [bool] -or
+            -not $displaced.receiptValidated -or $typed.role -cne 'yield_terminal' -or
+            $typed.yieldKind -cne 'Quiescent' -or $typed.pairingState -cne 'Invalidated' -or
+            $displaced.authorityId -in @('', '(none)', $prior.authorityId, $successor.authorityId) -or
+            [long]$displaced.operationGeneration -le 0 -or
+            [long]$displaced.operationGeneration -ge [long]$prior.operationGeneration -or
+            $displaced.operationKey -cne ('fallback_tail_yield|yield_terminal|' + $displaced.authorityId + '|' +
+                ([long]$displaced.operationGeneration).ToString([Globalization.CultureInfo]::InvariantCulture) + '|Quiescent') -or
+            -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence $displaced)) { return $null }
+        foreach ($scope in @($typed.sourceBoundary, $typed.effectiveBoundary, $typed.targetBoundary)) {
+            if ($null -eq $scope -or -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $scope) -or
+                $scope.dataSessionIdentity -cne $successorScope.dataSessionIdentity -or
+                [long]$scope.dataSessionGeneration -ne [long]$successorScope.dataSessionGeneration) {
+                return $null
+            }
+        }
+        $retainedReceipt = @($typed.receipts | Where-Object {
+                $_.stage -ceq 'invalidation' -and $_.receiptStatus -ceq 'Invalidated' -and
+                $_.receiptValidated -is [bool] -and $_.receiptValidated
+            })
+        if ($retainedReceipt.Count -ne 1 -or
+            [long]$retainedReceipt[0].commandGeneration -ne [long]$displaced.operationGeneration -or
+            [long]$retainedReceipt[0].receiptGeneration -ne [long]$displaced.operationGeneration) { return $null }
+        foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint',
+                'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$displaced.$field -cne [string]$retainedReceipt[0].$field) { return $null }
+        }
+    }
     foreach ($operation in @($prior, $successor, $terminal)) {
         $typed = $operation.fallbackTailYield
         $expectedKey = @(
@@ -3284,6 +3358,7 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape 
         FailedCurrent = $prior
         QuiescentCurrent = $successor
         FailedTerminal = $terminal
+        DisplacedTerminal = $displaced
         PeerReceipt = $priorPeer[0]
         YieldReceipt = $successorYield[0]
         SupersessionReceipt = $supersession[0]
@@ -4000,6 +4075,12 @@ function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
         return 'current_checkpoint_peer_proof_successor_transition_invalid'
     }
     if ([string]$Envelope.decisionKind -ceq 'FallbackTailQuiescent') {
+        if (@($Envelope.aggregate.operations | Where-Object {
+                    $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -ceq 'yield_terminal' -and
+                    $_.operationKind -ceq 'Quiescent'
+                }).Count -gt 0) {
+            return 'failed_to_quiescent_terminal_slot_rollover_rejected_as_extra_operation'
+        }
         $failedSupersession =
             Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
                 -Operations @($Envelope.aggregate.operations)
@@ -4025,11 +4106,192 @@ function Get-FileTransferCoordinatorSnapshotFamily4CatalogVariant {
     return '(none)'
 }
 
+function Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]
+        [object[]]$AggregateEntries,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]
+        [object[]]$Effects
+    )
+
+    $bindings = [Collections.Generic.List[object]]::new()
+    $effectIndex = @{}
+    foreach ($effect in $Effects) {
+        if ([string]$effect.EffectKind -cne 'peer_proof_observed') {
+            continue
+        }
+        $key = "$($effect.CoordinatorInstanceId)|$($effect.TransitionId)|$($effect.OperationKey)"
+        if (-not $effectIndex.ContainsKey($key)) {
+            $effectIndex[$key] = [Collections.Generic.List[object]]::new()
+        }
+        $effectIndex[$key].Add($effect) | Out-Null
+    }
+
+    foreach ($entry in @($aggregateEntries | Where-Object {
+                [string]$_.Boundary.decisionKind -ceq
+                    'ApplyFallbackTailPeerProofReceipt' -and
+                [string]$_.Boundary.decisionStatus -ceq 'Accepted' -and
+                [string]$_.Boundary.decisionReason -ceq
+                    'fallback_tail_initial_peer_proof_receipt_retained'
+            })) {
+        $pending = @($entry.Boundary.operations | Where-Object {
+                [string]$_.family -ceq 'fallback_tail_yield' -and
+                [string]$_.operationRole -ceq
+                    'peer_proof_pending_initial' -and
+                [string]$_.operationKind -ceq 'PeerProof' -and
+                [string]$_.beforeState -ceq 'None' -and
+                [string]$_.afterState -ceq 'Pending' -and
+                [bool]$_.stateApplied
+            })
+        if ($pending.Count -ne 1) {
+            continue
+        }
+
+        $operation = $pending[0]
+        $typed = $operation.fallbackTailYield
+        $receipts = @($typed.receipts | Where-Object {
+                [string]$_.stage -ceq 'peer_proof' -and
+                [string]$_.receiptStatus -ceq 'Observed' -and
+                [bool]$_.receiptValidated
+            })
+        $expectedOperationKey = @(
+            'fallback_tail_yield',
+            'peer_proof_pending_initial',
+            [string]$operation.authorityId,
+            ([long]$operation.operationGeneration).ToString(
+                [Globalization.CultureInfo]::InvariantCulture),
+            'PeerProof') -join '|'
+        $rawPeerAuthority = [string](
+            Get-FileTransferCoordinatorSnapshotObjectProperty `
+                -InputObject $typed `
+                -Name 'peerProofAuthorityId' `
+                -Default '(none)')
+        $scopeEnvelope = [pscustomobject]@{
+            aggregate = [pscustomobject]@{
+                afterBoundary = $entry.AfterBoundary
+            }
+        }
+        if ($null -eq $typed -or
+            $receipts.Count -ne 1 -or
+            [string]$operation.operationKey -cne $expectedOperationKey -or
+            [string]$operation.predecessorAuthorityId -cne '(none)' -or
+            [long]$operation.operationGeneration -le 0L -or
+            $rawPeerAuthority -notmatch
+                '^fta2-fallback_tail_yield-[0-9a-f]{24}$' -or
+            (ConvertTo-FileTransferCoordinatorEvidenceToken `
+                $rawPeerAuthority) -cne [string]$operation.authorityId -or
+            [string]$typed.role -cne 'peer_proof_pending_initial' -or
+            [string]$typed.yieldKind -cne 'PeerProof' -or
+            [string]$typed.pairingState -cne 'Pending' -or
+            [long]$typed.peerProofYieldGeneration -ne
+                [long]$operation.operationGeneration -or
+            [string]$typed.peerProofIdentity -in @('', '(none)') -or
+            [string]$typed.peerProofFingerprint -in @('', '(none)') -or
+            [string]$typed.ownerKey -in @('', '(none)') -or
+            [string]$typed.pairKey -in @('', '(none)') -or
+            -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
+                -Operation $operation) -or
+            -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
+                -Envelope $scopeEnvelope `
+                -Operation $operation)) {
+            continue
+        }
+
+        $receipt = $receipts[0]
+        if ([string]$operation.commandIdentity -cne
+                [string]$receipt.commandIdentity -or
+            [long]$operation.commandGeneration -ne
+                [long]$receipt.commandGeneration -or
+            [string]$operation.commandFingerprint -cne
+                [string]$receipt.commandFingerprint -or
+            [string]$operation.receiptIdentity -cne
+                [string]$receipt.receiptIdentity -or
+            [long]$operation.receiptGeneration -ne
+                [long]$receipt.receiptGeneration -or
+            [string]$operation.receiptStatus -cne
+                [string]$receipt.receiptStatus -or
+            [string]$operation.receiptFingerprint -cne
+                [string]$receipt.receiptFingerprint -or
+            -not [bool]$operation.receiptValidated) {
+            continue
+        }
+
+        $effectKey = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.boundaryId)|$($operation.operationKey)"
+        $matchingEffects = @($effectIndex[$effectKey] | Where-Object {
+                $null -ne $_ -and [string]$_.EffectKind -ceq 'peer_proof_observed' -and
+                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                    -Boundary $entry.Boundary `
+                    -Operation $operation `
+                    -Effect $_)
+            })
+        if ($matchingEffects.Count -ne 1 -or
+            [string]$matchingEffects[0].Writer -cne
+                [string]$entry.Boundary.writer) {
+            continue
+        }
+
+        $effect = $matchingEffects[0]
+        $bindings.Add([pscustomobject]@{
+                BindingKind = 'pending_peer_proof'
+                CoordinatorInstanceId =
+                    [string]$entry.Boundary.coordinatorInstanceId
+                Writer = [string]$entry.Boundary.writer
+                TransitionId = [string]$entry.Boundary.boundaryId
+                TransitionSequence = [long]$entry.Boundary.writerSequence
+                StateGeneration = [long]$entry.Boundary.afterStateGeneration
+                SessionId = [string]$entry.SessionId
+                TransferId = [string]$entry.TransferId
+                Direction = [string]$entry.Direction
+                OperationKey = [string]$operation.operationKey
+                OperationAuthorityId = [string]$operation.authorityId
+                OperationGeneration = [long]$operation.operationGeneration
+                OperationRole = [string]$operation.operationRole
+                BeforeState = [string]$operation.beforeState
+                AfterState = [string]$operation.afterState
+                OwnerKey = [string]$typed.ownerKey
+                PairKey = [string]$typed.pairKey
+                PeerProofAuthorityId = $rawPeerAuthority
+                PeerProofGeneration = [long](
+                    Get-FileTransferCoordinatorSnapshotObjectProperty `
+                        -InputObject $typed `
+                        -Name 'peerProofGeneration' `
+                        -Default 0L)
+                PeerProofYieldGeneration =
+                    [long]$typed.peerProofYieldGeneration
+                PeerProofIdentity = [string]$typed.peerProofIdentity
+                PeerProofFingerprint = [string]$typed.peerProofFingerprint
+                PairingState = [string]$typed.pairingState
+                PairingGeneration = [long]$typed.pairingGeneration
+                LocalProofIdentity = [string]$typed.localProofIdentity
+                LocalProofFingerprint = [string]$typed.localProofFingerprint
+                PairedReleaseAuthorityId =
+                    [string]$typed.pairedReleaseAuthorityId
+                PairedReleaseGeneration =
+                    [long]$typed.pairedReleaseGeneration
+                PairedReleaseOutcome =
+                    [string]$typed.pairedReleaseOutcome
+                AggregateBoundary = $entry.AfterBoundary
+                SourceBoundary = $typed.sourceBoundary
+                EffectiveBoundary = $typed.effectiveBoundary
+                TargetBoundary = $typed.targetBoundary
+                PeerProofReceipt = $receipt
+                PeerProofEffect = $effect
+                LocalProofReceipt = $null
+                LocalProofEffects = @()
+                PairedReleaseReceipt = $null
+                PairedReleaseEffect = $null
+            }) | Out-Null
+    }
+
+    return $bindings.ToArray()
+}
+
 function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
     param(
         [Parameter(Mandatory = $true)]$Entry,
         [Parameter(Mandatory = $true)]$OperationHistory,
-        [Parameter(Mandatory = $true)]$Effects
+        [Parameter(Mandatory = $true)]$Effects,
+        $SupersessionPeerProofOrigins = @{}
     )
 
     $operation = $Entry.Operation
@@ -4084,6 +4346,23 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
         [string]$operation.operationKey -ceq
             [string]$failedSupersession.QuiescentCurrent.operationKey) {
         $prior = $failedSupersession.FailedCurrent
+        $entryKey = Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey -Entry $Entry
+        if ($SupersessionPeerProofOrigins.ContainsKey($entryKey)) {
+            $provenance = $SupersessionPeerProofOrigins[$entryKey]
+            $origin = $provenance.Origin
+            # Physical observation stays on the pending receipt; only the
+            # validated two-hop slot history can carry it to this successor.
+            $sameBoundary = $true
+            foreach ($field in @('coordinatorInstanceId','writer','sessionId','transferId','direction',
+                    'boundaryId','beforeStateGeneration','afterStateGeneration','beforeStateHash','afterStateHash')) {
+                if ([string]$Entry.Boundary.$field -cne [string]$provenance.Boundary.$field) { $sameBoundary = $false }
+            }
+            return $sameBoundary -and
+                (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature -Operation $operation) -ceq $provenance.Signature -and
+                [string]$matchingEffects[0].Writer -ceq [string]$origin.Boundary.writer -and
+                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
+                    -Boundary $origin.Boundary -Operation $origin.Operation -Effect $matchingEffects[0])
+        }
         if ([string]$matchingEffects[0].OperationKey -cne
                 [string]$prior.operationKey -or
             [string]$matchingEffects[0].AuthorityId -cne
@@ -4121,6 +4400,8 @@ function Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect {
                 [string]$_.Operation.operationRole -ceq 'yield_current' -and
                 [string]$_.Operation.operationKind -ceq 'Failed' -and
                 [string]$_.Operation.afterState -ceq 'PeerProofObserved' -and
+                [string]$_.Boundary.decisionKind -ceq 'ApplyFallbackTailPeerProofReceipt' -and
+                [string]$_.Boundary.decisionStatus -ceq 'Accepted' -and
                 (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature `
                     -Operation $_.Operation) -ceq $priorSignature -and
                 (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
@@ -4372,7 +4653,8 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
     param(
         [Parameter(Mandatory = $true)]$YieldHistory,
         [Parameter(Mandatory = $true)]$OperationHistory,
-        [Parameter(Mandatory = $true)]$Effects
+        [Parameter(Mandatory = $true)]$Effects,
+        $SupersessionPeerProofOrigins = @{}
     )
 
     $results = @{}
@@ -4412,7 +4694,7 @@ function Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle {
                     (Test-FileTransferCoordinatorSnapshotFallbackTailPeerProofEffect `
                         -Entry $entry `
                         -OperationHistory $OperationHistory `
-                        -Effects $Effects)
+                        -Effects $Effects -SupersessionPeerProofOrigins $SupersessionPeerProofOrigins)
                 if ($valid -and $null -ne $lastCurrent) {
                     $valid =
                         Test-FileTransferCoordinatorSnapshotFallbackTailCurrentPeerProofSuccessor `
@@ -6794,25 +7076,46 @@ function Test-FileTransferCoordinatorCheckpointYieldTerminalBirth {
 }
 
 function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
-    param($AggregateIndex, $Candidates, $InvalidBoundaries, [object[]]$Effects, [object[]]$AllBoundaries)
+    param($AggregateIndex, $Candidates, $InvalidBoundaries, [object[]]$Effects, [object[]]$AllBoundaries,
+        $SupersessionCandidates = @{}, $RejectedSupersessions = @{},
+        [object[]]$PendingPeerProofBindings = @(), $SupersessionPeerProofOrigins = @{},
+        $ValidatedDisplacedTerminals = @{})
 
     # Index effects and rejected observations once, then reduce the Coordinator's
     # current/LastTerminalOperation slots in generation order. Retained terminal
     # scopes are immutable history, not the aggregate's currently installed scope.
-    $forbiddenEffects = @{}; $invalidGenerations = @{}; $resolved = @{}
+    $forbiddenEffects = @{}; $invalidGenerations = @{}; $resolved = @{}; $effectIndex = @{}
     foreach ($effect in $Effects) {
         if ($effect.Family -ceq 'fallback_tail_yield') {
             $forbiddenEffects["$($effect.CoordinatorInstanceId)|$($effect.TransitionId)"] = $true
+            $effectKey = "$($effect.CoordinatorInstanceId)|$($effect.TransitionId)|$($effect.OperationKey)"
+            if (-not $effectIndex.ContainsKey($effectKey)) { $effectIndex[$effectKey] = [Collections.Generic.List[object]]::new() }
+            $effectIndex[$effectKey].Add($effect)
         }
     }
+    $neutralProofObservations = @{}
     foreach ($boundary in $AllBoundaries) {
         if ($InvalidBoundaries.ContainsKey([string]$boundary.boundaryId)) {
             $invalidGenerations["$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.beforeStateGeneration)"] = $true
         }
+        if ([long]$boundary.beforeStateGeneration -eq [long](Get-FileTransferCoordinatorSnapshotObjectProperty $boundary 'afterStateGeneration' (-1)) -and
+            @($boundary.operations | Where-Object { $_.family -ceq 'fallback_tail_yield' -and
+                    $_.operationRole -in @('peer_proof_pending_initial','yield_current','yield_terminal') }).Count -gt 0) {
+            $key = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.beforeStateGeneration)"
+            if (-not $neutralProofObservations.ContainsKey($key)) { $neutralProofObservations[$key] = [Collections.Generic.List[object]]::new() }
+            $neutralProofObservations[$key].Add($boundary)
+        }
+    }
+    $pendingOrigins = @{}
+    foreach ($binding in $PendingPeerProofBindings) {
+        $key = "$($binding.CoordinatorInstanceId)|$($binding.Writer)|$($binding.TransitionId)|$($binding.OperationKey)"
+        if (-not $pendingOrigins.ContainsKey($key)) { $pendingOrigins[$key] = [Collections.Generic.List[object]]::new() }
+        $pendingOrigins[$key].Add($binding)
     }
     foreach ($streamKey in $AggregateIndex.Keys) {
         $stream = $AggregateIndex[$streamKey]
         $slots = @{}; $seen = @{}; $previous = $null
+        $pendingProof = $null; $seenPendingProofs = @{}
         foreach ($generation in @($stream.Mutations.Keys | Sort-Object)) {
             $entries = $stream.Mutations[$generation]
             if ($entries.Count -ne 1) {
@@ -6822,7 +7125,7 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                     [void]$stream.Boundaries.Remove($id)
                 }
                 [void]$stream.Mutations.Remove($generation)
-                $slots = @{}; $previous = $null
+                $slots = @{}; $previous = $null; $pendingProof = $null
                 continue
             }
             $entry = $entries[0]; $boundary = $entry.Boundary; $id = [string]$boundary.boundaryId
@@ -6842,7 +7145,77 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                     [string]$previous.Direction -ceq [string]$entry.Direction -and
                     (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $previous.AfterBoundary $entry.BeforeBoundary)
             }
-            if (-not $valid) { $slots = @{} }
+            if (-not $valid) { $slots = @{}; $pendingProof = $null }
+            # State-neutral carried descriptors cannot mutate and restore an
+            # origin between mutations. Attempted/rejected observations are
+            # separate diagnostic roles and do not authorize or poison a carry.
+            foreach ($observation in @($neutralProofObservations["$streamKey|$generation"] | Where-Object { $null -ne $_ })) {
+                $observationAnchorValid = $observation.beforeStateHash -ceq $boundary.beforeStateHash -and
+                    $observation.afterStateHash -ceq $boundary.beforeStateHash
+                $originObservationValid = $observationAnchorValid
+                foreach ($operation in @($observation.operations | Where-Object {
+                        $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -in @('peer_proof_pending_initial','yield_current','yield_terminal') })) {
+                    $subject = if ($operation.operationRole -ceq 'peer_proof_pending_initial') { $pendingProof }
+                        elseif ($slots.ContainsKey([string]$operation.operationRole)) { $slots[[string]$operation.operationRole] } else { $null }
+                    $identity = $operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
+                    $subjectObservationValid = $observationAnchorValid -and $null -ne $subject -and
+                        $operation.beforeState -ceq $operation.afterState -and -not $operation.stateApplied
+                    if ($null -ne $subject) {
+                        $subjectObservationValid = $subjectObservationValid -and $identity -ceq $subject.Identity -and
+                            $operation.beforeState -ceq $subject.Operation.afterState
+                    }
+                    if (-not $subjectObservationValid -and $operation.operationRole -ceq 'yield_terminal' -and
+                        $slots.ContainsKey('yield_terminal')) {
+                        $slots.yield_terminal.OriginProven = $false
+                    }
+                    $originObservationValid = $originObservationValid -and $subjectObservationValid
+                }
+                if (-not $originObservationValid) {
+                    $pendingProof = $null
+                    if ($slots.ContainsKey('yield_current')) { $slots.yield_current.PendingProofOrigin = $null }
+                }
+            }
+            $supersessionProof = $null; $retiredPendingProof = $null; $displacedTerminal = $null
+            $pendingNext = $pendingProof
+            $pendingOperations = @($boundary.operations | Where-Object {
+                    $_.family -ceq 'fallback_tail_yield' -and $_.operationRole -ceq 'peer_proof_pending_initial' -and $_.stateApplied
+                })
+            if ($pendingOperations.Count -gt 0) {
+                $pendingExisting = @($pendingOperations | Where-Object beforeState -CNE 'None')
+                $pendingEntering = @($pendingOperations | Where-Object { $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Pending' })
+                $pendingValid = $valid -and $pendingExisting.Count -le 1 -and $pendingEntering.Count -le 1 -and
+                    $pendingOperations.Count -eq ($pendingExisting.Count + $pendingEntering.Count)
+                if ($pendingExisting.Count -eq 1) {
+                    $pendingOperation = $pendingExisting[0]
+                    $pendingIdentity = $pendingOperation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
+                    $pendingValid = $pendingValid -and $null -ne $pendingProof -and $pendingOperation.beforeState -ceq 'Pending' -and
+                        $pendingOperation.afterState -in @('Pending','None')
+                    if ($null -ne $pendingProof) { $pendingValid = $pendingValid -and $pendingIdentity -ceq $pendingProof.Identity }
+                    if ($pendingOperation.afterState -ceq 'None') {
+                        if ($pendingValid) { $retiredPendingProof = $pendingProof }
+                        $pendingNext = $null
+                    }
+                }
+                if ($pendingEntering.Count -eq 1) {
+                    $pendingOperation = $pendingEntering[0]
+                    $pendingKey = [string]$pendingOperation.operationKey
+                    $originKey = "$($boundary.coordinatorInstanceId)|$($boundary.writer)|$id|$pendingKey"
+                    $origins = @($pendingOrigins[$originKey] | Where-Object { $null -ne $_ })
+                    $pendingValid = $pendingValid -and $null -eq $pendingNext -and -not $seenPendingProofs.ContainsKey($pendingKey) -and $origins.Count -eq 1
+                    $seenPendingProofs[$pendingKey] = $true
+                    if ($origins.Count -eq 1) {
+                        $binding = $origins[0]
+                        $pendingValid = $pendingValid -and $binding.SessionId -ceq $entry.SessionId -and $binding.TransferId -ceq $entry.TransferId -and
+                            $binding.Direction -ceq $entry.Direction -and [long]$binding.StateGeneration -eq [long]$boundary.afterStateGeneration -and
+                            $binding.PeerProofReceipt.receiptReason -ceq 'fallback_tail_peer_proof_retained'
+                        if ($pendingValid) {
+                            $pendingNext = @{ Binding = $binding; Operation = $pendingOperation; Boundary = $boundary
+                                Identity = ($pendingOperation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress) }
+                        }
+                    }
+                }
+                if (-not $pendingValid) { $pendingNext = $null; $retiredPendingProof = $null }
+            }
             $operations = @($boundary.operations | Where-Object {
                     $_.family -ceq 'fallback_tail_yield' -and
                     $_.operationRole -in @('yield_current', 'yield_terminal') -and $_.stateApplied
@@ -6874,6 +7247,17 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                     else {
                         $identity = $operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
                         $next[$role] = @{ Operation = $operation
+                            PendingProofOrigin = $(if ($slots.ContainsKey($role) -and $slots[$role].Identity -ceq $identity) { $slots[$role].PendingProofOrigin } else { $null })
+                            OriginProven = ($slots.ContainsKey($role) -and $slots[$role].OriginProven)
+                            SupersessionIdentity = $(if ($slots.ContainsKey($role) -and
+                                    ($slots[$role].SupersessionIdentity -ceq $identity -or
+                                     ($role -ceq 'yield_current' -and $operation.operationKind -ceq 'Failed' -and
+                                      $null -ne $slots[$role].SupersessionIdentity -and
+                                      $slots[$role].SupersessionIdentity -ceq $slots[$role].Identity -and
+                                      $slots[$role].Operation.afterState -ceq 'YieldIssued' -and
+                                      $operation.afterState -ceq 'PeerProofObserved' -and
+                                      $boundary.decisionKind -ceq 'ApplyFallbackTailPeerProofReceipt' -and
+                                      $boundary.decisionStatus -ceq 'Accepted'))) { $identity } else { $null })
                             CheckpointIdentity = $(if ($slots.ContainsKey($role) -and
                                     $slots[$role].CheckpointIdentity -ceq $identity) { $identity } else { $null })
                             Identity = $identity }
@@ -6898,11 +7282,50 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                     $seen[$key] = $true
                     $identity = $operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 64 -Compress
                     $next[$role] = @{ Operation = $operation
+                        PendingProofOrigin = $null
                         Identity = $identity
+                        OriginProven = $(if ($role -ceq 'yield_current') {
+                                $operation.operationKind -ceq 'Quiescent' -and
+                                $operation.afterState -in @('YieldIssued', 'PeerProofObserved') -and
+                                $boundary.decisionKind -ceq 'FallbackTailQuiescent' -and $boundary.decisionStatus -ceq 'Accepted'
+                            } else { $slots.ContainsKey('yield_current') -and $slots.yield_current.OriginProven })
+                        SupersessionIdentity = $(if ($role -ceq 'yield_current' -and $operation.operationKind -ceq 'Failed' -and
+                                $operation.afterState -in @('YieldIssued', 'PeerProofObserved') -and
+                                $boundary.decisionKind -ceq 'FallbackTailFailed' -and $boundary.decisionStatus -ceq 'Accepted') {
+                                $identity
+                            } else { $null })
                         CheckpointIdentity = $(if ($role -ceq 'yield_current' -and $operation.operationKind -ceq 'Failed' -and
                                 $operation.afterState -ceq 'PeerProofObserved' -and $boundary.decisionKind -ceq 'FallbackTailFailed' -and
                                 $boundary.decisionStatus -ceq 'Accepted') { $identity } else { $null }) }
                 }
+            }
+            if ($valid -and $null -ne $retiredPendingProof -and $next.ContainsKey('yield_current') -and
+                $boundary.decisionKind -ceq 'FallbackTailFailed' -and $boundary.decisionStatus -ceq 'Accepted') {
+                $current = $next.yield_current.Operation
+                $envelope = [pscustomobject]@{
+                    decisionKind=$boundary.decisionKind; decisionStatus=$boundary.decisionStatus; decisionReason=$boundary.decisionReason
+                    aggregate=[pscustomobject]@{
+                        beforeStateGeneration=$boundary.beforeStateGeneration; afterStateGeneration=$boundary.afterStateGeneration
+                        beforeStateFingerprint=$boundary.beforeStateHash; afterStateFingerprint=$boundary.afterStateHash
+                        beforeBoundary=$entry.BeforeBoundary; afterBoundary=$entry.AfterBoundary; operations=$boundary.operations
+                        changedFamilies=@(Get-FileTransferCoordinatorSnapshotObjectProperty $boundary 'families' @())
+                    }
+                }
+                $originMatches = Test-FileTransferCoordinatorSnapshotFallbackTailFailedEnvelope $envelope
+                $binding = $retiredPendingProof.Binding; $typed = $current.fallbackTailYield
+                foreach ($field in @('ownerKey','pairKey','peerProofAuthorityId','peerProofYieldGeneration','peerProofIdentity','peerProofFingerprint')) {
+                    if ([string]$typed.$field -cne [string]$binding.$field) { $originMatches = $false }
+                }
+                foreach ($scope in @('sourceBoundary','effectiveBoundary','targetBoundary')) {
+                    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $typed.$scope $binding.$scope)) { $originMatches = $false }
+                }
+                $peer = @($typed.receipts | Where-Object stage -CEQ 'peer_proof')
+                $originMatches = $originMatches -and $peer.Count -eq 1
+                if ($peer.Count -eq 1) {
+                    $originMatches = $originMatches -and $peer[0].receiptReason -ceq 'fallback_tail_peer_proof_observed' -and
+                        (Test-FileTransferCoordinatorSnapshotFallbackTailReceiptEqual $peer[0] $binding.PeerProofReceipt)
+                }
+                if ($originMatches) { $next.yield_current.PendingProofOrigin = $retiredPendingProof }
             }
             if ($Candidates.ContainsKey($id)) {
                 $resolved[$id] = $true
@@ -6930,7 +7353,80 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
                     $valid = $false
                 }
             }
-            if ($valid) { $slots = $next } else { $slots = @{} }
+            if ($SupersessionCandidates.ContainsKey($id)) {
+                $resolved[$id] = $true
+                if ($InvalidBoundaries.ContainsKey($id)) {
+                    # Keep an already precise receipt/effect failure primary;
+                    # this rejected boundary cannot contribute slot history.
+                    [void]$stream.Boundaries.Remove($id); [void]$stream.Mutations.Remove($generation)
+                    $valid = $false
+                }
+                else {
+                    $shape = Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape -Operations @($boundary.operations)
+                    $rolloverValid = $null -ne $shape
+                    $forbidden = $false
+                    if ($rolloverValid -and $null -eq $shape.DisplacedTerminal) {
+                        # Preserve the existing three-operation contract, but it may
+                        # not silently overwrite a terminal retained by this stream.
+                        $rolloverValid = -not $slots.ContainsKey('yield_terminal')
+                    }
+                    elseif ($rolloverValid) {
+                        $rolloverValid = $valid -and $slots.ContainsKey('yield_terminal') -and $slots.yield_terminal.OriginProven -and
+                            $slots.ContainsKey('yield_current') -and $null -ne $slots.yield_current.SupersessionIdentity -and
+                            $slots.yield_current.Identity -ceq $slots.yield_current.SupersessionIdentity
+                        if ($rolloverValid) {
+                            $identity = $shape.DisplacedTerminal | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied |
+                                ConvertTo-Json -Depth 64 -Compress
+                            $rolloverValid = $identity -ceq $slots.yield_terminal.Identity
+                        }
+                        $effectKey = "$($boundary.coordinatorInstanceId)|$id|$($shape.QuiescentCurrent.operationKey)"
+                        $yieldEffects = @($effectIndex[$effectKey] | Where-Object {
+                                $null -ne $_ -and $_.EffectKind -ceq 'recovery_owner_retired_after_yield' -and
+                                $_.Writer -ceq $boundary.writer
+                            })
+                        $rolloverValid = $rolloverValid -and $yieldEffects.Count -eq 1
+                        if ($yieldEffects.Count -eq 1) {
+                            $rolloverValid = $rolloverValid -and
+                                (Test-FileTransferCoordinatorSnapshotExactEffectBinding $boundary $shape.QuiescentCurrent $yieldEffects[0])
+                        }
+                        $forbidden = $effectIndex.ContainsKey("$($boundary.coordinatorInstanceId)|$id|$($shape.DisplacedTerminal.operationKey)")
+                    }
+                    if (-not $rolloverValid -or $forbidden) {
+                        $variant = if ($forbidden) { 'failed_to_quiescent_terminal_slot_rollover_forbidden_effect' }
+                            else { 'failed_to_quiescent_terminal_slot_rollover_history_unproven' }
+                        $InvalidBoundaries[$id] = $true
+                        $RejectedSupersessions[$id] = $true
+                        [void]$stream.Boundaries.Remove($id); [void]$stream.Mutations.Remove($generation)
+                        "snapshot_operation_catalog_mismatch|$variant`:$($boundary.evidenceLineIndex)"
+                        $valid = $false
+                    }
+                    elseif ($valid -and $slots.ContainsKey('yield_current') -and $null -ne $slots.yield_current.PendingProofOrigin) {
+                        $successorPeer = @($shape.QuiescentCurrent.fallbackTailYield.receipts | Where-Object stage -CEQ 'peer_proof')
+                        if ($successorPeer.Count -eq 1 -and $successorPeer[0].receiptReason -ceq 'fallback_tail_peer_proof_observed') {
+                            $supersessionProof = @{ Origin = $slots.yield_current.PendingProofOrigin; Boundary = $boundary
+                                Signature = (Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofSignature -Operation $shape.QuiescentCurrent) }
+                        }
+                    }
+                    if ($valid -and $rolloverValid -and -not $forbidden -and $null -ne $shape.DisplacedTerminal -and
+                        $boundary.decisionKind -ceq 'FallbackTailQuiescent' -and $boundary.decisionStatus -ceq 'Accepted') {
+                        $displacedTerminal = $shape.DisplacedTerminal
+                    }
+                }
+            }
+            if ($valid) {
+                $slots = $next; $pendingProof = $pendingNext
+                if ($null -ne $supersessionProof) {
+                    $key = Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey `
+                        -Entry ([pscustomobject]@{ Boundary=$boundary; Operation=$shape.QuiescentCurrent })
+                    $SupersessionPeerProofOrigins[$key] = $supersessionProof
+                }
+                if ($null -ne $displacedTerminal) {
+                    $key = Get-FileTransferCoordinatorSnapshotFallbackTailYieldEntryKey `
+                        -Entry ([pscustomobject]@{ Boundary=$boundary; Operation=$displacedTerminal })
+                    $ValidatedDisplacedTerminals["$($boundary.coordinatorInstanceId)|$($boundary.writer)|$key"] = $true
+                }
+            }
+            else { $slots = @{}; $pendingProof = $null }
             $previous = $entry
         }
     }
@@ -6938,6 +7434,13 @@ function Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates {
         if (-not $resolved.ContainsKey($id)) {
             $InvalidBoundaries[$id] = $true
             "snapshot_operation_catalog_mismatch|checkpoint_failed_peer_first_invalidation_terminal_rollover_history_unproven:$($Candidates[$id].Line)"
+        }
+    }
+    foreach ($id in $SupersessionCandidates.Keys) {
+        if (-not $resolved.ContainsKey($id)) {
+            $InvalidBoundaries[$id] = $true
+            $RejectedSupersessions[$id] = $true
+            "snapshot_operation_catalog_mismatch|failed_to_quiescent_terminal_slot_rollover_history_unproven:$($SupersessionCandidates[$id].Line)"
         }
     }
 }
@@ -8758,7 +9261,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         $profileIdentity = "$profileVersion|$profileHash"
         if ($null -eq $selectedCatalogIdentity) {
             $selectedCatalogIdentity = $profileIdentity
-            if ($profileVersion -ceq $script:FileTransferCoordinatorReceiverBarrierCatalogVersion) {
+            if ($profileVersion -cin @($script:FileTransferCoordinatorReceiverBarrierCatalogVersion,
+                    $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -8772,6 +9276,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $checkpointStalePeerProofCandidates = @{}
     $checkpointPeerProofSuccessorCandidates = @{}
     $failedCheckpointYieldCandidates = @{}
+    $failedQuiescentSupersessionCandidates = @{}
+    $rejectedFailedQuiescentSupersessions = @{}
     $failedCheckpointYieldHistoryObservations = [System.Collections.Generic.List[object]]::new()
     $receiveRecoveryRouteCarryCandidates = @{}
     $effects = [System.Collections.Generic.List[object]]::new()
@@ -9046,6 +9552,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 if (Test-FileTransferCoordinatorSnapshotFailedCheckpointYieldCandidate $envelope) {
                     $failedCheckpointYieldCandidates[$transitionId] = @{ Line = $record.LineIndex }
                 }
+                if ([string]$envelope.decisionKind -ceq 'FallbackTailQuiescent' -and
+                    [string]$envelope.decisionStatus -ceq 'Accepted' -and
+                    $null -ne (Get-FileTransferCoordinatorSnapshotFallbackTailFailedSupersessionShape `
+                        -Operations @($envelope.aggregate.operations))) {
+                    $failedQuiescentSupersessionCandidates[$transitionId] = @{ Line = $record.LineIndex }
+                }
                 foreach ($operation in @($envelope.aggregate.operations)) {
                     if ([string]$operation.family -ceq 'regular_v4_frontier_repair_pressure' -and
                         [string]$operation.operationRole -ceq 'recovery_handoff_terminal' -and
@@ -9071,6 +9583,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         [string]::IsNullOrWhiteSpace([string]$operation.receiptFingerprint)) {
                         $errors.Add("snapshot_operation_identity_incomplete:$($record.LineIndex)")
                         break
+                    }
+                    if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $operation) {
+                        if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $operation $catalog)) {
+                            $errors.Add("snapshot_checkpoint_repair_continuity_operation_invalid:$($record.LineIndex)")
+                            break
+                        }
+                        continue
                     }
                     if (Test-FileTransferCoordinatorReceiverBarrierMarker $operation) {
                         if (-not (Test-FileTransferCoordinatorReceiverBarrierOperation $envelope $operation $catalog)) {
@@ -9599,7 +10118,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($effect.Family -in $script:FileTransferCoordinatorSnapshotFamily6 -and
             $script:FileTransferCoordinatorSnapshotFamily6EffectKinds -notcontains
                 [string]$effect.EffectKind -and
-            -not ($catalog.Version -ceq $script:FileTransferCoordinatorReceiverBarrierCatalogVersion -and
+            -not ((Test-FileTransferCoordinatorReceiverBarrierCatalogCapability $catalog) -and
                 $effect.EffectKind -ceq 'receiver_barrier_close_applied')) {
             $errors.Add("snapshot_authority_effect_kind_unknown:$($effect.LineIndex)")
             continue
@@ -9617,6 +10136,11 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         else {
             @()
+        }
+        if (@($candidates | Where-Object {
+                Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_.Operation }).Count -gt 0) {
+            $errors.Add("snapshot_checkpoint_repair_continuity_authority_effect_forbidden:$($effect.LineIndex)")
+            continue
         }
         $matches = @($candidates | Where-Object {
                 [string]$_.Boundary.coordinatorInstanceId -ceq
@@ -10565,6 +11089,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
+                if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $operation) { continue }
                 if ([string]$operation.family -in
                     (@($script:FileTransferCoordinatorSnapshotFamily1) +
                      @($script:FileTransferCoordinatorSnapshotFamily2) +
@@ -10847,7 +11372,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             -AggregateIndex $aggregateBoundaryIndex -InvalidBoundaries $invalidResponderCarryBoundaries)) {
         $errors.Add([string]$failure)
     }
-    if ($failedCheckpointYieldCandidates.Count -gt 0) {
+    $pendingPeerProofBindings = @(Get-FileTransferCoordinatorSnapshotPendingPeerProofBindings -AggregateEntries @($aggregateEntries) -Effects @($effects))
+    $supersessionPeerProofOrigins = @{}
+    $validatedDisplacedTerminals = @{}
+    if ($failedCheckpointYieldCandidates.Count -gt 0 -or $failedQuiescentSupersessionCandidates.Count -gt 0) {
         $invalidAggregateBoundaries = @{}
         foreach ($failure in @(ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
                 -Errors @($errors) -Records @($records) -Boundaries @($boundaries))) {
@@ -10855,10 +11383,21 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         foreach ($failure in @(Resolve-FileTransferCoordinatorFailedCheckpointYieldCandidates `
                 -AggregateIndex $aggregateBoundaryIndex -Candidates $failedCheckpointYieldCandidates `
+                -SupersessionCandidates $failedQuiescentSupersessionCandidates `
+                -RejectedSupersessions $rejectedFailedQuiescentSupersessions `
+                -PendingPeerProofBindings $pendingPeerProofBindings -SupersessionPeerProofOrigins $supersessionPeerProofOrigins `
+                -ValidatedDisplacedTerminals $validatedDisplacedTerminals `
                 -InvalidBoundaries $invalidAggregateBoundaries -Effects @($effects) `
                 -AllBoundaries (@($boundaries) + @($failedCheckpointYieldHistoryObservations)))) {
             $errors.Add([string]$failure)
         }
+    }
+    if ($rejectedFailedQuiescentSupersessions.Count -gt 0) {
+        # Keep rejected snapshots and their strict failures in the result, but
+        # do not let their unproven operations establish downstream authority.
+        $operationHistory = @($operationHistory | Where-Object {
+                -not $rejectedFailedQuiescentSupersessions.ContainsKey([string]$_.Boundary.boundaryId)
+            })
     }
     foreach ($lineageGroup in @($responderEntries | Group-Object {
                 Get-FileTransferCoordinatorResponderProbeHandoffLifecycleKey `
@@ -11220,7 +11759,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             Get-FileTransferCoordinatorSnapshotFallbackTailPeerProofLifecycle `
                 -YieldHistory $yieldHistory `
                 -OperationHistory @($operationHistory) `
-                -Effects @($effects)
+                -Effects @($effects) -SupersessionPeerProofOrigins $supersessionPeerProofOrigins
         foreach ($entry in $yieldHistory) {
             $operation = $entry.Operation
             $state = [string]$operation.afterState
@@ -11279,8 +11818,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                 $valid = & $hasReceiptEffect 'paired_release' 'paired_release_published'
             }
             if ($valid -and [string]$typed.yieldKind -ceq 'Quiescent') {
+                $displacementKey = "$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$peerProofEntryKey"
                 if ([string]$entry.Boundary.decisionKind -ceq
-                    'FallbackTailQuiescent') {
+                    'FallbackTailQuiescent' -and -not $validatedDisplacedTerminals.ContainsKey($displacementKey)) {
                     $yieldEffects = @($effects | Where-Object {
                             [string]$_.EffectKind -ceq
                                 'recovery_owner_retired_after_yield' -and
@@ -11292,6 +11832,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $valid = $yieldEffects.Count -eq 1
                 }
                 else {
+                    # Exact terminal-slot displacement retains the original
+                    # yield's one-shot effect; it does not issue that yield again.
                     $valid = & $hasReceiptEffect `
                         'yield' 'recovery_owner_retired_after_yield'
                 }
@@ -12571,159 +13113,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
-    foreach ($entry in @($aggregateEntries | Where-Object {
-                [string]$_.Boundary.decisionKind -ceq
-                    'ApplyFallbackTailPeerProofReceipt' -and
-                [string]$_.Boundary.decisionStatus -ceq 'Accepted' -and
-                [string]$_.Boundary.decisionReason -ceq
-                    'fallback_tail_initial_peer_proof_receipt_retained'
-            })) {
-        $pending = @($entry.Boundary.operations | Where-Object {
-                [string]$_.family -ceq 'fallback_tail_yield' -and
-                [string]$_.operationRole -ceq
-                    'peer_proof_pending_initial' -and
-                [string]$_.operationKind -ceq 'PeerProof' -and
-                [string]$_.beforeState -ceq 'None' -and
-                [string]$_.afterState -ceq 'Pending' -and
-                [bool]$_.stateApplied
-            })
-        if ($pending.Count -ne 1) {
-            continue
-        }
-
-        $operation = $pending[0]
-        $typed = $operation.fallbackTailYield
-        $receipts = @($typed.receipts | Where-Object {
-                [string]$_.stage -ceq 'peer_proof' -and
-                [string]$_.receiptStatus -ceq 'Observed' -and
-                [bool]$_.receiptValidated
-            })
-        $expectedOperationKey = @(
-            'fallback_tail_yield',
-            'peer_proof_pending_initial',
-            [string]$operation.authorityId,
-            ([long]$operation.operationGeneration).ToString(
-                [Globalization.CultureInfo]::InvariantCulture),
-            'PeerProof') -join '|'
-        $rawPeerAuthority = [string](
-            Get-FileTransferCoordinatorSnapshotObjectProperty `
-                -InputObject $typed `
-                -Name 'peerProofAuthorityId' `
-                -Default '(none)')
-        $scopeEnvelope = [pscustomobject]@{
-            aggregate = [pscustomobject]@{
-                afterBoundary = $entry.AfterBoundary
-            }
-        }
-        if ($null -eq $typed -or
-            $receipts.Count -ne 1 -or
-            [string]$operation.operationKey -cne $expectedOperationKey -or
-            [string]$operation.predecessorAuthorityId -cne '(none)' -or
-            [long]$operation.operationGeneration -le 0L -or
-            $rawPeerAuthority -notmatch
-                '^fta2-fallback_tail_yield-[0-9a-f]{24}$' -or
-            (ConvertTo-FileTransferCoordinatorEvidenceToken `
-                $rawPeerAuthority) -cne [string]$operation.authorityId -or
-            [string]$typed.role -cne 'peer_proof_pending_initial' -or
-            [string]$typed.yieldKind -cne 'PeerProof' -or
-            [string]$typed.pairingState -cne 'Pending' -or
-            [long]$typed.peerProofYieldGeneration -ne
-                [long]$operation.operationGeneration -or
-            [string]$typed.peerProofIdentity -in @('', '(none)') -or
-            [string]$typed.peerProofFingerprint -in @('', '(none)') -or
-            [string]$typed.ownerKey -in @('', '(none)') -or
-            [string]$typed.pairKey -in @('', '(none)') -or
-            -not (Test-FileTransferCoordinatorSnapshotFamily4StageEvidence `
-                -Operation $operation) -or
-            -not (Test-FileTransferCoordinatorSnapshotFallbackTailOperationScope `
-                -Envelope $scopeEnvelope `
-                -Operation $operation)) {
-            continue
-        }
-
-        $receipt = $receipts[0]
-        if ([string]$operation.commandIdentity -cne
-                [string]$receipt.commandIdentity -or
-            [long]$operation.commandGeneration -ne
-                [long]$receipt.commandGeneration -or
-            [string]$operation.commandFingerprint -cne
-                [string]$receipt.commandFingerprint -or
-            [string]$operation.receiptIdentity -cne
-                [string]$receipt.receiptIdentity -or
-            [long]$operation.receiptGeneration -ne
-                [long]$receipt.receiptGeneration -or
-            [string]$operation.receiptStatus -cne
-                [string]$receipt.receiptStatus -or
-            [string]$operation.receiptFingerprint -cne
-                [string]$receipt.receiptFingerprint -or
-            -not [bool]$operation.receiptValidated) {
-            continue
-        }
-
-        $matchingEffects = @($effects | Where-Object {
-                [string]$_.EffectKind -ceq 'peer_proof_observed' -and
-                (Test-FileTransferCoordinatorSnapshotExactEffectBinding `
-                    -Boundary $entry.Boundary `
-                    -Operation $operation `
-                    -Effect $_)
-            })
-        if ($matchingEffects.Count -ne 1 -or
-            [string]$matchingEffects[0].Writer -cne
-                [string]$entry.Boundary.writer) {
-            continue
-        }
-
-        $effect = $matchingEffects[0]
-        $fallbackTailPeerProofBindings.Add([pscustomobject]@{
-                BindingKind = 'pending_peer_proof'
-                CoordinatorInstanceId =
-                    [string]$entry.Boundary.coordinatorInstanceId
-                Writer = [string]$entry.Boundary.writer
-                TransitionId = [string]$entry.Boundary.boundaryId
-                TransitionSequence = [long]$entry.Boundary.writerSequence
-                StateGeneration = [long]$entry.Boundary.afterStateGeneration
-                SessionId = [string]$entry.SessionId
-                TransferId = [string]$entry.TransferId
-                Direction = [string]$entry.Direction
-                OperationKey = [string]$operation.operationKey
-                OperationAuthorityId = [string]$operation.authorityId
-                OperationGeneration = [long]$operation.operationGeneration
-                OperationRole = [string]$operation.operationRole
-                BeforeState = [string]$operation.beforeState
-                AfterState = [string]$operation.afterState
-                OwnerKey = [string]$typed.ownerKey
-                PairKey = [string]$typed.pairKey
-                PeerProofAuthorityId = $rawPeerAuthority
-                PeerProofGeneration = [long](
-                    Get-FileTransferCoordinatorSnapshotObjectProperty `
-                        -InputObject $typed `
-                        -Name 'peerProofGeneration' `
-                        -Default 0L)
-                PeerProofYieldGeneration =
-                    [long]$typed.peerProofYieldGeneration
-                PeerProofIdentity = [string]$typed.peerProofIdentity
-                PeerProofFingerprint = [string]$typed.peerProofFingerprint
-                PairingState = [string]$typed.pairingState
-                PairingGeneration = [long]$typed.pairingGeneration
-                LocalProofIdentity = [string]$typed.localProofIdentity
-                LocalProofFingerprint = [string]$typed.localProofFingerprint
-                PairedReleaseAuthorityId =
-                    [string]$typed.pairedReleaseAuthorityId
-                PairedReleaseGeneration =
-                    [long]$typed.pairedReleaseGeneration
-                PairedReleaseOutcome =
-                    [string]$typed.pairedReleaseOutcome
-                AggregateBoundary = $entry.AfterBoundary
-                SourceBoundary = $typed.sourceBoundary
-                EffectiveBoundary = $typed.effectiveBoundary
-                TargetBoundary = $typed.targetBoundary
-                PeerProofReceipt = $receipt
-                PeerProofEffect = $effect
-                LocalProofReceipt = $null
-                LocalProofEffects = @()
-                PairedReleaseReceipt = $null
-                PairedReleaseEffect = $null
-            }) | Out-Null
+    foreach ($binding in $pendingPeerProofBindings) {
+        $fallbackTailPeerProofBindings.Add($binding) | Out-Null
     }
 
     if ($selectionModes.Count -ne 1) {
@@ -12747,6 +13138,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $checkpointRepairContinuityEvidence = Get-FileTransferCheckpointRepairContinuityEvidence `
+        -Boundaries @($aggregateEntries | ForEach-Object { $_.Boundary }) -Catalog $catalog
+    foreach ($failure in @($checkpointRepairContinuityEvidence.Errors)) { $errors.Add([string]$failure) }
     $validationFailures = @(
         ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
             -Errors @($errors) `
@@ -12958,6 +13352,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         BoundaryHash = $boundaryHash
         Boundaries = @($boundaries)
         # Internal correlation evidence; excluded from normalized boundary JSON/hash.
+        __CheckpointRepairContinuityEvidence = if ($artifactVerdict -ceq 'pass') { $checkpointRepairContinuityEvidence } else { $null }
         __HeldPublicationProofClosures = @($heldPublicationProofClosures.ToArray() | Where-Object { $artifactVerdict -ceq 'pass' })
         __FallbackTailPeerProofBindings =
             @($orderedFallbackTailPeerProofBindings)
@@ -13351,7 +13746,9 @@ function Test-FileTransferCoordinatorSnapshotFallbackOwnerPublication {
             }
             if (-not (Test-FileTransferCoordinatorSnapshotFallbackCheckpointScopeMutation $checkpoint)) { return $false }
         }
-        foreach ($operation in @($step.operations | Where-Object { $_.stateApplied -and $_.family -ceq 'route_runtime' })) {
+        foreach ($operation in @($step.operations | Where-Object {
+                $_.stateApplied -and $_.family -ceq 'route_runtime' -and
+                -not (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_) })) {
             $prior = if ($operation.operationKey -ceq $Previous.Operation.operationKey) { $Previous.Operation }
                 elseif ($operation.operationKey -ceq $Previous.RuntimeOwner.operationKey) { $Previous.RuntimeOwner } else { $null }
             if ($null -eq $prior -or $operation.beforeState -cne $prior.afterState -or $operation.afterState -cne $prior.afterState) { return $false }

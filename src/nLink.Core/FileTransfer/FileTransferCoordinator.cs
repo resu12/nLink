@@ -2653,6 +2653,8 @@ internal readonly record struct FileTransferCoordinatorPersistentState(
 
     internal string? SnapshotStateFingerprint { get; init; }
 
+    internal CheckpointRepairContinuityOrigin? CheckpointRepairContinuityOrigin { get; init; }
+
     private readonly RuntimeUnlockRetryLifecycleSubstate?
         runtimeUnlockRetryLifecycle;
     private readonly FileTransferFallbackTailYieldSubstate?
@@ -25584,6 +25586,7 @@ internal static partial class FileTransferCoordinator
             leg.BridgeRecoveryGeneration;
         var previousCheckpointRequestId = leg.CheckpointRequestId;
         var previousCheckpointGeneration = leg.CheckpointGeneration;
+        var checkpointContinuitySource = CreateCheckpointRepairContinuityScope(state);
         MarkFallbackCheckpointAccepted(
             leg,
             coordinatorEvent.TransportEpochId,
@@ -25635,6 +25638,8 @@ internal static partial class FileTransferCoordinator
             ? nextState.PersistentState.FileTransferReceiveRecovery
                 .PendingFallbackCheckpointFrontierRequestRecheckCommand
             : null;
+        nextState = RetainCheckpointRepairContinuityOrigin(
+            nextState, checkpointContinuitySource, acceptedLease, coordinatorEvent);
         return Decision(
             nextState,
             reason,

@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "e507b186e037924e5785e563742fedd9111552684fc8cc2f46eef38225b0bb94";
+        "e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3005,6 +3005,12 @@ public sealed partial class SessionFileTransferService
                  operationIndex++)
             {
                 var operation = envelope.Aggregate.Operations[operationIndex];
+                // Continuity receipts attest evidence only, never physical authority.
+                if (operation.CheckpointRepairContinuity is not null ||
+                    operation.OperationKind == "FallbackCheckpointRepairScopeContinuity")
+                {
+                    continue;
+                }
                 var evidenceOperation =
                     evidenceEnvelope.Aggregate.Operations[operationIndex];
                 var scope = operation.RouteRuntime?.Boundary ??
@@ -3334,8 +3340,58 @@ public sealed partial class SessionFileTransferService
                         Receipts = barrier.Receipts.Select(CreateEvidenceReceipt).ToImmutableArray(),
                     }
                     : null,
+                CheckpointRepairContinuity = operation.CheckpointRepairContinuity is { } continuity
+                    ? CreateCheckpointContinuityEvidence(continuity)
+                    : null,
             };
         }
+
+        private static CheckpointRepairContinuityScope CreateCheckpointContinuityScopeEvidence(
+            CheckpointRepairContinuityScope scope)
+            => scope with
+            {
+                Boundary = CreateEvidenceBoundary(scope.Boundary),
+                RuntimeOwnerFingerprint = EvidenceToken(scope.RuntimeOwnerFingerprint),
+                PublicationFingerprint = EvidenceToken(scope.PublicationFingerprint),
+                CommitFingerprint = EvidenceToken(scope.CommitFingerprint),
+                RetainedLegCheckpointRequestId = EvidenceToken(scope.RetainedLegCheckpointRequestId),
+                ScopeFingerprint = EvidenceToken(scope.ScopeFingerprint),
+            };
+
+        private static FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot
+            CreateCheckpointContinuityEvidence(FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot value)
+            => value with
+            {
+                CoordinatorInstanceId = EvidenceToken(value.CoordinatorInstanceId),
+                SessionId = EvidenceToken(value.SessionId),
+                TransferId = EvidenceToken(value.TransferId),
+                AcceptanceIdentity = EvidenceToken(value.AcceptanceIdentity),
+                OriginOperationKey = CreateEvidenceOperationKey("route_runtime", "checkpoint_acceptance_retained",
+                    EvidenceToken(value.AcceptanceIdentity), value.AcceptedStateGeneration,
+                    "FallbackCheckpointRepairScopeContinuity"),
+                OriginReceiptIdentity = EvidenceToken(value.OriginReceiptIdentity),
+                OriginReceiptFingerprint = EvidenceToken(value.OriginReceiptFingerprint),
+                SourceScope = CreateCheckpointContinuityScopeEvidence(value.SourceScope),
+                ClearedScope = CreateCheckpointContinuityScopeEvidence(value.ClearedScope),
+                CurrentScope = CreateCheckpointContinuityScopeEvidence(value.CurrentScope),
+                AcceptedCheckpoint = value.AcceptedCheckpoint with
+                {
+                    CheckpointRequestId = EvidenceToken(value.AcceptedCheckpoint.CheckpointRequestId),
+                    LeaseFingerprint = EvidenceToken(value.AcceptedCheckpoint.LeaseFingerprint),
+                },
+                Repair = value.Repair is { } repair ? repair with
+                {
+                    AuthorityId = EvidenceToken(repair.AuthorityId),
+                    PredecessorAuthorityId = EvidenceToken(repair.PredecessorAuthorityId),
+                    CanonicalRepairKey = EvidenceToken(repair.CanonicalRepairKey),
+                    RangeFingerprint = EvidenceToken(repair.RangeFingerprint),
+                    ProtocolRepairRequestId = EvidenceToken(repair.ProtocolRepairRequestId),
+                    RequestCorrelationId = EvidenceToken(repair.RequestCorrelationId),
+                    CheckpointRequestId = EvidenceToken(repair.CheckpointRequestId),
+                    RepairFingerprint = EvidenceToken(repair.RepairFingerprint),
+                } : null,
+                Receipts = value.Receipts.Select(CreateEvidenceReceipt).ToImmutableArray(),
+            };
 
         private static string CreateEvidenceOperationKey(
             string family,

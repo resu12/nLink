@@ -59487,7 +59487,8 @@ function Get-FileTransferFallbackFrontierRepairSuccessorDispatchMissingCorrelati
 function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
     param(
         [object[]]$Events = @(),
-        [AllowNull()][System.Collections.Generic.HashSet[object]]$OwnedCandidateEvents = $null)
+        [AllowNull()][System.Collections.Generic.HashSet[object]]$OwnedCandidateEvents = $null,
+        [AllowNull()]$SnapshotEvidence = $null)
 
     [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
             Sort-Object Sequence, LineNumber)
@@ -59963,10 +59964,14 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         $rawCount += $rawEvents.Count
         $candidate = $rawEvents[0]
         if ($null -eq (Get-Variable -Name currentSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
-            $currentSourceIndex = New-FileTransferStallGraceCurrentSourceIndex -Events $ordered
+            $currentSourceIndex = New-FileTransferStallGraceCurrentSourceIndex -Events $ordered -SnapshotEvidence $SnapshotEvidence
         }
         $currentSourceRecovery = Get-FileTransferStallGraceCurrentSourceRecovery -Index $currentSourceIndex `
             -Candidate $candidate -HistoricalProgress $incident.Progress
+        if ($null -eq $currentSourceRecovery -and $null -ne $incident.PSObject.Properties['PublishedSource']) {
+            $currentSourceRecovery = Get-FileTransferStallGraceCheckpointScopeOwnership `
+                -CurrentSourceIndex $currentSourceIndex -PublishedSourceIndex $incident.PublishedSourceIndex -Candidate $candidate
+        }
         if ($null -ne $currentSourceRecovery) {
             # Changed-source obligations cannot fall through to historical
             # scope matching or a less exact ordinary-progress recovery.
@@ -66012,7 +66017,7 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events
     $fileTransferFallbackFrontierStallGraceRecheckProof =
         Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation `
-            -Events $events
+            -Events $events -SnapshotEvidence $coordinatorSnapshotEvaluation
     $fileTransferFallbackFrontierRecentProgressGraceRecheckProof =
         Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation `
             -Events $events
@@ -74646,7 +74651,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         & $StageObserver -Name 'full_writer_operator_and_snapshot_artifacts' -Status Started -InputCount $writerAllEventCount
     }
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
-    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-summary.json') -Encoding UTF8
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-coordinator-snapshot-summary.txt' -Lines @(
         ("mode={0}" -f $snapshotEvaluation.Mode),
         ("contract_version={0}" -f $snapshotEvaluation.ContractVersion),

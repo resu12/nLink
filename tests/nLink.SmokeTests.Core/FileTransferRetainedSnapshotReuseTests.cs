@@ -297,7 +297,7 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
                 $expectedMode = if ($shape -in @('legacy', 'empty')) { 'LegacyV0' } else { 'SnapshotV1Authoritative' }
                 $expectedVerdict = if ($shape -in @('partial', 'conflicting_duplicate')) { 'fail' } else { 'pass' }
                 if ($expected.Mode -cne $expectedMode -or $expected.ArtifactEvidenceVerdict -cne $expectedVerdict) { throw 'fixture does not establish its intended evidence contract' }
-                $expectedJson = $expected | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 -Compress
+                $expectedJson = $expected | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 -Compress
                 $beforeSummary = $summary | ConvertTo-Json -Depth 64 -Compress
                 foreach ($reuse in @('exact', 'absent', 'changed', 'reordered', 'truncated', 'duplicate')) {
                     [string[]]$handoffLines = @($lines)
@@ -317,7 +317,7 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
                     if ($reuse -ceq 'exact' -and -not [object]::ReferenceEquals($snapshotEvaluation, $expected)) { throw 'complete handoff was not reused exactly' }
                     if ($expectedCalls) { Assert-ExactLines $lines $script:EvaluationCalls[$before].Lines }
                     if (@($stages | Where-Object {$_.InputCount -ne $lines.Count}).Count) { throw 'writer stage count still describes a transfer-only subset' }
-                    if (($snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 -Compress) -cne $expectedJson) { throw 'writer changed complete-source evidence' }
+                    if (($snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 -Compress) -cne $expectedJson) { throw 'writer changed complete-source evidence' }
 
                     $effectiveVerdict='PASS'; $effectiveGateStatus='pass'; $effectiveNextArtifact=''; $effectiveHardFailures=[Collections.Generic.List[string]]::new()
                     . $script:WriterSnapshotGate

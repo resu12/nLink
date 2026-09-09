@@ -3,12 +3,14 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
-    [InlineData("recent_progress")]
-    [InlineData("stall")]
-    [InlineData("stall_progress")]
+    [InlineData("recent_progress", "powershell")]
+    [InlineData("stall", "powershell")]
+    [InlineData("stall_progress", "powershell")]
+    [InlineData("stall_published", "powershell")]
+    [InlineData("stall_published", "pwsh")]
     [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
     [Trait("OpsSuite", "GuiHarness")]
-    public async Task RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity(string kind)
+    public async Task RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity(string kind, string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var script = """
@@ -36,6 +38,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 $f.frontier_chunk_index=[string]$frontier; $f.source_kind='ReceiverRequest'; $f.target_transport='regular_nkn'
                 $f.durable_received_highest_chunk_index='80'
                 $f.primary_protocol_repair_request_id="request:$frontier"; $f.primary_request_correlation_id="correlation:$frontier"
+                if($Kind -eq 'stall_published'){$f.range_count='1';$f.requested_chunk_count='1';$f.repair_request_key="fallback-frontier:${frontier}:1:range:$frontier"}
                 return $f
             }
             function Add([string]$name,[int]$ms,[hashtable]$fields,[hashtable]$extra=@{}){
@@ -113,6 +116,16 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     'natural_conflict','natural_ambiguous_wake','natural_ambiguous_state','natural_unrelated',
                     'natural_wrong_progress_time','natural_wrong_commit_count','natural_early_rearm')
             }
+            if($Kind -eq 'stall_published'){
+                $cases=@('exact','duplicate','missing_grant','early_grant','missing_delivery','missing_dispatch','missing_send',
+                    'missing_retirement','wrong_retirement','wrong_retirement_reason','wrong_scope','missing_commit','rejected_commit',
+                    'missing_disposition','missing_publication','wrong_data','wrong_transition','wrong_target','ambiguous_grant',
+                    'highest_regression','wrong_stall_data','wrong_dispatch_order','unrelated_publication','terminal','pause','replacement','conflict',
+                    'published_missing_wake','published_wrong_wake','published_early_wake','published_wrong_deadline','published_wrong_frontier',
+                    'published_wrong_wake_data','published_alias_only','published_wrong_primary','published_wrong_correlation',
+                    'published_wrong_request_key','published_missing_predecessor','published_foreign_predecessor','published_prior_authority_case',
+                    'published_prior_duplicate','published_empty_optional_diagnostic','published_prior_event_conflict','published_prior_session_conflict','published_unrelated_progress')
+            }
             foreach($case in $cases){
                 [object[]]$events=if($Kind -eq 'stall_progress'){NaturalFixture}else{Fixture}
                 if($Kind -eq 'stall'){
@@ -159,6 +172,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     'duplicate' {$events += $events[13]}
                     'early_grant' {$events[11].Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1200).UtcTicks}
                     'wrong_retirement' {$events[15].Fields.authority_id='fta2-repair_replay-other'}
+                    'wrong_retirement_reason' {$events[15].Fields.decision_reason='another_reason'}
                     'wrong_scope' {$events[15].Fields.transport_epoch='2'}
                     'rejected_commit' {$events[16].Fields.decision_status='Rejected'}
                     'wrong_data' {$events[18].Fields.data_session_identity='replacement'}
@@ -190,27 +204,131 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                         $events += [pscustomobject]@{EventName=$carry.event;Fields=$carry;Sequence=11L;LineNumber=32;TimestampUtc=$origin.AddMilliseconds(1200)}
                     }
                 }
-                $expected=$case -in @('exact','duplicate','natural_unrelated','natural_early_rearm') -or ($Kind -eq 'stall' -and $case -in @('missing_wake','stall_progress_only'))
-                $legacy=if($Kind -eq 'stall'){$script:FileTransferFallbackFrontierStallGraceLegacyCorrelation}else{$script:FileTransferFallbackFrontierRecentProgressGraceLegacyCorrelation}
+                if($Kind -eq 'stall_published'){
+                    # No repair-progress predecessor reaches F: the exact publication admits this obligation.
+                    $events=@($events|Where-Object {$_.Sequence -notin @(6,7,8,9,11)})
+                    $candidate=@($events|Where-Object EventName -eq 'filetransfer_v6_frontier_request_deferred')[0]
+                    $candidate.Fields.authority_effect='none'
+                    $script:fixtureEvents=[Collections.Generic.List[object]]::new()
+                    Add 'filetransfer_route_hint_authorized_publication_accepted' -100 $scope @{
+                        route_publication_action_kind='RoutePublication';coordinator_decision_reason='accepted';target_route='post_tuna_fallback_v6';
+                        target_protocol_version='6';target_transport='regular_nkn';fallback_leg_generation='3';fallback_transport_epoch='1';fallback_bridge_recovery_generation='1'}
+                    Add 'filetransfer_v6_sparse_write_committed' 100 $scope @{contiguous_chunks_committed='1';next_chunk_index='41';highest_received_chunk_index='70'}
+                    Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index='70'}
+                    Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' 1864 $candidate.Fields @{
+                        decision_status='dispatched';decision_reason='exact_receiver_request_dispatched';authority_effect='none'}
+                    $wake=$script:fixtureEvents[3]
+                    $alias=Repair 'fta2-repair_replay-B' 61 41 'fta2-repair_replay-A'
+                    Add 'filetransfer_v6_frontier_request_sent' 2000 $alias @{repair_request_id='request:41:alias';request_correlation_id='correlation:41:alias'}
+                    Add 'unrelated_liveness_diagnostic' 1200 $scope @{}
+                    foreach($extra in $script:fixtureEvents){$extra.Fields.log_writer_sequence=[string](100+$extra.Sequence)}
+                    $events+=@($script:fixtureEvents)
+                    switch($case){
+                        'published_missing_wake' {$events=@($events|Where-Object EventName -ne 'filetransfer_v6_frontier_stall_grace_recheck_decided')}
+                        'published_wrong_wake' {$wake.Fields.wake_generation='42'}
+                        'published_early_wake' {$wake.Fields.log_writer_attempt_utc_ticks=[string]$origin.AddMilliseconds(1849).UtcTicks}
+                        'published_wrong_deadline' {$wake.Fields.wake_deadline_utc=$origin.AddMilliseconds(1851).ToString('o')}
+                        'published_wrong_frontier' {$wake.Fields.frontier_chunk_index='42'}
+                        'published_wrong_wake_data' {$wake.Fields.data_session_identity='other'}
+                        'published_alias_only' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_v6_frontier_request_sent' -or $_.Fields.repair_request_id -ne 'request:41'})}
+                        'published_wrong_primary' {@($events|Where-Object {$_.EventName -eq 'filetransfer_v6_frontier_request_sent' -and $_.Fields.repair_request_id -eq 'request:41'})[0].Fields.repair_request_id='request:other'}
+                        'published_wrong_correlation' {@($events|Where-Object {$_.EventName -eq 'filetransfer_control_plane_delivery_observed' -and $_.Fields.repair_request_id -eq 'request:41'})[0].Fields.request_correlation_id='correlation:other'}
+                        'published_wrong_request_key' {@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' -and $_.Fields.frontier_chunk_index -eq '41'})[0].Fields.repair_request_key='frontier:other'}
+                        'published_missing_predecessor' {$events=@($events|Where-Object {$_.EventName -ne 'filetransfer_fallback_frontier_repair_authority_granted' -or $_.Fields.authority_id -ne 'fta2-repair_replay-A'})}
+                        'published_foreign_predecessor' {@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and $_.Fields.authority_id -eq 'fta2-repair_replay-A'})[0].Fields.route_publication_generation='2'}
+                        'published_prior_authority_case' {@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and $_.Fields.authority_id -ceq 'fta2-repair_replay-A'})[0].Fields.authority_id='fta2-repair_replay-a'}
+                        'published_empty_optional_diagnostic' {$candidate.Fields.optional_diagnostic='';@($events|Where-Object EventName -eq 'filetransfer_route_hint_authorized_publication_accepted')[0].Fields.optional_diagnostic=''}
+                        {$_ -in @('published_prior_duplicate','published_prior_event_conflict','published_prior_session_conflict')} {
+                            $prior=@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' -and $_.Fields.authority_id -eq 'fta2-repair_replay-A'})[0]
+                            $copy=$prior.PSObject.Copy();$copy.Fields=$prior.Fields.Clone()
+                            if($case -eq 'published_prior_event_conflict'){$copy.EventName='filetransfer_route_selected';$copy.Fields.event=$copy.EventName}
+                            if($case -eq 'published_prior_session_conflict'){$copy.Fields.session_id='foreign'}
+                            $events+=@($copy)
+                        }
+                        'wrong_dispatch_order' {$dispatch=@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' -and $_.Fields.frontier_chunk_index -eq '41'})[0];$dispatch.TimestampUtc=$origin.AddMilliseconds(1865);$dispatch.Fields.log_writer_attempt_utc_ticks=[string]$dispatch.TimestampUtc.UtcTicks}
+                        'published_unrelated_progress' {
+                            $events=@($events|Where-Object {$_.EventName -notin @('filetransfer_route_transition_committed','filetransfer_route_transition_disposition_applied','filetransfer_live_route_epoch_recovered')})
+                            $script:fixtureEvents=[Collections.Generic.List[object]]::new()
+                            $other=Repair 'fta2-repair_replay-Tuna' 62 41 '(none)';$other.route='file_tuna_v4';$other.protocol_version='4';$other.target_transport='tuna'
+                            Add 'filetransfer_fallback_frontier_repair_progress_observed' 2200 $other @{previous_frontier_chunk_index='41';current_frontier_chunk_index='59'}
+                            $script:fixtureEvents[0].Fields.log_writer_sequence='110';$events+=@($script:fixtureEvents)
+                        }
+                    }
+                    $events=@($events|Sort-Object TimestampUtc,LineNumber)
+                    $sequence=0L;foreach($event in $events){$event.Sequence=++$sequence;$event.LineNumber=[int]$sequence}
+                    if(@($events|Where-Object {$_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -and $_.Fields.current_frontier_chunk_index -eq '41'}).Count){throw 'fixture synthesized predecessor progress'}
+                    $publishedIndex=New-FileTransferStallGracePublishedSourceIndex $events
+                    $admission=Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedIndex -Candidate $candidate
+                    if(-not $admission.Admitted -or $admission.Episode.AdmissionKind -cne 'CurrentPublishedSource' -or $null -ne $admission.Episode.HistoricalProgress){throw "$case did not use exact current-publication admission"}
+                    if($case -eq 'exact'){
+                        foreach($badSource in @('missing','wrong_scope','wrong_receipt','aba')){
+                            $badEvents=@($events|ForEach-Object {$copy=$_.PSObject.Copy();$copy.Fields=$_.Fields.Clone();$copy})
+                            $publication=@($badEvents|Where-Object EventName -eq 'filetransfer_route_hint_authorized_publication_accepted')[0]
+                            switch($badSource){
+                                'missing' {$badEvents=@($badEvents|Where-Object EventName -ne 'filetransfer_route_hint_authorized_publication_accepted')}
+                                'wrong_scope' {$publication.Fields.route_publication_generation='4'}
+                                'wrong_receipt' {$publication.Fields.coordinator_decision_reason='rejected'}
+                                'aba' {$copy=$publication.PSObject.Copy();$copy.Fields=$publication.Fields.Clone();$copy.Fields.event='filetransfer_route_selected';$copy.EventName=$copy.Fields.event;$copy.Fields.route_publication_generation='4';$copy.Sequence=2L;$copy.Fields.log_writer_sequence='120';$badEvents+=@($copy)
+                                    $restored=$publication.PSObject.Copy();$restored.Fields=$publication.Fields.Clone();$restored.Sequence=3L;$restored.Fields.log_writer_sequence='121';$badEvents+=@($restored)}
+                            }
+                            $badIndex=New-FileTransferStallGracePublishedSourceIndex $badEvents
+                            if($null -ne (Get-FileTransferStallGraceTunaHandoffClosure -Events $badEvents -Episode $admission.Episode -PublishedSourceIndex $badIndex)){throw "$badSource publication accepted through forged admission"}
+                        }
+                        foreach($field in @('AdmissionKind','PublishedSource')){
+                            $forged=$admission.Episode.PSObject.Copy()
+                            if($field -eq 'AdmissionKind'){$forged.AdmissionKind='forged'}else{$forged.PublishedSource=$null}
+                            if($null -ne (Get-FileTransferStallGraceTunaHandoffClosure -Events $events -Episode $forged -PublishedSourceIndex $publishedIndex)){throw "$field forged admission accepted"}
+                        }
+                    }
+                }
+                $expected=$case -in @('exact','duplicate','published_prior_duplicate','published_empty_optional_diagnostic','natural_unrelated','natural_early_rearm') -or ($Kind -eq 'stall' -and $case -in @('missing_wake','stall_progress_only'))
+                $isStall=$Kind -in @('stall','stall_published')
+                $legacy=if($isStall){$script:FileTransferFallbackFrontierStallGraceLegacyCorrelation}else{$script:FileTransferFallbackFrontierRecentProgressGraceLegacyCorrelation}
                 $plain=& $legacy -Events $events
                 $index=New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $events
-                $indexed=if($Kind -eq 'stall'){Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $events -Index $index}else{Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $events -Index $index}
+                $indexed=if($isStall){Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $events -Index $index}else{Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation -Events $events -Index $index}
                 $lines=@($events|Sort-Object Sequence|ForEach-Object {
                     $f=$_.Fields; $parts=@($f.Keys|Sort-Object|ForEach-Object {"$_=$($f[$_])"})
                     "[$($_.TimestampUtc.ToString('yyyy-MM-dd HH:mm:ss.fffffffZ'))] [INFO] [FileTransfer] $($parts -join '; '); gui_evidence_sequence=$($_.Sequence)"
                 })
-                $guiResult=if($Kind -eq 'stall'){Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $lines}else{Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure -Lines $lines}
+                $guiResult=if($isStall){Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $lines}else{Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure -Lines $lines}
+                if($Kind -eq 'stall_published'){
+                    # Regenerate compact input from this independent full fixture using the explicit catalog.
+                    $catalog=@(Get-FileTransferFallbackFrontierGraceCorrelationEventNames)
+                    $compactLines=@($lines|Where-Object {$_ -match '(?:^|; )event=([^;]+)' -and $Matches[1] -cin $catalog})
+                    $compactGui=Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $compactLines
+                    if($guiResult.Unresolved -ne $compactGui.Unresolved -or $guiResult.FirstSequence -ne $compactGui.FirstSequence){throw "$case full/compact GUI boundary differs"}
+                    function ParseLines([string[]]$inputLines,[string]$path){
+                        for($i=0;$i -lt $inputLines.Count;$i++){ConvertFrom-FileTransferLogLine -Line $inputLines[$i] -FilePath $path -LineNumber ($i+1) -Sequence ($i+1)}
+                    }
+                    $fullEvents=@(ParseLines $lines 'full.log');$compactEvents=@(ParseLines $compactLines 'compact.log')
+                    $serializedFull=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $fullEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $fullEvents)
+                    $compact=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $compactEvents -Index (New-FileTransferFallbackFrontierGraceCorrelationIndex $compactEvents)
+                    if($compact.RawCount -ne $indexed.RawCount -or $compact.DistinctCount -ne $indexed.DistinctCount -or $compact.RecoveredCount -ne $indexed.RecoveredCount -or $compact.UnresolvedCount -ne $indexed.UnresolvedCount){throw "$case regenerated compact quartet differs"}
+                    function BoundaryJson($result){
+                        $records=@(foreach($record in $result.CandidateRecords){[ordered]@{
+                            reason=$record.Reason;variant=$record.Variant;recovered=$record.Recovered;
+                            writer=$record.Event.Fields.log_writer_id;sequence=$record.Event.Fields.log_writer_sequence;
+                            frontier=$record.Event.Fields.frontier_chunk_index;
+                            recoveryWriter=$(if($null -ne $record.RecoveryEvent){$record.RecoveryEvent.Fields.log_writer_id}else{''});
+                            recoverySequence=$(if($null -ne $record.RecoveryEvent){$record.RecoveryEvent.Fields.log_writer_sequence}else{''})}})
+                        ConvertTo-Json -InputObject ([ordered]@{raw=$result.RawCount;distinct=$result.DistinctCount;recovered=$result.RecoveredCount;unresolved=$result.UnresolvedCount;verdict=$result.Verdict;boundaries=$records}) -Depth 10 -Compress
+                    }
+                    $fullBoundary=BoundaryJson $serializedFull;$compactBoundary=BoundaryJson $compact
+                    if($fullBoundary -cne $compactBoundary -or $fullBoundary -cne (BoundaryJson $indexed)){throw "$case full/compact normalized boundary differs"}
+                }
                 foreach($result in @($plain,$indexed)){
                     if($result.RawCount -ne 1 -or $result.DistinctCount -ne 1 -or $result.RecoveredCount -ne [int]$expected){throw "$case parity mismatch $($result|ConvertTo-Json -Depth 2 -Compress)"}
+                    if($Kind -eq 'stall_published' -and $expected -and $result.CandidateRecords[0].RecoveryEvent.EventName -cne 'filetransfer_live_route_epoch_recovered'){throw "$case closed without the exact handoff publication"}
                 }
                 if($guiResult.Unresolved -eq $expected){throw "$case GUI mismatch"}
                 if(-not $expected -and $guiResult.FirstSequence -ne $plain.UnresolvedCandidateRecords[0].Event.Sequence){throw "$case GUI location mismatch"}
                 "pass $case"
             }
             """;
-        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), kind]);
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), kind], host);
         Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("pass exact", result.Stdout, StringComparison.Ordinal);
-        Assert.Contains(kind == "stall_progress" ? "pass natural_missing_state" : "pass stall_progress_only", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(kind switch { "stall_progress" => "pass natural_missing_state", "stall_published" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
     }
 }

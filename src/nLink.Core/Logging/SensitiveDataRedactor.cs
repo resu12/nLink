@@ -40,6 +40,7 @@ public static partial class SensitiveDataRedactor
         var redacted = ProtectSnapshotEvidenceValues(
             text,
             protectedSnapshotEvidenceValues);
+        redacted = ProtectCheckpointContinuityEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         var protectedFallbackBootstrapProofKinds = new List<string>();
         redacted = ProtectFallbackBootstrapProofKinds(
             redacted,
@@ -111,8 +112,14 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\boperation_key=(?<value>[A-Za-z0-9._/:-]+\|[A-Za-z0-9._/:-]+\|(?:fte1-[a-f0-9]{24}|\(none\))\|[0-9]+\|[A-Za-z0-9._/:-]+)(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceOperationKeyValueRegex();
 
-    [GeneratedRegex(@"\bsnapshot_catalog_version=(?<value>snapshot-authority-v1(?:-receiver-barrier-v1)?)(?=;\s|$)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\bsnapshot_catalog_version=(?<value>snapshot-authority-v1(?:-receiver-barrier-v1(?:-checkpoint-repair-continuity-v1)?)?)(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceCatalogVersionRegex();
+
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_fallback_frontier_repair_(?:authority_granted|contract_settled|dispatched|progress_observed)|filetransfer_v6_frontier_request_(?:sent|deferred)|filetransfer_v6_frontier_stall_grace_recheck_decided|filetransfer_v6_fallback_frontier_repair_progress_state_forced|filetransfer_v6_receiver_state_sent|filetransfer_control_plane_delivery_observed)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex CheckpointContinuityEvidenceLineRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>continuity_profile)=(?<value>snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1)|(?<key>continuity_(?:coordinator_id|source_fingerprint|acceptance_id|origin_receipt_id|origin_receipt_fingerprint|receipt_id|receipt_fingerprint|current_scope_fingerprint|repair_authority_id|request_id|correlation_id))=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex CheckpointContinuityEvidenceValueRegex();
 
     [GeneratedRegex(@"\bproof_kind=(?<value>file_transfer_(?:bulk_frame|v4_state_frame|v6_state_frame|v6_frontier_request_frame)_(?:received|sent))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex FallbackBootstrapProofKindValueRegex();
@@ -226,6 +233,21 @@ public static partial class SensitiveDataRedactor
 
         return restored;
     }
+
+    private static string ProtectCheckpointContinuityEvidenceValues(string text, List<string> protectedValues)
+        => CheckpointContinuityEvidenceLineRegex().Replace(text, line =>
+        {
+            if (EventKeyValueRegex().Matches(line.Value).Count != 1)
+            {
+                return line.Value;
+            }
+            return CheckpointContinuityEvidenceValueRegex().Replace(line.Value, match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"{match.Groups["key"].Value}={placeholder}";
+            });
+        });
 
     private static string ProtectFallbackBootstrapProofKinds(
         string text,

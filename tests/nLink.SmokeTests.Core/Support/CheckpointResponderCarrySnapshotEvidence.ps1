@@ -54,10 +54,36 @@ function Assert-Parity([string[]]$lines, [bool]$valid, [string]$reason = '') {
             }
         }
     }
+    $boundary = $full.FirstUnresolvedBoundary
+    if ($valid) {
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+        $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+        if ((Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass') {
+            throw 'Checkpoint fixture route-result parity differs.'
+        }
+        # This fixture deliberately begins after Tuna publication. Its first
+        # retained publication is therefore not an initial route publication.
+        $publications = @($envelopes.aggregate.operations | Where-Object {
+            $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_publication' -and
+            $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Published'
+        })
+        if ($publications.Count -ne 1 -or $publications[0].operationGeneration -le 1) { throw 'Fixture route entry changed.' }
+        $scope = "$($first.coordinatorInstanceId)|fixture-writer|$($first.sessionId)|$($first.transferId)|$($first.direction)"
+        $expectedFindings = @(
+            "snapshot route publication generation is not contiguous: scope=$scope; generation=$($publications[0].operationGeneration)"
+        )
+        $routeBoundary = $route.FirstUnresolvedBoundary
+        if ($route.Verdict -cne 'fail' -or (@($route.Findings) -join "`n") -cne ($expectedFindings -join "`n") -or
+            $null -eq $routeBoundary -or $routeBoundary.taxonomyClass -cne 'filetransfer_route_consistency_analysis_parity_invalid' -or
+            $routeBoundary.variant -cne 'snapshot_authoritative_route_boundary_invalid' -or
+            $routeBoundary.writer -cne 'fixture-writer' -or $routeBoundary.writerSequence -ne 60) {
+            throw "Unexpected checkpoint fixture route finding: $(ConvertTo-Json -InputObject $route -Depth 12 -Compress)"
+        }
+        $boundary = $routeBoundary
+    }
     $path = Join-Path $OutputRoot 'compact.log'; [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
-    $boundary = $full.FirstUnresolvedBoundary
-    if ($null -eq $boundary) { if ($null -ne $gui) { throw 'GUI invented a boundary.' }; return }
+    if ($null -eq $boundary) { if ($null -ne $gui) { throw "GUI invented a boundary: $(ConvertTo-Json -InputObject $gui -Depth 8 -Compress)" }; return }
     if ($gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or $gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or
         $gui.CoordinatorWriter -cne $boundary.writer -or $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or
         $gui.CoordinatorRawCount -ne $boundary.rawCount -or $gui.CoordinatorDistinctCount -ne $boundary.distinctCount -or

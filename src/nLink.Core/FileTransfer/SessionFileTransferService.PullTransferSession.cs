@@ -6209,6 +6209,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        InvalidateCheckpointRepairContinuityLocked(context, "data_session_replaced");
         if (context.DataSession is not null)
         {
             UnsubscribeDataSessionEvents(context.DataSession);

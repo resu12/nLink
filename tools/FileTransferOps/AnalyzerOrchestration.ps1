@@ -3868,7 +3868,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             -InputCount $runtimeUnlockRegularV4RecoveryOrderedEvents.Count `
             -Action {
                 New-FileTransferFallbackFrontierGraceCorrelationIndex `
-                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents
+                    -Events $runtimeUnlockRegularV4RecoveryOrderedEvents `
+                    -SnapshotEvidence $compactSnapshotEvaluation
             }
     $fileTransferFallbackFrontierStallGraceRecheckProof =
         Invoke-FileTransferCompactCorrelator `
@@ -8962,8 +8963,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [string]$routeConsistencyState.Parity.FailureReason
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
-    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
-    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
+    $snapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
+    $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
     $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
     return [pscustomobject]@{
@@ -12364,9 +12365,9 @@ function Invoke-FileTransferRetainedAnalysis {
         $artifactStopwatch.Start()
         & $fullReportStageObserver -Name 'full_snapshot_summary_publication' -Status Started -InputCount $fullSnapshotLines.Count
         Invoke-FileTransferFullReportAction -StageObserver $fullReportStageObserver -Action {
-            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 |
+            $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
-            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects | ConvertTo-Json -Depth 64 |
+            $compactSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-compact-summary.json') -Encoding UTF8
             $snapshotParity | ConvertTo-Json -Depth 8 |
                 Set-Content -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8

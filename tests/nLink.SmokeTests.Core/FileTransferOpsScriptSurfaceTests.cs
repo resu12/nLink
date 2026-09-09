@@ -607,6 +607,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $failedPriorBoundary=[pscustomobject]@{
                 coordinatorInstanceId='coordinator'; boundaryId='failed-prior'
                 afterStateGeneration=12L; decisionUtcMilliseconds=10L
+                decisionKind='ApplyFallbackTailPeerProofReceipt'; decisionStatus='Accepted'
                 operations=@($failedPrior)
             }
             $failedBoundary=[pscustomobject]@{

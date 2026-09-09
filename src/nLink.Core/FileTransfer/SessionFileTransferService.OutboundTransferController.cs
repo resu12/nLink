@@ -1262,6 +1262,7 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            InvalidateCheckpointRepairContinuityLocked(context, "local_transfer_failure");
             _ = TryInvalidateReceiveRecoveryOperationForScopeReplacementLocked(
                 context,
                 "local_transfer_failure");

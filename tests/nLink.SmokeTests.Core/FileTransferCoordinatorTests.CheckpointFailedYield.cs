@@ -27,6 +27,20 @@ public sealed partial class FileTransferCoordinatorTests
     {
         // Keep the route setup and the large value-type receipt graph in separate
         // stack frames, as in the retained-recheck ownership fixture.
+        var fixture = CreateCheckpointFailedYieldSource(direction, priorTerminal);
+        RequestCheckpointFailedYieldInvalidation(fixture);
+        AssertCheckpointFailedYieldInvalidation(fixture, priorTerminal);
+        AssertCheckpointPriorEnvelopesImmutable(fixture);
+        checkpointEnvelope = fixture.CheckpointEnvelope;
+        failedEnvelope = fixture.FailedEnvelope;
+        priorTerminalEnvelope = fixture.PriorTerminalEnvelope;
+        return fixture.Snapshots.ToArray();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static CheckpointFailedYieldFixture CreateCheckpointFailedYieldSource(
+        FileTransferDirection direction, bool priorTerminal)
+    {
         var fixture = new CheckpointFailedYieldFixture();
         if (priorTerminal)
         {
@@ -52,13 +66,7 @@ public sealed partial class FileTransferCoordinatorTests
         SettleCheckpointBeforeFailedYield(fixture);
         RetainCheckpointFailedPeerProof(fixture);
         IssueCheckpointFailedYield(fixture);
-        RequestCheckpointFailedYieldInvalidation(fixture);
-        AssertCheckpointFailedYieldInvalidation(fixture, priorTerminal);
-        AssertCheckpointPriorEnvelopesImmutable(fixture);
-        checkpointEnvelope = fixture.CheckpointEnvelope;
-        failedEnvelope = fixture.FailedEnvelope;
-        priorTerminalEnvelope = fixture.PriorTerminalEnvelope;
-        return fixture.Snapshots.ToArray();
+        return fixture;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

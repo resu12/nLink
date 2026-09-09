@@ -259,7 +259,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     FileTransferCoordinatorResponderProbeHandoffOperationSnapshot?
         ResponderProbeHandoff = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null);
+    FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot? CheckpointRepairContinuity = null);
 
 internal sealed record FileTransferCoordinatorReceiverBarrierOperationSnapshot(
     string Role,
@@ -2161,6 +2163,17 @@ internal static partial class FileTransferCoordinator
                 .Where(operation => operation.ReceiverBarrier is not null).ToImmutableArray();
             attemptedOperations = attemptedOperations.IsDefault ? barrierOperations : attemptedOperations.AddRange(barrierOperations);
         }
+        if (!ReferenceEquals(before, after))
+        {
+            after = ReconcileCheckpointRepairContinuityOrigin(after);
+        }
+        if (suppliedOperationsAreComplete)
+        {
+            var continuityOperations = CreateCheckpointRepairContinuityTransitions(before, after);
+            attemptedOperations = attemptedOperations.IsDefault
+                ? continuityOperations
+                : attemptedOperations.AddRange(continuityOperations);
+        }
         if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
         {
             throw new ArgumentException(
@@ -3142,7 +3155,8 @@ internal static partial class FileTransferCoordinator
             operation.FallbackTailYield,
             operation.RegularV4FrontierRepairPressure,
             operation.ResponderProbeHandoff,
-            operation.ReceiverBarrier);
+            operation.ReceiverBarrier,
+            operation.CheckpointRepairContinuity);
 
     internal static ImmutableArray<
         FileTransferCoordinatorOperationTransitionSnapshot>
@@ -3181,6 +3195,7 @@ internal static partial class FileTransferCoordinator
         AddFallbackTailYieldOperationDescriptors(state, builder);
         AddRegularV4FrontierRepairPressureOperationDescriptors(state, builder);
         AddInitialActivationReceiverBarrierDescriptors(state, builder);
+        AddCheckpointRepairContinuityDescriptors(state, builder);
         if (includeResponderProbeHandoff)
         {
             AddResponderProbeHandoffOperationDescriptors(state, builder);
@@ -6441,5 +6456,7 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorResponderProbeHandoffOperationSnapshot?
             ResponderProbeHandoff = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null);
+        FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot? CheckpointRepairContinuity = null);
 }

@@ -22849,6 +22849,10 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (state.TransferPaused)
+            {
+                InvalidateCheckpointRepairContinuityLocked(context, "peer_paused");
+            }
             var previousEpoch = context.PeerV4LastStateEpoch;
             context.PeerV4LastStateEpoch = Math.Max(context.PeerV4LastStateEpoch, state.Epoch);
             context.PeerPaused = state.TransferPaused;
@@ -23004,6 +23008,10 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (pauseControl.Paused)
+            {
+                InvalidateCheckpointRepairContinuityLocked(context, "peer_paused");
+            }
             var previousEpoch = context.PeerV4LastPauseControlEpoch;
             context.PeerV4LastPauseControlEpoch = Math.Max(context.PeerV4LastPauseControlEpoch, pauseControl.Epoch);
             context.PeerPaused = pauseControl.Paused;
