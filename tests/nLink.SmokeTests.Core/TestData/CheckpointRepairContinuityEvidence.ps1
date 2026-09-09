@@ -1,4 +1,4 @@
-param([string]$RepoRoot, [string]$InputPath)
+param([string]$RepoRoot, [string]$InputPath, [switch]$CommittedRetirement)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
@@ -50,6 +50,255 @@ function Metadata($Record) {
     $result.recovered = [bool]$Record.Recovered
     $result.recoverySequence = if ($null -ne $Record.RecoveryEvent) { [string]$Record.RecoveryEvent.Fields.log_writer_sequence } else { '' }
     ConvertTo-Json -InputObject $result -Depth 4 -Compress
+}
+if ($CommittedRetirement) {
+    foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult', 'Get-TunaGuiExplicitFailureClassification',
+        'Get-TunaGuiFileTransferSetupFailureClassification')) {
+        $definitions = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+        }, $true))
+        if ($definitions.Count -ne 1) { throw "Shared GUI function is not unique: $name" }
+        Invoke-Expression $definitions[0].Extent.Text
+    }
+    function Copy-Value($Value) { ConvertFrom-Json (ConvertTo-Json -InputObject $Value -Depth 64 -Compress) }
+    function Replace-Envelope([string]$Line, $Envelope) {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $Envelope -Depth 64 -Compress))
+        $line = Set-Field $Line 'snapshot_sha256' (Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes)
+        Set-Field $line 'snapshot_payload' ([Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_'))
+    }
+    function Origin-Operation($Envelope) {
+        $operations = @($Envelope.aggregate.operations | Where-Object { $_.operationRole -ceq 'checkpoint_acceptance_retained' })
+        if ($operations.Count -ne 1) { throw 'Expected one continuity origin operation' }
+        $operations[0]
+    }
+    $snapshots = @(for ($i=0; $i -lt $captured.Count; $i++) {
+        if ((Name $captured[$i]) -ceq 'filetransfer_coordinator_transition_snapshot') {
+            [pscustomobject]@{ Index=$i; Envelope=(ConvertFrom-FileTransferCoordinatorSnapshotPayload (Field $captured[$i] 'snapshot_payload')).Value }
+        }
+    })
+    $commits = @($snapshots | Where-Object {
+        $_.Envelope.decisionKind -ceq 'CommitFileTransferRouteTransition' -and $_.Envelope.decisionStatus -ceq 'Committed' -and
+        @($_.Envelope.aggregate.operations | Where-Object {
+            $_.operationRole -ceq 'checkpoint_acceptance_retained' -and $_.beforeState -ceq 'Retained' -and $_.afterState -ceq 'None'
+        }).Count -eq 1
+    })
+    if ($commits.Count -ne 1) { throw 'Expected exactly one real Committed continuity retirement' }
+    $candidate = $commits[0]
+    $retirement = Origin-Operation $candidate.Envelope
+    $births = @($snapshots | Where-Object {
+        $_.Envelope.decisionKind -ceq 'FallbackCheckpointAccepted' -and
+        @($_.Envelope.aggregate.operations | Where-Object {
+            $_.operationKey -ceq $retirement.operationKey -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Retained'
+        }).Count -eq 1
+    })
+    if ($births.Count -ne 1) { throw 'Expected the exact accepted origin before route preparation' }
+    $birth = $births[0]
+    $origin = Origin-Operation $birth.Envelope
+    if ($birth.Index -ge $candidate.Index -or
+        (ConvertTo-Json -InputObject $origin.checkpointRepairContinuity -Depth 64 -Compress) -cne
+        (ConvertTo-Json -InputObject $retirement.checkpointRepairContinuity -Depth 64 -Compress) -or
+        $retirement.receiptStatus -cne 'Accepted') { throw 'Real Committed retirement changed its historical Accepted receipt/payload' }
+    $validations = @($snapshots | Where-Object {
+        $_.Envelope.decisionKind -ceq 'CheckpointRepairContinuityValidated' -and $_.Index -gt $birth.Index -and $_.Index -lt $candidate.Index -and
+        @($_.Envelope.aggregate.operations | Where-Object { $_.afterState -ceq 'Validated' }).Count -eq 1
+    })
+    if ($validations.Count -eq 0) { throw 'Missing actual pre-retirement current-repair validation' }
+    foreach ($kind in @('PrepareFileTransferRouteTransition', 'BeginFileTransferRouteTransitionPhysicalDrain',
+        'ApplyFileTransferRouteTransitionDispositionReceipt')) {
+        if (@($snapshots | Where-Object { $_.Envelope.decisionKind -ceq $kind }).Count -eq 0) {
+            throw "Missing actual route lifecycle decision: $kind"
+        }
+    }
+    $routeCommits = @($candidate.Envelope.aggregate.operations | Where-Object {
+        $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_commit' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Committed'
+    })
+    if ($routeCommits.Count -ne 1) { throw 'Missing independent exact route-commit operation' }
+    $cases = @('exact', 'exact_duplicate', 'unknown_committed', 'wrong_reason', 'rejected_mutation', 'idempotent_mutation',
+        'generation_gap', 'unchanged_hash', 'unchanged_route', 'wrong_before_scope', 'wrong_data_session', 'wrong_data_generation',
+        'historical_source', 'origin_fingerprint', 'receipt_command_identity_consistent', 'receipt_command_fingerprint_consistent',
+        'receipt_identity_consistent', 'missing_origin', 'missing_retirement', 'duplicate_removal', 'competing_removal',
+        'missing_route_commit', 'invalid_route_receipt', 'missing_route_effect', 'conflicting_snapshot')
+    $outputs = [Collections.Generic.List[object]]::new()
+    $baseline = $null
+    foreach ($case in $cases) {
+        "checkpoint-committed-retirement-case=$case"
+        $lines = @($captured)
+        $item = if ($case -ceq 'missing_origin') { $birth } else { $candidate }
+        $envelope = Copy-Value $item.Envelope
+        $subject = Origin-Operation $envelope
+        $payload = $subject.checkpointRepairContinuity
+        $receipt = $payload.receipts[0]
+        switch -CaseSensitive ($case) {
+            'unknown_committed' { $envelope.decisionKind = 'UnknownRouteCommit' }
+            'wrong_reason' { $envelope.decisionReason = 'not_the_route_commit_reason' }
+            'rejected_mutation' { $envelope.decisionStatus = 'Rejected' }
+            'idempotent_mutation' { $envelope.decisionStatus = 'Idempotent' }
+            'generation_gap' { $envelope.aggregate.afterStateGeneration++ }
+            'unchanged_hash' { $envelope.aggregate.afterStateFingerprint = $envelope.aggregate.beforeStateFingerprint }
+            'unchanged_route' { $envelope.aggregate.afterBoundary = Copy-Value $envelope.aggregate.beforeBoundary }
+            'wrong_before_scope' { $envelope.aggregate.beforeBoundary.routePublicationGeneration++ }
+            'wrong_data_session' { $envelope.aggregate.afterBoundary.dataSessionIdentity = 'fte1-' + ('a' * 24) }
+            'wrong_data_generation' { $envelope.aggregate.afterBoundary.dataSessionGeneration++ }
+            'historical_source' { $payload.sourceScope.scopeFingerprint = 'fte1-' + ('b' * 24) }
+            'origin_fingerprint' { $payload.originReceiptFingerprint = 'fte1-' + ('c' * 24) }
+            'receipt_command_identity_consistent' { $subject.commandIdentity = 'fte1-' + ('d' * 24); $receipt.commandIdentity = $subject.commandIdentity }
+            'receipt_command_fingerprint_consistent' { $subject.commandFingerprint = 'fte1-' + ('e' * 24); $receipt.commandFingerprint = $subject.commandFingerprint }
+            'receipt_identity_consistent' {
+                $subject.receiptIdentity = 'fte1-' + ('f' * 24)
+                $receipt.receiptIdentity = $subject.receiptIdentity; $payload.originReceiptIdentity = $subject.receiptIdentity
+            }
+            'missing_origin' { $envelope.aggregate.operations = @($envelope.aggregate.operations | Where-Object { $_ -ne $subject }) }
+            'missing_retirement' { $envelope.aggregate.operations = @($envelope.aggregate.operations | Where-Object { $_ -ne $subject }) }
+            'duplicate_removal' { $envelope.aggregate.operations += (Copy-Value $subject) }
+            'competing_removal' {
+                $other = Copy-Value $subject
+                $other.authorityId = 'fte1-' + ('1' * 24)
+                $other.operationKey = $other.operationKey.Replace($subject.authorityId, $other.authorityId)
+                $other.checkpointRepairContinuity.acceptanceIdentity = $other.authorityId
+                $other.checkpointRepairContinuity.originOperationKey = $other.operationKey
+                $envelope.aggregate.operations += $other
+            }
+            'missing_route_commit' { $envelope.aggregate.operations = @($envelope.aggregate.operations | Where-Object {
+                -not ($_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_commit') }) }
+            'invalid_route_receipt' {
+                $routeCommit = @($envelope.aggregate.operations | Where-Object { $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_commit' })[0]
+                $routeCommit.receiptValidated = $false
+            }
+            'conflicting_snapshot' { $receipt.commandIdentity = 'fte1-' + ('2' * 24) }
+        }
+        if ($case -cin @('receipt_command_identity_consistent', 'receipt_command_fingerprint_consistent')) {
+            if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $subject $catalog)) {
+                throw "$case must reach immutable origin-history validation, not fail only outer/typed consistency"
+            }
+        }
+        if ($case -cnotin @('exact', 'exact_duplicate', 'missing_route_effect')) {
+            $changed = Replace-Envelope $lines[$item.Index] $envelope
+            if ($changed -ceq $lines[$item.Index]) { throw "Mutation did not change evidence: $case" }
+            if ($case -ceq 'conflicting_snapshot') {
+                $lines = @($lines[0..$item.Index]) + @($changed) + @($lines[($item.Index+1)..($lines.Count-1)])
+            } else { $lines[$item.Index] = $changed }
+        }
+        if ($case -ceq 'exact_duplicate') {
+            $lines = @($lines[0..$candidate.Index]) + @($lines[$candidate.Index]) + @($lines[($candidate.Index+1)..($lines.Count-1)])
+        }
+        if ($case -ceq 'missing_route_effect') {
+            $lines = @($lines | Where-Object { -not ((Name $_) -ceq 'filetransfer_coordinator_authority_effect' -and
+                (Field $_ 'transition_id') -ceq $candidate.Envelope.transitionId -and (Field $_ 'effect_kind') -ceq 'route_commit_adopted') })
+            if ($lines.Count -ge $captured.Count) { throw 'No real projected route-commit effect removed' }
+        }
+        $fullLines = @('event=unrelated_fixture_diagnostic; note=independent_compaction') + $lines
+        $compactRecords = @(for ($i=0; $i -lt $fullLines.Count; $i++) {
+            if ((Name $fullLines[$i]) -cin (@($catalog.SnapshotAuthorityV1) + @($catalog.GenerationStampedEffects))) {
+                [pscustomobject]@{ Line=$fullLines[$i]; LineIndex=$i }
+            }
+        })
+        if ($compactRecords.Count -ge $fullLines.Count) { throw 'Compact input was not independently regenerated' }
+        $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $fullLines
+        $compact = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords $compactRecords
+        $successfulFixture = $case -cin @('exact', 'exact_duplicate')
+        $expectedValidCatalog = $successfulFixture -or $case -ceq 'missing_route_effect'
+        $expected = if ($expectedValidCatalog) { 'pass' } else { 'fail' }
+        foreach ($evaluation in @($full, $compact)) {
+            if ($evaluation.ArtifactEvidenceVerdict -cne $expected) {
+                throw "$case expected=$expected; actual=$($evaluation.ArtifactEvidenceVerdict); reason=$($evaluation.ArtifactEvidenceFailureReason)"
+            }
+            if ($successfulFixture -and @($evaluation.Boundaries | Where-Object {
+                $_.boundaryId -ceq $candidate.Envelope.transitionId -and $_.verdict -ceq 'fail'
+            }).Count -ne 0) { throw "$case introduced a semantic failure at the exact committed retirement" }
+            if ($case -cin @('receipt_command_identity_consistent', 'receipt_command_fingerprint_consistent') -and
+                $evaluation.ArtifactEvidenceFailureReason -cnotmatch 'snapshot_checkpoint_repair_continuity_retirement_unbound') {
+                throw "$case did not reject the exact immutable historical receipt tuple: $($evaluation.ArtifactEvidenceFailureReason)"
+            }
+        }
+        $json = ConvertTo-Json -InputObject @($full.Boundaries) -Depth 100 -Compress
+        if ((Compare-FileTransferCoordinatorSnapshotEvaluations $full $compact).Verdict -cne 'pass' -or
+            $json -cne (ConvertTo-Json -InputObject @($compact.Boundaries) -Depth 100 -Compress)) {
+            throw "$case full/regenerated-compact normalized boundary JSON/hash differs"
+        }
+        $boundary = $full.FirstUnresolvedBoundary
+        $routeJson = $null
+        if ($expectedValidCatalog) {
+            if (-not $full.StreamComplete -or $full.LegacySelectionCount -ne 0) { throw "$case lost exact complete snapshot authority" }
+            $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $full
+            $compactRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $compact
+            if ((Compare-FileTransferCoordinatorSnapshotRouteConsistency $route $compactRoute).Verdict -cne 'pass') { throw "$case route-result parity failed" }
+            $routeJson = ConvertTo-Json -InputObject @($route.Findings) -Depth 100 -Compress
+            if ($case -ceq 'exact') { $baseline = $full; $baselineRoute = $routeJson }
+            elseif ($successfulFixture -and $routeJson -cne $baselineRoute) { throw 'Byte-identical duplicate changed independent route findings' }
+            if ($case -ceq 'missing_route_effect') {
+                $missingAdoption = @($full.Boundaries | Where-Object {
+                    $_.boundaryId -ceq $candidate.Envelope.transitionId -and $_.verdict -ceq 'fail' -and
+                    $_.taxonomyClass -ceq 'publication_authority_missing' -and $_.domain -ceq 'route_runtime' -and
+                    $_.rawCount -eq 1 -and $_.distinctCount -eq 1 -and $_.recoveredCount -eq 0 -and $_.unresolvedCount -eq 1
+                })
+                if ($missingAdoption.Count -ne 1) { throw 'Missing route adoption did not retain its exact unresolved publication-authority boundary' }
+            }
+            if ($null -eq $boundary) { $boundary = $route.FirstUnresolvedBoundary }
+            $origins = @($full.__CheckpointRepairContinuityEvidence.OriginsByKey.Values)
+            if ($origins.Count -ne 1 -or $null -eq $origins[0].RetiredBoundary -or
+                $origins[0].RetiredBoundary.boundaryId -cne $candidate.Envelope.transitionId) {
+                throw "$case did not retire exactly the original accepted origin at the real commit"
+            }
+        }
+        $guiOutputs = @()
+        foreach ($input in @(@{ Name='full'; Lines=$fullLines }, @{ Name='compact'; Lines=@($compactRecords | ForEach-Object Line) })) {
+            $path = Join-Path ([IO.Path]::GetDirectoryName($InputPath)) ($input.Name + '-retirement-gui.log')
+            [IO.File]::WriteAllLines($path, [string[]]$input.Lines)
+            $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
+            if ($null -eq $boundary) {
+                if ($null -ne $gui) { throw "$case GUI invented a boundary" }
+            } elseif ($null -eq $gui -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
+                $gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorWriter -cne $boundary.writer -or
+                $gui.CoordinatorWriterSequence -ne $boundary.writerSequence -or $gui.CoordinatorRawCount -ne $boundary.rawCount -or
+                $gui.CoordinatorDistinctCount -ne $boundary.distinctCount -or $gui.CoordinatorRecoveredCount -ne $boundary.recoveredCount -or
+                $gui.CoordinatorUnresolvedCount -ne $boundary.unresolvedCount) { throw "$case shared GUI boundary/episode metadata differs" }
+            $guiOutputs += if ($null -eq $gui) { $null } else { [ordered]@{ BoundaryId=$gui.CoordinatorBoundaryId; BoundaryHash=$gui.CoordinatorBoundaryHash } }
+        }
+        $outputs.Add([ordered]@{ Case=$case; Verdict=$full.ArtifactEvidenceVerdict; Boundaries=$json; Route=$routeJson; Gui=$guiOutputs })
+    }
+    # Reducer-only hostile histories start from the independently validated real
+    # graph. These copies test retirement/reuse bookkeeping, not producer authority.
+    $originBoundary = @($baseline.Boundaries | Where-Object { $_.boundaryId -ceq $birth.Envelope.transitionId })[0]
+    $retiredBoundary = @($baseline.Boundaries | Where-Object { $_.boundaryId -ceq $candidate.Envelope.transitionId })[0]
+    $attemptBoundary = @($baseline.Boundaries | Where-Object { $_.boundaryId -ceq $validations[0].Envelope.transitionId })[0]
+    foreach ($case in @('prior_retirement', 'origin_aba', 'stale_post_commit_validation', 'competing_origin')) {
+        $history = @($baseline.Boundaries | ForEach-Object { Copy-Value $_ })
+        if ($case -ceq 'prior_retirement') {
+            $prior = @($history | Where-Object { $_.boundaryId -ceq $attemptBoundary.boundaryId })[0]
+            $prior.operations = @((Copy-Value $retirement))
+        } else {
+            $extra = Copy-Value $(if ($case -ceq 'stale_post_commit_validation') { $attemptBoundary } else { $originBoundary })
+            $extra.boundaryId += '-' + $case
+            $extra.beforeStateGeneration = [long]$retiredBoundary.afterStateGeneration + 100
+            $extra.afterStateGeneration = $extra.beforeStateGeneration + 1
+            if ($case -ceq 'competing_origin') { $extra.beforeStateGeneration = $originBoundary.afterStateGeneration; $extra.afterStateGeneration = $extra.beforeStateGeneration }
+            $history += $extra
+        }
+        $historyResult = Get-FileTransferCheckpointRepairContinuityEvidence -Boundaries $history -Catalog $catalog
+        $reason = @($historyResult.Errors) -join ';'
+        $expectedReason = if ($case -ceq 'prior_retirement') { 'retirement_unbound' }
+            elseif ($case -ceq 'stale_post_commit_validation') { 'origin_unbound' } else { 'origin_reused' }
+        if ($reason -cnotmatch $expectedReason) { throw "$case expected history rejection $expectedReason, got $reason" }
+        "pass $case"
+    }
+    $binding = @($baseline.__CheckpointRepairContinuityEvidence.BindingsByReceiptKey.Values)[0]
+    if ($null -eq $binding -or $null -eq $binding.Origin.RetiredBoundary) { throw 'Missing real historical repair binding and retirement poison' }
+    $payload = $binding.Operation.checkpointRepairContinuity
+    $stamp = @{ continuity_profile=$profile; continuity_coordinator_id=$payload.coordinatorInstanceId;
+        continuity_source_fingerprint=$payload.sourceScope.scopeFingerprint; continuity_acceptance_id=$payload.acceptanceIdentity;
+        continuity_accepted_state_generation=$payload.acceptedStateGeneration; continuity_origin_receipt_id=$payload.originReceiptIdentity;
+        continuity_origin_receipt_fingerprint=$payload.originReceiptFingerprint; continuity_receipt_id=$binding.Operation.receiptIdentity;
+        continuity_receipt_fingerprint=$binding.Operation.receiptFingerprint; continuity_current_scope_fingerprint=$payload.currentScope.scopeFingerprint;
+        continuity_repair_authority_id=$payload.repair.authorityId; continuity_repair_generation=$payload.repair.decisionGeneration;
+        continuity_request_id=$payload.repair.protocolRepairRequestId; continuity_correlation_id=$payload.repair.requestCorrelationId }
+    if ($null -eq (Resolve-FileTransferCheckpointRepairContinuityBinding -SnapshotEvidence $baseline -SourceFields $stamp -CurrentFields $stamp) -or
+        $null -ne (Resolve-FileTransferCheckpointRepairContinuityBinding -SnapshotEvidence $baseline -SourceFields $stamp -CurrentFields $stamp `
+            -EvidenceUtcMilliseconds ([long]$binding.Origin.RetiredBoundary.decisionUtcMilliseconds))) {
+        throw 'Historical binding control or exact post-retirement reuse rejection failed'
+    }
+    'checkpoint-committed-retirement-normalized=' + (ConvertTo-Json -InputObject $outputs.ToArray() -Depth 100 -Compress)
+    'checkpoint-committed-retirement-evidence-ok'
+    return
 }
 $hold = One $captured 'filetransfer_v6_frontier_request_deferred'
 $grant = One $captured 'filetransfer_fallback_frontier_repair_authority_granted'

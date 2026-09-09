@@ -6,7 +6,7 @@ public sealed partial class FileTransferCoordinatorTests
 {
     internal static (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
         IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes)
-        CreateCheckpointRepairContinuityFixture()
+        CreateCheckpointRepairContinuityFixture(int frontierChunkIndex = 100, int highestObservedChunkIndex = 255)
     {
         var established = ActiveFallbackStateWithoutCheckpoint(FileTransferDirection.Inbound);
         var state = established with
@@ -29,7 +29,7 @@ public sealed partial class FileTransferCoordinatorTests
         envelopes.Add(requested.SnapshotEnvelope!);
         var source = FileTransferCoordinator.CreateCheckpointContinuitySourceStamp(requested.State);
         var accepted = AcceptFallbackCheckpoint(requested.State, state.RouteSelection, requestId,
-            state.CurrentLeg.TransportEpochId, 100, 255);
+            state.CurrentLeg.TransportEpochId, frontierChunkIndex, highestObservedChunkIndex);
         Assert.Null(accepted.MutationRejectedReason);
         envelopes.Add(accepted.SnapshotEnvelope!);
         Assert.Equal(requested.State.PersistentState.SnapshotStateGeneration + 1,
@@ -45,8 +45,9 @@ public sealed partial class FileTransferCoordinatorTests
         envelopes.Add(authorized.SnapshotEnvelope!);
         Assert.True(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
             authorized.RepairReplayDecision!.Value,
-            new("fallback-frontier:100:1:frng-continuity", "frng-continuity", 100, 255, 1, 1,
-                FallbackFrontierRepairSourceKind.ReceiverRequest, "v6-frontier:100:1", "frq-continuity",
+            new($"fallback-frontier:{frontierChunkIndex}:1:frng-continuity", "frng-continuity",
+                frontierChunkIndex, highestObservedChunkIndex, 1, 1,
+                FallbackFrontierRepairSourceKind.ReceiverRequest, $"v6-frontier:{frontierChunkIndex}:1", "frq-continuity",
                 "(none)", "frontier", "regular_nkn_frontier_stall_control_bulk", "fallback_frontier_request"),
             out var authority, out var rejection), rejection);
         var validation = FileTransferCoordinator.ValidateCheckpointRepairContinuity(authorized.State, authority!.Value);

@@ -283,9 +283,58 @@ function Test-FileTransferCoordinatorCheckpointRepairContinuityOperation {
                     (Test-FileTransferCheckpointRepairContinuityAggregateScope $payload.sourceScope $Envelope.aggregate.beforeBoundary) -and
                     (Test-FileTransferCheckpointRepairContinuityAggregateScope $payload.clearedScope $Envelope.aggregate.afterBoundary)
             }
-            return $Operation.beforeState -ceq 'Retained' -and $Operation.afterState -ceq 'None' -and
-                $Envelope.decisionStatus -ceq 'Accepted' -and
-                [long]$Envelope.aggregate.afterStateGeneration -gt [long]$payload.acceptedStateGeneration
+            if ($Operation.beforeState -cne 'Retained' -or $Operation.afterState -cne 'None' -or
+                [long]$Envelope.aggregate.afterStateGeneration -le [long]$payload.acceptedStateGeneration) { return $false }
+            if ($Envelope.decisionStatus -ceq 'Accepted') { return $true }
+
+            # The receipt remains the original Accepted checkpoint receipt. A
+            # route commit retires that evidence under its own Committed status.
+            $before = $Envelope.aggregate.beforeBoundary
+            $after = $Envelope.aggregate.afterBoundary
+            if ($Envelope.decisionKind -cne 'CommitFileTransferRouteTransition' -or
+                $Envelope.decisionStatus -cne 'Committed' -or
+                $Envelope.decisionReason -cne 'filetransfer_route_transition_committed' -or
+                [long]$Envelope.aggregate.afterStateGeneration -ne ([long]$Envelope.aggregate.beforeStateGeneration + 1) -or
+                $Envelope.aggregate.beforeStateFingerprint -ceq $Envelope.aggregate.afterStateFingerprint -or
+                $before.route -cne 'post_tuna_fallback_v6' -or [int]$before.protocolVersion -ne 6 -or
+                $after.route -cne 'file_tuna_v4' -or [int]$after.protocolVersion -ne 4 -or
+                $before.dataSessionIdentity -cne $after.dataSessionIdentity -or
+                [long]$before.dataSessionGeneration -ne [long]$after.dataSessionGeneration -or
+                [long]$before.terminalGeneration -ne [long]$after.terminalGeneration -or
+                -not (Test-FileTransferCheckpointRepairContinuityAggregateScope $payload.clearedScope $before) -or
+                @($Envelope.aggregate.operations | Where-Object {
+                    $_.operationRole -ceq 'checkpoint_acceptance_retained'
+                }).Count -ne 1) { return $false }
+            $commits = @($Envelope.aggregate.operations | Where-Object {
+                $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'route_commit' -and
+                $_.operationKind -ceq 'RouteCommit' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Committed'
+            })
+            $terminals = @($Envelope.aggregate.operations | Where-Object {
+                $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'terminal' -and
+                $_.operationKind -ceq 'PostTunaFallbackV6ToTunaV4' -and
+                $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Committed'
+            })
+            $currents = @($Envelope.aggregate.operations | Where-Object {
+                $_.family -ceq 'route_transition' -and $_.operationRole -ceq 'current' -and
+                $_.operationKind -ceq 'PostTunaFallbackV6ToTunaV4' -and
+                $_.beforeState -ceq 'Draining' -and $_.afterState -ceq 'None'
+            })
+            if ($commits.Count -ne 1 -or $terminals.Count -ne 1 -or $currents.Count -ne 1) { return $false }
+            $commit = $commits[0]; $terminal = $terminals[0]; $current = $currents[0]
+            foreach ($subject in @($commit, $terminal, $current)) {
+                if (-not $subject.stateApplied -or -not $subject.receiptValidated -or
+                    -not (Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog $Envelope $subject)) { return $false }
+            }
+            # Reuse Family 1's source/target domains; its shared lifecycle pass
+            # remains responsible for the complete receipt and physical effects.
+            return $commit.receiptStatus -ceq 'Committed' -and $terminal.receiptStatus -ceq 'Committed' -and
+                [long]$commit.operationGeneration -eq [long]$after.routeCommitGeneration -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $commit.routeRuntime.boundary $after) -and
+                $current.authorityId -ceq $terminal.authorityId -and
+                [long]$current.operationGeneration -eq [long]$terminal.operationGeneration -and
+                (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $current.routeTransition.sourceBoundary $terminal.routeTransition.sourceBoundary) -and
+                (Test-FileTransferCoordinatorSnapshotRouteTransitionSourceCurrent $terminal.routeTransition.sourceBoundary $before) -and
+                (Test-FileTransferCoordinatorSnapshotRouteTransitionTargetCurrent $terminal.routeTransition.targetBoundary $after)
         }
         $repair = $payload.repair
         if (-not (Test-FileTransferCheckpointRepairContinuityFields $repair `
@@ -378,8 +427,22 @@ function Get-FileTransferCheckpointRepairContinuityEvidence {
             foreach ($operation in $removals) {
                 $payload = $operation.checkpointRepairContinuity
                 $key = Get-FileTransferCheckpointRepairContinuityOriginKey $payload
+                $receiptMatches = $null -ne $current
+                if ($receiptMatches) {
+                    $originalReceipt = $current.Operation.checkpointRepairContinuity.receipts[0]
+                    $retiredReceipt = $payload.receipts[0]
+                    foreach ($field in @('stage', 'commandIdentity', 'commandGeneration', 'commandFingerprint',
+                        'receiptIdentity', 'receiptGeneration', 'receiptStatus', 'receiptReason',
+                        'receiptFingerprint', 'receiptValidated')) {
+                        if ([string]$originalReceipt.$field -cne [string]$retiredReceipt.$field) {
+                            $receiptMatches = $false
+                            break
+                        }
+                    }
+                }
                 if ($null -eq $current -or $current.Key -cne $key -or
-                    $current.Signature -cne (Get-FileTransferCheckpointRepairContinuityOriginSignature $payload)) {
+                    $current.Signature -cne (Get-FileTransferCheckpointRepairContinuityOriginSignature $payload) -or
+                    -not $receiptMatches) {
                     $errors.Add("snapshot_checkpoint_repair_continuity_retirement_unbound:$($boundary.evidenceLineIndex)")
                 }
                 if ($null -ne $current) { $current.RetiredBoundary = $boundary }

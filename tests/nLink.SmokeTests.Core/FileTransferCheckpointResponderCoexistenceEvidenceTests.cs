@@ -40,7 +40,7 @@ public sealed class FileTransferCheckpointResponderCoexistenceEvidenceTests : Fi
         finally { TryDeleteDirectory(directory); }
     }
 
-    private static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
+    internal static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
     {
         const BindingFlags instance = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
         const BindingFlags statics = BindingFlags.NonPublic | BindingFlags.Static;

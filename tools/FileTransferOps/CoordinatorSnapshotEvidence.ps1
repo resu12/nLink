@@ -9586,7 +9586,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                     if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $operation) {
                         if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $operation $catalog)) {
-                            $errors.Add("snapshot_checkpoint_repair_continuity_operation_invalid:$($record.LineIndex)")
+                            $continuityReason = 'snapshot_checkpoint_repair_continuity_operation_invalid'
+                            if ($envelope.decisionKind -ceq 'CommitFileTransferRouteTransition' -and
+                                $envelope.decisionStatus -ceq 'Committed' -and
+                                $operation.operationRole -ceq 'checkpoint_acceptance_retained') {
+                                $continuityReason += '|committed_route_transition_checkpoint_continuity_retirement_invalid'
+                            }
+                            $errors.Add("$continuityReason`:$($record.LineIndex)")
                             break
                         }
                         continue
