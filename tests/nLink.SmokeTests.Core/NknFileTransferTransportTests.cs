@@ -27,7 +27,7 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("Area", "Core")]
-public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
+public sealed partial class NknFileTransferTransportTests : CoreSmokeTestsBase
 {
     [Fact]
     public void NknTransport_AdvertisesFileTransferControlPlaneDeliveryTransport()
@@ -2707,6 +2707,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.Equal(FileTransferTransportKind.RegularNkn, received.TransportKind);
 
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("receive_disposition=dispatch_entered", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_data_frame_dispatched; transport=nkn;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=file_tuna_v4_payload_requires_tuna", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_data_path_mismatch;", logTail, StringComparison.Ordinal);

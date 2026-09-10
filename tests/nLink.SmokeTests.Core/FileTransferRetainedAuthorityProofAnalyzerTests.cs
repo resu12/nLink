@@ -1212,7 +1212,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         }
 
         const string transferId = "transfer_file_tuna_v4_receive_regular_rejected";
-        var lines = BuildFileTunaV4RejectedReceiveFixture(transferId);
+        var lines = BuildFileTunaV4InitialActivationRejectedReceiveFixture(transferId);
 
         var result = await RunAnalyzeFixtureAsync(lines);
         var compact = await RunAnalyzeFixtureAsync(
@@ -1222,18 +1222,108 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                 ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
             });
 
-        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
-        Assert.Equal("pass", route["file_tuna_v4_data_path_proof_verdict"]);
-        Assert.Equal("0", route["file_tuna_v4_regular_nkn_send_result_count"]);
-        Assert.Equal("0", route["file_tuna_v4_data_path_mismatch_count"]);
-        Assert.Equal("0", route["file_tuna_v4_data_path_missing_actual_proof_count"]);
+        foreach (var analysis in new[] { result, compact })
+        {
+            Assert.Equal(0, analysis.Script.ExitCode);
+            var route = ReadArtifactReport(analysis.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+            Assert.Equal("pass", route["route_consistency_verdict"]);
+            Assert.Equal("0", route["route_mismatch_count"]);
+            Assert.Equal("0", route["file_tuna_v4_data_path_mismatch_count"]);
+            Assert.Equal("1", route["file_tuna_v4_data_path_mismatch_raw_count"]);
+            Assert.Equal("1", route["file_tuna_v4_data_path_mismatch_distinct_count"]);
+            Assert.Equal("1", route["file_tuna_v4_data_path_mismatch_recovered_count"]);
+            Assert.Equal("0", route["file_tuna_v4_data_path_mismatch_unresolved_count"]);
+            var verdict = ReadArtifactReport(analysis.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("(none)", verdict["failure_variant"]);
+            Assert.NotEqual("protocol_or_integrity", verdict["recovery_failure_class"]);
+        }
 
+        // These broader data-path fields are emitted only by the full report writer.
+        var fullRoute = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", fullRoute["file_tuna_v4_data_path_proof_verdict"]);
+        Assert.Equal("0", fullRoute["file_tuna_v4_regular_nkn_send_result_count"]);
+        Assert.Equal("0", fullRoute["file_tuna_v4_data_path_missing_actual_proof_count"]);
         var fullVerdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("(none)", fullVerdict["recovery_failure_class"]);
-        Assert.Equal("none", compactVerdict["recovery_failure_class"]);
+        Assert.Equal("(none)", compactVerdict["recovery_failure_class"]);
         Assert.NotEqual("file_tuna_data_path_mismatch", fullVerdict["first_proof_chain_failure_class"]);
         Assert.NotEqual("file_tuna_data_path_mismatch", compactVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_FileTunaV4InitialActivationRejectedReceiveHistoryPreservesRouteAndProofGuards()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        const string transferId = "transfer_initial_activation_rejected_ingress_guards";
+        var lines = BuildFileTunaV4InitialActivationRejectedReceiveFixture(transferId);
+        List<string> WithActivationField(string field, string? value) => lines.Select(line =>
+            line.Contains("event=filetransfer_route_selected;", StringComparison.Ordinal) &&
+            line.Contains("; route=file_tuna_v4;", StringComparison.Ordinal)
+                ? RemoveSemicolonLogField(line, field) + (value is null ? string.Empty : $"; {field}={value}")
+                : line).ToList();
+        List<string> Without(string marker) => lines.Where(line => !line.Contains(marker, StringComparison.Ordinal)).ToList();
+        var cases = new[]
+        {
+            new { Name = "initial_activation", RoutePass = true, Recovered = true, Lines = lines },
+            new { Name = "missing_handoff", RoutePass = false, Recovered = true, Lines = WithActivationField("handoff_kind", null) },
+            new { Name = "wrong_handoff", RoutePass = false, Recovered = true, Lines = WithActivationField("handoff_kind", "none") },
+            new { Name = "tuna_inactive", RoutePass = false, Recovered = true, Lines = WithActivationField("file_tuna_active", "0") },
+            new { Name = "fallback_active", RoutePass = false, Recovered = true, Lines = WithActivationField("post_tuna_fallback_active", "1") },
+            new { Name = "static_tuna_before_regular_source", RoutePass = false, Recovered = true, Lines = BuildFileTunaV4RejectedReceiveFixture(transferId) },
+            new { Name = "missing_source", RoutePass = true, Recovered = false, Lines = Without("event=filetransfer_data_path_send_result;") },
+            new { Name = "missing_receiver_transition", RoutePass = true, Recovered = false, Lines = Without("event=filetransfer_route_transitioned; direction=inbound;") },
+            new { Name = "missing_ignore", RoutePass = true, Recovered = false, Lines = Without("event=filetransfer_data_frame_ignored;") }
+        };
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(
+            System.Text.Json.JsonSerializer.Serialize(cases)));
+        const string script = """
+            param([string]$RepoRoot)
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')
+            $FixtureBase64 = '__INITIAL_ACTIVATION_FIXTURE_BASE64__'
+            $cases = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($FixtureBase64)) | ConvertFrom-Json
+            $results = @(foreach ($case in $cases) {
+                Reset-FileTransferRetainedEventIndex
+                $events = @(for ($index = 0; $index -lt $case.Lines.Count; $index++) {
+                    ConvertFrom-FileTransferLogLine -Line $case.Lines[$index] -FilePath 'initial-activation.log' -LineNumber ($index + 1) -Sequence ($index + 1)
+                })
+                $route = Get-FileTransferRouteConsistency -TransferEvents $events
+                $proof = Get-FileTransferFileTunaV4DataPathMismatchProof -Events $events
+                $expectedRecovered = if ($case.Recovered) { 1 } else { 0 }
+                if (($route.Verdict -ceq 'pass') -ne [bool]$case.RoutePass -or
+                    ($route.Findings.Count -eq 0) -ne [bool]$case.RoutePass) {
+                    throw "$($case.Name): route guard changed: $($route.Findings -join ' | ')"
+                }
+                if ($proof.RawCandidateCount -ne 1 -or $proof.DistinctCount -ne 1 -or
+                    $proof.RecoveredCount -ne $expectedRecovered -or
+                    $proof.UnresolvedCount -ne (1 - $expectedRecovered) -or
+                    $proof.EffectiveCount -ne (2 * (1 - $expectedRecovered)) -or
+                    @($proof.CandidateRecords | Where-Object { $_.Variant -cne '(none)' }).Count -ne 0) {
+                    throw "$($case.Name): exact initial rejection proof changed"
+                }
+                [pscustomobject]@{
+                    Case=$case.Name; Route=$route.Verdict; RouteFindings=@($route.Findings);
+                    Raw=$proof.RawCandidateCount; Distinct=$proof.DistinctCount;
+                    Recovered=$proof.RecoveredCount; Unresolved=$proof.UnresolvedCount; Scalar=$proof.EffectiveCount
+                }
+            })
+            Write-Output ('initial-activation-rejected-ingress=' + ($results | ConvertTo-Json -Depth 5 -Compress))
+            """;
+        string? firstHost = null;
+        foreach (var host in new[] { "powershell", "pwsh" })
+        {
+            var result = await RunPowerShellScriptTextAsync(
+                script.Replace("__INITIAL_ACTIVATION_FIXTURE_BASE64__", encoded, StringComparison.Ordinal),
+                [FindRepoRoot()], host);
+            Assert.True(result.ExitCode == 0, $"{host} STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+            var normalized = Assert.Single(result.Stdout.Split('\n').Select(line => line.Trim()).Where(line =>
+                line.StartsWith("initial-activation-rejected-ingress=", StringComparison.Ordinal)));
+            if (firstHost is not null) { Assert.Equal(firstHost, normalized); }
+            firstHost = normalized;
+        }
     }
 
     [Theory]
@@ -1362,6 +1452,59 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         Assert.Equal("0", verdict["file_tuna_v4_data_path_mismatch_count"]);
         Assert.NotEqual("file_tuna_data_path_mismatch", verdict["recovery_failure_class"]);
         Assert.NotEqual("file_tuna_data_path_mismatch", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_SecondTunaRejectedIngressDiagnosticPreservesExactRecoveryContract()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var lines = BuildFileTunaV4RejectedReceiveFixture(
+            "transfer_second_tuna_rejected_ingress", secondTunaCycle: true,
+            includeTunaReceive: false, physicalRouteOrder: true);
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(
+            System.Text.Json.JsonSerializer.Serialize(lines)));
+        var script = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tests", "nLink.SmokeTests.Core",
+            "Support", "SecondTunaRejectedIngressDiagnostics.ps1"));
+        string? firstHost = null;
+        foreach (var host in new[] { "powershell", "pwsh" })
+        {
+            var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), encoded], host);
+            Assert.True(result.ExitCode == 0, $"{host} STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+            var normalized = Assert.Single(result.Stdout.Split('\n').Select(line => line.Trim()).Where(line =>
+                line.StartsWith("second-tuna-rejected-ingress=", StringComparison.Ordinal)));
+            if (firstHost is not null) { Assert.Equal(firstHost, normalized); }
+            firstHost = normalized;
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    public async Task AnalyzeRetained_GeneratedRejectedIngressPreservesFreshCompactProofParity()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var log = await NknFileTransferTransportTests.CreateRejectedDataPathEnvelopeProvenanceFixture(true);
+        var path = Path.Combine(Path.GetTempPath(), $"nlink-rejected-ingress-{Guid.NewGuid():N}.log");
+        try
+        {
+            await File.WriteAllTextAsync(path, log);
+            var script = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tests", "nLink.SmokeTests.Core",
+                "Support", "SecondTunaRejectedIngressDiagnostics.ps1"));
+            string? firstHost = null;
+            foreach (var host in new[] { "powershell", "pwsh" })
+            {
+                var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), "generated", path], host);
+                Assert.True(result.ExitCode == 0, $"{host} STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+                var normalized = Assert.Single(result.Stdout.Split('\n').Select(line => line.Trim()).Where(line =>
+                    line.StartsWith("second-tuna-generated-parity=", StringComparison.Ordinal)));
+                if (firstHost is not null) { Assert.Equal(firstHost, normalized); }
+                firstHost = normalized;
+            }
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Theory]
@@ -4976,6 +5119,42 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         return lines;
     }
 
+    private static List<string> BuildFileTunaV4InitialActivationRejectedReceiveFixture(string transferId)
+    {
+        var original = BuildFileTunaV4RejectedReceiveFixture(transferId);
+        var sourceIndex = original.FindIndex(line => line.Contains("event=filetransfer_data_path_send_result;", StringComparison.Ordinal));
+        Assert.True(sourceIndex > 0);
+        var tunaSetup = original.Take(sourceIndex).Select(line =>
+        {
+            foreach (var (field, value) in new[]
+            {
+                ("live_route_epoch", "3"), ("runtime_generation", "7"), ("terminal_generation", "0"),
+                ("leg_generation", "4"), ("route_publication_generation", "9"), ("route_commit_generation", "0"),
+                ("target_route", "file_tuna_v4"), ("target_protocol_version", "4"), ("target_transport", "tuna")
+            })
+            {
+                line = RemoveSemicolonLogField(line, field) + $"; {field}={value}";
+            }
+            return line.Replace("handoff_kind=none", "handoff_kind=normal_to_tuna_activation", StringComparison.Ordinal);
+        }).ToList();
+        var regularSetup = BuildRouteAwareCompletedFixture(
+            transferId, "regular_nkn_v4_fast", 4, "regular_nkn_v4_fast", "regular_nkn_v4_fast", "filetransfer_v4_sender_started");
+        var lines = regularSetup.Take(regularSetup.Length - 2).ToList();
+        lines.Add(original[sourceIndex]);
+        // Explicit selections precede ordinary route-transition diagnostics in this legacy fixture.
+        lines.AddRange(tunaSetup.Where(line => line.Contains("event=filetransfer_route_selected;", StringComparison.Ordinal)));
+        lines.AddRange(original.Where(line => line.Contains("event=filetransfer_route_transitioned;", StringComparison.Ordinal)));
+        lines.AddRange(tunaSetup.Where(line => !line.Contains("event=filetransfer_route_selected;", StringComparison.Ordinal)));
+        lines.AddRange(original.Skip(sourceIndex + 1)
+            .Where(line => !line.Contains("event=filetransfer_route_transitioned;", StringComparison.Ordinal))
+            .Select(line => line.Contains("event=filetransfer_data_path_receive_result;", StringComparison.Ordinal) ||
+                            line.Contains("event=filetransfer_tuna_data_path_mismatch;", StringComparison.Ordinal)
+                ? line.Replace("direction=outbound", "direction=inbound", StringComparison.Ordinal)
+                : line));
+        return lines.Select((line, index) =>
+            (line.StartsWith('\uFEFF') ? "\uFEFF" : string.Empty) + RetimestampLogLine(line.TrimStart('\uFEFF'), index)).ToList();
+    }
+
     private static List<string> BuildFileTunaV4RejectedReceiveFixture(
         string transferId,
         string? omittedCompanionEvidence = null,
@@ -4983,7 +5162,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         bool secondTunaCycle = false,
         int adjacentRejectedReceiveCopies = 1,
         bool omitFirstAdjacentIgnore = false,
-        int unrelatedCompanionRecords = 0)
+        int unrelatedCompanionRecords = 0,
+        bool includeTunaReceive = true,
+        bool physicalRouteOrder = false)
     {
         const string sourceWriterId = "writer_source_regular";
         const string writerId = "writer_receive_regular_rejected";
@@ -5045,6 +5226,10 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         {
             sourceSend
         };
+        if (physicalRouteOrder && includeOutboundTransition)
+        {
+            messages.Add(outboundTransition.Replace("log_writer_sequence=3", "log_writer_sequence=2", StringComparison.Ordinal));
+        }
         if (secondTunaCycle)
         {
             messages.Add(
@@ -5057,24 +5242,34 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
                         "delivery_result=accepted",
                         "delivery_result=sent",
                         StringComparison.Ordinal) +
-                $"; log_writer_id={sourceWriterId}; log_writer_sequence=2");
-            messages.Add(
-                FileTunaV4DataPathActualMessage(
-                    transferId,
-                    actualTransport: "tuna",
-                    eventName: "filetransfer_data_path_receive_result",
-                    proofDirection: "receive",
-                    startChunkIndex: 0).Replace(
-                        "direction=outbound",
-                        "direction=inbound",
-                        StringComparison.Ordinal) +
-                $"; log_writer_id={writerId}; log_writer_sequence=8");
+                $"; log_writer_id={sourceWriterId}; log_writer_sequence={(physicalRouteOrder ? 3 : 2)}");
+            if (physicalRouteOrder)
+            {
+                messages.Add(inboundTransition.Replace("log_writer_sequence=9", "log_writer_sequence=7", StringComparison.Ordinal));
+            }
+            if (includeTunaReceive)
+            {
+                messages.Add(
+                    FileTunaV4DataPathActualMessage(
+                        transferId,
+                        actualTransport: "tuna",
+                        eventName: "filetransfer_data_path_receive_result",
+                        proofDirection: "receive",
+                        startChunkIndex: 0).Replace(
+                            "direction=outbound",
+                            "direction=inbound",
+                            StringComparison.Ordinal) +
+                    $"; log_writer_id={writerId}; log_writer_sequence=8");
+            }
         }
-        if (includeOutboundTransition)
+        if (includeOutboundTransition && !physicalRouteOrder)
         {
             messages.Add(outboundTransition);
         }
-        messages.Add(inboundTransition);
+        if (!physicalRouteOrder || !secondTunaCycle)
+        {
+            messages.Add(inboundTransition);
+        }
         messages.Add(FileTunaV4DataPathIntentMessage(transferId));
         if (adjacentRejectedReceiveCopies <= 1)
         {

@@ -12823,6 +12823,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
+            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -12872,9 +12873,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             }
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
-        Assert.True(result.ExitCode == 0, $"File-Tuna rejected receive GUI index failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
-        Assert.Contains("gui-file-tuna-data-path-rejection-index-ok", result.Stdout, StringComparison.Ordinal);
+        foreach (var host in new[] { "powershell", "pwsh" })
+        {
+            var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), host);
+            Assert.True(result.ExitCode == 0, $"{host} File-Tuna rejected receive GUI index failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+            Assert.Contains("gui-file-tuna-data-path-rejection-index-ok", result.Stdout, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

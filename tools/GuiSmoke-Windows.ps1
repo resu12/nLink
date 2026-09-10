@@ -7315,10 +7315,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
         $sourceSends = @{}
         $receiverTransitions = @{}
+        $terminalIndexes = @{}
         $activeCandidates = @{}
         $candidateRecords = New-Object System.Collections.Generic.List[object]
-        $seenRecords = New-Object 'System.Collections.Generic.HashSet[string]'
+        $seenRecords = @{}
+        $conflictingRecords = New-Object 'System.Collections.Generic.HashSet[string]'
         $lineVisits = 0L
+        $getTransferKey = {
+            param($fields)
+            $parts = foreach ($name in @('log_writer_id', 'session_id', 'transfer_id')) {
+                $value = Get-GuiSmokeFieldValue -Fields $fields -Name $name -Default ''
+                if ([string]::IsNullOrWhiteSpace($value)) { return '' }
+                $value.ToLowerInvariant()
+            }
+            return [string]::Join('|', [string[]]$parts)
+        }
         $getPayloadKey = {
             param($fields, [switch]$IncludeWriter)
 
@@ -7409,11 +7420,20 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
 
             $fields = $line
-            $recordKey = @(
+            $recordKey = (@(
                 $eventName,
                 (Get-GuiSmokeFieldValue -Fields $fields -Name 'log_writer_id' -Default ''),
-                (Get-GuiSmokeFieldValue -Fields $fields -Name 'log_writer_sequence' -Default '')) -join '|'
-            if (-not $seenRecords.Add($recordKey.ToLowerInvariant())) { continue }
+                (Get-GuiSmokeFieldValue -Fields $fields -Name 'log_writer_sequence' -Default '')) -join '|').ToLowerInvariant()
+            # The index appends location metadata; it is not part of the writer record.
+            $writerRecord = $line -replace '; gui_evidence_sequence=\d+$', ''
+            if ($seenRecords.ContainsKey($recordKey)) {
+                if ($seenRecords[$recordKey] -cne $writerRecord) {
+                    $conflictingRecords.Add($recordKey) | Out-Null
+                }
+                continue
+            }
+            $seenRecords[$recordKey] = $writerRecord
+            $transferKey = & $getTransferKey $fields
 
             if ($eventName -eq 'filetransfer_data_path_send_result') {
                 if ((Get-GuiSmokeFieldValue -Fields $fields -Name 'direction' -Default '') -eq 'outbound' -and
@@ -7426,9 +7446,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $payloadKey,
                         (Get-GuiSmokeFieldValue -Fields $fields -Name 'raw_payload_bytes' -Default ''),
                         (Get-GuiSmokeFieldValue -Fields $fields -Name 'batch_chunk_count' -Default '')) -join '|'
-                    if (-not [string]::IsNullOrWhiteSpace($payloadKey)) {
+                    if (-not [string]::IsNullOrWhiteSpace($payloadKey) -and
+                        -not [string]::IsNullOrWhiteSpace($transferKey)) {
                         if (-not $sourceSends.ContainsKey($shapeKey)) { $sourceSends[$shapeKey] = @() }
-                        $sourceSends[$shapeKey] += $lineIndex
+                        $sourceSends[$shapeKey] += [pscustomobject]@{
+                            LineIndex = $lineIndex; TransferKey = $transferKey; RecordKey = $recordKey
+                        }
                     }
                 }
                 continue
@@ -7445,11 +7468,29 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                         $candidate.Poisoned = $true
                     }
                 }
-                if ((Get-GuiSmokeFieldValue -Fields $fields -Name 'direction' -Default '') -eq 'inbound' -and
-                    (Get-GuiSmokeFieldValue -Fields $fields -Name 'new_route' -Default '') -eq 'file_tuna_v4') {
+                if (-not [string]::IsNullOrWhiteSpace($transferKey)) {
+                    if (-not $receiverTransitions.ContainsKey($transferKey)) {
+                        $receiverTransitions[$transferKey] = [pscustomobject]@{
+                            Eligible = $false; InitialSeen = $false; ScopeKey = ''
+                            LineIndex = -1; RecordKey = ''
+                        }
+                    }
+                    $transition = $receiverTransitions[$transferKey]
+                    $transition.Eligible = $false
                     $scopeKey = & $getScopeKey $fields
-                    if (-not [string]::IsNullOrWhiteSpace($scopeKey)) {
-                        $receiverTransitions[$scopeKey] = $lineIndex
+                    if (-not $transition.InitialSeen -and
+                        -not $terminalIndexes.ContainsKey($transferKey) -and
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'direction' -Default '') -eq 'inbound' -and
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'previous_route' -Default '') -eq 'regular_nkn_v4_fast' -and
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'new_route' -Default '') -eq 'file_tuna_v4' -and
+                        (Get-GuiSmokeFieldValue -Fields $fields -Name 'protocol_version' -Default '') -eq '4' -and
+                        -not [string]::IsNullOrWhiteSpace($scopeKey)) {
+                        $transition.Eligible = $true
+                        $transition.InitialSeen = $true
+                        $transition.ScopeKey = $scopeKey
+                        $transition.LineIndex = $lineIndex
+                        $transition.RecordKey = $recordKey
                     }
                 }
                 continue
@@ -7460,9 +7501,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     'transfer_terminal', 'filetransfer_runtime_terminalized')) {
                 $session = Get-GuiSmokeFieldValue -Fields $fields -Name 'session_id' -Default ''
                 $transfer = Get-GuiSmokeFieldValue -Fields $fields -Name 'transfer_id' -Default ''
+                $writer = Get-GuiSmokeFieldValue -Fields $fields -Name 'log_writer_id' -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($transferKey)) {
+                    $terminalIndexes[$transferKey] = $lineIndex
+                    if ($receiverTransitions.ContainsKey($transferKey)) {
+                        $receiverTransitions[$transferKey].Eligible = $false
+                    }
+                }
                 foreach ($candidateKey in @($activeCandidates.Keys)) {
                     $candidate = $activeCandidates[$candidateKey]
-                    if ($candidate.Session -eq $session -and $candidate.Transfer -eq $transfer -and
+                    if (($candidate.Writer -eq $writer -or
+                            $candidate.SourceTransferKeys.Contains($transferKey)) -and
+                        $candidate.Session -eq $session -and $candidate.Transfer -eq $transfer -and
                         -not $candidate.Closed) {
                         $candidate.Poisoned = $true
                     }
@@ -7491,6 +7541,30 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     & $completeCandidate $activeCandidates[$writerPayloadKey]
                 }
                 $scopeKey = & $getScopeKey $fields
+                $transition = if ($receiverTransitions.ContainsKey($transferKey)) {
+                    $receiverTransitions[$transferKey]
+                } else { $null }
+                $transitionCurrent = $null -ne $transition -and $transition.Eligible -and
+                    $transition.ScopeKey -eq $scopeKey
+                $evidenceKeys = New-Object System.Collections.Generic.List[string]
+                $sourceTransferKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+                $evidenceKeys.Add($recordKey)
+                $sourceSendCount = 0
+                if ($transitionCurrent) {
+                    $evidenceKeys.Add($transition.RecordKey)
+                    if ($sourceSends.ContainsKey($shapeKey)) {
+                        foreach ($source in $sourceSends[$shapeKey]) {
+                            if ($source.TransferKey -ne $transferKey -and
+                                $source.LineIndex -lt $transition.LineIndex -and
+                                (-not $terminalIndexes.ContainsKey($source.TransferKey) -or
+                                    $source.LineIndex -gt $terminalIndexes[$source.TransferKey])) {
+                                $sourceSendCount++
+                                $evidenceKeys.Add($source.RecordKey)
+                                $sourceTransferKeys.Add($source.TransferKey) | Out-Null
+                            }
+                        }
+                    }
+                }
                 $candidate = [pscustomobject]@{
                     Line = $line; LineIndex = $lineIndex
                     Writer = Get-GuiSmokeFieldValue -Fields $fields -Name 'log_writer_id' -Default ''
@@ -7498,8 +7572,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     Transfer = Get-GuiSmokeFieldValue -Fields $fields -Name 'transfer_id' -Default ''
                     PayloadKey = $payloadKey; WriterPayloadKey = $writerPayloadKey; ShapeKey = $shapeKey
                     ScopeKey = $scopeKey
-                    SourceSendCount = if ($sourceSends.ContainsKey($shapeKey)) { @($sourceSends[$shapeKey]).Count } else { 0 }
-                    TransitionCurrent = $receiverTransitions.ContainsKey($scopeKey)
+                    SourceSendCount = $sourceSendCount
+                    TransitionCurrent = $transitionCurrent
+                    EvidenceKeys = $evidenceKeys
+                    SourceTransferKeys = $sourceTransferKeys
                     MismatchCount = 0; IgnoredCount = 0; Poisoned = $false; Closed = $false
                 }
                 $activeCandidates[$writerPayloadKey] = $candidate
@@ -7510,6 +7586,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             if ([string]::IsNullOrWhiteSpace($writerPayloadKey) -or
                 -not $activeCandidates.ContainsKey($writerPayloadKey)) { continue }
             $candidate = $activeCandidates[$writerPayloadKey]
+            $candidate.EvidenceKeys.Add($recordKey)
             if ($eventName -eq 'filetransfer_tuna_data_path_mismatch') {
                 if ((Get-GuiSmokeFieldValue -Fields $fields -Name 'proof_direction' -Default '') -eq 'receive' -and
                     (Get-GuiSmokeFieldValue -Fields $fields -Name 'mismatch_reason' -Default '') -eq 'file_tuna_v4_resolved_to_regular_nkn' -and
@@ -7534,6 +7611,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
 
         foreach ($candidate in @($activeCandidates.Values)) { & $completeCandidate $candidate }
+        foreach ($candidate in $candidateRecords) {
+            foreach ($key in $candidate.EvidenceKeys) {
+                if ($conflictingRecords.Contains($key)) { $candidate.Poisoned = $true }
+            }
+        }
         [object[]]$distinctCandidates = @($candidateRecords | Group-Object {
                 @($_.Writer, $_.Session, $_.Transfer, $_.WriterPayloadKey,
                     (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'log_writer_sequence')) -join '|'
@@ -7554,7 +7636,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             Unresolved = $unresolved.Count -gt 0
             Line = if ($unresolved.Count -gt 0) { $unresolved[0].Line } else { '' }
             FirstSequence = if ($unresolved.Count -gt 0) {
-                [long]($unresolved[0].LineIndex + 1)
+                $sequence = Get-TunaGuiLogLineFieldValue -Line $unresolved[0].Line -Name 'gui_evidence_sequence'
+                if ($sequence -match '^[1-9][0-9]*$') { [long]$sequence }
+                else { [long]($unresolved[0].LineIndex + 1) }
             }
             else { [long]::MaxValue }
             LineVisits = $lineVisits
@@ -19238,8 +19322,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         FileTunaDataPath = @(
             'filetransfer_data_path_send_result',
             'filetransfer_data_path_receive_result',
-            'filetransfer_data_path_transport_mismatch',
-            'filetransfer_data_path_frame_ignored',
+            'filetransfer_tuna_data_path_mismatch',
+            'filetransfer_data_frame_ignored',
+            'filetransfer_route_transitioned',
             'filetransfer_route_selected',
             'filetransfer_live_route_epoch_recovered',
             'filetransfer_runtime_owner_changed',

@@ -9847,13 +9847,20 @@ function Get-FileTransferFileTunaV4DataPathRejectedReceiveChain {
     }
 }
 
-function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
+function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
     param(
         [Parameter(Mandatory = $true)]$Mismatch,
         [Parameter(Mandatory = $true)][object[]]$Events,
         $DataPathIndex = $null
     )
 
+    $result = [pscustomobject]@{
+        Recovered = $false
+        RejectionChainMatched = $false
+        ReceiveDisposition = '(unproven)'
+        Reason = 'not_receive_candidate'
+        Variant = '(none)'
+    }
     if ($null -eq $DataPathIndex) {
         $DataPathIndex =
             New-FileTransferFileTunaV4DataPathCorrelationIndex -Events $Events
@@ -9862,13 +9869,14 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
     $proofDirection = Get-FileTransferEventField -Event $Mismatch -Name 'proof_direction' -Default ''
     if ($Mismatch.EventName -ne 'filetransfer_data_path_receive_result' -and
         -not ($Mismatch.EventName -eq 'filetransfer_tuna_data_path_mismatch' -and $proofDirection -eq 'receive')) {
-        return $false
+        return $result
     }
 
     $writerId = Get-FileTransferEventField -Event $Mismatch -Name 'log_writer_id' -Default ''
     $writerSequence = Get-FileTransferEventInt64Field -Event $Mismatch -Name 'log_writer_sequence' -Default 0
     if ([string]::IsNullOrWhiteSpace($writerId) -or $writerSequence -le 0) {
-        return $false
+        $result.Reason = 'missing_writer_identity'
+        return $result
     }
 
     $rejectedReceiveChain =
@@ -9876,9 +9884,19 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
             -Reference $Mismatch `
             -DataPathIndex $DataPathIndex
     if ($null -eq $rejectedReceiveChain) {
-        return $false
+        $result.Reason = 'missing_rejection_companion'
+        return $result
     }
 
+    # This records rejection evidence only; recovery still requires every
+    # existing source, boundary, and Tuna-payload predicate below.
+    $result.RejectionChainMatched = $true
+    $result.ReceiveDisposition = 'rejected_before_dispatch'
+    $sourceSendMatched = $false
+    $sourceSendBeforeTerminal = $false
+    $receiverTransitionAmbiguous = $false
+    $tunaResendMissing = $false
+    $tunaReceiptMissing = $false
     $receive = $rejectedReceiveChain.Receive
     $explicitMismatch = $rejectedReceiveChain.Mismatch
     $ignoredWindowAnchorSequence =
@@ -9951,6 +9969,7 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                 continue
             }
 
+            $sourceSendMatched = $true
             [object[]]$terminalBoundaries = @(
                 Get-FileTransferFileTunaV4DataPathIndexedTerminalEvents `
                     -Index $DataPathIndex `
@@ -9976,6 +9995,7 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                 continue
             }
 
+            $sourceSendBeforeTerminal = $true
             [object[]]$receiverTransitions = @(
                 Get-FileTransferFileTunaV4DataPathIndexedReceiverTransitions `
                     -Index $DataPathIndex `
@@ -9996,6 +10016,9 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                         [System.StringComparison]::OrdinalIgnoreCase)
                 } | Sort-Object Sequence -Descending)
             $matchingReceiverTransitionCount = 0
+            $matchingReceiverScopeCount = 0
+            $missingTunaResendCount = 0
+            $missingTunaReceiptCount = 0
             foreach ($receiverTransition in @($receiverTransitions)) {
                 $transitionMatches = $true
                 foreach ($fieldName in @(
@@ -10023,6 +10046,7 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                     continue
                 }
 
+                $matchingReceiverScopeCount++
                 $previousRoute = Get-FileTransferEventField `
                     -Event $receiverTransition `
                     -Name 'previous_route' `
@@ -10064,6 +10088,12 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                             (Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Mismatch -Actual $_)
                         })
                     if ($tunaResends.Count -eq 0 -or $tunaReceipts.Count -eq 0) {
+                        if ($tunaResends.Count -eq 0) {
+                            $missingTunaResendCount++
+                        }
+                        else {
+                            $missingTunaReceiptCount++
+                        }
                         continue
                     }
                 }
@@ -10071,12 +10101,42 @@ function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
                 $matchingReceiverTransitionCount++
             }
             if ($matchingReceiverTransitionCount -eq 1) {
-                return $true
+                $result.Recovered = $true
+                $result.Reason = 'recovered'
+                return $result
+            }
+            if ($matchingReceiverScopeCount -eq 1) {
+                $tunaResendMissing = $tunaResendMissing -or $missingTunaResendCount -eq 1
+                $tunaReceiptMissing = $tunaReceiptMissing -or $missingTunaReceiptCount -eq 1
+            }
+            elseif ($matchingReceiverScopeCount -gt 1) {
+                $receiverTransitionAmbiguous = $true
             }
         }
     }
 
-    return $false
+    $result.Reason = if ($tunaReceiptMissing) {
+        $result.Variant = 'second_tuna_rejected_regular_ingress_exact_tuna_receive_missing'
+        'missing_exact_tuna_receive'
+    }
+    elseif ($tunaResendMissing) { 'missing_tuna_resend' }
+    elseif ($receiverTransitionAmbiguous) { 'ambiguous_receiver_route_transition' }
+    elseif ($sourceSendBeforeTerminal) { 'missing_receiver_route_transition' }
+    elseif ($sourceSendMatched) { 'terminal_boundary' }
+    else { 'missing_earlier_source_send' }
+    return $result
+}
+
+function Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed {
+    param(
+        [Parameter(Mandatory = $true)]$Mismatch,
+        [Parameter(Mandatory = $true)][object[]]$Events,
+        $DataPathIndex = $null
+    )
+
+    $result = Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult `
+        -Mismatch $Mismatch -Events $Events -DataPathIndex $DataPathIndex
+    return [bool]$result.Recovered
 }
 
 function Test-FileTransferFileTunaV4DataPathScopeMatches {
@@ -15478,13 +15538,28 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
             (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'regular_nkn' -or
             (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn'
         })
-    [object[]]$effectiveMismatchEvents = @($rawMismatchEvents | Where-Object {
-            -not $corroboratingMismatchSequences.Contains([int64]$_.Sequence) -and
-            -not (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed `
-                -Mismatch $_ `
-                -Events $orderedEvents `
-                -DataPathIndex $DataPathIndex)
-        })
+    [object[]]$rawMismatchRecords = @(foreach ($mismatch in $rawMismatchEvents) {
+        $recovered = $corroboratingMismatchSequences.Contains([int64]$mismatch.Sequence)
+        $rejectionDiagnostic = $null
+        if (-not $recovered) {
+            $rejectionDiagnostic =
+                Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult `
+                    -Mismatch $mismatch `
+                    -Events $orderedEvents `
+                    -DataPathIndex $DataPathIndex
+            $recovered = [bool]$rejectionDiagnostic.Recovered
+        }
+        [pscustomobject]@{
+            Event = $mismatch
+            Recovered = [bool]$recovered
+            Variant = if ($null -ne $rejectionDiagnostic) {
+                [string]$rejectionDiagnostic.Variant
+            } else { '(none)' }
+            RejectionDiagnostic = $rejectionDiagnostic
+        }
+    })
+    [object[]]$effectiveMismatchRecords = @($rawMismatchRecords | Where-Object { -not $_.Recovered })
+    [object[]]$effectiveMismatchEvents = @($effectiveMismatchRecords | ForEach-Object { $_.Event })
 
     $attachedMismatchSequences =
         New-Object 'System.Collections.Generic.HashSet[int64]'
@@ -15502,35 +15577,35 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
         }
     }
 
-    [object[]]$rawCandidateEvents = @($rawMismatchEvents | Where-Object {
-            $_.EventName -in @(
+    [object[]]$rawCandidateRecords = @($rawMismatchRecords | Where-Object {
+            $_.Event.EventName -in @(
                 'filetransfer_data_path_receive_result',
                 'filetransfer_data_path_send_result') -or
-            -not $attachedMismatchSequences.Contains([int64]$_.Sequence)
+            -not $attachedMismatchSequences.Contains([int64]$_.Event.Sequence)
         })
+    [object[]]$rawCandidateEvents = @($rawCandidateRecords | ForEach-Object { $_.Event })
     $candidateRecordsByKey = @{}
-    foreach ($candidate in @($rawCandidateEvents)) {
+    foreach ($candidateRecord in $rawCandidateRecords) {
+        $candidate = $candidateRecord.Event
         $candidateKey =
             Get-FileTransferFileTunaV4DataPathMismatchCandidateKey -Event $candidate
         if ([string]::IsNullOrWhiteSpace($candidateKey)) {
             continue
         }
 
-        $recovered =
-            $corroboratingMismatchSequences.Contains([int64]$candidate.Sequence) -or
-            (Test-FileTransferFileTunaV4DataPathMismatchRejectedFailClosed `
-                -Mismatch $candidate `
-                -Events $orderedEvents `
-                -DataPathIndex $DataPathIndex)
+        $recovered = [bool]$candidateRecord.Recovered
         if (-not $candidateRecordsByKey.ContainsKey($candidateKey)) {
             $candidateRecordsByKey[$candidateKey] = [pscustomobject]@{
                 Event = $candidate
                 DistinctKey = $candidateKey
                 Recovered = [bool]$recovered
+                Variant = [string]$candidateRecord.Variant
+                RejectionDiagnostic = $candidateRecord.RejectionDiagnostic
             }
         }
         elseif ($recovered) {
             $candidateRecordsByKey[$candidateKey].Recovered = $true
+            $candidateRecordsByKey[$candidateKey].Variant = '(none)'
         }
     }
     [object[]]$distinctCandidateRecords = @($candidateRecordsByKey.Values)
@@ -15543,6 +15618,7 @@ function Get-FileTransferFileTunaV4DataPathMismatchProof {
         RawCount = [int]$rawMismatchEvents.Count
         EffectiveCount = [int]$effectiveMismatchEvents.Count
         EffectiveEvents = $effectiveMismatchEvents
+        EffectiveCandidateRecords = $effectiveMismatchRecords
         RawCandidateCount = [int]$rawCandidateEvents.Count
         DistinctCount = [int]$distinctCandidateRecords.Count
         RecoveredCount = [int]$recoveredCandidateRecords.Count
@@ -15842,9 +15918,20 @@ function Get-FileTransferFileTunaV4DataPathProof {
         }
     }
 
-    foreach ($mismatch in @($mismatchEvents)) {
+    $evidenceCandidateRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($evidence.ToArray() | Select-Object -First 20)) {
+        $evidenceCandidateRecords.Add([pscustomobject]@{
+            Event = $event
+            Variant = '(none)'
+            RejectionDiagnostic = $null
+        }) | Out-Null
+    }
+    foreach ($mismatchRecord in @($mismatchProof.EffectiveCandidateRecords)) {
+        $mismatch = $mismatchRecord.Event
         $findings.Add(("file_tuna_v4 V4 data path resolved to regular NKN: effect={0}" -f (Format-FileTransferEvidenceLine -Event $mismatch))) | Out-Null
-        $evidence.Add($mismatch) | Out-Null
+        if ($evidenceCandidateRecords.Count -lt 20) {
+            $evidenceCandidateRecords.Add($mismatchRecord) | Out-Null
+        }
     }
 
     $peerVisiblePayloadBytes = 0L
@@ -15867,7 +15954,8 @@ function Get-FileTransferFileTunaV4DataPathProof {
         MissingActualProofCount = [int]$missingActualProofCount
         PeerVisiblePayloadBytes = [long]$peerVisiblePayloadBytes
         Findings = $findings
-        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+        EvidenceEvents = @($evidenceCandidateRecords.ToArray() | ForEach-Object { $_.Event })
+        EvidenceCandidateRecords = @($evidenceCandidateRecords.ToArray())
         RouteTransitionProof = $routeTransitionProof
         RouteTransitionLiveEpochProjectionProof =
             $routeTransitionLiveEpochProjectionProof
@@ -70512,12 +70600,15 @@ function Get-FileTransferRecoveryFailureClassification {
             -UseDefaultReason
     }
     if ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
-        Add-FileTransferProofChainFailureCandidates `
-            -Candidates $proofChainFailureCandidates `
-            -Class 'file_tuna_data_path_mismatch' `
-            -Events $fileTunaV4DataPathProof.EvidenceEvents `
-            -DefaultReason 'file_tuna_data_path_mismatch' `
-            -UseDefaultReason
+        foreach ($candidateRecord in @($fileTunaV4DataPathProof.EvidenceCandidateRecords)) {
+            Add-FileTransferProofChainFailureCandidates `
+                -Candidates $proofChainFailureCandidates `
+                -Class 'file_tuna_data_path_mismatch' `
+                -Events @($candidateRecord.Event) `
+                -DefaultReason 'file_tuna_data_path_mismatch' `
+                -Variant ([string]$candidateRecord.Variant) `
+                -UseDefaultReason
+        }
     }
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
@@ -71388,6 +71479,10 @@ function Get-FileTransferRecoveryFailureClassification {
     $failureVariant = '(none)'
     $fallbackFrontierStallDiagnostic = $null
     if ($null -ne $firstProofChainFailure -and
+        [string]$firstProofChainFailure.Class -eq 'file_tuna_data_path_mismatch') {
+        $failureVariant = [string]$firstProofChainFailure.Variant
+    }
+    elseif ($null -ne $firstProofChainFailure -and
         [string]$firstProofChainFailure.Class -eq
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' -and
         [string]$firstProofChainFailure.Reason -eq

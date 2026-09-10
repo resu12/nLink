@@ -5444,11 +5444,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         }) | Out-Null
     }
     if ($fileTunaV4DataPathMismatchProof.EffectiveCount -gt 0) {
-        foreach ($candidateEvent in @($fileTunaV4DataPathMismatchProof.EffectiveEvents)) {
+        foreach ($candidateRecord in @($fileTunaV4DataPathMismatchProof.EffectiveCandidateRecords)) {
             $compactProofChainCandidates.Add([pscustomobject]@{
                 Class = 'file_tuna_data_path_mismatch'
-                Event = $candidateEvent
+                Event = $candidateRecord.Event
                 Reason = 'file_tuna_data_path_mismatch'
+                Variant = [string]$candidateRecord.Variant
             }) | Out-Null
         }
     }
@@ -6280,6 +6281,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     }
     $failureVariant = if ($null -ne $firstCompactProofChainFailure -and
         [string]$firstCompactProofChainFailure.Class -in @(
+            'file_tuna_data_path_mismatch',
             'runtime_unlock_responder_acked_probe_route_transition_handoff_missing',
             'fallback_tail_local_yield_missing',
             'paired_fallback_tail_yield_missing',

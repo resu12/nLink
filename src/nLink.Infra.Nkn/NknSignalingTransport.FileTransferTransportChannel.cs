@@ -1155,7 +1155,11 @@ public sealed partial class NknSignalingTransport
                 batchChunkCount,
                 batchProfile,
                 dataPathSendAuthority,
-                dataFrame);
+                dataFrame,
+                CreateFileTransferDataPathEnvelopeEvidence(
+                    envelope.MessageId,
+                    dataFrame?.SessionId ?? dataPathSendAuthority?.SessionId,
+                    dataFrame?.TransferId ?? normalizedTransferId));
         }
 
         if (messageType == MsgType.FileTransferDataFrame && !sentViaAcceleration)
@@ -2790,6 +2794,34 @@ public sealed partial class NknSignalingTransport
             ? batch.BatchProfile
             : "(none)";
 
+    private readonly record struct FileTransferDataPathEnvelopeEvidence(
+        string EnvelopeFingerprint,
+        string SessionId,
+        string TransferId);
+
+    private static FileTransferDataPathEnvelopeEvidence CreateFileTransferDataPathEnvelopeEvidence(
+        string? messageId,
+        string? sessionId,
+        string? transferId)
+        => new(
+            string.IsNullOrWhiteSpace(messageId) || messageId == "(none)"
+                ? "(none)"
+                : "ftenv1-" + Convert.ToHexString(SHA256.HashData(
+                    Encoding.UTF8.GetBytes("nLink/filetransfer/data-path-envelope/v1\0" + messageId)))
+                    .ToLowerInvariant(),
+            FileTransferDataPathScopeEvidenceToken(sessionId),
+            FileTransferDataPathScopeEvidenceToken(transferId));
+
+    private static string FileTransferDataPathScopeEvidenceToken(string? value)
+        => string.IsNullOrWhiteSpace(value) || value == "(none)"
+            ? "(none)"
+            : "fte1-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))
+                .ToLowerInvariant()[..24];
+
+    private static string FormatFileTransferDataPathEnvelopeEvidenceSuffix(
+        FileTransferDataPathEnvelopeEvidence evidence)
+        => $"; data_path_envelope_fingerprint={evidence.EnvelopeFingerprint}; data_path_session_id={evidence.SessionId}; data_path_transfer_id={evidence.TransferId}";
+
     private static string FormatFileTransferDataPathFrameIdentitySuffix(FileTransferDataFrame? frame)
     {
         if (frame is null)
@@ -2851,7 +2883,8 @@ public sealed partial class NknSignalingTransport
         int batchChunkCount,
         string? batchProfile,
         FileTransferDataPathSendAuthority? dataPathSendAuthority,
-        FileTransferDataFrame? dataFrame)
+        FileTransferDataFrame? dataFrame,
+        FileTransferDataPathEnvelopeEvidence envelopeEvidence)
     {
         var explicitAuthority = dataPathSendAuthority;
         var hasExplicitAuthority = explicitAuthority is not null;
@@ -2869,6 +2902,7 @@ public sealed partial class NknSignalingTransport
             ? FormatFileTransferDataPathAuthoritySuffix(explicitAuthority!)
             : FormatFileTransferDataPathAuthoritySuffix(hasAuthority, routeHint);
         var frameIdentitySuffix = FormatFileTransferDataPathFrameIdentitySuffix(dataFrame);
+        var envelopeEvidenceSuffix = FormatFileTransferDataPathEnvelopeEvidenceSuffix(envelopeEvidence);
         var sessionIdForLog = hasExplicitAuthority
             ? explicitAuthority!.SessionId
             : hasAuthority
@@ -2876,7 +2910,7 @@ public sealed partial class NknSignalingTransport
                 : currentSessionSecurityState.SessionId?.Value ?? "(none)";
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_data_path_send_result; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; sent_via_acceleration={(sentViaAcceleration ? 1 : 0)}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; plaintext_payload_bytes={plaintextPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent{frameIdentitySuffix}{authoritySuffix}");
+            $"event=filetransfer_data_path_send_result; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; sent_via_acceleration={(sentViaAcceleration ? 1 : 0)}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; plaintext_payload_bytes={plaintextPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}");
 
         var hasFileTunaV4Authority = hasExplicitAuthority
             ? IsFileTunaV4TargetTuna(explicitAuthority!)
@@ -2895,14 +2929,14 @@ public sealed partial class NknSignalingTransport
             {
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=filetransfer_tuna_data_path_peer_visible; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport=tuna; delivery_transport=tuna; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent; proof_direction=send{frameIdentitySuffix}{authoritySuffix}");
+                    $"event=filetransfer_tuna_data_path_peer_visible; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport=tuna; delivery_transport=tuna; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent; proof_direction=send{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}");
                 return;
             }
             else
             {
                 LocalOperationalLog.Error(
                     "SessionSecurity",
-                    $"event=filetransfer_tuna_data_path_mismatch; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; proof_direction=send; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn{frameIdentitySuffix}{authoritySuffix}");
+                    $"event=filetransfer_tuna_data_path_mismatch; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; proof_direction=send; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}");
             }
         }
     }
@@ -2910,13 +2944,12 @@ public sealed partial class NknSignalingTransport
     private void LogFileTransferDataPathReceiveResult(
         FileTransferDataFrame frame,
         NknBridgeChannel channel,
-        FileTransferTransportKind actualTransport)
+        FileTransferTransportKind actualTransport,
+        FileTransferDataPathEnvelopeEvidence envelopeEvidence,
+        string receiveDisposition,
+        bool hasAuthority,
+        FileTransferRouteHint routeHint)
     {
-        var hasAuthority = TryGetFileTransferDataPathRouteAuthority(
-            frame.SessionId,
-            frame.TransferId,
-            FileTransferDirection.Inbound,
-            out var routeHint);
         var frameType = string.IsNullOrWhiteSpace(frame.Type)
             ? "(none)"
             : frame.Type.Trim();
@@ -2926,11 +2959,14 @@ public sealed partial class NknSignalingTransport
         var authoritySuffix = FormatFileTransferDataPathAuthoritySuffix(hasAuthority, routeHint);
         var runtimeUnlockPreCommitSuffix = FormatRuntimeUnlockPreCommitProbeTupleSuffix(frame);
         var frameIdentitySuffix = FormatFileTransferDataPathFrameIdentitySuffix(frame);
+        var envelopeEvidenceSuffix = FormatFileTransferDataPathEnvelopeEvidenceSuffix(envelopeEvidence);
+        var dispositionSuffix = $"; receive_disposition={receiveDisposition}" +
+            (receiveDisposition == "rejected_before_dispatch" ? "; authority_effect=none" : string.Empty);
         var rawPayloadBytes = GetFrameRawPayloadBytes(frame);
         var batchChunkCount = GetFrameBatchChunkCount(frame);
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_data_path_receive_result; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; delivery_result=received{frameIdentitySuffix}{runtimeUnlockPreCommitSuffix}{authoritySuffix}");
+            $"event=filetransfer_data_path_receive_result; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; delivery_result=received{frameIdentitySuffix}{runtimeUnlockPreCommitSuffix}{authoritySuffix}{envelopeEvidenceSuffix}{dispositionSuffix}");
 
         if (hasAuthority &&
             routeHint.Route == FileTransferRoute.FileTunaV4 &&
@@ -2946,13 +2982,13 @@ public sealed partial class NknSignalingTransport
             {
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=filetransfer_tuna_data_path_peer_visible; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport=tuna; delivery_transport=tuna; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; proof_direction=receive{frameIdentitySuffix}{authoritySuffix}");
+                    $"event=filetransfer_tuna_data_path_peer_visible; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport=tuna; delivery_transport=tuna; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; proof_direction=receive{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}{dispositionSuffix}");
             }
             else
             {
                 LocalOperationalLog.Error(
                     "SessionSecurity",
-                    $"event=filetransfer_tuna_data_path_mismatch; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; proof_direction=receive; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn{frameIdentitySuffix}{authoritySuffix}");
+                    $"event=filetransfer_tuna_data_path_mismatch; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; proof_direction=receive; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn{frameIdentitySuffix}{authoritySuffix}{envelopeEvidenceSuffix}{dispositionSuffix}");
             }
         }
     }
@@ -2960,7 +2996,8 @@ public sealed partial class NknSignalingTransport
     private bool ShouldRejectFileTunaV4PayloadReceive(
         FileTransferDataFrame frame,
         NknBridgeChannel channel,
-        FileTransferTransportKind actualTransport)
+        FileTransferTransportKind actualTransport,
+        FileTransferDataPathEnvelopeEvidence envelopeEvidence)
     {
         if (actualTransport == FileTransferTransportKind.Tuna ||
             !TryGetFileTransferDataPathRouteAuthority(frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint) ||
@@ -2986,10 +3023,14 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        LogFileTransferDataPathReceiveResult(frame, channel, actualTransport);
+        LogFileTransferDataPathReceiveResult(
+            frame, channel, actualTransport, envelopeEvidence,
+            "rejected_before_dispatch", hasAuthority: true, routeHint);
+        var envelopeEvidenceSuffix = FormatFileTransferDataPathEnvelopeEvidenceSuffix(envelopeEvidence);
+        var authoritySuffix = FormatFileTransferDataPathAuthoritySuffix(hasAuthority: true, routeHint);
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; reason=file_tuna_v4_payload_requires_tuna; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}; target_transport=tuna; route={FileTransferRouteResolver.FileTunaV4Token}; protocol_version={FileTransferProtocol.ProtocolVersionV4}");
+            $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; reason=file_tuna_v4_payload_requires_tuna; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}{authoritySuffix}{envelopeEvidenceSuffix}; receive_disposition=rejected_before_dispatch; authority_effect=none");
         NknRuntimeDiagnostics.SetLastEnvelopeDropReason("file_tuna_v4_payload_requires_tuna");
         return true;
     }
@@ -4317,7 +4358,9 @@ public sealed partial class NknSignalingTransport
         }
 
         var receivedTransportKind = ResolveInboundFileTransferDataFrameTransportKind(channel);
-        if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind))
+        var envelopeEvidence = CreateFileTransferDataPathEnvelopeEvidence(
+            env.MessageId, frame.SessionId, frame.TransferId);
+        if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
         {
             return false;
         }
@@ -4425,7 +4468,11 @@ public sealed partial class NknSignalingTransport
                         frame.SessionId);
                 }
 
-                LogFileTransferDataPathReceiveResult(frame, channel, receivedTransportKind);
+                var hasRouteAuthority = TryGetFileTransferDataPathRouteAuthority(
+                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint);
+                LogFileTransferDataPathReceiveResult(
+                    frame, channel, receivedTransportKind, envelopeEvidence,
+                    "dispatch_entered", hasRouteAuthority, routeHint);
                 DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source);
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);
             },

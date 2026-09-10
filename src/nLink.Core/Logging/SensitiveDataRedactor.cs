@@ -41,6 +41,7 @@ public static partial class SensitiveDataRedactor
             text,
             protectedSnapshotEvidenceValues);
         redacted = ProtectCheckpointContinuityEvidenceValues(redacted, protectedSnapshotEvidenceValues);
+        redacted = ProtectDataPathEnvelopeEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         var protectedFallbackBootstrapProofKinds = new List<string>();
         redacted = ProtectFallbackBootstrapProofKinds(
             redacted,
@@ -120,6 +121,12 @@ public static partial class SensitiveDataRedactor
 
     [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>continuity_profile)=(?<value>snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1)|(?<key>continuity_(?:coordinator_id|source_fingerprint|acceptance_id|origin_receipt_id|origin_receipt_fingerprint|receipt_id|receipt_fingerprint|current_scope_fingerprint|repair_authority_id|request_id|correlation_id))=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex CheckpointContinuityEvidenceValueRegex();
+
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_(?:peer_visible|mismatch)|filetransfer_data_frame_ignored)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex DataPathEnvelopeEvidenceLineRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>data_path_envelope_fingerprint)=(?<value>ftenv1-[a-f0-9]{64})|(?<key>data_path_(?:session|transfer)_id)=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex DataPathEnvelopeEvidenceValueRegex();
 
     [GeneratedRegex(@"\bproof_kind=(?<value>file_transfer_(?:bulk_frame|v4_state_frame|v6_state_frame|v6_frontier_request_frame)_(?:received|sent))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex FallbackBootstrapProofKindValueRegex();
@@ -242,6 +249,22 @@ public static partial class SensitiveDataRedactor
                 return line.Value;
             }
             return CheckpointContinuityEvidenceValueRegex().Replace(line.Value, match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"{match.Groups["key"].Value}={placeholder}";
+            });
+        });
+
+    private static string ProtectDataPathEnvelopeEvidenceValues(string text, List<string> protectedValues)
+        => DataPathEnvelopeEvidenceLineRegex().Replace(text, line =>
+        {
+            if (EventKeyValueRegex().Matches(line.Value).Count != 1)
+            {
+                return line.Value;
+            }
+
+            return DataPathEnvelopeEvidenceValueRegex().Replace(line.Value, match =>
             {
                 var placeholder = $"SEVP{protectedValues.Count}";
                 protectedValues.Add(match.Groups["value"].Value);
