@@ -113,9 +113,10 @@ public sealed partial class FileTransferCoordinatorTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
         RuntimeUnlockRouteCommitProof FinalProof) CreateCheckpointResponderCoexistencePairedHandoff(
-        FileTransferCoordinatorState state, Action<FileTransferCoordinatorTransitionEnvelope> capture)
+        FileTransferCoordinatorState state, Action<FileTransferCoordinatorTransitionEnvelope> capture,
+        bool pairYield = true)
     {
-        state = PairCheckpointResponderCoexistenceYield(state, capture);
+        if (pairYield) { state = PairCheckpointResponderCoexistenceYield(state, capture); }
         var release = Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
             FileTransferCoordinator.GetFallbackTailYieldSubstate(state).CurrentOperation!.Value.PairedRelease);
         var admitted = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
