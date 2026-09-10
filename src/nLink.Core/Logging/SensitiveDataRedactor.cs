@@ -42,6 +42,7 @@ public static partial class SensitiveDataRedactor
             protectedSnapshotEvidenceValues);
         redacted = ProtectCheckpointContinuityEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectDataPathEnvelopeEvidenceValues(redacted, protectedSnapshotEvidenceValues);
+        redacted = ProtectTunaDeliveryTraceValues(redacted, protectedSnapshotEvidenceValues);
         var protectedFallbackBootstrapProofKinds = new List<string>();
         redacted = ProtectFallbackBootstrapProofKinds(
             redacted,
@@ -240,6 +241,24 @@ public static partial class SensitiveDataRedactor
 
         return restored;
     }
+
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=tuna_delivery_trace(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex TunaDeliveryTraceLineRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>trace_wire)=(?<value>ftwire1-[a-f0-9]{64})|(?<key>data_path_envelope_fingerprint)=(?<value>ftenv1-[a-f0-9]{64})|(?<key>data_path_session_id|data_path_transfer_id)=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex TunaDeliveryTraceValueRegex();
+
+    private static string ProtectTunaDeliveryTraceValues(string text, List<string> protectedValues)
+        => TunaDeliveryTraceLineRegex().Replace(text, line =>
+        {
+            if (EventKeyValueRegex().Matches(line.Value).Count != 1) return line.Value;
+            return TunaDeliveryTraceValueRegex().Replace(line.Value, match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"{match.Groups["key"].Value}={placeholder}";
+            });
+        });
 
     private static string ProtectCheckpointContinuityEvidenceValues(string text, List<string> protectedValues)
         => CheckpointContinuityEvidenceLineRegex().Replace(text, line =>

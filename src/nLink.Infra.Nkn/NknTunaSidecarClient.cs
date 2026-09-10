@@ -29,6 +29,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
     private CancellationTokenSource? cts;
     private Task? readerTask;
     private Task? writerTask;
+    private NknTunaDeliveryTrace.Connection? deliveryTrace;
     private int disposed;
     private int available;
     private long nextSequence;
@@ -106,14 +107,16 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         await client.ConnectAsync(host, port, ct).ConfigureAwait(false);
         var networkStream = client.GetStream();
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var trace = NknTunaDeliveryTrace.Current?.Connect();
 
         lock (gate)
         {
             tcpClient = client;
             stream = networkStream;
             cts = linkedCts;
-            readerTask = Task.Run(() => ReadLoopAsync(linkedCts.Token), CancellationToken.None);
-            writerTask = Task.Run(() => WriteLoopAsync(linkedCts.Token), CancellationToken.None);
+            deliveryTrace = trace;
+            readerTask = Task.Run(() => ReadLoopAsync(linkedCts.Token, trace), CancellationToken.None);
+            writerTask = Task.Run(() => WriteLoopAsync(linkedCts.Token, trace), CancellationToken.None);
         }
 
         var completed = await Task.WhenAny(statusReady.Task, Task.Delay(statusTimeout, ct)).ConfigureAwait(false);
@@ -160,9 +163,15 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             checked((ulong)Interlocked.Increment(ref nextSequence)),
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             envelopeBytes.AsSpan().ToArray());
+        if (sidecarLane == NknTunaSidecarLane.Bulk)
+        {
+            frame = frame with { Trace = deliveryTrace?.Select("app_to_tuna", frame.Sequence, frame.Payload) };
+            NknTunaDeliveryTrace.BindSend(envelopeBytes, frame.Trace);
+        }
 
         if (!await TryQueueFrameAsync(frame, GetQueueWriteTimeoutMs(sidecarLane), ct).ConfigureAwait(false))
         {
+            frame.Trace?.Record("queue_rejected");
             var rejected = Interlocked.Increment(ref sendRejected);
             Interlocked.Increment(ref queueOverflow);
             if (sidecarLane == NknTunaSidecarLane.Media)
@@ -184,6 +193,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         }
 
         IncrementAccepted(sidecarLane);
+        frame.Trace?.Record("queue_accepted");
         return true;
     }
 
@@ -236,7 +246,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         cts?.Dispose();
     }
 
-    private async Task ReadLoopAsync(CancellationToken ct)
+    private async Task ReadLoopAsync(CancellationToken ct, NknTunaDeliveryTrace.Connection? trace)
     {
         try
         {
@@ -250,7 +260,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
                         HandleStatusFrame(frame.Payload);
                         break;
                     case NknTunaSidecarFrameType.Data:
-                        HandleDataFrame(frame);
+                        HandleDataFrame(frame, trace);
                         break;
                     case NknTunaSidecarFrameType.Close:
                         MarkUnavailable("remote_closed");
@@ -268,9 +278,13 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             statusReady.TrySetException(ex);
             MarkUnavailable("read_failed");
         }
+        finally
+        {
+            trace?.End("tuna_to_app", "read_loop_ended");
+        }
     }
 
-    private async Task WriteLoopAsync(CancellationToken ct)
+    private async Task WriteLoopAsync(CancellationToken ct, NknTunaDeliveryTrace.Connection? trace)
     {
         try
         {
@@ -278,7 +292,10 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             await foreach (var frame in outbound.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
                 await SendIdleWarmupIfNeededAsync(activeStream, frame, ct).ConfigureAwait(false);
-                await NknTunaSidecarFrameProtocol.WriteFrameAsync(
+                frame.Trace?.Record("ipc_write_entered");
+                try
+                {
+                    await NknTunaSidecarFrameProtocol.WriteFrameAsync(
                         activeStream,
                         NknTunaSidecarFrameType.Data,
                         frame.Lane,
@@ -287,6 +304,13 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
                         frame.Payload,
                         ct)
                     .ConfigureAwait(false);
+                    frame.Trace?.Record("ipc_write_completed");
+                }
+                catch (Exception ex)
+                {
+                    frame.Trace?.Record(ex is OperationCanceledException ? "ipc_write_canceled" : "ipc_write_failed");
+                    throw;
+                }
                 Interlocked.Exchange(ref lastWriteUtcMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 var written = Interlocked.Increment(ref framesWritten);
                 IncrementWritten(frame.Lane);
@@ -306,6 +330,10 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         {
             LocalOperationalLog.Warn("NKN.Tuna", $"event=tuna_sidecar_write_failed; error={ex.GetType().Name}");
             MarkUnavailable("write_failed");
+        }
+        finally
+        {
+            trace?.End("app_to_tuna", "write_loop_ended");
         }
     }
 
@@ -415,10 +443,14 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         }
     }
 
-    private void HandleDataFrame(NknTunaSidecarFrame frame)
+    private void HandleDataFrame(NknTunaSidecarFrame frame, NknTunaDeliveryTrace.Connection? connection)
     {
+        var trace = frame.Lane == NknTunaSidecarLane.Bulk
+            ? connection?.Select("tuna_to_app", frame.Sequence, frame.Payload) : null;
+        trace?.Record("ipc_read_completed");
         if (!IsAvailable)
         {
+            trace?.Record("callback_rejected_unavailable");
             return;
         }
 
@@ -455,7 +487,10 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             }
         }
 
-        MessageReceived?.Invoke(
+        using var traceScope = NknTunaDeliveryTrace.EnterReceive(trace, frame.Payload);
+        var messageReceived = MessageReceived;
+        trace?.Record(messageReceived is null ? "callback_unsubscribed" : "callback_entered");
+        messageReceived?.Invoke(
             this,
             new NknIncomingMessage(
                 source: string.Empty,
@@ -677,5 +712,6 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         NknTunaSidecarLane Lane,
         ulong Sequence,
         long TimestampUtcMs,
-        byte[] Payload);
+        byte[] Payload,
+        NknTunaDeliveryTrace.Frame? Trace = null);
 }

@@ -17,6 +17,9 @@ public sealed partial class NknAccelerationTransportTests
     [Trait("FileTransferInfraSuite", "TunaStoppedDelivery")]
     public async Task TunaSidecarClient_WrittenBatchIsReceivedOnlyWhenRelayForwardsBeforeStop(bool forwardBeforeStop)
     {
+        var traceLines = new ConcurrentQueue<string>();
+        using var traceOverride = NknTunaDeliveryTrace.OverrideForTests(
+            new NknTunaDeliveryTrace.Producer(Guid.NewGuid().ToString("D"), traceLines.Enqueue));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var listener = new TcpListener(IPAddress.Loopback, 0);
         using var sender = new NknTunaSidecarClient(NknAccelerationLaneKind.File, queueCapacity: 16);
@@ -32,8 +35,8 @@ public sealed partial class NknAccelerationTransportTests
         listener.Start();
         try
         {
-            using var senderRelay = await ConnectRelayAsync(sender);
-            using var receiverRelay = await ConnectRelayAsync(receiver);
+            using var senderRelay = await ConnectDeliveryTraceRelayAsync(listener, sender, cts.Token);
+            using var receiverRelay = await ConnectDeliveryTraceRelayAsync(listener, receiver, cts.Token);
             // Install the real connected client for the production StopAsync path.
             // This fixture does not negotiate a Tuna route or start a sidecar process.
             SetPrivateField(receiverLane, "client", receiver);
@@ -59,7 +62,11 @@ public sealed partial class NknAccelerationTransportTests
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), null);
             var envelopeBytes = EnvelopeCodec.Serialize(envelope);
 
-            Assert.True(await sender.TrySendAsync(NknBridgeChannel.Bulk, envelopeBytes, cts.Token));
+            using (var sendTrace = NknTunaDeliveryTrace.BeginSend(envelopeBytes))
+            {
+                Assert.True(await sender.TrySendAsync(NknBridgeChannel.Bulk, envelopeBytes, cts.Token));
+                sendTrace!.Result("; start_chunk_index=4602; frame_chunk_count=3");
+            }
             var warmup = await NknTunaSidecarFrameProtocol.ReadFrameAsync(senderRelay.GetStream(), cts.Token);
             Assert.Equal(NknTunaSidecarFrameType.Ping, warmup.Type);
             var held = await NknTunaSidecarFrameProtocol.ReadFrameAsync(senderRelay.GetStream(), cts.Token);
@@ -109,6 +116,13 @@ public sealed partial class NknAccelerationTransportTests
             Assert.Equal(forwardBeforeStop, delivered.Task.IsCompletedSuccessfully);
             Assert.Equal(1, sender.GetDiagnosticsSnapshot().BulkFramesAccepted);
             Assert.Equal(1, sender.GetDiagnosticsSnapshot().BulkFramesWritten);
+            var wire = NknTunaDeliveryTrace.WireHash(envelopeBytes);
+            foreach (var stage in new[] { "queue_accepted", "ipc_write_entered", "ipc_write_completed", "app_send_result" })
+                Assert.Single(traceLines.Where(line => line.Contains($"trace_stage={stage};", StringComparison.Ordinal) &&
+                    line.Contains($"trace_wire={wire};", StringComparison.Ordinal) && line.Contains("trace_seq=1;", StringComparison.Ordinal)));
+            Assert.Equal(forwardBeforeStop ? 1 : 0, traceLines.Count(line => line.Contains("trace_stage=ipc_read_completed;", StringComparison.Ordinal)));
+            Assert.Equal(forwardBeforeStop ? 1 : 0, traceLines.Count(line => line.Contains("trace_stage=callback_entered;", StringComparison.Ordinal)));
+            Assert.DoesNotContain(traceLines, line => line.Contains("trace_tail=complete", StringComparison.Ordinal));
         }
         finally
         {
@@ -121,34 +135,35 @@ public sealed partial class NknAccelerationTransportTests
             }).OfType<Task>();
             await Task.WhenAll(ioTasks).WaitAsync(TimeSpan.FromSeconds(5));
         }
+    }
 
-        async Task<TcpClient> ConnectRelayAsync(NknTunaSidecarClient client)
+    private static async Task<TcpClient> ConnectDeliveryTraceRelayAsync(
+        TcpListener listener, NknTunaSidecarClient client, CancellationToken ct)
+    {
+        var connect = client.ConnectAsync(((IPEndPoint)listener.LocalEndpoint).ToString(),
+            TimeSpan.FromSeconds(5), ct);
+        var relay = await listener.AcceptTcpClientAsync(ct);
+        try
         {
-            var connect = client.ConnectAsync(((IPEndPoint)listener.LocalEndpoint).ToString(),
-                TimeSpan.FromSeconds(5), cts.Token);
-            var relay = await listener.AcceptTcpClientAsync(cts.Token);
-            try
+            var status = JsonSerializer.SerializeToUtf8Bytes(new
             {
-                var status = JsonSerializer.SerializeToUtf8Bytes(new
-                {
-                    @event = "status",
-                    address = "nlink-tuna-sidecar.loopback-stopped-delivery",
-                    appProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion,
-                    frameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
-                    sidecarVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion,
-                    lanes = new[] { "file" },
-                });
-                await NknTunaSidecarFrameProtocol.WriteFrameAsync(relay.GetStream(),
-                    NknTunaSidecarFrameType.Status, NknTunaSidecarLane.Control, 0,
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), status, cts.Token);
-                await connect;
-                return relay;
-            }
-            catch
-            {
-                relay.Dispose();
-                throw;
-            }
+                @event = "status",
+                address = "nlink-tuna-sidecar.loopback-stopped-delivery",
+                appProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion,
+                frameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
+                sidecarVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion,
+                lanes = new[] { "file" },
+            });
+            await NknTunaSidecarFrameProtocol.WriteFrameAsync(relay.GetStream(),
+                NknTunaSidecarFrameType.Status, NknTunaSidecarLane.Control, 0,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), status, ct);
+            await connect;
+            return relay;
+        }
+        catch
+        {
+            relay.Dispose();
+            throw;
         }
     }
 }

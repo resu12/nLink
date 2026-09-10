@@ -459,6 +459,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         TaskCompletionSource<NknTunaListenerSidecarEndpoint> ready,
         Stopwatch startupStopwatch)
     {
+        if (NknTunaDeliveryTrace.PreserveChildLine(line, owner?.RunId, "listener")) return;
+
         if (!IsCurrentProcessOwner(owner, process))
         {
             LocalOperationalLog.Info(

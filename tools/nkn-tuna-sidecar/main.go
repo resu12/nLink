@@ -109,9 +109,11 @@ type config struct {
 }
 
 type emitter struct {
-	jsonl bool
-	out   io.Writer
-	mu    sync.Mutex
+	jsonl         bool
+	out           io.Writer
+	mu            sync.Mutex
+	deliveryOnce  sync.Once
+	deliveryTrace *deliveryTraceProducer
 }
 
 type event map[string]any
@@ -1104,8 +1106,10 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 	if hasDurationCap {
 		scheduleDurationCapHandoff(ctx, emit, role, duration, &capHandoffRequested)
 	}
-	go bridgeDirection(ctx, role, "app_to_tuna", appConn, tunaConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh)
-	go bridgeDirection(ctx, role, "tuna_to_app", tunaConn, appConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh)
+	emit.deliveryOnce.Do(func() { emit.deliveryTrace = newDeliveryTraceProducer(emit) })
+	deliveryTrace := emit.deliveryTrace.connect()
+	go bridgeDirection(ctx, role, "app_to_tuna", appConn, tunaConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh, deliveryTrace)
+	go bridgeDirection(ctx, role, "tuna_to_app", tunaConn, appConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh, deliveryTrace)
 
 	var err error
 	var result bridgeDirectionResult
@@ -1266,7 +1270,8 @@ func bridgeDirection(
 	softLimitBytes int64,
 	capHandoffRequested *atomic.Bool,
 	emit *emitter,
-	errCh chan<- bridgeDirectionResult) {
+	errCh chan<- bridgeDirectionResult, trace *deliveryTraceConnection) {
+	trace.record(direction, "direction_start", "none", nil)
 	startedAt := time.Now()
 	var framesForwarded int64
 	var payloadBytes int64
@@ -1280,6 +1285,7 @@ func bridgeDirection(
 	var lastReadAt time.Time
 	sequenceTracker := &bridgeSequenceTracker{}
 	finish := func(stage string, err error, frame sidecarFrame) {
+		trace.record(direction, "direction_end", bridgeTerminalReason(direction, stage, err), nil)
 		laneSummaries := bridgeLaneSequenceSummaries(sequenceTracker.laneStats)
 		for _, summary := range laneSummaries {
 			summary["event"] = "bridge_sequence_gap_summary"
@@ -1330,6 +1336,10 @@ func bridgeDirection(
 			}
 			finish("read", err, lastFrame)
 			return
+		}
+		deliveryFrame := trace.selectFrame(direction, frame)
+		if deliveryFrame != nil {
+			trace.record(direction, "read_completed", "none", deliveryFrame)
 		}
 		now := time.Now()
 		if !lastReadAt.IsZero() {
@@ -1428,9 +1438,18 @@ func bridgeDirection(
 			})
 		}
 		writeStarted := time.Now()
+		if deliveryFrame != nil {
+			trace.record(direction, "write_entered", "none", deliveryFrame)
+		}
 		if err := writeFrame(dst, frame.typ, frame.lane, frame.seq, frame.timestamp, frame.payload); err != nil {
+			if deliveryFrame != nil {
+				trace.record(direction, "write_failed", bridgeTerminalReason(direction, "write", err), deliveryFrame)
+			}
 			finish("write", err, frame)
 			return
+		}
+		if deliveryFrame != nil {
+			trace.record(direction, "write_completed", "none", deliveryFrame)
 		}
 		totalBytes.Add(moved)
 		writeMs := time.Since(writeStarted).Milliseconds()

@@ -381,13 +381,12 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             {
                 return;
             }
-
+            if (TryPreserveOwnedDialerTrace(owner, e.Data)) return;
             if (TryHandleReadyLine(e.Data, ready))
             {
                 Interlocked.Exchange(ref lastSidecarEvent, "ready");
                 return;
             }
-
             var eventName = TryExtractSidecarEvent(e.Data, out var reason);
             if (!string.IsNullOrWhiteSpace(eventName))
             {
@@ -398,7 +397,6 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                 {
                     Interlocked.Exchange(ref lastSidecarReason, safeReason);
                 }
-
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=tuna_dialer_sidecar_event; sidecar_event={safeEventName}; sidecar_reason={safeReason ?? ""}; line_len={e.Data.Length}");
@@ -406,7 +404,6 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                 {
                     LogBridgeTerminal(e.Data);
                 }
-
                 if (IsTerminalSidecarEvent(safeEventName))
                 {
                     MarkDialerClientUnavailable(owner, $"sidecar_{safeReason ?? safeEventName}");
@@ -874,6 +871,9 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return null;
         }
     }
+
+    private static bool TryPreserveOwnedDialerTrace(NknTunaSidecarProcessOwner? owner, string line)
+        => NknTunaDeliveryTrace.PreserveChildLine(line, owner?.RunId, "dialer");
 
     private static void LogBridgeTerminal(string line)
     {

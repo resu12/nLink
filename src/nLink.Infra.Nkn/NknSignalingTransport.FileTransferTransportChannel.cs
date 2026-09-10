@@ -973,6 +973,8 @@ public sealed partial class NknSignalingTransport
         var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload, useBulkIdentity: useBulkLane);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         var transportPayload = EnvelopeCodec.Serialize(envelope);
+        using var deliveryTraceScope = messageType == MsgType.FileTransferDataFrame
+            ? NknTunaDeliveryTrace.BeginSend(transportPayload) : null;
         var lane = useBulkLane ? "bulk" : "control";
         var bridgeCommandBytes = NknBridgePayloadAccounting.MeasureSendFrameBytes(destination, transportPayload);
         LogFileTransferPayloadBudget(
@@ -1138,6 +1140,12 @@ public sealed partial class NknSignalingTransport
 
         if (messageType == MsgType.FileTransferDataFrame)
         {
+            deliveryTraceScope?.Result(
+                $"; actual_transport={(sentViaAcceleration ? "tuna" : "nkn")}" +
+                FormatFileTransferDataPathFrameIdentitySuffix(dataFrame) +
+                (dataPathSendAuthority is null ? string.Empty : FormatFileTransferDataPathAuthoritySuffix(dataPathSendAuthority)) +
+                FormatFileTransferDataPathEnvelopeEvidenceSuffix(CreateFileTransferDataPathEnvelopeEvidence(
+                    envelope.MessageId, dataFrame?.SessionId, normalizedTransferId)));
             LogRuntimeUnlockPreCommitProbeDeliveryOnce(
                 sentViaAcceleration ? FileTransferTransportKind.Tuna : FileTransferTransportKind.RegularNkn,
                 "sent",
@@ -2797,7 +2805,8 @@ public sealed partial class NknSignalingTransport
     private readonly record struct FileTransferDataPathEnvelopeEvidence(
         string EnvelopeFingerprint,
         string SessionId,
-        string TransferId);
+        string TransferId,
+        NknTunaDeliveryTrace.Frame? DeliveryTrace);
 
     private static FileTransferDataPathEnvelopeEvidence CreateFileTransferDataPathEnvelopeEvidence(
         string? messageId,
@@ -2810,7 +2819,8 @@ public sealed partial class NknSignalingTransport
                     Encoding.UTF8.GetBytes("nLink/filetransfer/data-path-envelope/v1\0" + messageId)))
                     .ToLowerInvariant(),
             FileTransferDataPathScopeEvidenceToken(sessionId),
-            FileTransferDataPathScopeEvidenceToken(transferId));
+            FileTransferDataPathScopeEvidenceToken(transferId),
+            NknTunaDeliveryTrace.ReceiveFrame);
 
     private static string FileTransferDataPathScopeEvidenceToken(string? value)
         => string.IsNullOrWhiteSpace(value) || value == "(none)"
@@ -2962,6 +2972,8 @@ public sealed partial class NknSignalingTransport
         var envelopeEvidenceSuffix = FormatFileTransferDataPathEnvelopeEvidenceSuffix(envelopeEvidence);
         var dispositionSuffix = $"; receive_disposition={receiveDisposition}" +
             (receiveDisposition == "rejected_before_dispatch" ? "; authority_effect=none" : string.Empty);
+        envelopeEvidence.DeliveryTrace?.Record("app_receive_disposition",
+            frameIdentitySuffix + authoritySuffix + envelopeEvidenceSuffix + dispositionSuffix);
         var rawPayloadBytes = GetFrameRawPayloadBytes(frame);
         var batchChunkCount = GetFrameBatchChunkCount(frame);
         LocalOperationalLog.Info(
@@ -3246,6 +3258,8 @@ public sealed partial class NknSignalingTransport
 
     private void OnClientMessageReceived(object? sender, NknIncomingMessage e)
     {
+        using var deliveryIngress = NknTunaDeliveryTrace.EnterReceive(NknTunaDeliveryTrace.ReceiveFrameFor(e.Payload), e.Payload);
+        NknTunaDeliveryTrace.ReceiveFrame?.Record("app_raw_ingress");
         if (disposed)
         {
             return;
