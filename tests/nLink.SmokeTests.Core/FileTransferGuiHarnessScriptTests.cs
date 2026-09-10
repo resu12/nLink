@@ -3073,7 +3073,38 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public async Task GuiSmokeLiveRoute_TwoDirectionAuthorityUsesOneFaultAdmissionCursor()
+    public void GuiSmokeLiveRoute_ImmediateRecognitionFailurePreservesCauseWithoutClaimingTemporalOrder()
+    {
+        var text = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var start = text.IndexOf("$activationWaitError = $_", StringComparison.Ordinal);
+        var end = text.IndexOf("throw $activationWaitError", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        var handler = text[start..end];
+        Assert.Contains("$liveReactivationRecognitionFailure = Get-TunaGuiLiveReactivationRecognitionFailure", handler, StringComparison.Ordinal);
+        Assert.Contains("-WaitFailure $activationWaitError.Exception.Message", handler, StringComparison.Ordinal);
+        Assert.Contains("proof_state={8}; activation_wait_failure={9}", handler, StringComparison.Ordinal);
+        Assert.DoesNotContain("$firstTransferTerminalBeforeLiveReactivation = $true", handler, StringComparison.Ordinal);
+        Assert.DoesNotContain("terminal_before_same_transfer_reactivation_immediate_probe", handler, StringComparison.Ordinal);
+        Assert.Contains("liveReactivationRecognitionFailure = $liveReactivationRecognitionFailure", text, StringComparison.Ordinal);
+        Assert.Contains("$pauseProbeSkipReason = if ($null -ne $liveReactivationRecognitionFailure)", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiSmokeLiveRoute_SharedPairRetainsExactDirectionLocalProofs(string powerShellHost)
+    {
+        var repoRoot = FindRepoRoot();
+        var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core", "TestData", "GuiRoutePairRecognition.ps1"));
+        var result = await RunPowerShellScriptTextAsync(script, [repoRoot], powerShellHost);
+        Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
+        Assert.Contains("gui-route-pair-recognition-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task GuiSmokeLiveRoute_TwoDirectionAuthorityUsesOneFaultAdmissionCursor(string powerShellHost)
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var trackerBody = ExtractPowerShellFunctionBody(guiText, "Add-TunaGuiCompletedTerminalToTracker", "New-TunaGuiLiveSwitchOffProgressGateResult");
@@ -3133,7 +3164,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "authority-$direction"
                 $dataSessionIdentity = if ($direction -eq 'inbound') { 'data-session-inbound:1' } else { '(none)' }
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=1; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=1; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=$dataSessionIdentity; decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=1; transition_kind=RegularV4ToTunaV4; source_route=regular_nkn_v4_fast; source_protocol_version=4; source_live_route_epoch=0; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=1; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=$dataSessionIdentity; decision_status=Committed")
                 $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1; live_route_epoch=1")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=1; disposition=committed")
                 $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1")
@@ -3155,7 +3186,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($direction in @('outbound', 'inbound')) {
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "fallback-authority-$direction"
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=2; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_live_route_epoch=2; target_runtime_generation=3; target_terminal_generation=0; target_leg_generation=3; target_route_publication_generation=3; target_route_commit_generation=0; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=2; transition_kind=TunaV4ToPostTunaFallbackV6; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=1; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_live_route_epoch=2; target_runtime_generation=3; target_terminal_generation=0; target_leg_generation=3; target_route_publication_generation=3; target_route_commit_generation=0; source_transport_epoch=0; source_bridge_recovery_generation=0; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
                 $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=post_tuna_fallback_v6; protocol_version=6; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0; live_route_epoch=2")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=2; target_route=post_tuna_fallback_v6; disposition=committed")
                 $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=3; route_commit_generation=0")
@@ -3175,10 +3206,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($direction in @('inbound', 'outbound')) {
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "reactivation-authority-$direction"
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=3; target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=3; target_runtime_generation=4; target_terminal_generation=0; target_leg_generation=4; target_route_publication_generation=4; target_route_commit_generation=2; source_transport_epoch=1; source_bridge_recovery_generation=1; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
-                $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=4; terminal_generation=0; leg_generation=4; route_publication_generation=4; route_commit_generation=2")
+                $generation = if ($direction -eq 'inbound') { 11 } else { 4 }
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=3; transition_kind=PostTunaFallbackV6ToTunaV4; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; pair_key=s|t|post_tuna_fallback_v6|6|2|1|(none); target_route=file_tuna_v4; target_protocol_version=4; target_live_route_epoch=3; target_runtime_generation=$generation; target_terminal_generation=0; target_leg_generation=$generation; target_route_publication_generation=$generation; target_route_commit_generation=2; source_transport_epoch=1; source_bridge_recovery_generation=1; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=$generation; terminal_generation=0; leg_generation=$generation; route_publication_generation=$generation; route_commit_generation=2")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=3; target_route=file_tuna_v4; disposition=committed")
-                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=4; terminal_generation=0; leg_generation=4; route_publication_generation=4; route_commit_generation=2")
+                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=$generation; terminal_generation=0; leg_generation=$generation; route_publication_generation=$generation; route_commit_generation=2")
             }
             [void](Update-TunaGuiFaultAdmissionTracker -Tracker $tracker)
             if ($null -ne $tracker.AuthoritativeTunaProjection) { throw 'epoch-3 projection unexpectedly survived skipped payload indexing before reset' }
@@ -3196,10 +3228,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             foreach ($direction in @('outbound', 'inbound')) {
                 $scope = "session_id=s; transfer_id=t; direction=$direction"
                 $authority = "final-fallback-authority-$direction"
-                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=4; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_live_route_epoch=4; target_runtime_generation=5; target_terminal_generation=0; target_leg_generation=5; target_route_publication_generation=5; target_route_commit_generation=0; source_transport_epoch=1; source_bridge_recovery_generation=1; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
-                $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=5; route_commit_generation=0")
+                $generation = if ($direction -eq 'inbound') { 12 } else { 5 }
+                $script:lines.Add("event=filetransfer_route_transition_committed; $scope; authority_id=$authority; transition_generation=4; transition_kind=TunaV4ToPostTunaFallbackV6; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch=3; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_live_route_epoch=4; target_runtime_generation=$generation; target_terminal_generation=0; target_leg_generation=$generation; target_route_publication_generation=$generation; target_route_commit_generation=0; source_transport_epoch=1; source_bridge_recovery_generation=1; checkpoint_request_id=(none); source_data_session_generation=1; data_session_identity=(none); decision_status=Committed")
+                $script:lines.Add("event=filetransfer_route_hint_authorized_publication_accepted; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=$generation; terminal_generation=0; leg_generation=$generation; route_publication_generation=$generation; route_commit_generation=0")
                 $script:lines.Add("event=filetransfer_route_transition_disposition_applied; $scope; authority_id=$authority; transition_generation=4; target_route=post_tuna_fallback_v6; disposition=committed")
-                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=5; route_commit_generation=0")
+                $script:lines.Add("event=filetransfer_data_path_receive_result; $scope; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=$generation; terminal_generation=0; leg_generation=$generation; route_publication_generation=$generation; route_commit_generation=0")
             }
             $finalFallback = Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $tracker -AfterBookmark $step4Bookmark -TimeoutMs 100
             if ($finalFallback.LiveRouteEpoch -ne 4 -or
@@ -3222,7 +3255,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Write-Output 'gui-live-route-two-direction-admission-ok'
             """;
 
-        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>(), powerShellHost);
         Assert.True(result.ExitCode == 0, result.Stdout + Environment.NewLine + result.Stderr);
         Assert.Contains("gui-live-route-two-direction-admission-ok", result.Stdout, StringComparison.Ordinal);
     }
@@ -12730,6 +12763,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             Set-StrictMode -Version Latest
+            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
