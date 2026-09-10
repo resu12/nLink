@@ -30129,7 +30129,7 @@ public sealed partial class NknSignalingTransport
                 validation.AcceptedLanes,
                 replyTarget,
                 pairedRetryScope);
-            if (!MarkInboundRuntimeUnlockOfferAccepted(
+            if (isRuntimeUnlockOffer && !MarkInboundRuntimeUnlockOfferAccepted(
                     offer,
                     answerAckGeneration,
                     pairedRetryScope))

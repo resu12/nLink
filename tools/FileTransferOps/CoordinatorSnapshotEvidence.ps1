@@ -2878,6 +2878,919 @@ function Test-FileTransferCoordinatorSnapshotAppliedScopeInvalidationStage {
     return $Envelope.decisionStatus -ceq 'Rejected' -or $Operation.commandFingerprint -ceq $receipt.receiptFingerprint
 }
 
+function Test-FileTransferCoordinatorSnapshotProvisionalRetrySupersession {
+    param([Parameter(Mandatory = $true)]$Envelope, [Parameter(Mandatory = $true)]$Operation)
+
+    if ($Operation.family -cne 'runtime_unlock_retry_lifecycle' -or
+        $Operation.operationRole -cne 'attempt_retained_predecessor' -or
+        $Operation.operationKind -cne 'RetryAttempt' -or $null -eq $Operation.runtimeUnlockRetry) { return $false }
+    $aggregate = $Envelope.aggregate
+    $operations = @($aggregate.operations)
+    $subjects = @($operations | Where-Object operationKey -CEQ $Operation.operationKey)
+    if ($subjects.Count -ne 1 -or
+        ($subjects[0] | ConvertTo-Json -Depth 32 -Compress) -cne ($Operation | ConvertTo-Json -Depth 32 -Compress) -or
+        $Envelope.decisionStatus -cne 'Accepted' -or
+        [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1L) -or
+        $aggregate.beforeStateFingerprint -ceq $aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $aggregate.beforeBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $aggregate.afterBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $aggregate.beforeBoundary $aggregate.afterBoundary)) { return $false }
+    $pending = $null
+    if ($Envelope.decisionKind -ceq 'CommitRuntimeUnlockRetryDispatchInstall') {
+        if ($Envelope.decisionReason -cne 'retry_dispatch_install_committed' -or $operations.Count -ne 4 -or
+            $Operation.beforeState -cne 'None' -or $Operation.afterState -cne 'Settled') { return $false }
+        $originals = @($operations | Where-Object {
+            $_.operationRole -ceq 'attempt_installed' -and $_.beforeState -ceq 'AliasBound' -and $_.afterState -ceq 'None'
+        })
+        $successors = @($operations | Where-Object {
+            $_.operationRole -ceq 'attempt_installed' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Installed'
+        })
+        $pendingOperations = @($operations | Where-Object {
+            $_.operationRole -ceq 'attempt_pending' -and $_.beforeState -ceq 'Staged' -and $_.afterState -ceq 'None'
+        })
+        if ($originals.Count -ne 1 -or $successors.Count -ne 1 -or $pendingOperations.Count -ne 1) { return $false }
+        $original = $originals[0]; $successor = $successors[0]; $pending = $pendingOperations[0]
+        if (-not (Test-FileTransferCoordinatorSnapshotStagedRetryInstallBoundary $Envelope $pending)) { return $false }
+    }
+    elseif ($Envelope.decisionKind -ceq 'CompensateRejectedRuntimeUnlockRetryDispatchConfirmation') {
+        $shape = Get-FileTransferCoordinatorRetryConfirmationCompensationShape $Envelope
+        if ($null -eq $shape -or -not $shape.Applied -or $shape.Displaced.Count -ne 1 -or $shape.Restored.Count -ne 1 -or
+            $shape.Displaced[0].operationKey -cne $Operation.operationKey -or
+            $shape.Restored[0].afterState -cne 'AliasBound') { return $false }
+        $original = $shape.Restored[0]; $successor = $shape.Failed
+        # Local shape admission is not history proof. The existing compensation
+        # history validator also requires the exact previously admitted commit.
+    }
+    else { return $false }
+    foreach ($subject in $operations) {
+        if ($subject.family -cne 'runtime_unlock_retry_lifecycle' -or $subject.operationKind -cne 'RetryAttempt' -or
+            $subject.stateApplied -isnot [bool] -or -not $subject.stateApplied -or
+            $subject.receiptValidated -isnot [bool] -or $null -eq $subject.runtimeUnlockRetry -or
+            $subject.runtimeUnlockRetry.requestActivePredecessorSupersession -isnot [bool] -or
+            $subject.runtimeUnlockRetry.dispatchObserved -isnot [bool] -or
+            $subject.runtimeUnlockRetry.role -cne $subject.operationRole -or
+            [long]$subject.operationGeneration -le 0 -or
+            [long]$subject.operationGeneration -ne [long]$subject.runtimeUnlockRetry.authorityGeneration -or
+            [string]::IsNullOrWhiteSpace([string]$subject.authorityId) -or $subject.authorityId -ceq '(none)' -or
+            $subject.operationKey -cne "runtime_unlock_retry_lifecycle|$($subject.operationRole)|$($subject.authorityId)|$($subject.operationGeneration)|RetryAttempt" -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $subject.runtimeUnlockRetry.sourceBoundary)) { return $false }
+        $receipts = @($subject.runtimeUnlockRetry.receipts)
+        if ($receipts.Count -lt 2) { return $false }
+        foreach ($receipt in $receipts) {
+            if ($receipt.receiptValidated -isnot [bool] -or -not $receipt.receiptValidated -or [long]$receipt.commandGeneration -le 0 -or
+                [long]$receipt.commandGeneration -ne [long]$receipt.receiptGeneration -or
+                ($receipt.stage -in @('stage', 'install') -and $receipt.commandIdentity -cne $receipt.receiptIdentity)) { return $false }
+            foreach ($field in @('commandIdentity', 'commandFingerprint', 'receiptIdentity', 'receiptFingerprint')) {
+                if ([string]::IsNullOrWhiteSpace([string]$receipt.$field) -or $receipt.$field -ceq '(none)') { return $false }
+            }
+        }
+        foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint', 'receiptIdentity',
+                'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$subject.$field -cne [string]$receipts[-1].$field) { return $false }
+        }
+    }
+    $a = $original.runtimeUnlockRetry; $retained = $Operation.runtimeUnlockRetry; $b = $successor.runtimeUnlockRetry
+    if ($original.authorityId -cne $Operation.authorityId -or $original.predecessorAuthorityId -cne $Operation.predecessorAuthorityId -or
+        $original.authorityId -ceq $successor.authorityId -or $successor.predecessorAuthorityId -cne $original.authorityId -or
+        [long]$original.operationGeneration -ne [long]$Operation.operationGeneration -or
+        [long]$successor.operationGeneration -le [long]$original.operationGeneration -or
+        $retained.successorAuthorityId -cne $successor.authorityId -or $a.successorAuthorityId -cne '(none)' -or
+        $b.successorAuthorityId -cne '(none)' -or -not [bool]$b.requestActivePredecessorSupersession -or
+        [bool]$a.dispatchObserved -or [bool]$retained.dispatchObserved -or [bool]$b.dispatchObserved -or
+        [long]$a.offerGeneration -le 0 -or [string]::IsNullOrWhiteSpace([string]$a.offerNonceFingerprint) -or
+        $a.offerNonceFingerprint -ceq '(none)' -or
+        [long]$a.dispatchAttemptGeneration -le 0 -or [long]$a.recoveryContractGeneration -le 0 -or
+        [long]$a.releaseGeneration -le 0 -or [string]::IsNullOrWhiteSpace([string]$a.releaseAuthorityId) -or
+        $a.releaseAuthorityId -ceq '(none)' -or
+        [long]$b.offerGeneration -ne 0 -or $b.offerNonceFingerprint -cne '(none)' -or
+        [long]$b.retiredOfferGeneration -ne [long]$a.offerGeneration -or
+        [long]$b.dispatchAttemptGeneration -ne ([long]$a.dispatchAttemptGeneration + 1L) -or
+        $a.listenerRearmRequirement -notin @('Required', 'RequiredBeforeDispatch') -or
+        $a.listenerExecutionMode -notin @('Default', 'AdoptCurrentCoordinatorScoped') -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $a.sourceBoundary $b.sourceBoundary)) { return $false }
+    $releaseOutcomeValid = switch -Exact ([string]$a.releaseKind) {
+        'RegularV4RepairSettlement' { $a.releaseOutcome -in @('ProgressObserved', 'MissingDispatch', 'SettledStalled'); break }
+        'ReceiveRecoveryLeaseClosure' { $a.releaseOutcome -ceq 'Retired'; break }
+        'FallbackPairedTailYield' { $a.releaseOutcome -ceq 'Quiescent'; break }
+        default { $false }
+    }
+    if (-not $releaseOutcomeValid) { return $false }
+    foreach ($field in @('recoveryContractGeneration', 'missingDispatchSuccessorGeneration', 'releaseKind', 'releaseAuthorityId',
+            'releaseGeneration', 'releaseOutcome', 'listenerRearmRequirement', 'listenerExecutionMode')) {
+        if ([string]$a.$field -cne [string]$b.$field) { return $false }
+    }
+    $aReceipts = @($a.receipts); $retainedReceipts = @($retained.receipts)
+    if ($aReceipts.Count -ne 3 -or $retainedReceipts.Count -ne 4 -or
+        $aReceipts[0].stage -cne 'stage' -or $aReceipts[1].stage -cne 'install' -or $aReceipts[2].stage -cne 'execution' -or
+        $aReceipts[0].receiptStatus -notin @('Staged', 'Idempotent') -or
+        $aReceipts[1].receiptStatus -cne 'AliasBound' -or $aReceipts[2].receiptStatus -cne 'AliasBound' -or
+        [long]$aReceipts[0].receiptGeneration -ne [long]$a.dispatchAttemptGeneration -or
+        [long]$aReceipts[2].receiptGeneration -ne [long]$a.offerGeneration -or
+        $aReceipts[0].commandFingerprint -cne $aReceipts[1].commandFingerprint -or
+        $aReceipts[2].commandFingerprint -cne $aReceipts[1].receiptFingerprint -or
+        $aReceipts[2].receiptReason -cne 'offer_bound' -or
+        $retainedReceipts[1].receiptStatus -cne 'Settled' -or $retainedReceipts[2].receiptStatus -cne 'Settled' -or
+        $retainedReceipts[2].receiptFingerprint -ceq $aReceipts[2].receiptFingerprint) { return $false }
+    $settlement = $retainedReceipts[3]
+    if ($settlement.stage -cne 'settlement' -or $settlement.receiptStatus -cne 'Superseded' -or
+        $settlement.receiptReason -cne 'coordinator_successor_installed' -or
+        [long]$settlement.receiptGeneration -ne [long]$a.offerGeneration -or
+        $settlement.commandIdentity -cne $settlement.receiptIdentity) { return $false }
+    # Stage/install are immutable. Execution's status AND fingerprint project
+    # AliasBound -> Settled; its raw nonce cannot be recovered from evidence.
+    $normalized = $retained | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
+    $normalized.role = 'attempt_installed'; $normalized.successorAuthorityId = '(none)'
+    $normalized.receipts = @($normalized.receipts[0..2])
+    $normalized.receipts[1].receiptStatus = 'AliasBound'
+    $normalized.receipts[2].receiptStatus = 'AliasBound'
+    $normalized.receipts[2].receiptFingerprint = $aReceipts[2].receiptFingerprint
+    if (($normalized | ConvertTo-Json -Depth 32 -Compress) -cne ($a | ConvertTo-Json -Depth 32 -Compress)) { return $false }
+    if ($null -ne $pending) {
+        if ($pending.predecessorAuthorityId -cne $original.authorityId -or $pending.authorityId -cne $successor.authorityId) { return $false }
+        $normalizedPending = $pending.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
+        $normalizedPending.role = 'attempt_installed'; $normalizedPending.receipts[1].receiptStatus = 'Installed'
+        if (($normalizedPending | ConvertTo-Json -Depth 32 -Compress) -cne ($b | ConvertTo-Json -Depth 32 -Compress)) { return $false }
+    }
+    $bInstall = @($b.receipts | Where-Object stage -CEQ 'install')
+    return $bInstall.Count -eq 1 -and [long]$bInstall[0].receiptGeneration -gt [long]$aReceipts[1].receiptGeneration
+}
+
+function Get-FileTransferCoordinatorSuccessfulRetryRetirementShape {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    $aggregate = $Envelope.aggregate
+    $operations = @($aggregate.operations)
+    if ($Envelope.decisionKind -cne 'ObserveRuntimeUnlockRetryDispatchSettlement' -or
+        $Envelope.decisionStatus -cne 'Accepted' -or
+        $Envelope.decisionReason -cne 'retry_dispatch_settlement_superseded_predecessor' -or
+        $operations.Count -ne 2 -or
+        [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1L) -or
+        $aggregate.beforeStateFingerprint -ceq $aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $aggregate.beforeBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $aggregate.afterBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $aggregate.beforeBoundary $aggregate.afterBoundary)) { return $null }
+    $retained = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_retained_predecessor' -and $_.beforeState -ceq 'Settled' -and $_.afterState -ceq 'None'
+    })
+    $terminal = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_terminal' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Settled'
+    })
+    if ($retained.Count -ne 1 -or $terminal.Count -ne 1) { return $null }
+    foreach ($operation in $operations) {
+        $payload = $operation.runtimeUnlockRetry
+        if ($operation.family -cne 'runtime_unlock_retry_lifecycle' -or $operation.operationKind -cne 'RetryAttempt' -or
+            $operation.stateApplied -isnot [bool] -or -not $operation.stateApplied -or
+            $operation.receiptValidated -isnot [bool] -or -not $operation.receiptValidated -or $null -eq $payload -or
+            $payload.role -cne $operation.operationRole -or $payload.dispatchObserved -isnot [bool] -or $payload.dispatchObserved -or
+            $payload.requestActivePredecessorSupersession -isnot [bool] -or
+            [long]$operation.operationGeneration -le 0 -or [long]$operation.operationGeneration -ne [long]$payload.authorityGeneration -or
+            $operation.operationKey -cne "runtime_unlock_retry_lifecycle|$($operation.operationRole)|$($operation.authorityId)|$($operation.operationGeneration)|RetryAttempt" -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $payload.sourceBoundary) -or
+            [long]$payload.offerGeneration -le 0 -or $payload.successorAuthorityId -in @('', '(none)', $operation.authorityId)) { return $null }
+        $receipts = @($payload.receipts)
+        if ($receipts.Count -ne 4 -or ($receipts.stage -join '|') -cne 'stage|install|execution|settlement' -or
+            $receipts[1].receiptStatus -cne 'Settled' -or $receipts[2].receiptStatus -cne 'Settled' -or
+            $receipts[3].receiptStatus -cne 'Superseded' -or $receipts[3].receiptReason -cne 'coordinator_successor_installed' -or
+            $receipts[3].commandIdentity -cne $receipts[3].receiptIdentity -or
+            [long]$receipts[3].receiptGeneration -ne [long]$payload.offerGeneration) { return $null }
+        foreach ($receipt in $receipts) {
+            if ($receipt.receiptValidated -isnot [bool] -or -not $receipt.receiptValidated -or
+                [long]$receipt.commandGeneration -le 0 -or [long]$receipt.commandGeneration -ne [long]$receipt.receiptGeneration) { return $null }
+            foreach ($field in @('commandIdentity', 'commandFingerprint', 'receiptIdentity', 'receiptFingerprint')) {
+                if ([string]::IsNullOrWhiteSpace([string]$receipt.$field) -or $receipt.$field -ceq '(none)') { return $null }
+            }
+        }
+        foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint', 'receiptIdentity',
+                'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$operation.$field -cne [string]$receipts[-1].$field) { return $null }
+        }
+    }
+    $normalized = $terminal[0] | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
+    $normalized.operationRole = $retained[0].operationRole; $normalized.operationKey = $retained[0].operationKey
+    $normalized.beforeState = 'Settled'; $normalized.afterState = 'None'
+    $normalized.runtimeUnlockRetry.role = $retained[0].operationRole
+    if (($normalized | ConvertTo-Json -Depth 32 -Compress) -cne ($retained[0] | ConvertTo-Json -Depth 32 -Compress)) { return $null }
+    return [pscustomobject]@{ Retained=$retained[0]; Terminal=$terminal[0] }
+}
+
+function Get-FileTransferCoordinatorSuccessfulRetrySuccessorSettlementShape {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    $aggregate = $Envelope.aggregate
+    $operations = @($aggregate.operations)
+    if ($Envelope.decisionKind -cne 'ObserveRuntimeUnlockRetryDispatchSettlement' -or
+        $Envelope.decisionStatus -cne 'Accepted' -or $Envelope.decisionReason -cne 'retry_dispatch_settlement_accepted' -or
+        $operations.Count -ne 3 -or [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1L) -or
+        $aggregate.beforeStateFingerprint -ceq $aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $aggregate.beforeBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $aggregate.afterBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $aggregate.beforeBoundary $aggregate.afterBoundary)) { return $null }
+    $removed = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_terminal' -and $_.beforeState -ceq 'Settled' -and $_.afterState -ceq 'None'
+    })
+    $installed = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_installed' -and $_.beforeState -ceq 'SendInFlight' -and $_.afterState -ceq 'None'
+    })
+    $terminal = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_terminal' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Settled'
+    })
+    if ($removed.Count -ne 1 -or $installed.Count -ne 1 -or $terminal.Count -ne 1) { return $null }
+    foreach ($operation in $operations) {
+        $payload = $operation.runtimeUnlockRetry
+        if ($operation.family -cne 'runtime_unlock_retry_lifecycle' -or $operation.operationKind -cne 'RetryAttempt' -or
+            $operation.stateApplied -isnot [bool] -or -not $operation.stateApplied -or
+            $operation.receiptValidated -isnot [bool] -or -not $operation.receiptValidated -or $null -eq $payload -or
+            $payload.role -cne $operation.operationRole -or $operation.authorityId -in @('', '(none)') -or
+            [long]$operation.operationGeneration -le 0 -or [long]$operation.operationGeneration -ne [long]$payload.authorityGeneration -or
+            $operation.operationKey -cne "runtime_unlock_retry_lifecycle|$($operation.operationRole)|$($operation.authorityId)|$($operation.operationGeneration)|RetryAttempt" -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryComplete $payload.sourceBoundary) -or
+            -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $payload.sourceBoundary $removed[0].runtimeUnlockRetry.sourceBoundary)) { return $null }
+        $receipts = @($payload.receipts)
+        if ($receipts.Count -lt 3) { return $null }
+        foreach ($receipt in $receipts) {
+            if ($receipt.receiptValidated -isnot [bool] -or -not $receipt.receiptValidated -or
+                [long]$receipt.commandGeneration -le 0 -or [long]$receipt.commandGeneration -ne [long]$receipt.receiptGeneration) { return $null }
+            foreach ($field in @('commandIdentity','commandFingerprint','receiptIdentity','receiptFingerprint')) {
+                if ([string]::IsNullOrWhiteSpace([string]$receipt.$field) -or $receipt.$field -ceq '(none)') { return $null }
+            }
+        }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity',
+                'receiptGeneration','receiptStatus','receiptFingerprint','receiptValidated')) {
+            if ([string]$operation.$field -cne [string]$receipts[-1].$field) { return $null }
+        }
+    }
+    $a = $removed[0]; $b = $terminal[0]; $current = $installed[0]
+    $aReceipts = @($a.runtimeUnlockRetry.receipts); $bReceipts = @($b.runtimeUnlockRetry.receipts)
+    $currentReceipts = @($current.runtimeUnlockRetry.receipts)
+    if ($a.authorityId -ceq $b.authorityId -or [long]$a.operationGeneration -ge [long]$b.operationGeneration -or
+        $a.runtimeUnlockRetry.successorAuthorityId -cne $b.authorityId -or $b.predecessorAuthorityId -cne $a.authorityId -or
+        $current.authorityId -cne $b.authorityId -or $current.predecessorAuthorityId -cne $a.authorityId -or
+        [long]$current.operationGeneration -ne [long]$b.operationGeneration -or
+        $a.runtimeUnlockRetry.dispatchObserved -isnot [bool] -or $a.runtimeUnlockRetry.dispatchObserved -or
+        $b.runtimeUnlockRetry.dispatchObserved -isnot [bool] -or -not $b.runtimeUnlockRetry.dispatchObserved -or
+        $current.runtimeUnlockRetry.dispatchObserved -isnot [bool] -or $current.runtimeUnlockRetry.dispatchObserved -or
+        ($aReceipts.stage -join '|') -cne 'stage|install|execution|settlement' -or
+        ($bReceipts.stage -join '|') -cne 'stage|install|execution|settlement' -or
+        ($currentReceipts.stage -join '|') -cne 'stage|install|execution' -or
+        $currentReceipts[1].receiptStatus -cne 'SendInFlight' -or $currentReceipts[2].receiptStatus -cne 'SendInFlight' -or
+        $bReceipts[1].receiptStatus -cne 'Settled' -or $bReceipts[2].receiptStatus -cne 'Settled' -or
+        $bReceipts[3].commandIdentity -cne $bReceipts[3].receiptIdentity -or
+        $aReceipts[1].receiptStatus -cne 'Settled' -or $aReceipts[2].receiptStatus -cne 'Settled' -or
+        $aReceipts[3].receiptStatus -cne 'Superseded' -or $aReceipts[3].receiptReason -cne 'coordinator_successor_installed' -or
+        [long]$aReceipts[3].receiptGeneration -ne [long]$a.runtimeUnlockRetry.offerGeneration -or
+        $bReceipts[3].receiptStatus -cne 'DispatchObserved' -or $bReceipts[3].receiptReason -cne 'dispatch_observed' -or
+        [long]$bReceipts[3].receiptGeneration -ne [long]$b.runtimeUnlockRetry.offerGeneration -or
+        [long]$b.runtimeUnlockRetry.offerGeneration -le 0 -or
+        ($b.runtimeUnlockRetry | Select-Object * -ExcludeProperty role,receipts,dispatchObserved | ConvertTo-Json -Depth 32 -Compress) -cne
+        ($current.runtimeUnlockRetry | Select-Object * -ExcludeProperty role,receipts,dispatchObserved | ConvertTo-Json -Depth 32 -Compress)) { return $null }
+    foreach ($subject in @($current, $b)) {
+        $receipts = @($subject.runtimeUnlockRetry.receipts)
+        $execution = $receipts[2]
+        if ([long]$execution.commandGeneration -ne [long]$b.runtimeUnlockRetry.offerGeneration -or
+            [long]$execution.receiptGeneration -ne [long]$b.runtimeUnlockRetry.offerGeneration -or
+            $execution.commandFingerprint -cne $receipts[1].receiptFingerprint) { return $null }
+        foreach ($field in @('commandIdentity','commandGeneration','commandFingerprint','receiptIdentity','receiptGeneration')) {
+            if ([string]$execution.$field -cne [string]$currentReceipts[2].$field) { return $null }
+        }
+    }
+    return [pscustomobject]@{ Removed=$a; Installed=$current; Terminal=$b }
+}
+
+function Test-FileTransferCoordinatorSuccessfulRetryRetirementObservation {
+    param([Parameter(Mandatory = $true)]$Terminal, [AllowEmptyCollection()][object[]]$Effects)
+    $receipt = @($Terminal.Operation.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'settlement')[0]
+    $observations = @($Effects | Where-Object {
+        $_.EffectKind -ceq 'settlement_observed' -and $_.Writer -ceq $Terminal.Boundary.writer -and
+        $_.ReceiptIdentity -ceq $receipt.receiptIdentity -and [long]$_.ReceiptGeneration -eq [long]$receipt.receiptGeneration -and
+        $_.ReceiptStatus -ceq 'Superseded' -and $_.ReceiptFingerprint -ceq $receipt.receiptFingerprint -and
+        (Test-FileTransferCoordinatorSnapshotExactEffectBinding -Boundary $Terminal.Boundary -Operation $Terminal.Operation -Effect $_)
+    })
+    return $observations.Count -eq 1
+}
+
+function Get-FileTransferCoordinatorSuccessfulRetryRetirementAttempt {
+    param([Parameter(Mandatory = $true)]$Envelope)
+    $aggregate = $Envelope.aggregate; $operations = @($aggregate.operations)
+    if ($Envelope.decisionKind -cne 'ObserveRuntimeUnlockRetryDispatchSettlement' -or
+        -not (($Envelope.decisionStatus -ceq 'Idempotent' -and $Envelope.decisionReason -ceq 'retry_dispatch_settlement_duplicate') -or
+              ($Envelope.decisionStatus -ceq 'Rejected' -and $Envelope.decisionReason -ceq 'retry_dispatch_settlement_execution_proof_mismatch')) -or
+        $operations.Count -ne 1 -or [long]$aggregate.beforeStateGeneration -ne [long]$aggregate.afterStateGeneration -or
+        $aggregate.beforeStateFingerprint -cne $aggregate.afterStateFingerprint -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $aggregate.beforeBoundary $aggregate.afterBoundary)) { return $null }
+    $operation = $operations[0]
+    if ($operation.family -cne 'runtime_unlock_retry_lifecycle' -or $operation.operationRole -cne 'attempt_terminal' -or
+        $operation.operationKind -cne 'RetryAttempt' -or $operation.beforeState -cne 'Settled' -or $operation.afterState -cne 'Settled' -or
+        $operation.stateApplied -isnot [bool] -or $operation.stateApplied -or
+        $operation.receiptValidated -isnot [bool] -or -not $operation.receiptValidated -or
+        $operation.receiptStatus -cne $Envelope.decisionStatus -or $null -eq $operation.runtimeUnlockRetry -or
+        [long]$operation.commandGeneration -ne [long]$operation.runtimeUnlockRetry.offerGeneration -or
+        [long]$operation.receiptGeneration -ne [long]$operation.commandGeneration -or [long]$operation.commandGeneration -le 0 -or
+        @($operation.runtimeUnlockRetry.receipts | Where-Object { $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'Superseded' }).Count -ne 1) { return $null }
+    foreach ($field in @('commandIdentity', 'commandFingerprint', 'receiptIdentity', 'receiptFingerprint')) {
+        if ([string]::IsNullOrWhiteSpace([string]$operation.$field) -or $operation.$field -ceq '(none)') { return $null }
+    }
+    return $operation
+}
+
+function Get-FileTransferCoordinatorRetryConfirmationCompensationShape {
+    param([Parameter(Mandatory = $true)]$Envelope)
+
+    if ($Envelope.decisionKind -cne 'CompensateRejectedRuntimeUnlockRetryDispatchConfirmation') { return $null }
+    $aggregate = $Envelope.aggregate
+    $operations = @($aggregate.operations)
+    if ($operations.Count -eq 0 -or @($operations | Where-Object {
+            $_.family -cne 'runtime_unlock_retry_lifecycle' -or $null -eq $_.runtimeUnlockRetry
+        }).Count -gt 0 -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $aggregate.beforeBoundary $aggregate.afterBoundary)) { return $null }
+    if ($Envelope.decisionStatus -in @('Rejected', 'Idempotent')) {
+        $reasonValid = if ($Envelope.decisionStatus -ceq 'Idempotent') {
+            $Envelope.decisionReason -ceq 'retry_dispatch_confirmation_already_compensated'
+        } else {
+            $Envelope.decisionReason -in @('retry_dispatch_confirmation_compensation_scope_mismatch',
+                'retry_dispatch_confirmation_compensation_install_mismatch',
+                'retry_dispatch_confirmation_compensation_predecessor_mismatch')
+        }
+        if (-not $reasonValid -or $operations.Count -ne 1 -or
+            [long]$aggregate.beforeStateGeneration -ne [long]$aggregate.afterStateGeneration -or
+            $aggregate.beforeStateFingerprint -cne $aggregate.afterStateFingerprint -or
+            [bool]$operations[0].stateApplied -or $operations[0].beforeState -cne $operations[0].afterState -or
+            $operations[0].receiptStatus -cne $Envelope.decisionStatus) { return $null }
+        return [pscustomobject]@{ Applied = $false; Operations = $operations }
+    }
+    if ($Envelope.decisionStatus -cne 'Accepted' -or
+        $Envelope.decisionReason -cne 'retry_dispatch_install_confirmation_rejected' -or
+        [long]$aggregate.afterStateGeneration -ne ([long]$aggregate.beforeStateGeneration + 1L) -or
+        $aggregate.afterStateFingerprint -ceq $aggregate.beforeStateFingerprint -or
+        $operations.Count -notin @(2, 4) -or @($operations | Where-Object {
+            -not [bool]$_.stateApplied -or $_.operationKind -cne 'RetryAttempt' -or
+            $_.runtimeUnlockRetry.role -cne $_.operationRole -or
+            [long]$_.operationGeneration -ne [long]$_.runtimeUnlockRetry.authorityGeneration
+        }).Count -gt 0) { return $null }
+    $failed = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_installed' -and $_.beforeState -ceq 'Installed' -and $_.afterState -ceq 'None'
+    })
+    $terminal = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_terminal' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Invalidated'
+    })
+    if ($failed.Count -ne 1 -or $terminal.Count -ne 1 -or
+        $failed[0].authorityId -cne $terminal[0].authorityId -or
+        $failed[0].predecessorAuthorityId -cne $terminal[0].predecessorAuthorityId -or
+        [long]$failed[0].operationGeneration -ne [long]$terminal[0].operationGeneration) { return $null }
+    foreach ($operation in $operations) {
+        $receipts = @($operation.runtimeUnlockRetry.receipts)
+        if ($receipts.Count -lt 2 -or @($receipts | Where-Object { -not [bool]$_.receiptValidated }).Count -gt 0) { return $null }
+        $last = $receipts[-1]
+        foreach ($field in @('commandIdentity', 'commandGeneration', 'commandFingerprint', 'receiptIdentity',
+                'receiptGeneration', 'receiptStatus', 'receiptFingerprint', 'receiptValidated')) {
+            if ([string]$operation.$field -cne [string]$last.$field) { return $null }
+        }
+    }
+    $failedReceipts = @($failed[0].runtimeUnlockRetry.receipts)
+    $terminalReceipts = @($terminal[0].runtimeUnlockRetry.receipts)
+    if ($failedReceipts.Count -ne 2 -or $terminalReceipts.Count -ne 2 -or
+        $failedReceipts[0].stage -cne 'stage' -or $failedReceipts[1].stage -cne 'install' -or
+        $failedReceipts[1].receiptStatus -cne 'Installed' -or
+        $terminalReceipts[1].stage -cne 'install' -or $terminalReceipts[1].receiptStatus -cne 'Invalidated') { return $null }
+    $normalizedTerminal = $terminal[0].runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
+    $normalizedTerminal.role = 'attempt_installed'
+    $normalizedTerminal.receipts[1].receiptStatus = 'Installed'
+    if (($normalizedTerminal | ConvertTo-Json -Depth 32 -Compress) -cne
+        ($failed[0].runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress)) { return $null }
+    $restored = @($operations | Where-Object {
+        $_.operationRole -ceq 'attempt_installed' -and $_.beforeState -ceq 'None' -and
+        $_.afterState -in @('Installed', 'AliasBound', 'SendInFlight', 'Settled')
+    })
+    $displaced = @($operations | Where-Object {
+        $_.operationRole -in @('attempt_terminal', 'attempt_retained_predecessor') -and
+        $_.beforeState -ceq 'Settled' -and $_.afterState -ceq 'None'
+    })
+    if (($operations.Count -eq 2 -and ($restored.Count -ne 0 -or $displaced.Count -ne 0)) -or
+        ($operations.Count -eq 4 -and ($restored.Count -ne 1 -or $displaced.Count -ne 1 -or
+            $restored[0].authorityId -ceq $failed[0].authorityId -or
+            $restored[0].authorityId -cne $displaced[0].authorityId -or
+            [long]$restored[0].operationGeneration -ne [long]$displaced[0].operationGeneration))) { return $null }
+    return [pscustomobject]@{ Applied = $true; Failed = $failed[0]; Terminal = $terminal[0];
+        Restored = $restored; Displaced = $displaced; Operations = $operations }
+}
+
+function Test-FileTransferCoordinatorRetryConfirmationCompensationHistory {
+    param([Parameter(Mandatory = $true)]$Envelope, [Parameter(Mandatory = $true)]$Boundary,
+        [AllowEmptyCollection()][object[]]$PriorEntries)
+
+    $shape = Get-FileTransferCoordinatorRetryConfirmationCompensationShape $Envelope
+    if ($null -eq $shape) { return $false }
+    if (-not $shape.Applied) { return $true }
+    $commits = @($PriorEntries | Where-Object {
+        $_.Boundary.coordinatorInstanceId -ceq $Boundary.coordinatorInstanceId -and
+        $_.Boundary.writer -ceq $Boundary.writer -and $_.SessionId -ceq $Boundary.sessionId -and
+        $_.TransferId -ceq $Boundary.transferId -and $_.Direction -ceq $Boundary.direction -and
+        $_.Boundary.decisionKind -ceq 'CommitRuntimeUnlockRetryDispatchInstall' -and
+        $_.Boundary.decisionStatus -ceq 'Accepted' -and
+        $_.Boundary.decisionReason -ceq 'retry_dispatch_install_committed' -and
+        [long]$_.Boundary.afterStateGeneration -eq [long]$Boundary.beforeStateGeneration -and
+        $_.Boundary.afterStateHash -ceq $Boundary.beforeStateHash -and
+        (Test-FileTransferCoordinatorSnapshotBoundaryEqual $_.AfterBoundary $Boundary.beforeBoundary)
+    })
+    if ($commits.Count -ne 1) { return $false }
+    $commit = $commits[0].Boundary
+    foreach ($operation in @($shape.Failed) + @($shape.Restored) + @($shape.Displaced | Where-Object operationRole -CEQ 'attempt_retained_predecessor')) {
+        $old = @($commit.operations | Where-Object {
+            $_.operationKey -ceq $operation.operationKey -and [bool]$_.stateApplied -and
+            $_.beforeState -ceq $operation.afterState -and $_.afterState -ceq $operation.beforeState -and
+            ($_.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress) -ceq
+                ($operation.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress)
+        })
+        if ($old.Count -ne 1) { return $false }
+    }
+    if ($shape.Displaced.Count -eq 1 -and $shape.Displaced[0].operationRole -ceq 'attempt_retained_predecessor') {
+        $commitEnvelope = [pscustomobject]@{ decisionKind=$commit.decisionKind; decisionStatus=$commit.decisionStatus;
+            decisionReason=$commit.decisionReason; aggregate=[pscustomobject]@{
+                beforeStateGeneration=$commit.beforeStateGeneration; afterStateGeneration=$commit.afterStateGeneration;
+                beforeStateFingerprint=$commit.beforeStateHash; afterStateFingerprint=$commit.afterStateHash;
+                beforeBoundary=$commit.beforeBoundary; afterBoundary=$commits[0].AfterBoundary; operations=$commit.operations
+            } }
+        $retainedAtCommit = @($commit.operations | Where-Object operationKey -CEQ $shape.Displaced[0].operationKey)
+        if ($retainedAtCommit.Count -ne 1 -or -not (Test-FileTransferCoordinatorSnapshotProvisionalRetrySupersession `
+                -Envelope $commitEnvelope -Operation $retainedAtCommit[0])) { return $false }
+    }
+    if ($shape.Displaced.Count -eq 1 -and $shape.Displaced[0].operationRole -ceq 'attempt_terminal') {
+        # MissingDispatch already owns the terminal slot before the successor
+        # commit. That unchanged descriptor is not re-emitted by the commit.
+        $displaced = $shape.Displaced[0]
+        $terminalHistory = @($PriorEntries | Where-Object {
+            $_.Boundary.coordinatorInstanceId -ceq $Boundary.coordinatorInstanceId -and
+            $_.Boundary.writer -ceq $Boundary.writer -and $_.SessionId -ceq $Boundary.sessionId -and
+            $_.TransferId -ceq $Boundary.transferId -and $_.Direction -ceq $Boundary.direction -and
+            [long]$_.Boundary.afterStateGeneration -le [long]$commit.beforeStateGeneration
+        } | ForEach-Object {
+            $priorBoundary = $_.Boundary
+            foreach ($operation in @($priorBoundary.operations | Where-Object {
+                $_.operationKey -ceq $displaced.operationKey -and [bool]$_.stateApplied
+            })) { [pscustomobject]@{ Boundary=$priorBoundary; Operation=$operation } }
+        })
+        # Exactly one None -> Settled establishes this operation key. Any later
+        # applied mutation/removal/restore before B commits poisons the carry.
+        if ($terminalHistory.Count -ne 1) { return $false }
+        $origin = $terminalHistory[0]
+        if ($origin.Operation.beforeState -cne 'None' -or $origin.Operation.afterState -cne 'Settled' -or
+            $origin.Boundary.decisionKind -notin @('EvaluateRuntimeUnlockRetryDispatchDeadline', 'ObserveRuntimeUnlockRetryDispatchSettlement') -or
+            $origin.Boundary.decisionStatus -cne 'Accepted' -or
+            $origin.Boundary.decisionReason -cne 'retry_dispatch_settlement_accepted' -or
+            ($origin.Operation.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress) -cne
+                ($displaced.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress) -or
+            @($displaced.runtimeUnlockRetry.receipts | Where-Object {
+                $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'MissingDispatch' -and [bool]$_.receiptValidated
+            }).Count -ne 1) { return $false }
+        $restoredPayload = $shape.Restored[0].runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress | ConvertFrom-Json
+        $restoredPayload.role = 'attempt_terminal'
+        if (($restoredPayload | ConvertTo-Json -Depth 32 -Compress) -cne
+            ($displaced.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress)) { return $false }
+    }
+    return $true
+}
+
+function Get-FileTransferCoordinatorProvisionalRetryScopeKey {
+    param($Boundary)
+    return @($Boundary.coordinatorInstanceId, $Boundary.writer, $Boundary.sessionId,
+        $Boundary.transferId, $Boundary.direction) -join [char]31
+}
+
+function Get-FileTransferCoordinatorProvisionalRetryReduction {
+    param([object[]]$AggregateEntries, [object[]]$OperationHistory, [switch]$DiagnosticOnly)
+
+    $result = [pscustomobject]@{ Participants=@{}; CancelledReceipts=@{}; SuccessfulRetirements=@{}; TerminalEvictions=@{}; InvalidScopes=@{};
+        Findings=[Collections.Generic.List[object]]::new(); Errors=[Collections.Generic.List[string]]::new() }
+    $scopes = @{}; $admittedCommits = @{}
+    foreach ($entry in $AggregateEntries) {
+        $boundary = $entry.Boundary
+        if ($boundary.decisionKind -cne 'CommitRuntimeUnlockRetryDispatchInstall' -or $boundary.decisionStatus -cne 'Accepted') { continue }
+        $retained = @($boundary.operations | Where-Object {
+            $_.operationRole -ceq 'attempt_retained_predecessor' -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Settled'
+        })
+        if ($retained.Count -ne 1) { continue }
+        $envelope = [pscustomobject]@{ decisionKind=$boundary.decisionKind; decisionStatus=$boundary.decisionStatus;
+            decisionReason=$boundary.decisionReason; aggregate=[pscustomobject]@{
+                beforeStateGeneration=$boundary.beforeStateGeneration; afterStateGeneration=$boundary.afterStateGeneration;
+                beforeStateFingerprint=$boundary.beforeStateHash; afterStateFingerprint=$boundary.afterStateHash;
+                beforeBoundary=$entry.BeforeBoundary; afterBoundary=$entry.AfterBoundary; operations=$boundary.operations
+            } }
+        if (-not (Test-FileTransferCoordinatorSnapshotProvisionalRetrySupersession $envelope $retained[0])) { continue }
+        $scopeKey = Get-FileTransferCoordinatorProvisionalRetryScopeKey $boundary
+        $admittedCommits["$scopeKey$([char]31)$($boundary.boundaryId)"] = $true
+        if (-not $scopes.ContainsKey($scopeKey)) { $scopes[$scopeKey] = [Collections.Generic.List[object]]::new() }
+        $scopes[$scopeKey].Add([pscustomobject]@{ Entry=$entry; Retained=$retained[0] })
+    }
+    if ($DiagnosticOnly) {
+        # A rejected active-commit catalog claim is not a substitute role history.
+        # Keep its artifact error, without falling back to descriptor-order inference.
+        foreach ($row in @($OperationHistory | Where-Object {
+            $_.Boundary.decisionKind -ceq 'CommitRuntimeUnlockRetryDispatchInstall' -and
+            $_.Boundary.decisionStatus -ceq 'Accepted' -and $_.Operation.family -ceq 'runtime_unlock_retry_lifecycle' -and
+            $_.Operation.operationRole -ceq 'attempt_retained_predecessor' -and
+            $_.Operation.beforeState -ceq 'None' -and $_.Operation.afterState -ceq 'Settled' -and
+            $null -ne $_.Operation.runtimeUnlockRetry -and
+            @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'Superseded'
+            }).Count -eq 1
+        })) {
+            $scopeKey = Get-FileTransferCoordinatorProvisionalRetryScopeKey $row.Boundary
+            if (-not $admittedCommits.ContainsKey("$scopeKey$([char]31)$($row.Boundary.boundaryId)")) {
+                $result.InvalidScopes[$scopeKey] = $true
+            }
+        }
+    }
+    foreach ($scopeKey in @($scopes.Keys)) {
+        if ($result.InvalidScopes.ContainsKey($scopeKey)) { continue }
+        $commits = @($scopes[$scopeKey])
+        $scopeEntries = @($AggregateEntries | Where-Object {
+            (Get-FileTransferCoordinatorProvisionalRetryScopeKey $_.Boundary) -ceq $scopeKey
+        })
+        $members = @{}; $reopens = @{}; $commitIds = @{}; $inverseIds = @{}
+        $cancellations = [Collections.Generic.List[object]]::new()
+        $terminalOrigins = @{}; $terminalOwner = $null; $successfulTerminalOwner = $null
+        $evictions = [Collections.Generic.List[object]]::new(); $successfulRetirements = [Collections.Generic.List[object]]::new()
+        $successfulEvictions = [Collections.Generic.List[object]]::new()
+        $poison = $null
+        foreach ($commit in $commits) {
+            $commitIds[[string]$commit.Entry.Boundary.boundaryId] = $true
+            foreach ($operation in @($commit.Entry.Boundary.operations | Where-Object operationRole -CEQ 'attempt_installed')) {
+                $authority = [string]$operation.authorityId
+                $immutable = $operation.runtimeUnlockRetry | Select-Object * -ExcludeProperty role, receipts,
+                    dispatchDeadlineUtcMs, offerGeneration, offerNonceFingerprint, dispatchObserved, successorAuthorityId |
+                    ConvertTo-Json -Depth 32 -Compress
+                if ($members.ContainsKey($authority)) {
+                    if ($members[$authority].Generation -ne $operation.operationGeneration -or
+                        $members[$authority].Immutable -cne $immutable) { $poison = $commit.Entry.Boundary }
+                } else {
+                    $members[$authority] = [pscustomobject]@{ Generation=$operation.operationGeneration; Immutable=$immutable;
+                        Slots=@{}; Stage=$null; Install=$null; Offer=$null; OpenRoles=@() }
+                }
+            }
+        }
+        foreach ($entry in $scopeEntries) {
+            $boundary = $entry.Boundary
+            if ($boundary.decisionKind -cne 'CompensateRejectedRuntimeUnlockRetryDispatchConfirmation' -or
+                $boundary.decisionStatus -cne 'Accepted') { continue }
+            $envelope = [pscustomobject]@{ decisionKind=$boundary.decisionKind; decisionStatus=$boundary.decisionStatus;
+                decisionReason=$boundary.decisionReason; aggregate=[pscustomobject]@{
+                    beforeStateGeneration=$boundary.beforeStateGeneration; afterStateGeneration=$boundary.afterStateGeneration;
+                    beforeStateFingerprint=$boundary.beforeStateHash; afterStateFingerprint=$boundary.afterStateHash;
+                    beforeBoundary=$entry.BeforeBoundary; afterBoundary=$entry.AfterBoundary; operations=$boundary.operations
+                } }
+            $shape = Get-FileTransferCoordinatorRetryConfirmationCompensationShape $envelope
+            if ($null -eq $shape -or -not $shape.Applied -or $shape.Displaced.Count -ne 1 -or
+                $shape.Displaced[0].operationRole -cne 'attempt_retained_predecessor' -or
+                -not (Test-FileTransferCoordinatorRetryConfirmationCompensationHistory $envelope $boundary $scopeEntries)) { continue }
+            $origins = @($commits | Where-Object {
+                $_.Entry.Boundary.afterStateGeneration -eq $boundary.beforeStateGeneration -and
+                $_.Entry.Boundary.afterStateHash -ceq $boundary.beforeStateHash -and
+                $_.Retained.operationKey -ceq $shape.Displaced[0].operationKey
+            })
+            if ($origins.Count -ne 1) { $poison = $boundary; continue }
+            $reopens["$($boundary.boundaryId)|$($shape.Restored[0].operationKey)"] = $true
+            $inverseIds[[string]$boundary.boundaryId] = $true
+            $cancellations.Add($origins[0])
+            $installed = @($origins[0].Entry.Boundary.operations | Where-Object {
+                $_.operationKey -ceq $shape.Failed.operationKey -and $_.beforeState -ceq 'None' -and $_.afterState -ceq 'Installed'
+            })
+            if ($installed.Count -ne 1) { $poison = $boundary; continue }
+            $terminalOrigins[[string]$boundary.boundaryId] = [pscustomobject]@{
+                Commit=$origins[0].Entry.Boundary; Installed=$installed[0]; Compensation=$boundary;
+                Terminal=$shape.Terminal; Restored=$shape.Restored[0];
+                Identity=($shape.Terminal | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 32 -Compress)
+            }
+        }
+        $rowsByBoundary = @{}
+        foreach ($row in @($OperationHistory | Where-Object {
+            (Get-FileTransferCoordinatorProvisionalRetryScopeKey $_.Boundary) -ceq $scopeKey -and
+            $_.Operation.family -ceq 'runtime_unlock_retry_lifecycle' -and $_.Operation.operationKind -ceq 'RetryAttempt' -and
+            ($members.ContainsKey([string]$_.Operation.authorityId) -or $_.Operation.operationRole -ceq 'attempt_terminal') -and
+            [bool]$_.Operation.stateApplied
+        })) {
+            $id = [string]$row.Boundary.boundaryId
+            if (-not $rowsByBoundary.ContainsKey($id)) { $rowsByBoundary[$id] = [Collections.Generic.List[object]]::new() }
+            $rowsByBoundary[$id].Add($row)
+        }
+        $live = $false; $guardActive = $false; $liveScope = $null; $liveGeneration = 0L; $liveHash = $null
+        foreach ($aggregateEntry in @($scopeEntries | Sort-Object {
+                    [long]$_.Boundary.beforeStateGeneration
+                }, { [long]$_.Boundary.afterStateGeneration }, { [string]$_.Boundary.boundaryId })) {
+            $boundary = $aggregateEntry.Boundary; $id = [string]$boundary.boundaryId
+            $allDeltas = @(if ($rowsByBoundary.ContainsKey($id)) { $rowsByBoundary[$id] })
+            $deltas = @($allDeltas | Where-Object { $members.ContainsKey([string]$_.Operation.authorityId) })
+            $terminalDeltas = @($allDeltas | Where-Object { $_.Operation.operationRole -ceq 'attempt_terminal' })
+            # Initial installation may adopt its authority's bridge scope. This
+            # guard owns only the admitted provisional supersession and its live inverse.
+            if (-not $guardActive -and $commitIds.ContainsKey($id)) {
+                $guardActive = $true; $liveScope = $aggregateEntry.BeforeBoundary
+                $liveGeneration = [long]$boundary.beforeStateGeneration; $liveHash = [string]$boundary.beforeStateHash
+            }
+            if ($guardActive) {
+                if ([long]$boundary.beforeStateGeneration -ne $liveGeneration -or
+                    $boundary.beforeStateHash -cne $liveHash -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $aggregateEntry.BeforeBoundary $liveScope) -or
+                    -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $aggregateEntry.AfterBoundary $liveScope)) {
+                    $poison = $boundary; break
+                }
+                $liveGeneration = [long]$boundary.afterStateGeneration; $liveHash = [string]$boundary.afterStateHash
+            }
+            if ($boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchSettlement' -and
+                $boundary.decisionStatus -in @('Idempotent', 'Rejected') -and
+                @($boundary.operations | Where-Object {
+                    $_.operationRole -ceq 'attempt_terminal' -and $null -ne $_.runtimeUnlockRetry -and
+                    @($_.runtimeUnlockRetry.receipts | Where-Object { $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'Superseded' }).Count -gt 0
+                }).Count -gt 0) {
+                $attemptEnvelope = [pscustomobject]@{ decisionKind=$boundary.decisionKind; decisionStatus=$boundary.decisionStatus;
+                    decisionReason=$boundary.decisionReason; aggregate=[pscustomobject]@{
+                        beforeStateGeneration=$boundary.beforeStateGeneration; afterStateGeneration=$boundary.afterStateGeneration;
+                        beforeStateFingerprint=$boundary.beforeStateHash; afterStateFingerprint=$boundary.afterStateHash;
+                        beforeBoundary=$aggregateEntry.BeforeBoundary; afterBoundary=$aggregateEntry.AfterBoundary; operations=$boundary.operations
+                    } }
+                $attempt = Get-FileTransferCoordinatorSuccessfulRetryRetirementAttempt $attemptEnvelope
+                if ($null -eq $attempt -or $null -eq $successfulTerminalOwner -or
+                    $attempt.operationKey -cne $successfulTerminalOwner.Operation.operationKey -or
+                    $attempt.predecessorAuthorityId -cne $successfulTerminalOwner.Operation.predecessorAuthorityId -or
+                    ($attempt.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress) -cne
+                    ($successfulTerminalOwner.Operation.runtimeUnlockRetry | ConvertTo-Json -Depth 32 -Compress)) {
+                    $poison = $boundary; break
+                }
+            }
+            if ($deltas.Count -eq 0 -and $terminalDeltas.Count -eq 0) { continue }
+            if (@($deltas | Group-Object { $_.Operation.operationKey } | Where-Object Count -NE 1).Count -gt 0) {
+                $poison = $boundary; break
+            }
+            # A restored installation closes only through its own accepted physical
+            # dispatch settlement, never through a terminal-looking state name.
+            $ownClosures = @{}
+            if ($boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchSettlement' -and
+                $boundary.decisionStatus -ceq 'Accepted' -and $boundary.decisionReason -ceq 'retry_dispatch_settlement_accepted') {
+                foreach ($terminal in @($deltas | Where-Object {
+                    $_.Operation.operationRole -ceq 'attempt_terminal' -and $_.Operation.beforeState -ceq 'None' -and
+                    $_.Operation.afterState -ceq 'Settled'
+                })) {
+                    $operation = $terminal.Operation; $payload = $operation.runtimeUnlockRetry
+                    $retirements = @($deltas | Where-Object {
+                        $_.Operation.operationRole -ceq 'attempt_installed' -and
+                        $_.Operation.authorityId -ceq $operation.authorityId -and
+                        $_.Operation.beforeState -ceq 'SendInFlight' -and $_.Operation.afterState -ceq 'None'
+                    })
+                    $settlement = @($payload.receipts | Where-Object {
+                        $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'DispatchObserved' -and
+                        $_.receiptReason -ceq 'dispatch_observed' -and $_.receiptValidated -and
+                        $_.receiptGeneration -eq $payload.offerGeneration
+                    })
+                    if ($retirements.Count -eq 1 -and $settlement.Count -eq 1 -and $payload.dispatchObserved -and
+                        [long]$payload.offerGeneration -gt 0 -and
+                        (($payload | Select-Object * -ExcludeProperty role,receipts,dispatchObserved | ConvertTo-Json -Depth 32 -Compress) -ceq
+                         ($retirements[0].Operation.runtimeUnlockRetry | Select-Object * -ExcludeProperty role,receipts,dispatchObserved | ConvertTo-Json -Depth 32 -Compress))) {
+                        $ownClosures[[string]$operation.authorityId] = $terminal
+                    }
+                }
+            }
+            $successfulShape = $null; $successfulOrigin = $null
+            if ($boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchSettlement' -and
+                $boundary.decisionReason -ceq 'retry_dispatch_settlement_superseded_predecessor') {
+                $successfulEnvelope = [pscustomobject]@{ decisionKind=$boundary.decisionKind; decisionStatus=$boundary.decisionStatus;
+                    decisionReason=$boundary.decisionReason; aggregate=[pscustomobject]@{
+                        beforeStateGeneration=$boundary.beforeStateGeneration; afterStateGeneration=$boundary.afterStateGeneration;
+                        beforeStateFingerprint=$boundary.beforeStateHash; afterStateFingerprint=$boundary.afterStateHash;
+                        beforeBoundary=$aggregateEntry.BeforeBoundary; afterBoundary=$aggregateEntry.AfterBoundary; operations=$boundary.operations
+                    } }
+                $successfulShape = Get-FileTransferCoordinatorSuccessfulRetryRetirementShape $successfulEnvelope
+                if ($null -eq $successfulShape) { $poison = $boundary; break }
+                $origins = @($commits | Where-Object {
+                    ($_.Retained | Select-Object * -ExcludeProperty beforeState,afterState | ConvertTo-Json -Depth 32 -Compress) -ceq
+                    ($successfulShape.Retained | Select-Object * -ExcludeProperty beforeState,afterState | ConvertTo-Json -Depth 32 -Compress)
+                })
+                $successorId = [string]$successfulShape.Retained.runtimeUnlockRetry.successorAuthorityId
+                $successorSlots = @(if ($members.ContainsKey($successorId)) { $members[$successorId].Slots.Values | Where-Object {
+                    $_.State -ceq 'Installed' -and $_.Entry.Operation.operationRole -ceq 'attempt_installed'
+                } })
+                if ($origins.Count -ne 1 -or $successorSlots.Count -ne 1 -or
+                    $successorSlots[0].Entry.Boundary.boundaryId -cne $origins[0].Entry.Boundary.boundaryId -or
+                    $null -ne $terminalOwner -or $null -ne $successfulTerminalOwner -or $terminalDeltas.Count -ne 1) {
+                    $poison = $boundary; break
+                }
+                $successfulOrigin = $origins[0]
+            }
+            $successfulEviction = $null
+            if ($null -ne $successfulTerminalOwner -and $terminalDeltas.Count -gt 0) {
+                $owned = @($terminalDeltas | Where-Object {
+                    ($_.Operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 32 -Compress) -ceq
+                    ($successfulTerminalOwner.Operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 32 -Compress)
+                })
+                if ($terminalDeltas.Count -eq 1 -and $owned.Count -eq 1 -and
+                    $owned[0].Operation.beforeState -ceq 'Settled' -and $owned[0].Operation.afterState -ceq 'Settled') {
+                    # The consumed predecessor still occupies the terminal slot.
+                }
+                else {
+                    $closureEnvelope = [pscustomobject]@{ decisionKind=$boundary.decisionKind; decisionStatus=$boundary.decisionStatus;
+                        decisionReason=$boundary.decisionReason; aggregate=[pscustomobject]@{
+                            beforeStateGeneration=$boundary.beforeStateGeneration; afterStateGeneration=$boundary.afterStateGeneration;
+                            beforeStateFingerprint=$boundary.beforeStateHash; afterStateFingerprint=$boundary.afterStateHash;
+                            beforeBoundary=$aggregateEntry.BeforeBoundary; afterBoundary=$aggregateEntry.AfterBoundary; operations=$boundary.operations
+                        } }
+                    $closureShape = Get-FileTransferCoordinatorSuccessfulRetrySuccessorSettlementShape $closureEnvelope
+                    $successorId = [string]$successfulTerminalOwner.Operation.runtimeUnlockRetry.successorAuthorityId
+                    if ($null -eq $closureShape -or $owned.Count -ne 1 -or $terminalDeltas.Count -ne 2 -or
+                        $closureShape.Removed.operationKey -cne $owned[0].Operation.operationKey -or
+                        $ownClosures.Count -ne 1 -or -not $ownClosures.ContainsKey($successorId) -or
+                        $ownClosures[$successorId].Operation.operationKey -cne $closureShape.Terminal.operationKey) {
+                        $poison = $boundary; break
+                    }
+                    $successfulEviction = [pscustomobject]@{ Entry=$owned[0]; Terminal=$successfulTerminalOwner;
+                        Successor=$ownClosures[$successorId] }
+                }
+            }
+            if ($guardActive -and $terminalDeltas.Count -gt 0 -and $null -eq $terminalOwner -and
+                $null -eq $successfulTerminalOwner -and $null -eq $successfulShape -and
+                -not $inverseIds.ContainsKey($id) -and $ownClosures.Count -eq 0) { $poison = $boundary; break }
+            $nextTerminalOwner = $terminalOwner
+            if ($null -ne $terminalOwner -and $terminalDeltas.Count -gt 0) {
+                $owned = @($terminalDeltas | Where-Object {
+                    $_.Operation.operationKey -ceq $terminalOwner.Terminal.operationKey -and
+                    ($_.Operation | Select-Object * -ExcludeProperty beforeState,afterState,stateApplied | ConvertTo-Json -Depth 32 -Compress) -ceq $terminalOwner.Identity
+                })
+                $restoredId = [string]$terminalOwner.Restored.authorityId
+                if ($terminalDeltas.Count -eq 1 -and $owned.Count -eq 1 -and
+                    $owned[0].Operation.beforeState -ceq 'Invalidated' -and $owned[0].Operation.afterState -ceq 'Invalidated') {
+                    # Exact unchanged carry retains the compensation's terminal owner.
+                }
+                elseif ($terminalDeltas.Count -eq 2 -and $owned.Count -eq 1 -and
+                    $owned[0].Operation.beforeState -ceq 'Invalidated' -and $owned[0].Operation.afterState -ceq 'None' -and
+                    $ownClosures.Count -eq 1 -and $ownClosures.ContainsKey($restoredId) -and
+                    $ownClosures[$restoredId].Operation.operationGeneration -eq $terminalOwner.Restored.operationGeneration) {
+                    $evictions.Add([pscustomobject]@{ Entry=$owned[0]; Origin=$terminalOwner })
+                    $nextTerminalOwner = $null
+                }
+                else { $poison = $boundary; break }
+            }
+            if ($terminalOrigins.ContainsKey($id)) {
+                $origin = $terminalOrigins[$id]
+                if ($null -ne $terminalOwner -or $terminalDeltas.Count -ne 1 -or
+                    ($terminalDeltas[0].Operation | ConvertTo-Json -Depth 32 -Compress) -cne
+                    ($origin.Terminal | ConvertTo-Json -Depth 32 -Compress)) { $poison = $boundary; break }
+                $nextTerminalOwner = $origin
+            }
+            $updates = [Collections.Generic.List[object]]::new()
+            foreach ($row in $deltas) {
+                $operation = $row.Operation; $member = $members[[string]$operation.authorityId]
+                $payload = $operation.runtimeUnlockRetry
+                $immutable = $payload | Select-Object * -ExcludeProperty role, receipts,
+                    dispatchDeadlineUtcMs, offerGeneration, offerNonceFingerprint, dispatchObserved, successorAuthorityId |
+                    ConvertTo-Json -Depth 32 -Compress
+                if ($operation.operationGeneration -ne $member.Generation -or $immutable -cne $member.Immutable) { $poison = $row.Boundary; break }
+                $slot = if ($member.Slots.ContainsKey($operation.operationKey)) { $member.Slots[$operation.operationKey] } else { $null }
+                $beforeState = if ($null -eq $slot) { 'None' } else { [string]$slot.State }
+                $payloadJson = $payload | ConvertTo-Json -Depth 32 -Compress
+                $role = [string]$operation.operationRole
+                $allowedRole = switch -Exact ($role) {
+                    'attempt_pending' { $operation.afterState -in @('Authorized','Staged','ReceiptIssued','None'); break }
+                    'attempt_installed' {
+                        if ($operation.afterState -ceq 'None') {
+                            $commitIds.ContainsKey($id) -or $inverseIds.ContainsKey($id) -or $ownClosures.ContainsKey([string]$operation.authorityId)
+                        } elseif ($operation.afterState -in @('AliasBound','SendInFlight') -and $operation.beforeState -cne 'None') {
+                            $boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchExecutionState' -and
+                            $boundary.decisionStatus -ceq 'Accepted' -and
+                            (($operation.beforeState -ceq 'Installed' -and $operation.afterState -ceq 'AliasBound') -or
+                             ($operation.beforeState -ceq 'AliasBound' -and $operation.afterState -ceq 'SendInFlight'))
+                        } else {
+                            ($operation.beforeState -ceq 'None' -and $operation.afterState -ceq 'Installed' -and
+                             $boundary.decisionKind -ceq 'CommitRuntimeUnlockRetryDispatchInstall' -and $boundary.decisionStatus -ceq 'Accepted') -or
+                            $reopens.ContainsKey("$id|$($operation.operationKey)")
+                        }
+                        break
+                    }
+                    'attempt_retained_predecessor' { $commitIds.ContainsKey($id) -or $inverseIds.ContainsKey($id) -or $null -ne $successfulShape; break }
+                    'attempt_terminal' {
+                        $inverseIds.ContainsKey($id) -or $null -ne $successfulShape -or
+                        ($null -ne $slot -and $operation.beforeState -ceq $operation.afterState -and
+                         $operation.afterState -in @('Settled','Invalidated') -and $slot.Payload -ceq $payloadJson) -or
+                        ($ownClosures.Count -eq 1 -and ($ownClosures.ContainsKey([string]$operation.authorityId) -or
+                         ($operation.beforeState -ceq 'Invalidated' -and $operation.afterState -ceq 'None'))) -or
+                        ($null -ne $successfulEviction -and $operation.operationKey -ceq $successfulEviction.Entry.Operation.operationKey)
+                        break
+                    }
+                    default { $false }
+                }
+                if ($operation.stateApplied -isnot [bool] -or -not $allowedRole -or $operation.beforeState -cne $beforeState -or
+                    ($null -ne $slot -and $beforeState -ceq 'None' -and $operation.afterState -cne 'None' -and
+                     -not $reopens.ContainsKey("$($row.Boundary.boundaryId)|$($operation.operationKey)")) -or
+                    ($operation.afterState -ceq 'None' -and ($null -eq $slot -or $slot.Payload -cne $payloadJson))) {
+                    $poison = $row.Boundary; break
+                }
+                foreach ($receipt in @($payload.receipts | Where-Object { $_.stage -in @('stage', 'install') })) {
+                    $signature = if ($receipt.stage -ceq 'install') {
+                        $receipt | Select-Object * -ExcludeProperty receiptStatus | ConvertTo-Json -Depth 16 -Compress
+                    } else { $receipt | ConvertTo-Json -Depth 16 -Compress }
+                    $property = if ($receipt.stage -ceq 'install') { 'Install' } else { 'Stage' }
+                    if ($null -ne $member.$property -and $member.$property -cne $signature) { $poison = $row.Boundary; break }
+                    $member.$property = $signature
+                }
+                if ($null -ne $poison) { break }
+                if ([long]$payload.offerGeneration -gt 0) {
+                    $offer = "$($payload.offerGeneration)|$($payload.offerNonceFingerprint)"
+                    if ($null -ne $member.Offer -and $member.Offer -cne $offer) { $poison = $row.Boundary; break }
+                    $member.Offer = $offer
+                }
+                $updates.Add([pscustomobject]@{ Member=$member; Key=$operation.operationKey;
+                    Slot=[pscustomobject]@{ State=$operation.afterState; Payload=$payloadJson; Entry=$row } })
+            }
+            if ($null -ne $poison) { break }
+            foreach ($update in $updates) { $update.Member.Slots[$update.Key] = $update.Slot }
+            if ($null -ne $successfulEviction) {
+                $successfulEvictions.Add($successfulEviction)
+                $successfulTerminalOwner = $null
+            }
+            if ($null -ne $successfulShape) {
+                $successfulTerminalOwner = @($deltas | Where-Object { $_.Operation.operationKey -ceq $successfulShape.Terminal.operationKey })[0]
+                $successfulRetirements.Add([pscustomobject]@{ Origin=$successfulOrigin; Terminal=$successfulTerminalOwner;
+                    Retained=@($deltas | Where-Object { $_.Operation.operationKey -ceq $successfulShape.Retained.operationKey })[0] })
+            }
+            $terminalOwner = $nextTerminalOwner
+            $live = @($members.Values | ForEach-Object { $_.Slots.Values } | Where-Object {
+                $_.State -in @('Authorized','Staged','ReceiptIssued','Installed','AliasBound','SendInFlight') -or
+                ($_.State -ceq 'Settled' -and $_.Entry.Operation.operationRole -ceq 'attempt_retained_predecessor')
+            }).Count -gt 0
+            $guardActive = $guardActive -and $live
+        }
+        if ($null -ne $poison) {
+            $result.Errors.Add("snapshot_operation_receipt_incomplete|provisional_retry_role_history_invalid:$($poison.evidenceLineIndex)")
+            $result.InvalidScopes[$scopeKey] = $true
+            continue
+        }
+        foreach ($authority in @($members.Keys)) {
+            $member = $members[$authority]
+            $member.OpenRoles = @($member.Slots.Values | Where-Object {
+                $_.State -in @('Authorized', 'Staged', 'ReceiptIssued', 'Installed', 'AliasBound', 'SendInFlight') -or
+                ($_.State -ceq 'Settled' -and $_.Entry.Operation.operationRole -ceq 'attempt_retained_predecessor')
+            } | ForEach-Object { $_.Entry })
+            $result.Participants["$scopeKey$([char]31)$authority$([char]31)$($member.Generation)"] = $member
+        }
+        foreach ($cancellation in $cancellations) {
+            if ($DiagnosticOnly) { continue }
+            $operation = $cancellation.Retained
+            $receipt = @($operation.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'settlement')[0]
+            $key = "$scopeKey$([char]31)$($cancellation.Entry.Boundary.boundaryId)$([char]31)$($operation.operationKey)"
+            $result.CancelledReceipts[$key] = [pscustomobject]@{
+                Operation=($operation | ConvertTo-Json -Depth 32 -Compress); Receipt=($receipt | ConvertTo-Json -Depth 16 -Compress)
+            }
+        }
+        if (-not $DiagnosticOnly) {
+            foreach ($retirement in $successfulRetirements) {
+                foreach ($subject in @([pscustomobject]@{ Boundary=$retirement.Origin.Entry.Boundary; Operation=$retirement.Origin.Retained },
+                        $retirement.Retained, $retirement.Terminal)) {
+                    $key = "$scopeKey$([char]31)$($subject.Boundary.boundaryId)$([char]31)$($subject.Operation.operationKey)"
+                    $result.SuccessfulRetirements[$key] = [pscustomobject]@{ Entry=$subject; Terminal=$retirement.Terminal; TerminalRemoval=$false;
+                        Operation=($subject.Operation | ConvertTo-Json -Depth 32 -Compress) }
+                }
+            }
+            foreach ($eviction in $successfulEvictions) {
+                $subject = $eviction.Entry
+                $key = "$scopeKey$([char]31)$($subject.Boundary.boundaryId)$([char]31)$($subject.Operation.operationKey)"
+                $result.SuccessfulRetirements[$key] = [pscustomobject]@{ Entry=$subject; Terminal=$eviction.Terminal; TerminalRemoval=$true;
+                    Successor=$eviction.Successor;
+                    Operation=($subject.Operation | ConvertTo-Json -Depth 32 -Compress) }
+            }
+            foreach ($eviction in $evictions) {
+                $operation = $eviction.Entry.Operation
+                $key = "$scopeKey$([char]31)$($eviction.Entry.Boundary.boundaryId)$([char]31)$($operation.operationKey)$([char]31)$($operation.operationGeneration)"
+                $result.TerminalEvictions[$key] = [pscustomobject]@{ Entry=$eviction.Entry; Origin=$eviction.Origin;
+                    Operation=($operation | ConvertTo-Json -Depth 32 -Compress) }
+            }
+        }
+    }
+    foreach ($entry in $AggregateEntries) {
+        if ($entry.Boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchSettlement' -and
+            (($entry.Boundary.decisionStatus -ceq 'Accepted' -and
+              $entry.Boundary.decisionReason -ceq 'retry_dispatch_settlement_superseded_predecessor') -or
+             ($entry.Boundary.decisionStatus -in @('Idempotent', 'Rejected') -and
+              @($entry.Boundary.operations | Where-Object {
+                  $_.family -ceq 'runtime_unlock_retry_lifecycle' -and $_.operationRole -ceq 'attempt_terminal' -and
+                  $null -ne $_.runtimeUnlockRetry -and @($_.runtimeUnlockRetry.receipts | Where-Object {
+                      $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'Superseded'
+                  }).Count -gt 0
+              }).Count -gt 0)) -and
+            -not $scopes.ContainsKey((Get-FileTransferCoordinatorProvisionalRetryScopeKey $entry.Boundary))) {
+            $result.Errors.Add("snapshot_operation_receipt_incomplete|successful_retry_retirement_origin_missing:$($entry.Boundary.evidenceLineIndex)")
+        }
+    }
+    if ($result.Errors.Count -gt 0) {
+        $result.CancelledReceipts.Clear(); $result.SuccessfulRetirements.Clear(); $result.TerminalEvictions.Clear()
+    }
+    return $result
+}
+
+function Add-FileTransferCoordinatorProvisionalRetryFinding {
+    param($Reduction, $Entry, [string]$Taxonomy, [string]$Rule, $Receipt = $null)
+    $scope = Get-FileTransferCoordinatorProvisionalRetryScopeKey $Entry.Boundary
+    $Reduction.Findings.Add([pscustomobject]@{
+        BoundaryKey="$scope$([char]31)$($Entry.Boundary.boundaryId)"; Entry=$Entry; Taxonomy=$Taxonomy;
+        Priority=$(if ($Taxonomy -ceq 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete') { 0 } else { 1 });
+        TieKey=(@($Entry.Operation.operationKey, ($Receipt | ConvertTo-Json -Depth 16 -Compress), $Rule) -join [char]31)
+    })
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
@@ -2896,8 +3809,9 @@ function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
             [System.Globalization.CultureInfo]::InvariantCulture),
         [string]$Operation.operationKind) -join '|'
     if ([string]$Operation.operationKey -cne $expectedOperationKey -or
-        [string]$Envelope.decisionKind -notin
-            $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -or
+        ([string]$Envelope.decisionKind -notin
+            $script:FileTransferCoordinatorSnapshotFamily2DecisionKinds -and
+         $null -eq (Get-FileTransferCoordinatorRetryConfirmationCompensationShape $Envelope)) -or
         [string]$Operation.operationRole -notin
             $script:FileTransferCoordinatorSnapshotFamily2OperationRoles -or
         $null -eq $Operation.runtimeUnlockRetry -or
@@ -2939,6 +3853,20 @@ function Test-FileTransferCoordinatorSnapshotFamily2OperationCatalog {
     }
     foreach ($receipt in @($Operation.runtimeUnlockRetry.receipts)) {
         $stage = [string]$receipt.stage
+        if ($stage -ceq 'settlement' -and [string]$receipt.receiptStatus -ceq 'Superseded') {
+            if (-not (Test-FileTransferCoordinatorSnapshotProvisionalRetrySupersession -Envelope $Envelope -Operation $Operation)) {
+                $successful = Get-FileTransferCoordinatorSuccessfulRetryRetirementShape $Envelope
+                $attempt = Get-FileTransferCoordinatorSuccessfulRetryRetirementAttempt $Envelope
+                $rollover = Get-FileTransferCoordinatorSuccessfulRetrySuccessorSettlementShape $Envelope
+                if (($null -eq $successful -or @(@($successful.Retained, $successful.Terminal) | Where-Object {
+                    ($_ | ConvertTo-Json -Depth 32 -Compress) -ceq ($Operation | ConvertTo-Json -Depth 32 -Compress)
+                }).Count -ne 1) -and ($null -eq $attempt -or
+                    ($attempt | ConvertTo-Json -Depth 32 -Compress) -cne ($Operation | ConvertTo-Json -Depth 32 -Compress)) -and
+                    ($null -eq $rollover -or ($rollover.Removed | ConvertTo-Json -Depth 32 -Compress) -cne
+                        ($Operation | ConvertTo-Json -Depth 32 -Compress))) { return $false }
+            }
+            continue
+        }
         if ($stage -ceq 'install' -and [string]$receipt.receiptStatus -ceq 'Staged') {
             if (-not (Test-FileTransferCoordinatorSnapshotStagedRetryInstallBoundary `
                     -Envelope $Envelope -Operation $Operation)) { return $false }
@@ -9272,6 +10200,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     }
     $boundaries = [System.Collections.Generic.List[object]]::new()
     $aggregateEntries = [System.Collections.Generic.List[object]]::new()
+    $retryConfirmationCompensations = @{}
     $pressureTerminalRolloverCandidates = @{}
     $checkpointStalePeerProofCandidates = @{}
     $checkpointPeerProofSuccessorCandidates = @{}
@@ -9658,6 +10587,18 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             ([string]$operation.beforeState -ceq 'Applied' -or [string]$operation.afterState -ceq 'Applied')) {
                             $variant = 'family2_applied_scope_invalidation_state_omitted_from_lifecycle_catalog'
                         }
+                        if ($envelope.decisionKind -cin @('CommitRuntimeUnlockRetryDispatchInstall',
+                                'CompensateRejectedRuntimeUnlockRetryDispatchConfirmation') -and
+                            @($envelope.aggregate.operations | Where-Object {
+                            $_.family -ceq 'runtime_unlock_retry_lifecycle' -and
+                            $_.operationRole -ceq 'attempt_retained_predecessor' -and
+                            $_.operationKind -ceq 'RetryAttempt' -and $null -ne $_.runtimeUnlockRetry -and
+                            @($_.runtimeUnlockRetry.receipts | Where-Object {
+                                $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'Superseded'
+                            }).Count -gt 0
+                        }).Count -gt 0) {
+                            $variant = 'provisional_active_predecessor_superseded_receipt_omitted_from_family2_catalog'
+                        }
                         $reason = 'snapshot_operation_catalog_mismatch'
                         if ($variant -cne '(none)') {
                             $reason = "$reason|$variant"
@@ -9905,6 +10846,15 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     unresolvedCount = 0
                 }
                 $boundaries.Add([pscustomobject]$boundary)
+                if ($envelope.decisionKind -ceq 'CompensateRejectedRuntimeUnlockRetryDispatchConfirmation') {
+                    if (-not (Test-FileTransferCoordinatorRetryConfirmationCompensationHistory `
+                            -Envelope $envelope -Boundary ([pscustomobject]$boundary) -PriorEntries @($aggregateEntries))) {
+                        $errors.Add("snapshot_retry_confirmation_compensation_invalid:$($record.LineIndex)")
+                    }
+                    elseif ($errors.Count -eq $transitionErrorCount) {
+                        $retryConfirmationCompensations["$instanceId|$transitionId"] = $true
+                    }
+                }
                 if ($errors.Count -eq $transitionErrorCount -and
                     (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $envelope.aggregate.beforeBoundary) -and
                     (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $envelope.aggregate.afterBoundary)) {
@@ -10169,6 +11119,12 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     -Operation $_.Operation `
                     -Effect $effect)
             })
+        if (@($candidates | Where-Object {
+                $_.Boundary.decisionKind -ceq 'CompensateRejectedRuntimeUnlockRetryDispatchConfirmation'
+            }).Count -gt 0) {
+            $errors.Add("snapshot_retry_confirmation_compensation_effect_forbidden:$($effect.LineIndex)")
+            continue
+        }
         if ($matches.Count -ne 1) {
             $errors.Add("snapshot_authority_effect_unbound:$($effect.LineIndex)")
         }
@@ -12082,6 +13038,74 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $retryAttempts = @($retryEntries | Where-Object {
             [string]$_.Operation.operationKind -ceq 'RetryAttempt'
         })
+    # Failed artifacts may still report exact negative role findings consistently;
+    # they cannot establish any cancellation of a receipt-effect obligation.
+    $provisionalRetryReduction = Get-FileTransferCoordinatorProvisionalRetryReduction `
+        -AggregateEntries @($aggregateEntries) -OperationHistory $operationHistory -DiagnosticOnly:($errors.Count -gt 0)
+    foreach ($failure in $provisionalRetryReduction.Errors) { $errors.Add([string]$failure) }
+    foreach ($effect in @($effects | Where-Object {
+        $_.EffectKind -ceq 'settlement_observed' -and $_.ReceiptStatus -ceq 'Superseded' -and
+        $_.OperationKey -clike 'runtime_unlock_retry_lifecycle|attempt_retained_predecessor|*'
+    })) {
+        $errors.Add("snapshot_provisional_retry_retained_settlement_effect_forbidden:$($effect.LineIndex)")
+    }
+    $neutralRetirements = @{}
+    foreach ($entry in @($aggregateEntries | Where-Object {
+        $_.Boundary.decisionKind -ceq 'ObserveRuntimeUnlockRetryDispatchSettlement' -and
+        $_.Boundary.decisionStatus -in @('Rejected', 'Idempotent') -and
+        @($_.Boundary.operations | Where-Object {
+            $_.operationRole -ceq 'attempt_terminal' -and $null -ne $_.runtimeUnlockRetry -and
+            @($_.runtimeUnlockRetry.receipts | Where-Object { $_.stage -ceq 'settlement' -and $_.receiptStatus -ceq 'Superseded' }).Count -gt 0
+        }).Count -gt 0
+    })) { $neutralRetirements["$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.writer)|$($entry.Boundary.boundaryId)"] = $true }
+    foreach ($effect in $effects) {
+        if ($neutralRetirements.ContainsKey("$($effect.CoordinatorInstanceId)|$($effect.Writer)|$($effect.TransitionId)")) {
+            $errors.Add("snapshot_successful_retry_retirement_attempt_effect_forbidden:$($effect.LineIndex)")
+        }
+    }
+    $successfulTerminalRemovals = @{}; $successfulSuccessorTerminals = @{}
+    foreach ($witness in $provisionalRetryReduction.SuccessfulRetirements.Values) {
+        if (-not $witness.TerminalRemoval) { continue }
+        $boundary = $witness.Entry.Boundary
+        $key = @($boundary.coordinatorInstanceId, $boundary.writer, $boundary.boundaryId,
+            $witness.Entry.Operation.operationKey) -join [char]31
+        $successfulTerminalRemovals[$key] = $true
+        $successor = $witness.Successor
+        $key = @($successor.Boundary.coordinatorInstanceId, $successor.Boundary.writer, $successor.Boundary.boundaryId,
+            $successor.Operation.operationKey) -join [char]31
+        $successfulSuccessorTerminals[$key] = $true
+    }
+    foreach ($effect in $effects) {
+        $key = @($effect.CoordinatorInstanceId, $effect.Writer, $effect.TransitionId, $effect.OperationKey) -join [char]31
+        if ($successfulTerminalRemovals.ContainsKey($key)) {
+            $errors.Add("snapshot_successful_retry_terminal_removal_effect_forbidden:$($effect.LineIndex)")
+        }
+        if ($successfulSuccessorTerminals.ContainsKey($key) -and $effect.EffectKind -cne 'settlement_observed') {
+            # B's terminal closes its already executed installation; a new
+            # terminal execution effect cannot replace the original send proof.
+            $errors.Add("snapshot_successful_retry_successor_terminal_effect_forbidden:$($effect.LineIndex)")
+        }
+    }
+    if ($errors.Count -gt 0) {
+        $provisionalRetryReduction.SuccessfulRetirements.Clear(); $provisionalRetryReduction.CancelledReceipts.Clear()
+        $provisionalRetryReduction.TerminalEvictions.Clear()
+    }
+    $evictionBoundaries = @{}
+    foreach ($witness in $provisionalRetryReduction.TerminalEvictions.Values) {
+        $boundary = $witness.Entry.Boundary
+        $evictionBoundaries["$($boundary.coordinatorInstanceId)|$($boundary.writer)|$($boundary.boundaryId)"] = $true
+    }
+    $forbiddenEvictionEffect = $false
+    foreach ($effect in @($effects | Where-Object { $_.EffectKind -ceq 'install_committed' })) {
+        if ($evictionBoundaries.ContainsKey("$($effect.CoordinatorInstanceId)|$($effect.Writer)|$($effect.TransitionId)")) {
+            $errors.Add("snapshot_retry_confirmation_eviction_install_effect_forbidden:$($effect.LineIndex)")
+            $forbiddenEvictionEffect = $true
+        }
+    }
+    if ($forbiddenEvictionEffect) {
+        $provisionalRetryReduction.TerminalEvictions.Clear(); $provisionalRetryReduction.CancelledReceipts.Clear()
+        $provisionalRetryReduction.SuccessfulRetirements.Clear()
+    }
     foreach ($authorityGroup in @($retryAttempts | Group-Object {
                 "$($_.Boundary.coordinatorInstanceId)|$([string]$_.Operation.authorityId)"
             })) {
@@ -12098,10 +13122,26 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
 
         $authorityId = [string]$history[0].Operation.authorityId
         $instanceId = [string]$history[0].Boundary.coordinatorInstanceId
+        $provisionalParticipant = $null
+        if ($null -ne $provisionalRetryReduction) {
+            $scopeKeys = @($history | ForEach-Object {
+                Get-FileTransferCoordinatorProvisionalRetryScopeKey $_.Boundary
+            } | Select-Object -Unique)
+            if ($scopeKeys.Count -eq 1 -and $provisionalRetryReduction.InvalidScopes.ContainsKey($scopeKeys[0])) { continue }
+            $participantKeys = @($history | ForEach-Object {
+                "$(Get-FileTransferCoordinatorProvisionalRetryScopeKey $_.Boundary)$([char]31)$($_.Operation.authorityId)$([char]31)$($_.Operation.operationGeneration)"
+            } | Select-Object -Unique)
+            if ($participantKeys.Count -eq 1 -and $provisionalRetryReduction.Participants.ContainsKey($participantKeys[0])) {
+                $provisionalParticipant = $provisionalRetryReduction.Participants[$participantKeys[0]]
+            }
+        }
         $sourceBoundary = $history[0].Operation.runtimeUnlockRetry.sourceBoundary
         $exactEffects = @($effects | Where-Object {
                 [string]$_.CoordinatorInstanceId -ceq $instanceId -and
-                [string]$_.AuthorityId -ceq $authorityId
+                [string]$_.AuthorityId -ceq $authorityId -and
+                ($null -eq $provisionalParticipant -or
+                 ([string]$_.Writer -ceq [string]$history[0].Boundary.writer -and
+                  [long]$_.OperationGeneration -eq [long]$provisionalParticipant.Generation))
             })
         $committedInstallProofs = [Collections.Generic.List[object]]::new()
         foreach ($installEntry in @($history | Where-Object {
@@ -12152,6 +13192,26 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         $missingRequiredReceiptEffect = $null
         foreach ($entry in $history) {
+            # Exact compensation only reverses its immediately preceding commit.
+            # Original stage/install/settlement entries still require their own
+            # effects; this boundary neither applies nor republishes an effect.
+            if ($retryConfirmationCompensations.ContainsKey("$($entry.Boundary.coordinatorInstanceId)|$($entry.Boundary.boundaryId)")) { continue }
+            $successfulKey = "$(Get-FileTransferCoordinatorProvisionalRetryScopeKey $entry.Boundary)$([char]31)$($entry.Boundary.boundaryId)$([char]31)$($entry.Operation.operationKey)"
+            if ($null -ne $provisionalParticipant -and $provisionalRetryReduction.SuccessfulRetirements.ContainsKey($successfulKey)) {
+                $retirement = $provisionalRetryReduction.SuccessfulRetirements[$successfulKey]
+                if ($retirement.TerminalRemoval) {
+                    # Only this validated slot eviction reuses the original A
+                    # observation. Original A evidence and B's own closure remain
+                    # independent obligations in their respective histories.
+                    if ($retirement.Operation -cne ($entry.Operation | ConvertTo-Json -Depth 32 -Compress) -or
+                        -not (Test-FileTransferCoordinatorSuccessfulRetryRetirementObservation -Terminal $retirement.Terminal -Effects $exactEffects)) {
+                        $missingRequiredReceiptEffect = [pscustomobject]@{ Entry=$entry; Stage='settlement';
+                            Receipt=@($entry.Operation.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'settlement')[0] }
+                        break
+                    }
+                    continue
+                }
+            }
             if (-not [bool]$entry.Operation.stateApplied -and
                 [string]$entry.Operation.beforeState -ceq
                     [string]$entry.Operation.afterState -and
@@ -12214,6 +13274,32 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         if ([string]$entry.Operation.operationRole -ceq
                                 'attempt_terminal' -and
                             [string]$entry.Operation.beforeState -cne 'None') {
+                            $evictionKey = "$(Get-FileTransferCoordinatorProvisionalRetryScopeKey $entry.Boundary)$([char]31)$($entry.Boundary.boundaryId)$([char]31)$($entry.Operation.operationKey)$([char]31)$($entry.Operation.operationGeneration)"
+                            if ($null -ne $provisionalParticipant -and $entry.Operation.beforeState -ceq 'Invalidated' -and
+                                $entry.Operation.afterState -ceq 'None' -and $receipt.receiptStatus -ceq 'Invalidated' -and
+                                $provisionalRetryReduction.TerminalEvictions.ContainsKey($evictionKey)) {
+                                $witness = $provisionalRetryReduction.TerminalEvictions[$evictionKey]
+                                $origin = $witness.Origin
+                                $originalReceipt = @($origin.Installed.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'install')[0]
+                                $terminalReceipt = @($origin.Terminal.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'install')[0]
+                                $originProofs = @($committedInstallProofs | Where-Object {
+                                    $_.Entry.Boundary.boundaryId -ceq $origin.Commit.boundaryId -and
+                                    $_.Entry.Boundary.afterStateGeneration -eq $origin.Commit.afterStateGeneration -and
+                                    $_.Entry.Boundary.afterStateHash -ceq $origin.Commit.afterStateHash -and
+                                    (Get-FileTransferCoordinatorProvisionalRetryScopeKey $_.Entry.Boundary) -ceq
+                                        (Get-FileTransferCoordinatorProvisionalRetryScopeKey $origin.Commit) -and
+                                    ($_.Entry.Operation | ConvertTo-Json -Depth 32 -Compress) -ceq
+                                        ($origin.Installed | ConvertTo-Json -Depth 32 -Compress) -and
+                                    ($_.Receipt | ConvertTo-Json -Depth 16 -Compress) -ceq
+                                        ($originalReceipt | ConvertTo-Json -Depth 16 -Compress)
+                                })
+                                if ($originProofs.Count -ne 1 -or
+                                    $witness.Operation -cne ($entry.Operation | ConvertTo-Json -Depth 32 -Compress) -or
+                                    ($receipt | ConvertTo-Json -Depth 16 -Compress) -cne ($terminalReceipt | ConvertTo-Json -Depth 16 -Compress)) {
+                                    $missingRequiredReceiptEffect = [pscustomobject]@{ Entry=$entry; Stage='install'; Receipt=$receipt }
+                                }
+                                break
+                            }
                             'install_committed'
                             break
                         }
@@ -12241,6 +13327,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                             $missingRequiredReceiptEffect = [pscustomobject]@{
                                 Entry = $entry
                                 Stage = [string]$receipt.stage
+                                Receipt = $receipt
                             }
                         }
                         break
@@ -12340,7 +13427,30 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         }
                         break
                     }
-                    'settlement' { 'settlement_observed'; break }
+                    'settlement' {
+                        if ($null -ne $provisionalParticipant) {
+                            $cancelledKey = "$(Get-FileTransferCoordinatorProvisionalRetryScopeKey $entry.Boundary)$([char]31)$($entry.Boundary.boundaryId)$([char]31)$($entry.Operation.operationKey)"
+                            if ($provisionalRetryReduction.CancelledReceipts.ContainsKey($cancelledKey)) {
+                                $cancelled = $provisionalRetryReduction.CancelledReceipts[$cancelledKey]
+                                if ($cancelled.Operation -ceq ($entry.Operation | ConvertTo-Json -Depth 32 -Compress) -and
+                                    $cancelled.Receipt -ceq ($receipt | ConvertTo-Json -Depth 16 -Compress)) { break }
+                            }
+                            if ($provisionalRetryReduction.SuccessfulRetirements.ContainsKey($cancelledKey)) {
+                                # Successful cleanup is observed, never cancelled. Both
+                                # retained descriptors resolve only to the entering terminal.
+                                $retirement = $provisionalRetryReduction.SuccessfulRetirements[$cancelledKey]
+                                $terminal = $retirement.Terminal
+                                $terminalReceipt = @($terminal.Operation.runtimeUnlockRetry.receipts | Where-Object stage -CEQ 'settlement')[0]
+                                if ($retirement.Operation -cne ($entry.Operation | ConvertTo-Json -Depth 32 -Compress) -or
+                                    ($receipt | ConvertTo-Json -Depth 16 -Compress) -cne ($terminalReceipt | ConvertTo-Json -Depth 16 -Compress) -or
+                                    -not (Test-FileTransferCoordinatorSuccessfulRetryRetirementObservation -Terminal $terminal -Effects $exactEffects)) {
+                                    $missingRequiredReceiptEffect = [pscustomobject]@{ Entry=$entry; Stage='settlement'; Receipt=$receipt }
+                                }
+                                break
+                            }
+                        }
+                        'settlement_observed'; break
+                    }
                     default { '' }
                 }
                 if ([string]::IsNullOrWhiteSpace($requiredEffectKind)) {
@@ -12370,6 +13480,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $missingRequiredReceiptEffect = [pscustomobject]@{
                         Entry = $entry
                         Stage = [string]$receipt.stage
+                        Receipt = $receipt
                     }
                     break
                 }
@@ -12380,20 +13491,27 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         if ($null -ne $missingRequiredReceiptEffect) {
             $candidate = $missingRequiredReceiptEffect.Entry
-            $candidate.Boundary.taxonomyClass =
+            $missingTaxonomy =
                 if ($missingRequiredReceiptEffect.Stage -in @('stage', 'install')) {
                     'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete'
                 }
                 else {
                     'runtime_unlock_retry_dispatch_contract_unsettled'
                 }
-            $candidate.Boundary.domain = 'route_runtime'
-            $candidate.Boundary.phase = 'runtime_unlock_retry'
-            $candidate.Boundary.rawCount = 1
-            $candidate.Boundary.distinctCount = 1
-            $candidate.Boundary.recoveredCount = 0
-            $candidate.Boundary.unresolvedCount = 1
-            $candidate.Boundary.verdict = 'fail'
+            if ($null -ne $provisionalParticipant) {
+                Add-FileTransferCoordinatorProvisionalRetryFinding $provisionalRetryReduction $candidate `
+                    $missingTaxonomy 'required_receipt_effect' $missingRequiredReceiptEffect.Receipt
+            }
+            else {
+                $candidate.Boundary.taxonomyClass = $missingTaxonomy
+                $candidate.Boundary.domain = 'route_runtime'
+                $candidate.Boundary.phase = 'runtime_unlock_retry'
+                $candidate.Boundary.rawCount = 1
+                $candidate.Boundary.distinctCount = 1
+                $candidate.Boundary.recoveredCount = 0
+                $candidate.Boundary.unresolvedCount = 1
+                $candidate.Boundary.verdict = 'fail'
+            }
         }
         $missingDispatch = @($history | Where-Object {
                 @($_.Operation.runtimeUnlockRetry.receipts | Where-Object {
@@ -12518,6 +13636,17 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             }
         }
 
+        if ($null -ne $provisionalParticipant) {
+            foreach ($openRole in $provisionalParticipant.OpenRoles) {
+                $hasInstall = @($openRole.Operation.runtimeUnlockRetry.receipts | Where-Object {
+                    $_.stage -ceq 'install' -and $_.receiptValidated
+                }).Count -eq 1
+                $class = if ($hasInstall) { 'runtime_unlock_retry_dispatch_contract_unsettled' }
+                    else { 'runtime_unlock_retry_dispatch_install_grant_evidence_incomplete' }
+                Add-FileTransferCoordinatorProvisionalRetryFinding $provisionalRetryReduction $openRole $class 'current_role_open'
+            }
+            continue
+        }
         $latest = $history[-1]
         $latestState = [string]$latest.Operation.afterState
         if ($latestState -in @(
@@ -12542,6 +13671,17 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             $latest.Boundary.recoveredCount = 0
             $latest.Boundary.unresolvedCount = 1
             $latest.Boundary.verdict = 'fail'
+        }
+    }
+
+    if ($null -ne $provisionalRetryReduction) {
+        foreach ($group in @($provisionalRetryReduction.Findings | Group-Object BoundaryKey)) {
+            $selected = @($group.Group | Sort-Object Priority, TieKey)[0]
+            $boundary = $selected.Entry.Boundary
+            $boundary.taxonomyClass = $selected.Taxonomy
+            $boundary.domain = 'route_runtime'; $boundary.phase = 'runtime_unlock_retry'
+            $boundary.rawCount = 1; $boundary.distinctCount = 1
+            $boundary.recoveredCount = 0; $boundary.unresolvedCount = 1; $boundary.verdict = 'fail'
         }
     }
 

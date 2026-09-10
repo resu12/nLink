@@ -6637,19 +6637,22 @@ public sealed partial class SessionFileTransferService :
 
         if (!bridge.ConfirmRuntimeUnlockRetryDispatchInstall(receipt))
         {
+            // Revalidate the live context against the commit-owned compensation
+            // context; never rewind to the issuance state.
             var rollback =
                 FileTransferCoordinator
-                    .InvalidateRuntimeUnlockRetryDispatchPendingAttempt(
-                        issuance.State,
-                        receipt.Authority.AuthorityId,
-                        "retry_dispatch_install_confirmation_rejected");
+                    .CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(
+                        CreateCoordinatorStateLocked(context),
+                        commitDecision.CompensationContext);
             ApplyRuntimeUnlockRetryLifecycleStateLocked(
                 context,
                 rollback.State,
                 rollback.SnapshotEnvelope);
             return CreateRuntimeUnlockRetryDispatchInstallRejection(
                 decision,
-                "retry_dispatch_install_confirmation_rejected",
+                rollback.Accepted
+                    ? "retry_dispatch_install_confirmation_rejected"
+                    : rollback.Reason,
                 rollback.State);
         }
 
@@ -6671,10 +6674,7 @@ public sealed partial class SessionFileTransferService :
                     .ObserveRuntimeUnlockRetryDispatchSettlement(
                         CreateCoordinatorStateLocked(context),
                         predecessorDecision.Report);
-            ApplyRuntimeUnlockRetryLifecycleStateLocked(
-                context,
-                retirement.State,
-                retirement.SnapshotEnvelope);
+            ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(context, retirement);
             if (!retirement.Accepted)
             {
                 predecessorSettlementDecision = predecessorDecision;
@@ -6759,19 +6759,22 @@ public sealed partial class SessionFileTransferService :
 
         if (!bridge.ConfirmRuntimeUnlockRetryDispatchInstall(receipt))
         {
+            // Revalidate the live context against the commit-owned compensation
+            // context; never rewind to the issuance state.
             var rollback =
                 FileTransferCoordinator
-                    .InvalidateRuntimeUnlockRetryDispatchPendingAttempt(
-                        issuance.State,
-                        receipt.Authority.AuthorityId,
-                        "retry_dispatch_install_confirmation_rejected");
+                    .CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(
+                        CreateCoordinatorStateLocked(context),
+                        commitDecision.CompensationContext);
             ApplyRuntimeUnlockRetryLifecycleStateLocked(
                 context,
                 rollback.State,
                 rollback.SnapshotEnvelope);
             return CreateRuntimeUnlockRetryDispatchInstallRejection(
                 decision,
-                "retry_dispatch_install_confirmation_rejected",
+                rollback.Accepted
+                    ? "retry_dispatch_install_confirmation_rejected"
+                    : rollback.Reason,
                 rollback.State);
         }
 
@@ -6793,10 +6796,7 @@ public sealed partial class SessionFileTransferService :
                     .ObserveRuntimeUnlockRetryDispatchSettlement(
                         CreateCoordinatorStateLocked(context),
                         predecessorDecision.Report);
-            ApplyRuntimeUnlockRetryLifecycleStateLocked(
-                context,
-                retirement.State,
-                retirement.SnapshotEnvelope);
+            ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(context, retirement);
             if (!retirement.Accepted)
             {
                 predecessorSettlementDecision = predecessorDecision;

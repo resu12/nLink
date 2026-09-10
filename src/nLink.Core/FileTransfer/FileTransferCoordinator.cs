@@ -1624,6 +1624,10 @@ internal readonly record struct RuntimeUnlockRetryLifecycleTransitionDecision(
     public RuntimeUnlockRetryDispatchSettlementDecision?
         PredecessorSettlementDecision { get; init; }
 
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal RuntimeUnlockRetryConfirmationCompensationContext?
+        CompensationContext { get; init; }
+
     public FileTransferCoordinatorTransitionEnvelope? SnapshotEnvelope
     {
         get;
@@ -2258,6 +2262,29 @@ internal sealed record FileTransferReceiveRecoveryFallbackCheckpointResumeReserv
     long ObservedUtcMs)
 {
     public bool IsDefault => Command.IsDefault || ObservedUtcMs <= 0;
+}
+
+// Produced only by an accepted Coordinator install commit; never serialized or
+// treated as a replacement aggregate. The service may use it only immediately
+// after operational confirmation returns false, while holding its own gate.
+internal sealed class RuntimeUnlockRetryConfirmationCompensationContext(
+    RuntimeUnlockRetryDispatchInstallReceipt receipt,
+    RuntimeUnlockRetryLifecycleAttemptSnapshot? predecessorBeforeInstall,
+    string? coordinatorInstanceId,
+    long committedStateGeneration,
+    string? committedSnapshotFingerprint,
+    string committedStateFingerprint,
+    FileTransferCoordinatorStateBoundarySnapshot committedBoundary,
+    string compensatedStateFingerprint)
+{
+    internal RuntimeUnlockRetryDispatchInstallReceipt Receipt { get; } = receipt;
+    internal RuntimeUnlockRetryLifecycleAttemptSnapshot? PredecessorBeforeInstall { get; } = predecessorBeforeInstall;
+    internal string? CoordinatorInstanceId { get; } = coordinatorInstanceId;
+    internal long CommittedStateGeneration { get; } = committedStateGeneration;
+    internal string? CommittedSnapshotFingerprint { get; } = committedSnapshotFingerprint;
+    internal string CommittedStateFingerprint { get; } = committedStateFingerprint;
+    internal FileTransferCoordinatorStateBoundarySnapshot CommittedBoundary { get; } = committedBoundary;
+    internal string CompensatedStateFingerprint { get; } = compensatedStateFingerprint;
 }
 
 internal enum
@@ -3898,7 +3925,8 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             RuntimeUnlockRetryDispatchSettlementDecision?
                 predecessorSettlementDecision = null)
-            => FinalizeRuntimeUnlockRetrySnapshot(
+        {
+            var finalized = FinalizeRuntimeUnlockRetrySnapshot(
                 state,
                 new RuntimeUnlockRetryLifecycleTransitionDecision(status, reason)
             {
@@ -3909,6 +3937,19 @@ internal static partial class FileTransferCoordinator
                 nameof(CommitRuntimeUnlockRetryDispatchInstall),
                 installResult,
                 installResult.Receipt.Authority.AuthorityId);
+            if (status != RuntimeUnlockRetryLifecycleTransitionStatus.Accepted ||
+                finalized.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt is null)
+            {
+                return finalized;
+            }
+
+            return finalized with
+            {
+                CompensationContext = CreateRuntimeUnlockRetryConfirmationCompensationContext(
+                    finalized.State, installResult.Receipt,
+                    state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt),
+            };
+        }
 
         if (state.IsTerminal)
         {
@@ -4297,6 +4338,135 @@ internal static partial class FileTransferCoordinator
             "retry_dispatch_install_committed",
             committedState,
             predecessorSettlementDecision);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockRetryConfirmationCompensationContext
+        CreateRuntimeUnlockRetryConfirmationCompensationContext(
+            FileTransferCoordinatorState committedState,
+            RuntimeUnlockRetryDispatchInstallReceipt receipt,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot? predecessor)
+    {
+        var lifecycle = committedState.PersistentState.RuntimeUnlockRetryLifecycle;
+        var invalidated = lifecycle.InstalledAttempt!.Value with
+        {
+            State = RuntimeUnlockRetryLifecycleAttemptState.Invalidated,
+        };
+        var compensatedLifecycle = lifecycle with
+        {
+            InstalledAttempt = predecessor,
+            RetainedPredecessor = null,
+            LastTerminalAttempt = invalidated,
+            AttemptHistory = AppendRuntimeUnlockRetryLifecycleAttemptHistory(lifecycle.AttemptHistory, invalidated),
+        };
+        return new RuntimeUnlockRetryConfirmationCompensationContext(
+            receipt, predecessor, committedState.PersistentState.CoordinatorInstanceId,
+            committedState.PersistentState.SnapshotStateGeneration,
+            committedState.PersistentState.SnapshotStateFingerprint,
+            CalculateStateFingerprint(committedState), CreateStateBoundarySnapshot(committedState),
+            CalculateStateFingerprint(ApplyRuntimeUnlockRetryLifecycle(committedState, compensatedLifecycle)));
+    }
+
+    // Operational confirmation is not persisted in the Coordinator aggregate.
+    // Callers must invoke this only for the synchronous false-confirmation
+    // branch, never after confirmation succeeded or execution was released.
+    internal static RuntimeUnlockRetryLifecycleTransitionDecision
+        CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryConfirmationCompensationContext? context)
+    {
+        const string reason = "retry_dispatch_install_confirmation_rejected";
+        var receipt = context?.Receipt ?? default;
+        RuntimeUnlockRetryLifecycleTransitionDecision Decision(
+            RuntimeUnlockRetryLifecycleTransitionStatus status,
+            string decisionReason,
+            FileTransferCoordinatorState? nextState = null)
+            => FinalizeRuntimeUnlockRetrySnapshot(state,
+                new RuntimeUnlockRetryLifecycleTransitionDecision(status, decisionReason) { State = nextState ?? state },
+                nameof(CompensateRejectedRuntimeUnlockRetryDispatchConfirmation),
+                new { receipt, predecessorBeforeInstall = context?.PredecessorBeforeInstall }, receipt.Authority.AuthorityId);
+
+        var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+        if (context is null || receipt.IsDefault || state.IsTerminal ||
+            state.PersistentState.CoordinatorInstanceId != context.CoordinatorInstanceId ||
+            CreateStateBoundarySnapshot(state) != context.CommittedBoundary ||
+            lifecycle.PendingScopeInvalidationCommand is not null || lifecycle.PendingAttempt is not null ||
+            lifecycle.LastInstallGeneration != receipt.InstallGeneration ||
+            lifecycle.LastAuthorityGeneration != receipt.Authority.AuthorityGeneration)
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_confirmation_compensation_scope_mismatch");
+        }
+
+        var fingerprint = CalculateStateFingerprint(state);
+        var compensatedGeneration = context.CommittedStateGeneration +
+            (string.IsNullOrWhiteSpace(context.CoordinatorInstanceId) ? 0 : 1);
+        if (state.PersistentState.SnapshotStateGeneration == compensatedGeneration &&
+            fingerprint == context.CompensatedStateFingerprint)
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
+                "retry_dispatch_confirmation_already_compensated");
+        }
+
+        if (state.PersistentState.SnapshotStateGeneration != context.CommittedStateGeneration ||
+            state.PersistentState.SnapshotStateFingerprint != context.CommittedSnapshotFingerprint ||
+            fingerprint != context.CommittedStateFingerprint ||
+            lifecycle.InstalledAttempt is not { State: RuntimeUnlockRetryLifecycleAttemptState.Installed } installed ||
+            installed.InstallReceipt != receipt || installed.Authority != receipt.Authority || installed.Request != receipt.Request ||
+            installed.OfferGeneration != 0 || !string.IsNullOrWhiteSpace(installed.OfferNonce) ||
+            installed.DispatchObserved || installed.Settlement is not null || installed.SuccessorAuthorityId is not null)
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_confirmation_compensation_install_mismatch");
+        }
+
+        var predecessor = context.PredecessorBeforeInstall;
+        if (receipt.Authority.PredecessorAuthorityId is { } predecessorId)
+        {
+            if (predecessor is not { IsInstalled: true } original || original.Authority.AuthorityId != predecessorId)
+            {
+                return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_confirmation_compensation_predecessor_mismatch");
+            }
+            if (receipt.Request.RequestActivePredecessorSupersession)
+            {
+                var expected = original with
+                {
+                    State = RuntimeUnlockRetryLifecycleAttemptState.Settled,
+                    Settlement = new RuntimeUnlockRetryDispatchSettlementReport(original.Authority,
+                        RuntimeUnlockRetryDispatchSettlementOutcome.Superseded, "coordinator_successor_installed")
+                    {
+                        OfferGeneration = original.OfferGeneration, OfferNonce = original.OfferNonce,
+                        DispatchObserved = false, SuccessorAuthorityId = receipt.Authority.AuthorityId,
+                    },
+                    SuccessorAuthorityId = receipt.Authority.AuthorityId,
+                };
+                if (original.IsTerminal || lifecycle.RetainedPredecessor != expected)
+                {
+                    return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                        "retry_dispatch_confirmation_compensation_predecessor_mismatch");
+                }
+            }
+            else if (original.Settlement?.Outcome != RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch ||
+                     lifecycle.RetainedPredecessor is not null || lifecycle.LastTerminalAttempt != original)
+            {
+                return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                    "retry_dispatch_confirmation_compensation_predecessor_mismatch");
+            }
+        }
+        else if (predecessor is not null || lifecycle.RetainedPredecessor is not null)
+        {
+            return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
+                "retry_dispatch_confirmation_compensation_predecessor_mismatch");
+        }
+
+        var invalidated = installed with { State = RuntimeUnlockRetryLifecycleAttemptState.Invalidated };
+        var compensated = ApplyRuntimeUnlockRetryLifecycle(state, lifecycle with
+        {
+            InstalledAttempt = predecessor, RetainedPredecessor = null, LastTerminalAttempt = invalidated,
+            AttemptHistory = AppendRuntimeUnlockRetryLifecycleAttemptHistory(lifecycle.AttemptHistory, invalidated),
+        });
+        return Decision(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, reason, compensated);
     }
 
     internal static RuntimeUnlockRetryLifecycleTransitionDecision

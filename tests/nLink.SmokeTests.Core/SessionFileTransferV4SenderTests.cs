@@ -33023,7 +33023,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         }
     }
 
-    private sealed class PeerVisibleControlPlaneLoopbackTransport(
+    private class PeerVisibleControlPlaneLoopbackTransport(
         string sessionId,
         bool deliverFrames = true) :
         LoopbackFileTransferTransport(sessionId),

@@ -1,5 +1,9 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 
@@ -786,6 +790,323 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Idempotent, duplicate.Status);
         Assert.Equal(1, fixture.Bridge.InstallCount);
         Assert.Equal(installedReceipt, GetCurrentInstallReceipt(fixture.Context));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfirmedSupersession_EmitsOnlyItsAcceptedEnteringTerminalSettlement(bool rejectConfirmation)
+        => await VerifyConfirmedSupersessionSettlementEffectsAsync(rejectConfirmation, settleSuccessor: false);
+
+    [Fact]
+    public async Task ConfirmedSupersession_SuccessorDispatchEmitsOnlyItsEnteringTerminalSettlement()
+        => await VerifyConfirmedSupersessionSettlementEffectsAsync(rejectConfirmation: false, settleSuccessor: true);
+
+    private async Task VerifyConfirmedSupersessionSettlementEffectsAsync(bool rejectConfirmation, bool settleSuccessor)
+    {
+        var logStart = GetOperationalLogLength();
+        using var fixture = await CreateFixtureAsync(
+            $"session_retry_supersession_effect_{rejectConfirmation}",
+            $"transfer_retry_supersession_effect_{rejectConfirmation}");
+        var emitter = fixture.Context.GetType().GetProperty("CoordinatorSnapshotEmitter",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(fixture.Context)!;
+        var projectedId = Assert.IsType<string>(emitter.GetType().GetMethod("EvidenceToken",
+            BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null,
+                [GetRequiredProperty<string>(fixture.Context, "CoordinatorInstanceId")]));
+        var scope = $"coordinator_instance_id={projectedId};";
+        var predecessor = Grant(fixture, fixture.InitialRequest with
+        {
+            ListenerRearmRequirement = RuntimeUnlockRetryDispatchListenerRearmRequirement.Required,
+        });
+        var offerGeneration = checked(fixture.InitialRequest.RetiredOfferGeneration + 1);
+        BindActivePredecessorForSuccessor(fixture, predecessor, offerGeneration);
+        fixture.Bridge.RejectNextConfirmation = rejectConfirmation;
+        fixture.Bridge.RaiseSuccessorEvaluation(new(predecessor.Authority, offerGeneration));
+        Assert.Equal(RuntimeUnlockRetryDispatchSuccessorDecisionStatus.Requested, fixture.Bridge.DequeueSuccessorDecision().Status);
+        var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(fixture.Bridge.DequeueAuthorityDecision().Contract);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStageStatus.Staged, fixture.Bridge.DequeueStageResult().Status);
+        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, fixture.Bridge.DequeueInstallResult().Status);
+        if (rejectConfirmation)
+        {
+            Assert.Equal("retry_dispatch_install_confirmation_rejected", fixture.Bridge.DequeueAuthorityDecision().Reason);
+            Assert.Same(predecessor, fixture.Bridge.InfraCurrentContract);
+            Assert.False(predecessor.Lifecycle.IsSettled);
+        }
+        else
+        {
+            fixture.Bridge.FlushInstallFollowUp();
+            Assert.True(predecessor.TryCreateSettlementReport(out var report));
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementOutcome.Superseded, report.Outcome);
+            Assert.Equal(successor.Authority.AuthorityId, report.SuccessorAuthorityId);
+            Assert.Null(GetPendingPredecessorAttempt(fixture.Context));
+            fixture.Bridge.RaiseSettlementReport(report);
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent, fixture.Bridge.DequeueSettlementDecision().Status);
+            fixture.Bridge.RaiseSettlementReport(report with { Reason = "late_predecessor_mismatch" });
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected, fixture.Bridge.DequeueSettlementDecision().Status);
+            Assert.Same(successor, fixture.Bridge.InfraCurrentContract);
+            Assert.Equal(successor.Authority, GetCurrentAttempt(fixture.Context)?.Authority);
+            Assert.False(successor.Lifecycle.IsSettled);
+            if (settleSuccessor)
+            {
+                var installReceipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(GetCurrentInstallReceipt(fixture.Context));
+                var successorOfferGeneration = checked(offerGeneration + 1);
+                var successorOfferNonce = $"confirmed-successor-{successorOfferGeneration}";
+                Assert.True(successor.TryBindOfferAlias(successorOfferGeneration, successorOfferNonce));
+                fixture.Bridge.RaiseExecutionObservation(new(successor.Authority,
+                    RuntimeUnlockRetryDispatchAttemptPhase.AliasBound, successorOfferGeneration, successorOfferNonce, false)
+                {
+                    InstallReceipt = installReceipt,
+                });
+                Assert.True(successor.TryBeginSend(out var attempt));
+                fixture.Bridge.RaiseExecutionObservation(new(successor.Authority,
+                    RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight, successorOfferGeneration, successorOfferNonce, false)
+                {
+                    InstallReceipt = installReceipt,
+                });
+                Assert.True(successor.TryCreateObservedSettlementProposal(attempt, "dispatch_observed", out var successorReport));
+                fixture.Bridge.RaiseSettlementReport(successorReport);
+                var closure = fixture.Bridge.DequeueSettlementDecision();
+                Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted, closure.Status);
+                Assert.Equal("retry_dispatch_settlement_accepted", closure.Reason);
+                Assert.Null(GetCurrentAttempt(fixture.Context));
+                Assert.Equal(successorReport, GetLastSettlement(fixture.Context));
+                Assert.Equal(successor.Authority,
+                    GetCoordinatorPersistentState(fixture.Context).RuntimeUnlockRetryLifecycle.LastTerminalAttempt!.Value.Authority);
+                Assert.True(successor.Lifecycle.DispatchObserved);
+                fixture.Bridge.RaiseSettlementReport(successorReport);
+                Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent, fixture.Bridge.DequeueSettlementDecision().Status);
+                fixture.Bridge.RaiseSettlementReport(successorReport with { Reason = "late_successor_mismatch" });
+                Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected, fixture.Bridge.DequeueSettlementDecision().Status);
+                fixture.Bridge.RaiseSettlementReport(successorReport with
+                {
+                    Outcome = RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+                    DispatchObserved = false, Reason = "late_successor_missing_dispatch",
+                });
+                Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected, fixture.Bridge.DequeueSettlementDecision().Status);
+                Assert.Equal(successorReport, GetLastSettlement(fixture.Context));
+            }
+        }
+        fixture.Service.Dispose();
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Split('\n').Any(line =>
+            line.Contains(scope, StringComparison.Ordinal) &&
+            line.Contains("event=filetransfer_coordinator_snapshot_stream_completed;", StringComparison.Ordinal)));
+        var lines = ReadOperationalLogTail(logStart).Split('\n').Where(line => line.Contains(scope, StringComparison.Ordinal)).ToArray();
+        var snapshots = lines.Where(line => line.Contains("event=filetransfer_coordinator_transition_snapshot;", StringComparison.Ordinal))
+            .Select(line =>
+            {
+                var payload = Field(line, "snapshot_payload").Replace('-', '+').Replace('_', '/');
+                payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+                using var document = JsonDocument.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(payload)));
+                return (Line: line, Envelope: document.RootElement.Clone());
+            }).ToArray();
+        var retirements = snapshots.Where(item =>
+            item.Envelope.GetProperty("decisionKind").GetString() == "ObserveRuntimeUnlockRetryDispatchSettlement" &&
+            item.Envelope.GetProperty("decisionStatus").GetString() == "Accepted" &&
+            item.Envelope.GetProperty("decisionReason").GetString() == "retry_dispatch_settlement_superseded_predecessor").ToArray();
+        var effects = lines.Where(line => line.Contains("event=filetransfer_coordinator_authority_effect;", StringComparison.Ordinal) &&
+            Field(line, "effect_kind") == "settlement_observed" && Field(line, "receipt_status") == "Superseded").ToArray();
+        if (rejectConfirmation)
+        {
+            Assert.Empty(retirements);
+            Assert.Empty(effects);
+            return;
+        }
+        var retirement = Assert.Single(retirements);
+        var aggregate = retirement.Envelope.GetProperty("aggregate");
+        var operations = aggregate.GetProperty("operations").EnumerateArray().ToArray();
+        Assert.Equal(2, operations.Length);
+        var retained = Assert.Single(operations, operation => operation.GetProperty("operationRole").GetString() == "attempt_retained_predecessor");
+        var terminal = Assert.Single(operations, operation => operation.GetProperty("operationRole").GetString() == "attempt_terminal");
+        Assert.Equal("Settled", retained.GetProperty("beforeState").GetString());
+        Assert.Equal("None", retained.GetProperty("afterState").GetString());
+        Assert.Equal("None", terminal.GetProperty("beforeState").GetString());
+        Assert.Equal("Settled", terminal.GetProperty("afterState").GetString());
+        Assert.Equal(retained.GetProperty("authorityId").GetString(), terminal.GetProperty("authorityId").GetString());
+        Assert.Equal(retained.GetProperty("runtimeUnlockRetry").GetProperty("receipts").GetRawText(),
+            terminal.GetProperty("runtimeUnlockRetry").GetProperty("receipts").GetRawText());
+        var receipt = Assert.Single(terminal.GetProperty("runtimeUnlockRetry").GetProperty("receipts").EnumerateArray(),
+            value => value.GetProperty("stage").GetString() == "settlement");
+        var effect = Assert.Single(effects);
+        Assert.Equal(retirement.Envelope.GetProperty("transitionId").GetString(), Field(effect, "transition_id"));
+        Assert.Equal(terminal.GetProperty("operationKey").GetString(), Field(effect, "operation_key"));
+        Assert.Equal(terminal.GetProperty("authorityId").GetString(), Field(effect, "operation_authority_id"));
+        Assert.Equal(aggregate.GetProperty("afterStateGeneration").GetInt64().ToString(), Field(effect, "coordinator_state_generation"));
+        Assert.Equal(receipt.GetProperty("receiptIdentity").GetString(), Field(effect, "receipt_identity"));
+        Assert.Equal(receipt.GetProperty("receiptGeneration").GetInt64().ToString(), Field(effect, "receipt_generation"));
+        Assert.Equal(receipt.GetProperty("receiptFingerprint").GetString(), Field(effect, "receipt_fingerprint"));
+        Assert.True(Array.IndexOf(lines, effect) > Array.IndexOf(lines, retirement.Line));
+
+        if (settleSuccessor)
+        {
+            var closure = Assert.Single(snapshots, item =>
+                item.Envelope.GetProperty("decisionKind").GetString() == "ObserveRuntimeUnlockRetryDispatchSettlement" &&
+                item.Envelope.GetProperty("decisionStatus").GetString() == "Accepted" &&
+                item.Envelope.GetProperty("decisionReason").GetString() == "retry_dispatch_settlement_accepted");
+            var closureAggregate = closure.Envelope.GetProperty("aggregate");
+            var closureOperations = closureAggregate.GetProperty("operations").EnumerateArray().ToArray();
+            Assert.Equal(3, closureOperations.Length);
+            var removed = Assert.Single(closureOperations, operation =>
+                operation.GetProperty("operationRole").GetString() == "attempt_terminal" &&
+                operation.GetProperty("beforeState").GetString() == "Settled" &&
+                operation.GetProperty("afterState").GetString() == "None");
+            Assert.Equal(terminal.GetProperty("operationKey").GetString(), removed.GetProperty("operationKey").GetString());
+            Assert.Equal(terminal.GetProperty("runtimeUnlockRetry").GetRawText(), removed.GetProperty("runtimeUnlockRetry").GetRawText());
+            var entering = Assert.Single(closureOperations, operation =>
+                operation.GetProperty("operationRole").GetString() == "attempt_terminal" &&
+                operation.GetProperty("beforeState").GetString() == "None" &&
+                operation.GetProperty("afterState").GetString() == "Settled");
+            var settlement = Assert.Single(entering.GetProperty("runtimeUnlockRetry").GetProperty("receipts").EnumerateArray(),
+                value => value.GetProperty("stage").GetString() == "settlement");
+            Assert.Equal("DispatchObserved", settlement.GetProperty("receiptStatus").GetString());
+            var closureEffects = lines.Where(line => line.Contains("event=filetransfer_coordinator_authority_effect;", StringComparison.Ordinal) &&
+                Field(line, "transition_id") == closure.Envelope.GetProperty("transitionId").GetString()).ToArray();
+            Assert.DoesNotContain(closureEffects, line => Field(line, "operation_key") == removed.GetProperty("operationKey").GetString());
+            var closureEffect = Assert.Single(closureEffects);
+            Assert.Equal("settlement_observed", Field(closureEffect, "effect_kind"));
+            Assert.Equal(entering.GetProperty("operationKey").GetString(), Field(closureEffect, "operation_key"));
+            Assert.Equal(entering.GetProperty("authorityId").GetString(), Field(closureEffect, "operation_authority_id"));
+            Assert.Equal(entering.GetProperty("operationGeneration").GetInt32().ToString(), Field(closureEffect, "operation_generation"));
+            Assert.Equal(closureAggregate.GetProperty("afterStateGeneration").GetInt64().ToString(), Field(closureEffect, "coordinator_state_generation"));
+            Assert.Equal(settlement.GetProperty("receiptIdentity").GetString(), Field(closureEffect, "receipt_identity"));
+            Assert.Equal(settlement.GetProperty("receiptGeneration").GetInt64().ToString(), Field(closureEffect, "receipt_generation"));
+            Assert.Equal("DispatchObserved", Field(closureEffect, "receipt_status"));
+            Assert.Equal(settlement.GetProperty("receiptFingerprint").GetString(), Field(closureEffect, "receipt_fingerprint"));
+            Assert.True(Array.IndexOf(lines, closureEffect) > Array.IndexOf(lines, closure.Line));
+            Assert.Single(lines.Where(line => line.Contains("event=filetransfer_coordinator_authority_effect;", StringComparison.Ordinal) &&
+                Field(line, "effect_kind") == "settlement_observed" &&
+                Field(line, "operation_authority_id") == entering.GetProperty("authorityId").GetString()));
+        }
+
+        static string Field(string line, string name)
+            => Regex.Match(line, @"(?:^|; )" + Regex.Escape(name) + @"=([^;]+)").Groups[1].Value;
+    }
+
+    [Fact]
+    public void ConfirmedSupersession_SuccessorBindingRejectsAmbiguousOrMismatchedTerminalEvidence()
+    {
+        var fixture = typeof(FileTransferCoordinatorTests).GetMethod("CreateActiveRetryConfirmationFixture",
+            BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;
+        var commit = GetRequiredProperty<RuntimeUnlockRetryLifecycleTransitionDecision>(fixture, "Commit");
+        var retirement = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+            commit.State, commit.PredecessorSettlementDecision!.Value.Report);
+        var installed = retirement.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt!.Value;
+        var receipt = installed.InstallReceipt!.Value;
+        var alias = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchExecutionState(retirement.State, receipt,
+            RuntimeUnlockRetryDispatchAttemptPhase.AliasBound, 73, "bound-successor", false);
+        var sending = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchExecutionState(alias.State, receipt,
+            RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight, 73, "bound-successor", false);
+        var report = new RuntimeUnlockRetryDispatchSettlementReport(installed.Authority,
+            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved, "dispatch_observed")
+        {
+            OfferGeneration = 73, OfferNonce = "bound-successor", DispatchObserved = true,
+        };
+        var closure = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(sending.State, report);
+        Assert.True(closure.Accepted, closure.Reason);
+        var envelope = closure.SnapshotEnvelope!;
+        var operations = envelope.Aggregate.Operations;
+        var entering = Assert.Single(operations, operation => operation.OperationRole == "attempt_terminal" && operation.BeforeState == "None");
+        var removed = Assert.Single(operations, operation => operation.OperationRole == "attempt_terminal" && operation.AfterState == "None");
+        var method = typeof(SessionFileTransferService).GetMethod(
+            "CreateRuntimeUnlockRetrySuccessorSettlementAuthorityEffectBinding", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var binding = Assert.IsType<FileTransferCoordinatorAuthorityEffectBinding>(Bind(closure));
+        Assert.Equal(entering.OperationKey, binding.OperationKey);
+        Assert.Equal(entering.ReceiptFingerprint, binding.ReceiptFingerprint);
+        Assert.Equal(binding, Bind(WithOperations(operations.Reverse())));
+        var cases = new (string Name, RuntimeUnlockRetryDispatchSettlementDecision Decision)[]
+        {
+            ("idempotent", closure with { Status = RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent }),
+            ("rejected", closure with { Status = RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected }),
+            ("wrong session", closure with { SnapshotEnvelope = envelope with { SessionId = "foreign-session" } }),
+            ("wrong report", closure with { Report = report with { OfferNonce = "foreign-offer" } }),
+            ("wrong generation", closure with { SnapshotEnvelope = envelope with
+                { Aggregate = envelope.Aggregate with { AfterStateGeneration = envelope.Aggregate.AfterStateGeneration + 1 } } }),
+            ("missing removed predecessor", WithOperations(operations.Where(operation => operation != removed))),
+            ("duplicate entering terminal", WithOperations(operations.Add(entering))),
+            ("wrong removed authority", WithOperations(operations.Select(operation => operation == removed ? operation with { AuthorityId = "foreign" } : operation))),
+            ("changed historical receipt", ChangeReceipt(removed)),
+            ("changed current receipt", ChangeReceipt(entering)),
+        };
+        foreach (var item in cases) { Assert.True(Bind(item.Decision) is null, item.Name); }
+
+        object? Bind(RuntimeUnlockRetryDispatchSettlementDecision decision) => method.Invoke(null, [decision]);
+        RuntimeUnlockRetryDispatchSettlementDecision WithOperations(IEnumerable<FileTransferCoordinatorOperationTransitionSnapshot> values)
+            => closure with { SnapshotEnvelope = envelope with { Aggregate = envelope.Aggregate with { Operations = values.ToImmutableArray() } } };
+        RuntimeUnlockRetryDispatchSettlementDecision ChangeReceipt(FileTransferCoordinatorOperationTransitionSnapshot subject)
+        {
+            var receipts = subject.RuntimeUnlockRetry!.Receipts;
+            var changed = receipts[^1] with { ReceiptFingerprint = "changed-settlement" };
+            var operation = subject with { ReceiptFingerprint = changed.ReceiptFingerprint,
+                RuntimeUnlockRetry = subject.RuntimeUnlockRetry with { Receipts = receipts.SetItem(receipts.Length - 1, changed) } };
+            return WithOperations(operations.Select(value => value == subject ? operation : value));
+        }
+    }
+
+    [Fact]
+    public void ConfirmedSupersession_BindingRejectsAmbiguousOrMismatchedTerminalEvidence()
+    {
+        // Reuse the real Coordinator fixture without adding a production test hook.
+        var fixture = typeof(FileTransferCoordinatorTests).GetMethod("CreateActiveRetryConfirmationFixture",
+            BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;
+        var commit = GetRequiredProperty<RuntimeUnlockRetryLifecycleTransitionDecision>(fixture, "Commit");
+        var retirement = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+            commit.State, commit.PredecessorSettlementDecision!.Value.Report);
+        Assert.True(retirement.Accepted, retirement.Reason);
+        var envelope = retirement.SnapshotEnvelope!;
+        var operations = envelope.Aggregate.Operations;
+        var retained = Assert.Single(operations, value => value.OperationRole == "attempt_retained_predecessor");
+        var terminal = Assert.Single(operations, value => value.OperationRole == "attempt_terminal");
+        var method = typeof(SessionFileTransferService).GetMethod(
+            "CreateRuntimeUnlockRetrySupersededSettlementAuthorityEffectBinding", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var binding = Assert.IsType<FileTransferCoordinatorAuthorityEffectBinding>(Bind(retirement));
+        Assert.Equal(terminal.OperationKey, binding.OperationKey);
+        Assert.Equal(terminal.ReceiptFingerprint, binding.ReceiptFingerprint);
+        Assert.Equal(binding, Bind(WithOperations(operations.Reverse())));
+
+        var cases = new (string Name, RuntimeUnlockRetryDispatchSettlementDecision Decision)[]
+        {
+            ("missing envelope", retirement with { SnapshotEnvelope = null }),
+            ("idempotent", retirement with { Status = RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent }),
+            ("rejected", retirement with { Status = RuntimeUnlockRetryDispatchSettlementDecisionStatus.Rejected }),
+            ("missing retained", WithOperations([terminal])),
+            ("duplicate retained", WithOperations([retained, retained, terminal])),
+            ("duplicate terminal", WithOperations([retained, terminal, terminal])),
+            ("wrong session", retirement with { SnapshotEnvelope = envelope with { SessionId = "foreign-session" } }),
+            ("wrong transfer", retirement with { SnapshotEnvelope = envelope with { TransferId = "foreign-transfer" } }),
+            ("wrong coordinator", retirement with { SnapshotEnvelope = envelope with { CoordinatorInstanceId = "foreign-coordinator" } }),
+            ("wrong direction", retirement with { SnapshotEnvelope = envelope with
+                { Direction = envelope.Direction == "outbound" ? "inbound" : "outbound" } }),
+            ("wrong generation", retirement with { SnapshotEnvelope = envelope with
+                { Aggregate = envelope.Aggregate with { AfterStateGeneration = envelope.Aggregate.AfterStateGeneration + 1 } } }),
+            ("no state mutation", Mutate(value => value with { StateApplied = false })),
+            ("wrong authority", Mutate(value => value with { AuthorityId = "foreign-authority",
+                OperationKey = $"runtime_unlock_retry_lifecycle|{value.OperationRole}|foreign-authority|{value.OperationGeneration}|RetryAttempt" })),
+            ("wrong source data session", Mutate(value => value with { RuntimeUnlockRetry = value.RuntimeUnlockRetry! with
+                { SourceBoundary = value.RuntimeUnlockRetry.SourceBoundary with { DataSessionIdentity = "foreign-data-session" } } })),
+            ("wrong source generation", Mutate(value => value with { RuntimeUnlockRetry = value.RuntimeUnlockRetry! with
+                { SourceBoundary = value.RuntimeUnlockRetry.SourceBoundary with
+                    { DataSessionGeneration = value.RuntimeUnlockRetry.SourceBoundary.DataSessionGeneration + 1 } } })),
+            ("wrong successor", Mutate(value => value with { RuntimeUnlockRetry = value.RuntimeUnlockRetry! with
+                { SuccessorAuthorityId = "foreign-successor" } })),
+            ("receipt sibling mismatch", WithOperations([retained, terminal with { ReceiptFingerprint = "foreign-fingerprint" }])),
+            ("receipt generation mismatch", Mutate(value => value with { ReceiptGeneration = value.ReceiptGeneration + 1,
+                RuntimeUnlockRetry = value.RuntimeUnlockRetry! with { Receipts = value.RuntimeUnlockRetry.Receipts.Select(receipt =>
+                    receipt.Stage == "settlement" ? receipt with { ReceiptGeneration = receipt.ReceiptGeneration + 1 } : receipt).ToImmutableArray() } })),
+            ("unvalidated receipt", Mutate(value => value with { ReceiptValidated = false,
+                RuntimeUnlockRetry = value.RuntimeUnlockRetry! with { Receipts = value.RuntimeUnlockRetry.Receipts.Select(receipt =>
+                    receipt.Stage == "settlement" ? receipt with { ReceiptValidated = false } : receipt).ToImmutableArray() } })),
+        };
+        foreach (var (name, decision) in cases)
+        {
+            Assert.True(Bind(decision) is null, name);
+        }
+        Assert.Equal(binding, Bind(retirement));
+
+        object? Bind(RuntimeUnlockRetryDispatchSettlementDecision decision) => method.Invoke(null, [decision]);
+        RuntimeUnlockRetryDispatchSettlementDecision WithOperations(IEnumerable<FileTransferCoordinatorOperationTransitionSnapshot> values)
+            => retirement with { SnapshotEnvelope = envelope with
+                { Aggregate = envelope.Aggregate with { Operations = values.ToImmutableArray() } } };
+        RuntimeUnlockRetryDispatchSettlementDecision Mutate(Func<FileTransferCoordinatorOperationTransitionSnapshot,
+            FileTransferCoordinatorOperationTransitionSnapshot> mutation) => WithOperations(operations.Select(mutation));
     }
 
     [Fact]

@@ -1323,6 +1323,18 @@ public sealed partial class SessionFileTransferService
             context,
             decision.State,
             decision.SnapshotEnvelope);
+        if (decision.Report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded)
+        {
+            EnqueueRuntimeUnlockRetrySupersededSettlementAuthorityEffect(
+                context.CoordinatorSnapshotEmitter, context.CoordinatorInstanceId, context.SessionId,
+                context.TransferId, FileTransferDirection.Outbound,
+                context.CoordinatorPersistentState.SnapshotStateGeneration, decision);
+            return;
+        }
+        if (TryEnqueueRuntimeUnlockRetrySuccessorSettlementAuthorityEffect(
+                context.CoordinatorSnapshotEmitter, context.CoordinatorInstanceId, context.SessionId,
+                context.TransferId, FileTransferDirection.Outbound,
+                context.CoordinatorPersistentState.SnapshotStateGeneration, decision)) { return; }
         EnqueueRuntimeUnlockRetryAuthorityEffect(
             context,
             decision.SnapshotEnvelope,
@@ -1338,6 +1350,18 @@ public sealed partial class SessionFileTransferService
             context,
             decision.State,
             decision.SnapshotEnvelope);
+        if (decision.Report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded)
+        {
+            EnqueueRuntimeUnlockRetrySupersededSettlementAuthorityEffect(
+                context.CoordinatorSnapshotEmitter, context.CoordinatorInstanceId, context.SessionId,
+                context.TransferId, FileTransferDirection.Inbound,
+                context.CoordinatorPersistentState.SnapshotStateGeneration, decision);
+            return;
+        }
+        if (TryEnqueueRuntimeUnlockRetrySuccessorSettlementAuthorityEffect(
+                context.CoordinatorSnapshotEmitter, context.CoordinatorInstanceId, context.SessionId,
+                context.TransferId, FileTransferDirection.Inbound,
+                context.CoordinatorPersistentState.SnapshotStateGeneration, decision)) { return; }
         EnqueueRuntimeUnlockRetryAuthorityEffect(
             context,
             decision.SnapshotEnvelope,

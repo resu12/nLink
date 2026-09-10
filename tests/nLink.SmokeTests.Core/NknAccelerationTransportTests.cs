@@ -21145,7 +21145,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             _ = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
                 "transfer_tuna_activation_ack_gate_host",
@@ -30783,7 +30784,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockPeerOfferAccepted_BindsCurrentTunaPathLeaseForPreCommitProof()
+    public async Task RuntimeUnlockPeerOfferAccepted_BindsCurrentTunaPathLeaseWithoutLaunchingBeforeConvergence()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -30837,6 +30838,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 typeof(NknSignalingTransport)
                     .GetField("runtimeUnlockTransactionState", BindingFlags.Instance | BindingFlags.NonPublic)!
                     .GetValue(helper));
+            var leaseState = GetPrivateField(helper, "runtimeUnlockTunaPathLeaseState");
+            Assert.Null(GetPrivateField(helper, "runtimeUnlockResponderAnswerProbeConvergence"));
             InvokePrivateMethod(
                 helper,
                 "RequestRuntimeUnlockPreCommitProbeLaunch",
@@ -30844,43 +30847,22 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 NknAccelerationLaneKind.File,
                 "unit_test_exact_launch_snapshot",
                 transactionState);
-            var launchSnapshot = Assert.IsType<RuntimeUnlockRouteCommitSnapshot>(
-                typeof(NknSignalingTransport)
-                    .GetField("runtimeUnlockPreCommitProbeLaunchSnapshot", BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .GetValue(helper));
-            Assert.True(launchSnapshot.LaunchGeneration > 0);
-            Assert.Equal(transferId, launchSnapshot.TransferId);
-            Assert.Equal(snapshot.TunaPathLeaseGeneration, launchSnapshot.TunaPathLeaseGeneration);
-
-            provider.NotifyRuntimeUnlockPathProbeStarted(
-                sessionId,
-                transferId,
-                transportEpoch: 1,
-                probeId: "runtime-unlock-precommit:1:9:exact-launch",
-                FileTransferTransportKind.Tuna,
-                reason: "unit_test_exact_launch_snapshot");
-            Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var startedSnapshot));
-            Assert.Equal(launchSnapshot.LaunchGeneration, startedSnapshot.LaunchGeneration);
-            Assert.Equal(transferId, startedSnapshot.TransferId);
-            Assert.Equal(launchSnapshot.TunaPathLeaseGeneration, startedSnapshot.TunaPathLeaseGeneration);
-            provider.NotifyRuntimeUnlockPathProbeResult(
-                sessionId,
-                transferId,
-                transportEpoch: 1,
-                probeId: "runtime-unlock-precommit:1:9:exact-launch",
-                FileTransferTransportKind.Tuna,
-                acked: true,
-                reason: "unit_test_exact_launch_snapshot_ack");
-            Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var ackedSnapshot));
-            Assert.Equal(launchSnapshot.LaunchGeneration, ackedSnapshot.LaunchGeneration);
-            Assert.Equal(transferId, ackedSnapshot.TransferId);
-            Assert.Equal(launchSnapshot.TunaPathLeaseGeneration, ackedSnapshot.TunaPathLeaseGeneration);
+            // Lease creation does not manufacture the answer/probe convergence
+            // required to launch. Actual Started/ACK provenance belongs in a
+            // joined fixture, not manually supplied callbacks in this test.
+            Assert.Null(GetPrivateField(helper, "runtimeUnlockPreCommitProbeLaunchSnapshot"));
+            Assert.Null(GetPrivateField(helper, "runtimeUnlockResponderAnswerProbeConvergence"));
+            Assert.Equal(transactionState, GetPrivateField(helper, "runtimeUnlockTransactionState"));
+            Assert.Equal(leaseState, GetPrivateField(helper, "runtimeUnlockTunaPathLeaseState"));
+            Assert.True(provider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var unchangedSnapshot));
+            Assert.Equal(snapshot, unchangedSnapshot);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_path_lease_listener_ready;", logTail, StringComparison.Ordinal);
             Assert.Contains("offer_generation=9", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("tuna_path_lease_generation=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_precommit_probe_launch_requested;", logTail, StringComparison.Ordinal);
-            Assert.Contains($"launch_generation={launchSnapshot.LaunchGeneration}", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_launch_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_acked;", logTail, StringComparison.Ordinal);
             Assert.Contains($"transfer_id={transferId}", logTail, StringComparison.Ordinal);
         }
         finally
@@ -38245,11 +38227,16 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             return true;
         }
 
-        public event EventHandler<NknIncomingMessage>? MessageReceived
-        {
-            add { }
-            remove { }
-        }
+        public event EventHandler<NknIncomingMessage>? MessageReceived;
+
+        // Optional physical-byte link for joined tests. Existing lane fixtures
+        // remain send-rejecting unless they explicitly supply this callback.
+        public Func<NknBridgeChannel, byte[], CancellationToken, Task<bool>>? ForwardBytesForTests { get; set; }
+
+        public void ReceivePeerBytesForTests(NknBridgeChannel lane, byte[] bytes)
+            => MessageReceived?.Invoke(this, new NknIncomingMessage(string.Empty, bytes.AsSpan().ToArray(),
+                isTopic: false, topic: null, channel: lane,
+                bridgeIngressObservedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
 
         public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
 
@@ -38347,7 +38334,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
 
         public Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
-            => Task.FromResult(false);
+            => IsAvailable && !ct.IsCancellationRequested && ForwardBytesForTests is { } forward
+                ? forward(lane, envelopeBytes.AsSpan().ToArray(), ct)
+                : Task.FromResult(false);
 
         public Task StopAsync(string reason, CancellationToken ct)
         {

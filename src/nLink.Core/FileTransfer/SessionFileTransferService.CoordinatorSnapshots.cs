@@ -1158,6 +1158,233 @@ public sealed partial class SessionFileTransferService
             FileTransferCoordinatorTransitionEnvelope envelope)
         => CreateRuntimeUnlockRetryInstallAuthorityEffectBinding(envelope);
 
+    private static void EnqueueRuntimeUnlockRetrySupersededSettlementAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter, string coordinatorInstanceId,
+        string sessionId, string transferId, FileTransferDirection direction, long stateGeneration,
+        RuntimeUnlockRetryDispatchSettlementDecision decision)
+    {
+        if (CreateRuntimeUnlockRetrySupersededSettlementAuthorityEffectBinding(decision) is not { } binding)
+        {
+            return;
+        }
+        emitter.EnqueueAuthorityEffect(coordinatorInstanceId, sessionId, transferId, direction, stateGeneration,
+            binding.Family, binding.AuthorityId, binding.OperationGeneration, binding.ReceiptIdentity,
+            binding.ReceiptGeneration, binding.ReceiptStatus, binding.ReceiptFingerprint, binding.EffectKind,
+            $"{binding.OperationKey}:{binding.EffectKind}", binding.ReceiptGeneration, binding.OperationKey);
+    }
+
+    private static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateRuntimeUnlockRetrySupersededSettlementAuthorityEffectBinding(RuntimeUnlockRetryDispatchSettlementDecision decision)
+    {
+        if (decision.Status != RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted ||
+            decision.SnapshotEnvelope is not { } envelope || decision.State is not { } state)
+        {
+            return null;
+        }
+        var report = decision.Report;
+        var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+        if (decision.Reason != "retry_dispatch_settlement_superseded_predecessor" || report.IsDefault ||
+            report.Outcome != RuntimeUnlockRetryDispatchSettlementOutcome.Superseded || report.DispatchObserved ||
+            report.Reason != "coordinator_successor_installed" || report.OfferGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(report.OfferNonce) || lifecycle.RetainedPredecessor is not null ||
+            lifecycle.LastTerminalAttempt is not { State: RuntimeUnlockRetryLifecycleAttemptState.Settled } retired ||
+            retired.Authority != report.Authority || retired.Settlement != report ||
+            lifecycle.InstalledAttempt is not { } successor || !successor.IsInstalled ||
+            successor.Authority.PredecessorAuthorityId != report.Authority.AuthorityId ||
+            successor.Authority.AuthorityId != report.SuccessorAuthorityId ||
+            envelope.DecisionKind != nameof(FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement) ||
+            envelope.DecisionStatus != "Accepted" || envelope.DecisionReason != decision.Reason ||
+            envelope.SessionId != report.Authority.SessionId || envelope.TransferId != report.Authority.TransferId ||
+            envelope.Direction != report.Authority.Direction.ToString().ToLowerInvariant() ||
+            envelope.CoordinatorInstanceId != state.PersistentState.CoordinatorInstanceId ||
+            envelope.Aggregate.AfterStateGeneration != envelope.Aggregate.BeforeStateGeneration + 1 ||
+            envelope.Aggregate.AfterStateGeneration != state.PersistentState.SnapshotStateGeneration ||
+            envelope.Aggregate.AfterStateFingerprint != state.PersistentState.SnapshotStateFingerprint ||
+            envelope.Aggregate.BeforeStateFingerprint == envelope.Aggregate.AfterStateFingerprint ||
+            envelope.Aggregate.BeforeBoundary != envelope.Aggregate.AfterBoundary ||
+            envelope.Aggregate.Operations.Length != 2)
+        {
+            return null;
+        }
+        var retainedMatches = envelope.Aggregate.Operations.Where(operation =>
+            operation.OperationRole == "attempt_retained_predecessor" && operation.BeforeState == "Settled" && operation.AfterState == "None").ToArray();
+        var terminalMatches = envelope.Aggregate.Operations.Where(operation =>
+            operation.OperationRole == "attempt_terminal" && operation.BeforeState == "None" && operation.AfterState == "Settled").ToArray();
+        if (retainedMatches.Length != 1 || terminalMatches.Length != 1) { return null; }
+        var retained = retainedMatches[0];
+        var terminal = terminalMatches[0];
+        var authority = report.Authority;
+        var authorityId = authority.AuthorityId.ToString();
+        var expectedSource = new FileTransferCoordinatorStateBoundarySnapshot(authority.RouteToken,
+            authority.ProtocolVersion, authority.LiveRouteEpoch, authority.RoutePublicationGeneration,
+            authority.RouteCommitGeneration ?? 0, authority.RuntimeGeneration, authority.TerminalGeneration,
+            authority.LegGeneration, authority.TransportEpoch, authority.BridgeRecoveryGeneration,
+            authority.CheckpointGeneration, authority.CheckpointRequestId, authority.DataSessionIdentity, authority.DataSessionGeneration);
+        foreach (var operation in new[] { retained, terminal })
+        {
+            if (operation.Family != "runtime_unlock_retry_lifecycle" || operation.OperationKind != "RetryAttempt" ||
+                !operation.StateApplied || operation.AuthorityId != authorityId ||
+                operation.OperationGeneration != authority.AuthorityGeneration ||
+                operation.OperationKey != $"runtime_unlock_retry_lifecycle|{operation.OperationRole}|{authorityId}|{authority.AuthorityGeneration}|RetryAttempt" ||
+                operation.RuntimeUnlockRetry is not { } payload || payload.Role != operation.OperationRole ||
+                payload.AuthorityGeneration != authority.AuthorityGeneration || payload.SourceBoundary != expectedSource ||
+                payload.SuccessorAuthorityId != successor.Authority.AuthorityId.ToString() ||
+                payload.OfferGeneration != report.OfferGeneration || payload.DispatchObserved)
+            {
+                return null;
+            }
+        }
+        var retainedPayload = retained.RuntimeUnlockRetry!;
+        var terminalPayload = terminal.RuntimeUnlockRetry!;
+        if (!retainedPayload.Receipts.SequenceEqual(terminalPayload.Receipts) ||
+            (retainedPayload with { Role = terminalPayload.Role, Receipts = terminalPayload.Receipts }) != terminalPayload ||
+            (retained with { OperationRole = terminal.OperationRole, OperationKey = terminal.OperationKey,
+                BeforeState = terminal.BeforeState, AfterState = terminal.AfterState, RuntimeUnlockRetry = terminalPayload }) != terminal)
+        {
+            return null;
+        }
+        var receipts = terminalPayload.Receipts.Where(receipt => receipt.Stage == "settlement").ToArray();
+        if (receipts.Length != 1) { return null; }
+        var settlement = receipts[0];
+        if (!settlement.ReceiptValidated || settlement.ReceiptStatus != "Superseded" || settlement.ReceiptReason != report.Reason ||
+            settlement.CommandIdentity != $"{authorityId}:settlement" || settlement.ReceiptIdentity != settlement.CommandIdentity ||
+            settlement.CommandGeneration != report.OfferGeneration || settlement.ReceiptGeneration != report.OfferGeneration ||
+            string.IsNullOrWhiteSpace(settlement.CommandFingerprint) || settlement.CommandFingerprint == "(none)" ||
+            string.IsNullOrWhiteSpace(settlement.ReceiptFingerprint) || settlement.ReceiptFingerprint == "(none)" ||
+            !ReceiptMatchesOperation(retained, settlement) || !ReceiptMatchesOperation(terminal, settlement))
+        {
+            return null;
+        }
+        return CreateAuthorityEffectBinding("settlement_observed", terminal, settlement);
+    }
+
+    private static bool TryEnqueueRuntimeUnlockRetrySuccessorSettlementAuthorityEffect(
+        CoordinatorSnapshotStreamEmitter emitter, string coordinatorInstanceId,
+        string sessionId, string transferId, FileTransferDirection direction, long stateGeneration,
+        RuntimeUnlockRetryDispatchSettlementDecision decision)
+    {
+        var lifecycle = decision.State?.PersistentState.RuntimeUnlockRetryLifecycle;
+        if (lifecycle?.LastTerminalAttempt is not { } completed ||
+            completed.Settlement?.Outcome != RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved || lifecycle.AttemptHistory.IsDefault ||
+            !lifecycle.AttemptHistory.Any(attempt =>
+                attempt.Authority.AuthorityId == completed.Authority.PredecessorAuthorityId &&
+                attempt.Settlement?.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded &&
+                attempt.SuccessorAuthorityId == completed.Authority.AuthorityId)) { return false; }
+        // A failed exact binding must not fall back to the generic receipt selector.
+        if (CreateRuntimeUnlockRetrySuccessorSettlementAuthorityEffectBinding(decision) is { } binding)
+        {
+            emitter.EnqueueAuthorityEffect(coordinatorInstanceId, sessionId, transferId, direction, stateGeneration,
+                binding.Family, binding.AuthorityId, binding.OperationGeneration, binding.ReceiptIdentity,
+                binding.ReceiptGeneration, binding.ReceiptStatus, binding.ReceiptFingerprint, binding.EffectKind,
+                $"{binding.OperationKey}:{binding.EffectKind}", binding.ReceiptGeneration, binding.OperationKey);
+        }
+        return true;
+    }
+
+    private static FileTransferCoordinatorAuthorityEffectBinding?
+        CreateRuntimeUnlockRetrySuccessorSettlementAuthorityEffectBinding(RuntimeUnlockRetryDispatchSettlementDecision decision)
+    {
+        if (decision.Status != RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted ||
+            decision.Reason != "retry_dispatch_settlement_accepted" || decision.SnapshotEnvelope is not { } envelope ||
+            decision.State is not { } state) { return null; }
+        var report = decision.Report;
+        var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
+        if (report.IsDefault || report.Outcome != RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved ||
+            !report.DispatchObserved || report.OfferGeneration <= 0 || string.IsNullOrWhiteSpace(report.OfferNonce) ||
+            lifecycle.InstalledAttempt is not null || lifecycle.RetainedPredecessor is not null || lifecycle.PendingAttempt is not null ||
+            lifecycle.LastTerminalAttempt is not { State: RuntimeUnlockRetryLifecycleAttemptState.Settled } completed ||
+            completed.Authority != report.Authority || completed.Settlement != report || !completed.DispatchObserved ||
+            completed.OfferGeneration != report.OfferGeneration || completed.OfferNonce != report.OfferNonce || lifecycle.LastSettlement != report ||
+            envelope.DecisionKind != nameof(FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement) ||
+            envelope.DecisionStatus != "Accepted" || envelope.DecisionReason != decision.Reason ||
+            envelope.SessionId != report.Authority.SessionId || envelope.TransferId != report.Authority.TransferId ||
+            envelope.Direction != report.Authority.Direction.ToString().ToLowerInvariant() ||
+            envelope.CoordinatorInstanceId != state.PersistentState.CoordinatorInstanceId ||
+            envelope.Aggregate.AfterStateGeneration != envelope.Aggregate.BeforeStateGeneration + 1 ||
+            envelope.Aggregate.AfterStateGeneration != state.PersistentState.SnapshotStateGeneration ||
+            envelope.Aggregate.AfterStateFingerprint != state.PersistentState.SnapshotStateFingerprint ||
+            envelope.Aggregate.BeforeStateFingerprint == envelope.Aggregate.AfterStateFingerprint ||
+            envelope.Aggregate.BeforeBoundary != envelope.Aggregate.AfterBoundary || envelope.Aggregate.Operations.Length != 3 ||
+            lifecycle.AttemptHistory.IsDefault) { return null; }
+        var predecessors = lifecycle.AttemptHistory.Where(attempt =>
+            attempt.Authority.AuthorityId == completed.Authority.PredecessorAuthorityId).ToArray();
+        if (predecessors.Length != 1) { return null; }
+        var predecessor = predecessors[0];
+        if (predecessor.State != RuntimeUnlockRetryLifecycleAttemptState.Settled || predecessor.DispatchObserved ||
+            predecessor.Settlement is not { Outcome: RuntimeUnlockRetryDispatchSettlementOutcome.Superseded } retired ||
+            retired.Authority != predecessor.Authority || retired.Reason != "coordinator_successor_installed" || retired.DispatchObserved ||
+            retired.SuccessorAuthorityId != completed.Authority.AuthorityId || predecessor.SuccessorAuthorityId != retired.SuccessorAuthorityId ||
+            predecessor.OfferGeneration <= 0 || retired.OfferGeneration != predecessor.OfferGeneration || retired.OfferNonce != predecessor.OfferNonce)
+        { return null; }
+        var operations = envelope.Aggregate.Operations;
+        var entering = operations.Where(operation => operation.OperationRole == "attempt_terminal" &&
+            operation.BeforeState == "None" && operation.AfterState == "Settled").ToArray();
+        var removed = operations.Where(operation => operation.OperationRole == "attempt_terminal" &&
+            operation.BeforeState == "Settled" && operation.AfterState == "None").ToArray();
+        var installed = operations.Where(operation => operation.OperationRole == "attempt_installed" &&
+            operation.BeforeState == "SendInFlight" && operation.AfterState == "None").ToArray();
+        if (entering.Length != 1 || removed.Length != 1 || installed.Length != 1 ||
+            !Matches(entering[0], completed, RuntimeUnlockRetryLifecycleAttemptState.Settled, true, report) ||
+            !Matches(removed[0], predecessor, RuntimeUnlockRetryLifecycleAttemptState.Settled, false, retired) ||
+            !Matches(installed[0], completed, RuntimeUnlockRetryLifecycleAttemptState.SendInFlight, false, null)) { return null; }
+        return CreateAuthorityEffectBinding("settlement_observed", entering[0], entering[0].RuntimeUnlockRetry!.Receipts[^1]);
+
+        // Validate only the small receipt operands already used by the Coordinator
+        // projection. Never expand or re-fingerprint the aggregate state graph.
+        static bool Matches(FileTransferCoordinatorOperationTransitionSnapshot operation,
+            RuntimeUnlockRetryLifecycleAttemptSnapshot attempt, RuntimeUnlockRetryLifecycleAttemptState phase,
+            bool dispatchObserved, RuntimeUnlockRetryDispatchSettlementReport? settlement)
+        {
+            var authority = attempt.Authority;
+            var authorityId = authority.AuthorityId.ToString();
+            if (operation.Family != "runtime_unlock_retry_lifecycle" || operation.OperationKind != "RetryAttempt" ||
+                !operation.StateApplied || !operation.ReceiptValidated || operation.AuthorityId != authorityId ||
+                operation.PredecessorAuthorityId != (authority.PredecessorAuthorityId?.ToString() ?? "(none)") ||
+                operation.OperationGeneration != authority.AuthorityGeneration ||
+                operation.OperationKey != $"runtime_unlock_retry_lifecycle|{operation.OperationRole}|{authorityId}|{authority.AuthorityGeneration}|RetryAttempt" ||
+                operation.RuntimeUnlockRetry is not { } payload || attempt.StageStatus is not { } stageStatus ||
+                attempt.InstallReceipt is not { IsDefault: false } install || install.Authority != authority || install.Request != attempt.Request ||
+                attempt.OfferGeneration <= 0 || string.IsNullOrWhiteSpace(attempt.OfferNonce)) { return false; }
+            var source = new FileTransferCoordinatorStateBoundarySnapshot(authority.RouteToken,
+                authority.ProtocolVersion, authority.LiveRouteEpoch, authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration ?? 0, authority.RuntimeGeneration, authority.TerminalGeneration,
+                authority.LegGeneration, authority.TransportEpoch, authority.BridgeRecoveryGeneration,
+                authority.CheckpointGeneration, authority.CheckpointRequestId, authority.DataSessionIdentity, authority.DataSessionGeneration);
+            var expected = new FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot(operation.OperationRole, source,
+                authority.AuthorityGeneration, authority.RecoveryContractGeneration, authority.DispatchAttemptGeneration,
+                authority.MissingDispatchSuccessorGeneration, authority.RetiredOfferGeneration, attempt.OfferGeneration,
+                Hash(attempt.OfferNonce), attempt.DispatchDeadlineUtcMs, dispatchObserved, authority.ReleaseKind.ToString(),
+                authority.ReleaseAuthorityId?.ToString() ?? "(none)", authority.ReleaseGeneration, authority.ReleaseOutcome,
+                authority.ListenerRearmRequirement.ToString(), authority.ListenerExecutionMode.ToString(),
+                attempt.Request.RequestActivePredecessorSupersession, attempt.SuccessorAuthorityId?.ToString() ?? "(none)", payload.Receipts);
+            if (payload != expected) { return false; }
+            var receipts = new List<FileTransferCoordinatorReceiptTransitionSnapshot>
+            {
+                new("stage", $"{authorityId}:stage", authority.DispatchAttemptGeneration, Hash(attempt.Request),
+                    $"{authorityId}:stage", authority.DispatchAttemptGeneration, stageStatus.ToString(), attempt.StageDisposition.ToString(),
+                    Hash(new { stageStatus, attempt.StageDisposition, attempt.StagedUtcMs, attempt.StageExpiresUtcMs }),
+                    stageStatus is RuntimeUnlockRetryDispatchDecisionStageStatus.Staged or RuntimeUnlockRetryDispatchDecisionStageStatus.Idempotent),
+                new("install", $"{authorityId}:install", install.InstallGeneration, Hash(install.Request),
+                    $"{authorityId}:install", install.InstallGeneration, phase.ToString(), "retry_dispatch_install_receipt", Hash(install), true),
+                new("execution", $"{authorityId}:execution", attempt.OfferGeneration, Hash(attempt.InstallReceipt),
+                    $"{authorityId}:offer:{attempt.OfferGeneration}", attempt.OfferGeneration, phase.ToString(),
+                    dispatchObserved ? "dispatch_observed" : "offer_bound",
+                    Hash(new { attempt.OfferGeneration, attempt.OfferNonce, DispatchObserved = dispatchObserved, State = phase }), true),
+            };
+            if (settlement is { } report)
+            {
+                receipts.Add(new("settlement", $"{authorityId}:settlement", attempt.OfferGeneration,
+                    Hash(new { report.Authority, report.OfferGeneration, report.OfferNonce }), $"{authorityId}:settlement",
+                    attempt.OfferGeneration, report.Outcome.ToString(), report.Reason, Hash(report), true));
+            }
+            var last = receipts[^1];
+            return payload.Receipts.SequenceEqual(receipts) && ReceiptMatchesOperation(operation, last) &&
+                operation.CommandIdentity == last.CommandIdentity && operation.CommandGeneration == last.CommandGeneration &&
+                operation.CommandFingerprint == last.CommandFingerprint;
+        }
+        static string Hash(object? value) => FileTransferCoordinator.CalculateSnapshotFingerprint(value);
+    }
+
     private static void EnqueueReceiveRecoveryAuthorityEffect(
         OutboundTransferContext context,
         FileTransferCoordinatorTransitionEnvelope? envelope,
