@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'FileTransferFallbackV6BootstrapDirectionCorrelation.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferFrontierGraceHandoff.ps1')
 . (Join-Path $PSScriptRoot 'GuiSmokeLogLedger.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferOps\GuiDataPathDiagnosticCompanion.ps1')
 
 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
 $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
@@ -6055,8 +6056,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [Parameter(Mandatory = $true)][string]$RouteMode,
         [AllowEmptyCollection()][string[]]$ImmutableEvidencePaths = @(),
         [AllowNull()]$TestMetrics = $null,
-        [switch]$RequireCompletedClassification
+        [switch]$RequireCompletedClassification,
+        [AllowNull()][System.Collections.IDictionary]$DiagnosticContext = $null
     )
+
+    if ($null -ne $DiagnosticContext) {
+        $DiagnosticContext.Clear()
+        $DiagnosticContext['eligible'] = $false
+        $DiagnosticContext['evidenceInputs'] = @()
+    }
 
     # The focused GUI classifier fixtures execute this function body without
     # loading the full retained-analysis module. Keep the two line parsers
@@ -6264,6 +6272,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             [string[]]$pathLines = [System.IO.File]::ReadAllLines(
                 $fullEvidencePath,
                 [System.Text.UTF8Encoding]::new($false, $true))
+            if ($null -ne $DiagnosticContext) {
+                # Hash the exact decoded lines already read for primary analysis.
+                # Optional diagnostic metadata must never invalidate that analysis.
+                try {
+                    $DiagnosticContext['evidenceInputs'] += [pscustomobject][ordered]@{
+                        path = $fullEvidencePath
+                        lineCount = $pathLines.Count
+                        contentSha256 = Get-TunaGuiDiagnosticContentHash -Lines $pathLines
+                    }
+                }
+                catch { $DiagnosticContext['inputIdentityUnavailable'] = $true }
+            }
             $immutableLines.AddRange($pathLines)
             if ($evidenceSelectionEventNames.Count -gt 0 -and
                 $pathLines.Count -gt 0) {
@@ -7215,6 +7235,28 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         }
     }
     if ($coordinatorSnapshotEvaluation.Mode -eq 'SnapshotV1Authoritative') {
+        # Reached only after existing evidence/parity/authority/bootstrap returns.
+        # This read-only carrier does not affect the primary return below.
+        if ($null -ne $DiagnosticContext) {
+            try {
+                $diagnosticSnapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
+                    -Full $coordinatorSnapshotFullEvaluation -Compact $coordinatorSnapshotCompactEvaluation
+                $DiagnosticContext['snapshotMode'] = [string]$coordinatorSnapshotEvaluation.Mode
+                $DiagnosticContext['artifactEvidenceVerdict'] = [string]$coordinatorSnapshotEvaluation.ArtifactEvidenceVerdict
+                $DiagnosticContext['streamComplete'] = [bool]$coordinatorSnapshotFullEvaluation.StreamComplete -and
+                    [bool]$coordinatorSnapshotCompactEvaluation.StreamComplete
+                $DiagnosticContext['parityVerdict'] = if ($diagnosticSnapshotParity.Verdict -ceq 'pass' -and
+                    $snapshotRouteConsistencyParity.Verdict -ceq 'pass') { 'pass' } else { 'fail' }
+                $DiagnosticContext['authorityBoundaryPresent'] = $null -ne $boundary
+                $DiagnosticContext['eligible'] = $RequireCompletedClassification.IsPresent -and
+                    $ImmutableEvidencePaths.Count -gt 0 -and $DiagnosticContext['streamComplete'] -and
+                    $DiagnosticContext['artifactEvidenceVerdict'] -ceq 'pass' -and
+                    $coordinatorSnapshotFullEvaluation.ArtifactEvidenceVerdict -ceq 'pass' -and
+                    $DiagnosticContext['parityVerdict'] -ceq 'pass' -and $null -eq $boundary -and
+                    -not $DiagnosticContext.Contains('inputIdentityUnavailable')
+            }
+            catch { $DiagnosticContext['eligible'] = $false }
+        }
         $harnessClassification =
             Get-TunaGuiAuthoritativePassHarnessClassification `
                 -FailureMessage $ErrorMessage `
@@ -31634,18 +31676,21 @@ function Invoke-TunaGuiFailureClassificationRequest {
     param([Parameter(Mandatory = $true)][string]$RequestPath)
 
     $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
+    $diagnosticContext = @{}
     $classification = Get-TunaGuiFileTransferSetupFailureClassification `
         -Bookmark 0 `
         -ErrorMessage ([string]$request.errorMessage) `
         -RouteMode ([string]$request.routeMode) `
         -ImmutableEvidencePaths @($request.evidencePaths) `
-        -RequireCompletedClassification
+        -RequireCompletedClassification `
+        -DiagnosticContext $diagnosticContext
     Write-GuiSmokeAtomicJson `
         -Path ([string]$request.responsePath) `
         -Value ([ordered]@{
             schemaVersion = 1
             event = 'filetransfer_tuna_gui_failure_classification_response'
             classification = $classification
+            diagnosticEligibility = $diagnosticContext
             completedUtc = [DateTimeOffset]::UtcNow.ToString('O')
         })
 }
@@ -31655,14 +31700,20 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][string]$ErrorMessage,
         [Parameter(Mandatory = $true)][string]$RouteMode,
-        [Parameter(Mandatory = $true)]$BaseClassification
+        [Parameter(Mandatory = $true)]$BaseClassification,
+        [AllowNull()][System.Collections.IDictionary]$DiagnosticContext = $null
     )
 
     $process = $null
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($null -ne $DiagnosticContext) { $DiagnosticContext.Clear() }
     try {
         $budgetMilliseconds =
             Get-TunaGuiFailureClassificationBudgetMilliseconds -ArtifactDir $ArtifactDir
+        if ($null -ne $DiagnosticContext) {
+            $DiagnosticContext['Stopwatch'] = $stopwatch
+            $DiagnosticContext['BudgetMilliseconds'] = $budgetMilliseconds
+        }
         if ($budgetMilliseconds -le 0) {
             return New-TunaGuiFailureClassificationEnrichmentReceipt `
                 -Classification $BaseClassification `
@@ -31815,6 +31866,12 @@ function Invoke-TunaGuiFailureClassificationEnrichment {
                 -ElapsedMilliseconds $stopwatch.ElapsedMilliseconds
         }
 
+        if ($null -ne $DiagnosticContext -and
+            $null -ne $response.PSObject.Properties['diagnosticEligibility']) {
+            # Defer all optional-carrier validation until after primary adoption.
+            $DiagnosticContext['Eligibility'] = $response.diagnosticEligibility
+            $DiagnosticContext['EvidencePaths'] = @($evidencePaths.ToArray() | Sort-Object -Unique)
+        }
         return New-TunaGuiFailureClassificationEnrichmentReceipt `
             -Classification $response.classification `
             -Status 'completed' `
@@ -37855,6 +37912,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     }
 
     if ($null -ne $scenarioFailure) {
+        $diagnosticContext = @{}
         if ($requiresFailureClassificationEnrichment) {
             Update-FileTransferGuiEvidenceFinalizationStage `
                 -Stage 'failure_classification_started'
@@ -37863,18 +37921,26 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
                     -ArtifactDir $artifactDir `
                     -ErrorMessage ([string]$scenarioFailure.Exception.Message) `
                     -RouteMode $routeMode `
-                    -BaseClassification $failureClassification
+                    -BaseClassification $failureClassification `
+                    -DiagnosticContext $diagnosticContext
             $failureClassification = $classificationEnrichmentReceipt.Classification
         }
 
+        $completedFailureSummary = & $newFailureSummary `
+            $failureClassification 'completed' $classificationEnrichmentReceipt
         Write-GuiSmokeAtomicJson `
             -Path (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') `
-            -Value (& $newFailureSummary `
-                $failureClassification `
-                'completed' `
-                $classificationEnrichmentReceipt)
+            -Value $completedFailureSummary
         Update-FileTransferGuiEvidenceFinalizationStage `
             -Stage 'failure_classification_completed'
+        try {
+            $diagnostics = Invoke-TunaGuiDataPathDiagnosticCompanion `
+                -ArtifactDir $artifactDir -Context $diagnosticContext
+            [void](Write-TunaGuiDataPathDiagnosticSummary `
+                -Path (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') `
+                -PrimarySummary $completedFailureSummary -Diagnostics $diagnostics)
+        }
+        catch {} # Preserve the completed primary and original scenario failure.
         throw $scenarioFailure
     }
 }

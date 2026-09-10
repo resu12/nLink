@@ -81,6 +81,8 @@ public abstract class FileTransferOpsScriptsTestBase
         "tools/FileTransferOps/AnalyzerOrchestration.ps1",
         "tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1",
         "tools/FileTransferOps/GuiRejectedIngressShadow.ps1",
+        "tools/FileTransferOps/GuiDataPathDiagnosticCompanion.ps1",
+        "tools/GuiSmokeContentHash.ps1",
         "tools/FileTransferSoak/LogParsing.ps1",
         "tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1",
         "tools/FileTransferSoak/SoakSummaryExtraction.ps1",

@@ -97,7 +97,7 @@ public sealed class FileTransferRejectedIngressModuleTests : FileTransferOpsScri
             $body = [scriptblock]::Create($branches[0].Extent.Text + "`nthrow 'Authoritative branch fell through.'")
             $coordinatorSnapshotEvaluation = [pscustomobject]@{ Mode='SnapshotV1Authoritative'; TransitionCount=3L }
             $ErrorMessage=''; $RouteMode='live-regular-activation-cycle'; $harnessRouteEpochRecords=@()
-            $TestMetrics=$null; $snapshotEvaluationLineVisitCount=3L; $explicitResult=$null
+            $TestMetrics=$null; $DiagnosticContext=$null; $snapshotEvaluationLineVisitCount=3L; $explicitResult=$null
             $classificationStopwatch=[Diagnostics.Stopwatch]::StartNew()
             $script:harnessResult=$null; $RequireCompletedClassification=$false
             if ($null -ne (& $body)) { throw 'Authority pass no longer returns null.' }

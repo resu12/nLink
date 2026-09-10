@@ -1,5 +1,6 @@
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'GuiSmokeContentHash.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferOps\CoordinatorSnapshotEvidence.ps1')
 
 if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
@@ -434,19 +435,6 @@ function Add-GuiSmokeLogLedgerWriterEvidence {
     if (-not [string]::Equals([string]$writer.AcceptanceRunId, $acceptanceRunId, [System.StringComparison]::Ordinal) -or
         -not [string]::Equals([string]$writer.ScenarioRunId, $scenarioRunId, [System.StringComparison]::Ordinal)) {
         $State.WriterIdentityMismatchCount++
-    }
-}
-
-function Get-GuiSmokeLogLedgerHash {
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
-
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-    }
-    finally {
-        $sha.Dispose()
     }
 }
 

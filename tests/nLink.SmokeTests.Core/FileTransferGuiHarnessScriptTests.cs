@@ -1851,7 +1851,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.Contains("Get-GuiSmokeLogLedgerSnapshot", guiText, StringComparison.Ordinal);
         Assert.Contains("Write-FileTransferGuiLogLedgerEvidence", guiText, StringComparison.Ordinal);
-        Assert.Contains("Write-GuiSmokeLogLedgerRangeCapture", guiText, StringComparison.Ordinal);
+        Assert.Single(
+            Regex.Matches(
+                scenarioBody,
+                @"(?m)^[ \t]*Write-FileTransferGuiLogLedgerEvidence(?=[ \t\r\n]|$)"));
         Assert.Contains("Copy-GuiSmokeFileAtomicCreateNew", guiText, StringComparison.Ordinal);
         Assert.Contains("capture_persisted", guiText, StringComparison.Ordinal);
         Assert.Contains("writer_validation_completed", guiText, StringComparison.Ordinal);
@@ -8151,11 +8154,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                             -Reason 'exact_proof_chain_failure' `
                             -RouteMode 'live-regular-activation-cycle' `
                             -ClassificationSource 'immutable_evidence_exact_proof'
-                        [ordered]@{
+                        $response = [ordered]@{
                             schemaVersion = 1
                             event = 'filetransfer_tuna_gui_failure_classification_response'
                             classification = $candidate
-                        } | ConvertTo-Json -Depth 32 | Set-Content `
+                        }
+                        if ($script:carrierMode -eq 'malformed') { $response.diagnosticEligibility = 'not-a-carrier' }
+                        $response | ConvertTo-Json -Depth 32 | Set-Content `
                             -LiteralPath (Join-Path $script:artifactRoot 'filetransfer-tuna-gui-failure-classification-response.json') `
                             -Encoding UTF8
                         return New-FakeClassificationProcess -WaitResult $true -ExitCode 0
@@ -8253,6 +8258,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 Assert-BaseClassificationPreserved $nullResponse 'failed' 'evidence_enrichment_response_classification_invalid'
 
                 $script:fakeProcessMode = 'completed'
+                $script:carrierMode = 'missing'
                 $completed = Invoke-TunaGuiFailureClassificationEnrichment -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' -RouteMode 'live-regular-activation-cycle' -BaseClassification $base
                 if ($completed.ClassificationEnrichmentStatus -ne 'completed' -or
                     $completed.ClassificationEnrichmentReason -ne '(none)' -or
@@ -8263,6 +8269,21 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     throw "valid completed enrichment response was not applied: $($completed | ConvertTo-Json -Depth 8 -Compress)"
                 }
                 Write-Output 'gui-enrichment-receipt-outcomes-ok'
+                foreach ($carrierMode in @('missing','malformed')) {
+                    $script:carrierMode = $carrierMode
+                    $diagnosticContext = @{ Eligibility='stale-context' }
+                    $withContext = Invoke-TunaGuiFailureClassificationEnrichment `
+                        -ArtifactDir $script:artifactRoot -ErrorMessage 'gui_smoke_scenario_deadline_exceeded' `
+                        -RouteMode 'live-regular-activation-cycle' -BaseClassification $base -DiagnosticContext $diagnosticContext
+                    if ($withContext.ClassificationEnrichmentStatus -ne 'completed' -or
+                        $withContext.Classification.Reason -ne 'exact_proof_chain_failure' -or
+                        $diagnosticContext.Stopwatch -isnot [Diagnostics.Stopwatch] -or
+                        $diagnosticContext.BudgetMilliseconds -ne 30000 -or
+                        ($carrierMode -eq 'missing' -and $diagnosticContext.ContainsKey('Eligibility')) -or
+                        ($carrierMode -eq 'malformed' -and $diagnosticContext.Eligibility -cne 'not-a-carrier')) {
+                        throw "Optional carrier changed primary adoption: $carrierMode"
+                    }
+                }
             }
             finally {
                 Remove-Item Env:NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH -ErrorAction SilentlyContinue
