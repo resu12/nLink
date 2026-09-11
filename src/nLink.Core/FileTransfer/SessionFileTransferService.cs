@@ -1308,6 +1308,7 @@ public sealed partial class SessionFileTransferService :
         IFileTransferSignalingTransport currentTransport;
         FileTransferRouteResolverInput routeInput;
         FileTransferInitialTunaReadinessEvidence? initialTunaEvidence;
+        FileTransferOfferV2 offerMessage;
 
         lock (gate)
         {
@@ -1341,6 +1342,22 @@ public sealed partial class SessionFileTransferService :
                 NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion,
             };
             StartCoordinatorSnapshotStreamLocked(context);
+            var agreementState = CreateCoordinatorStateLocked(context);
+            var correlationSupported = currentTransport is IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true };
+            offerMessage = new FileTransferOfferV2
+            {
+                SessionId = context.SessionId, TransferId = context.TransferId, FileName = context.FileName,
+                FileSizeBytes = context.FileSizeBytes, PreferredDataProtocolVersion = context.OfferedDataProtocolVersion,
+                FileTransferRoute = context.RouteSelection.TelemetryToken,
+                FallbackBootstrapCorrelationVersion = correlationSupported ? 1 : null,
+                FallbackBootstrapIssuerId = correlationSupported ? FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(agreementState) : null,
+            };
+            if (correlationSupported)
+            {
+                var offerDecision = FileTransferCoordinator.PinFallbackBootstrapOffer(agreementState, offerMessage);
+                AdoptBootstrapAgreementLocked(context, offerDecision);
+                if (!offerDecision.Accepted) { return null; }
+            }
             context.RoutePublicationAuthorityForwarder =
                 (token, publicationReason) => ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
                     context,
@@ -1416,16 +1433,6 @@ public sealed partial class SessionFileTransferService :
         }
 
         RaiseTransferChanged(CreateSnapshot());
-
-        var offerMessage = new FileTransferOfferV2
-        {
-            SessionId = context.SessionId,
-            TransferId = context.TransferId,
-            FileName = context.FileName,
-            FileSizeBytes = context.FileSizeBytes,
-            PreferredDataProtocolVersion = context.OfferedDataProtocolVersion,
-            FileTransferRoute = context.RouteSelection.TelemetryToken,
-        };
 
         StartOutboundOfferRetryLoop(context, offerMessage);
 
@@ -1651,6 +1658,7 @@ public sealed partial class SessionFileTransferService :
         }
 
         SessionFileTransferSnapshot snapshot;
+        FileTransferAcceptV1 acceptMessage;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -1661,6 +1669,28 @@ public sealed partial class SessionFileTransferService :
                 return CaptureCurrentInboundSnapshot();
             }
 
+            var agreementState = CreateCoordinatorStateLocked(context);
+            var correlationSelected = transport is IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true } &&
+                agreementState.PersistentState.FileTransferRouteTransition.BootstrapAgreement?.Offer.FallbackBootstrapCorrelationVersion == 1;
+            acceptMessage = new FileTransferAcceptV1
+            {
+                SessionId = context.SessionId, TransferId = context.TransferId,
+                AcceptedDataProtocolVersion = context.RouteSelection.ProtocolVersion, FileTransferRoute = context.RouteSelection.TelemetryToken,
+                FallbackBootstrapCorrelationVersion = correlationSelected ? 1 : null,
+                FallbackBootstrapIssuerId = correlationSelected ? FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(agreementState) : null,
+            };
+            if (agreementState.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not null)
+            {
+                var acceptDecision = FileTransferCoordinator.ApplyFallbackBootstrapAccept(agreementState, acceptMessage);
+                AdoptBootstrapAgreementLocked(context, acceptDecision);
+                if (!acceptDecision.Accepted)
+                {
+                    context.AcceptInProgress = false;
+                    LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, context.SessionId, context.TransferId, acceptDecision.Reason);
+                    return CaptureCurrentInboundSnapshot();
+                }
+                ObserveBootstrapAgreementSelectionLocked(acceptDecision);
+            }
             context.OpenWriteDestinationAsync = openWriteDestinationAsync;
             context.AcceptInProgress = false;
             context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
@@ -1677,13 +1707,7 @@ public sealed partial class SessionFileTransferService :
         {
             var currentTransport = GetTransportOrThrow();
             await currentTransport.SendFileTransferAcceptAsync(
-                new FileTransferAcceptV1
-                {
-                    SessionId = context.SessionId,
-                    TransferId = context.TransferId,
-                    AcceptedDataProtocolVersion = context.NegotiatedDataProtocolVersion,
-                    FileTransferRoute = context.RouteSelection.TelemetryToken,
-                },
+                acceptMessage,
                 ct).ConfigureAwait(false);
             if (context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6)
             {
@@ -1892,6 +1916,7 @@ public sealed partial class SessionFileTransferService :
                 }
 
                 outboundTransfer.UserPaused = true;
+                InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(outboundTransfer), "bootstrap_user_paused");
                 outboundTransfer.UserPauseReason = normalizedReason;
                 outboundTransfer.UserPausedSinceUtc = DateTimeOffset.UtcNow;
                 outboundTransfer.StatusMessage = "Transfer paused.";
@@ -1920,6 +1945,7 @@ public sealed partial class SessionFileTransferService :
                 }
 
                 inboundTransfer.UserPaused = true;
+                InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(inboundTransfer), "bootstrap_user_paused");
                 InvalidateCheckpointRepairContinuityLocked(inboundTransfer, "user_paused");
                 inboundTransfer.UserPauseReason = normalizedReason;
                 inboundTransfer.UserPausedSinceUtc = DateTimeOffset.UtcNow;
@@ -2904,7 +2930,50 @@ public sealed partial class SessionFileTransferService :
         InboundTransferContext? duplicateTransfer = null;
         FileTransferTransferState duplicateState = default;
         SessionFileTransferSnapshot? snapshotToRaise = null;
+        lock (gate)
+        {
+            if (inboundTransfer is { IsTerminal: false } existing && existing.TransferId == message.TransferId)
+            {
+                var existingState = CreateCoordinatorStateLocked(existing);
+                if (existingState.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not null)
+                {
+                    var duplicateDecision = FileTransferCoordinator.PinFallbackBootstrapOffer(existingState, message);
+                    AdoptBootstrapAgreementLocked(existing, duplicateDecision);
+                    if (!duplicateDecision.Accepted)
+                    {
+                        LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, duplicateDecision.Reason);
+                        return;
+                    }
+                }
+                else if (message.FallbackBootstrapCorrelationVersion is not null || message.FallbackBootstrapIssuerId is not null)
+                {
+                    LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, "bootstrap_inflight_upgrade_rejected");
+                    return;
+                }
+                duplicateTransfer = existing;
+                duplicateState = existing.State;
+            }
+        }
+        if (duplicateTransfer is not null)
+        {
+            if (duplicateState != FileTransferTransferState.PendingDecision)
+            {
+                await TryResendAcceptForDuplicateOfferAsync(duplicateTransfer, "duplicate_offer").ConfigureAwait(false);
+            }
+            return;
+        }
         var incoming = new InboundTransferContext(message, routeSelection);
+        if (currentTransport is IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true } ||
+            message.FallbackBootstrapCorrelationVersion is not null || message.FallbackBootstrapIssuerId is not null)
+        {
+            var offerDecision = FileTransferCoordinator.PinFallbackBootstrapOffer(CreateCoordinatorStateLocked(incoming), message);
+            AdoptBootstrapAgreementLocked(incoming, offerDecision);
+            if (!offerDecision.Accepted)
+            {
+                LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, offerDecision.Reason);
+                return;
+            }
+        }
         incoming.RoutePublicationAuthorityForwarder =
             (token, publicationReason) => ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
                 incoming,
@@ -2943,6 +3012,21 @@ public sealed partial class SessionFileTransferService :
             {
                 if (string.Equals(inboundTransfer.TransferId, incoming.TransferId, StringComparison.Ordinal))
                 {
+                    if (inboundTransfer.CoordinatorPersistentState.FileTransferRouteTransition.BootstrapAgreement is not null)
+                    {
+                        var duplicateDecision = FileTransferCoordinator.PinFallbackBootstrapOffer(CreateCoordinatorStateLocked(inboundTransfer), message);
+                        AdoptBootstrapAgreementLocked(inboundTransfer, duplicateDecision);
+                        if (!duplicateDecision.Accepted)
+                        {
+                            LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, duplicateDecision.Reason);
+                            return;
+                        }
+                    }
+                    else if (message.FallbackBootstrapCorrelationVersion is not null || message.FallbackBootstrapIssuerId is not null)
+                    {
+                        LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, "bootstrap_inflight_upgrade_rejected");
+                        return;
+                    }
                     duplicateTransfer = inboundTransfer;
                     duplicateState = inboundTransfer.State;
                 }
@@ -3025,7 +3109,7 @@ public sealed partial class SessionFileTransferService :
             var acceptedProtocolVersion = context.NegotiatedDataProtocolVersion > 0
                 ? context.NegotiatedDataProtocolVersion
                 : context.RouteSelection.ProtocolVersion;
-            acceptMessage = new FileTransferAcceptV1
+            acceptMessage = context.CoordinatorPersistentState.FileTransferRouteTransition.BootstrapAgreement?.Accept ?? new FileTransferAcceptV1
             {
                 SessionId = context.SessionId,
                 TransferId = context.TransferId,
@@ -3064,13 +3148,24 @@ public sealed partial class SessionFileTransferService :
             context = outboundTransfer;
             if (context is null ||
                 context.IsTerminal ||
-                context.State != FileTransferTransferState.AwaitingAcceptance ||
-                context.SendStarted ||
                 !string.Equals(context.TransferId, message.TransferId, StringComparison.Ordinal))
             {
                 return;
             }
 
+            if (context.State != FileTransferTransferState.AwaitingAcceptance || context.SendStarted)
+            {
+                if (context.CoordinatorPersistentState.FileTransferRouteTransition.BootstrapAgreement is not null)
+                {
+                    var duplicateDecision = FileTransferCoordinator.ApplyFallbackBootstrapAccept(CreateCoordinatorStateLocked(context), message);
+                    AdoptBootstrapAgreementLocked(context, duplicateDecision);
+                    if (!duplicateDecision.Accepted)
+                    {
+                        LogBootstrapCorrelationRejection(FileTransferDirection.Outbound, message.SessionId, message.TransferId, duplicateDecision.Reason);
+                    }
+                }
+                return;
+            }
             acceptedVersionMatchesOffer = acceptedProtocolVersion == context.OfferedDataProtocolVersion;
             acceptedRouteMatchesOffer =
                 acceptedProtocolVersion is { } normalizedAcceptedProtocolVersion &&
@@ -3085,6 +3180,23 @@ public sealed partial class SessionFileTransferService :
             }
             else
             {
+                var agreementState = CreateCoordinatorStateLocked(context);
+                if (agreementState.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not null)
+                {
+                    var decision = FileTransferCoordinator.ApplyFallbackBootstrapAccept(agreementState, message);
+                    AdoptBootstrapAgreementLocked(context, decision);
+                    if (!decision.Accepted)
+                    {
+                        LogBootstrapCorrelationRejection(FileTransferDirection.Outbound, message.SessionId, message.TransferId, decision.Reason);
+                        return;
+                    }
+                    ObserveBootstrapAgreementSelectionLocked(decision);
+                }
+                else if (message.FallbackBootstrapCorrelationVersion is not null || message.FallbackBootstrapIssuerId is not null)
+                {
+                    LogBootstrapCorrelationRejection(FileTransferDirection.Outbound, message.SessionId, message.TransferId, "bootstrap_agreement_missing");
+                    return;
+                }
                 context.SendStarted = true;
                 context.SessionId = message.SessionId;
                 context.NegotiatedDataProtocolVersion = acceptedProtocolVersion.Value;
@@ -3196,6 +3308,27 @@ public sealed partial class SessionFileTransferService :
             else if (context.State is not FileTransferTransferState.AwaitingMetadata and not FileTransferTransferState.Receiving)
             {
                 context = null;
+            }
+            else
+            {
+                var agreementState = CreateCoordinatorStateLocked(context);
+                var agreement = agreementState.PersistentState.FileTransferRouteTransition.BootstrapAgreement;
+                if (agreement is not null)
+                {
+                    var decision = FileTransferCoordinator.ApplyFallbackBootstrapSessionOpen(agreementState, message);
+                    AdoptBootstrapAgreementLocked(context, decision);
+                    if (!decision.Accepted)
+                    {
+                        LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, decision.Reason);
+                        return;
+                    }
+                    if (agreement.ReceiverSessionOpenValidated) { return; }
+                }
+                else if (message.FallbackBootstrapCorrelationVersion is not null || message.FallbackBootstrapIssuerId is not null)
+                {
+                    LogBootstrapCorrelationRejection(FileTransferDirection.Inbound, message.SessionId, message.TransferId, "bootstrap_agreement_missing");
+                    return;
+                }
             }
         }
 

@@ -22,4 +22,12 @@ public sealed record FileTransferSessionOpenV2
     public int ChunkSizeBytes { get; init; }
 
     public int InitialPipelineDepth { get; init; }
+
+    [JsonPropertyName("fallbackBootstrapCorrelationVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackBootstrapCorrelationVersion { get; init; }
+
+    [JsonPropertyName("fallbackBootstrapIssuerId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FallbackBootstrapIssuerId { get; init; }
 }

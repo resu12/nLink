@@ -185,7 +185,7 @@ public sealed partial class SessionFileTransferService
         if (!ReferenceEquals(outboundTransfer, context) ||
             context.IsTerminal ||
             context.DataSession is not { } dataSession ||
-            !IsPeerPostTunaFallbackV6RuntimeProofFrame(frame) ||
+            !IsRetainableBootstrapCorrelationProof(CreateCoordinatorStateLocked(context), frame, coordinatorEvidence) ||
             !PostTunaFallbackPeerProofFrameIdentity.TryCreate(frame, out var identity) ||
             !string.Equals(frame.SessionId, context.SessionId, StringComparison.Ordinal) ||
             !string.Equals(frame.TransferId, context.TransferId, StringComparison.Ordinal))
@@ -365,7 +365,7 @@ public sealed partial class SessionFileTransferService
         if (!ReferenceEquals(inboundTransfer, context) ||
             context.IsTerminal ||
             context.DataSession is not { } dataSession ||
-            !IsPeerPostTunaFallbackV6RuntimeProofFrame(frame) ||
+            !IsRetainableBootstrapCorrelationProof(CreateCoordinatorStateLocked(context), frame, coordinatorEvidence) ||
             !PostTunaFallbackPeerProofFrameIdentity.TryCreate(frame, out var identity) ||
             !string.Equals(frame.SessionId, context.SessionId, StringComparison.Ordinal) ||
             !string.Equals(frame.TransferId, context.TransferId, StringComparison.Ordinal))
@@ -3321,6 +3321,13 @@ public sealed partial class SessionFileTransferService
         {
             switch (execution.RetainedPeerFrame)
             {
+                case FileTransferFallbackBootstrapStateFrameV6 correlatedState:
+                    await ApplyOutboundV6ReceiverState(context, CreateRetainedBootstrapReceiverState(correlatedState),
+                        FileTransferTransportKind.RegularNkn).ConfigureAwait(false);
+                    applied = true;
+                    applyReason = "filetransfer_route_transition_retained_frame_applied";
+                    break;
+
                 case FileTransferReceiverStateFrameV6 receiverState:
                     await ApplyOutboundV6ReceiverState(
                             context,
@@ -3439,8 +3446,9 @@ public sealed partial class SessionFileTransferService
             }
 
             context.FileTransferRouteTransitionExecution = null;
-            if (execution.RetainedPeerFrame is
-                    FileTransferReceiverStateFrameV6 retainedReceiverState &&
+            var retainedReceiverState = execution.RetainedPeerFrame is FileTransferFallbackBootstrapStateFrameV6 correlated
+                ? CreateRetainedBootstrapReceiverState(correlated) : execution.RetainedPeerFrame as FileTransferReceiverStateFrameV6;
+            if (retainedReceiverState is not null &&
                 context.CurrentTransferLeg is { } currentLeg)
             {
                 TryMarkOutboundFallbackTailQuiescentAfterCheckpointAcceptedLocked(
@@ -3655,6 +3663,15 @@ public sealed partial class SessionFileTransferService
         {
             switch (frame)
             {
+                case FileTransferFallbackBootstrapRequestFrameV6:
+                    MarkInboundV4PeerFrameReceived(context);
+                    applied = await SendInboundSparseCreditStateAsync(context, V6RegularNknStateRefreshRecoveryMode,
+                        terminalReady: false, forceSend: true).ConfigureAwait(false);
+                    responseSent = applied;
+                    reason = applied ? "filetransfer_route_transition_retained_frame_applied"
+                        : "filetransfer_route_transition_retained_frame_response_failed";
+                    break;
+
                 case FileTransferFrontierRequestFrameV6 frontier:
                 {
                     MarkInboundV4PeerFrameReceived(context);

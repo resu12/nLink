@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -4409,11 +4410,14 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        ObserveFileTransferReceiveRecoveryProof(
-            frame.SessionId,
-            frame.TransferId,
-            "file_transfer_data_frame",
-            MapBridgeChannel(channel));
+        if (!IsBootstrapEvidenceOnlyDataFrame(frame))
+        {
+            ObserveFileTransferReceiveRecoveryProof(
+                frame.SessionId,
+                frame.TransferId,
+                "file_transfer_data_frame",
+                MapBridgeChannel(channel));
+        }
 
         if (frame is FileTransferCancelFrameV4 cancelFrame)
         {
@@ -4473,7 +4477,7 @@ public sealed partial class NknSignalingTransport
             frame.TransferId,
             () =>
             {
-                if (receivedTransportKind != FileTransferTransportKind.Tuna)
+                if (receivedTransportKind != FileTransferTransportKind.Tuna && !IsBootstrapEvidenceOnlyDataFrame(frame))
                 {
                     RecordTunaFallbackFileTransferDataFrameReceived(
                         frame,
@@ -6329,7 +6333,7 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            if (applyStateChange)
+            if (applyStateChange && !IsBootstrapEvidenceOnlyDataFrame(frame))
             {
                 CommitFileTransferStateLocked(normalizedTransferId, nextState);
             }
@@ -6676,6 +6680,19 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (IsBootstrapEvidenceOnlyDataFrame(frame))
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "bootstrap_control_requires_start";
+                return false;
+            }
+            nextState = currentState;
+            return true;
+        }
+
         if (IsV6RecoveryControlDataFrame(frame))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
@@ -6752,7 +6769,7 @@ public sealed partial class NknSignalingTransport
 
     private bool ShouldEchoCancelForLateFileTransferDataFrame(FileTransferDataFrame frame, string failureReason)
     {
-        if (frame is FileTransferCancelFrameV4)
+        if (frame is FileTransferCancelFrameV4 || IsBootstrapEvidenceOnlyDataFrame(frame))
         {
             return false;
         }
@@ -6769,7 +6786,7 @@ public sealed partial class NknSignalingTransport
 
     private bool ShouldEchoCompleteForLateFileTransferDataFrame(FileTransferDataFrame frame, string failureReason)
     {
-        if (frame is FileTransferCompleteFrameV4)
+        if (frame is FileTransferCompleteFrameV4 || IsBootstrapEvidenceOnlyDataFrame(frame))
         {
             return false;
         }
@@ -6984,6 +7001,10 @@ public sealed partial class NknSignalingTransport
             or FileTransferFrontierRequestFrameV6
             or FileTransferRepairProofFrameV6;
 
+    private static bool IsCorrelatedBootstrapDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferFallbackBootstrapFrameV6 ||
+           frame is FileTransferTransportEpochFrameV6 epoch && epoch.RecoveryMode == FileTransferBootstrapCorrelation.RecoveryMode;
+
     private static bool IsTerminalDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferCompleteFrameV4
             or FileTransferCancelFrameV4
@@ -7044,7 +7065,8 @@ public sealed partial class NknSignalingTransport
             fileTransferTerminalTombstones[transferId] = new FileTransferTerminalTombstone(
                 nextState.Phase,
                 DateTimeOffset.UtcNow.UtcTicks,
-                null);
+                null,
+                nextState.CorrelatedBootstrapSelected);
             fileTransferStates.Remove(transferId);
             UnregisterActiveFileTransferRuntime(transferId);
             return;
@@ -7250,10 +7272,18 @@ public sealed partial class NknSignalingTransport
     {
         TransportFileTransferDataSession? session;
         var createdSession = false;
+        var bootstrapEvidenceOnly = IsBootstrapEvidenceOnlyDataFrame(frame);
         lock (gate)
         {
             fileTransferDataSessions.TryGetValue(frame.TransferId, out var existingSession);
             session = existingSession;
+            if (bootstrapEvidenceOnly &&
+                (session is null || session.IsDisposed || session.SessionId != frame.SessionId))
+            {
+                LocalOperationalLog.Info("SessionSecurity",
+                    $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; reason=bootstrap_current_data_session_required");
+                return;
+            }
             if (session is not null &&
                 session.IsDisposed)
             {
@@ -7571,7 +7601,8 @@ public sealed partial class NknSignalingTransport
 
     private readonly record struct FileTransferTransportState(
         bool InitiatedLocally,
-        FileTransferTransportPhase Phase)
+        FileTransferTransportPhase Phase,
+        bool CorrelatedBootstrapSelected = false)
     {
         public bool IsTerminal =>
             Phase is FileTransferTransportPhase.Completed or
@@ -7583,7 +7614,8 @@ public sealed partial class NknSignalingTransport
     private readonly record struct FileTransferTerminalTombstone(
         FileTransferTransportPhase Phase,
         long CompletedUtcTicks,
-        FileTransferCompleteV1? CompleteMessage);
+        FileTransferCompleteV1? CompleteMessage,
+        bool CorrelatedBootstrapSelected = false);
 
     private readonly record struct InboundFileTransferDispatchWork(
         long Generation,
@@ -8039,7 +8071,11 @@ public sealed partial class NknSignalingTransport
                 ValidateDataPathSendAuthority(frame, authority);
             }
 
-            var completion = new PhysicalSendCompletionTracker();
+            var bootstrapFrame = IsCorrelatedBootstrapPhysicalFrame(frame);
+            var bootstrapIdentity = bootstrapFrame ? new PostTunaFallbackPeerProofFrameIdentity(frame.Type,
+                frame is IFileTransferTransportMetadataFrame metadata ? metadata.TransportEpoch : ((FileTransferTransportEpochFrameV6)frame).TransportEpoch,
+                Convert.ToHexString(SHA256.HashData(FileTransferDataFrameCodec.Serialize(frame))).ToLowerInvariant()) : null;
+            var completion = new PhysicalSendCompletionTracker(bootstrapIdentity);
             var deliveryTask = SendWithPhysicalCompletionTrackingAsync(
                 frame,
                 authority,
@@ -8047,8 +8083,15 @@ public sealed partial class NknSignalingTransport
                 ct);
             return new FileTransferPhysicalSendSubmission(
                 deliveryTask,
-                completion.WaitForCompletionAsync(deliveryTask));
+                completion.WaitForCompletionAsync(deliveryTask))
+            {
+                BootstrapCopies = bootstrapFrame ? completion.CaptureBootstrapCopies : null,
+            };
         }
+
+        private static bool IsCorrelatedBootstrapPhysicalFrame(FileTransferDataFrame frame)
+            => frame is FileTransferFallbackBootstrapFrameV6 ||
+               frame is FileTransferTransportEpochFrameV6 epoch && epoch.RecoveryMode == FileTransferBootstrapCorrelation.RecoveryMode;
 
         private async Task SendWithPhysicalCompletionTrackingAsync(
             FileTransferDataFrame frame,
@@ -8152,7 +8195,8 @@ public sealed partial class NknSignalingTransport
                                 ? "V4 redundant feedback send failed on both lanes."
                                 : "V6 redundant feedback send failed on both lanes.",
                             dataPathSendAuthority: dataPathSendAuthority,
-                            ct: sendCt)
+                            ct: sendCt,
+                            physicalSendCompletion: IsCorrelatedBootstrapPhysicalFrame(frame) ? physicalSendCompletion : null)
                         .ConfigureAwait(false);
                     return;
                 }
@@ -8165,7 +8209,7 @@ public sealed partial class NknSignalingTransport
                 var preCommitProbeAuthority = TryCreateRuntimeUnlockPreCommitProbeAuthority(frame);
                 var preCommitAckAuthority = TryConsumeRuntimeUnlockPreCommitAckAuthority(frame);
 
-                await owner.SendFileTransferEnvelopeRawAsync(
+                var singleSend = owner.SendFileTransferEnvelopeRawAsync(
                         MsgType.FileTransferDataFrame,
                         TransferId,
                         serializedFrame,
@@ -8181,8 +8225,9 @@ public sealed partial class NknSignalingTransport
                         runtimeUnlockPreCommitProbeAuthority: preCommitProbeAuthority,
                         runtimeUnlockPreCommitAckAuthority: preCommitAckAuthority,
                         dataPathSendAuthority: dataPathSendAuthority,
-                        dataFrame: frame)
-                    .ConfigureAwait(false);
+                        dataFrame: frame);
+                physicalSendCompletion?.RegisterBootstrapCopy(useBulkLane ? "bulk" : "control", singleSend);
+                await singleSend.ConfigureAwait(false);
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && IsTunaActivationPauseSendCancellation(out var pauseReason))
             {
@@ -8334,7 +8379,8 @@ public sealed partial class NknSignalingTransport
             int protocolVersion,
             string bothFailedMessage,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
-            CancellationToken ct)
+            CancellationToken ct,
+            PhysicalSendCompletionTracker? physicalSendCompletion = null)
         {
             await SendDataFrameWithParallelFirstSuccessBulkRedundancyAsync(
                     frame,
@@ -8342,7 +8388,8 @@ public sealed partial class NknSignalingTransport
                     protocolVersion,
                     bothFailedMessage,
                     dataPathSendAuthority,
-                    ct)
+                    ct,
+                    physicalSendCompletion)
                 .ConfigureAwait(false);
         }
 
@@ -8352,7 +8399,8 @@ public sealed partial class NknSignalingTransport
             int protocolVersion,
             string bothFailedMessage,
             FileTransferDataPathSendAuthority? dataPathSendAuthority,
-            CancellationToken ct)
+            CancellationToken ct,
+            PhysicalSendCompletionTracker? physicalSendCompletion = null)
         {
             var started = Stopwatch.StartNew();
             var controlTask = SendRedundantFeedbackCopyAsync(
@@ -8363,6 +8411,7 @@ public sealed partial class NknSignalingTransport
                 protocolVersion: protocolVersion,
                 dataPathSendAuthority: dataPathSendAuthority,
                 ct: ct);
+            physicalSendCompletion?.RegisterBootstrapCopy("control", controlTask, () => CaptureRedundantBootstrapOutcome(controlTask));
             var bulkTask = SendRedundantFeedbackCopyAsync(
                 frame,
                 serializedFrame,
@@ -8371,6 +8420,7 @@ public sealed partial class NknSignalingTransport
                 protocolVersion: protocolVersion,
                 dataPathSendAuthority: dataPathSendAuthority,
                 ct: ct);
+            physicalSendCompletion?.RegisterBootstrapCopy("bulk", bulkTask, () => CaptureRedundantBootstrapOutcome(bulkTask));
             var firstTask = await Task.WhenAny(controlTask, bulkTask).ConfigureAwait(false);
             var first = await firstTask.ConfigureAwait(false);
             var secondTask = ReferenceEquals(firstTask, controlTask) ? bulkTask : controlTask;
@@ -8614,12 +8664,54 @@ public sealed partial class NknSignalingTransport
 
         private readonly record struct RedundantFeedbackSendResult(string Lane, bool Succeeded, Exception? Error);
 
+        private static FileTransferBootstrapCopyOutcome CaptureRedundantBootstrapOutcome(Task<RedundantFeedbackSendResult> task)
+            => !task.IsCompleted ? FileTransferBootstrapCopyOutcome.Pending
+                : task.IsCanceled ? FileTransferBootstrapCopyOutcome.Canceled
+                : !task.IsCompletedSuccessfully ? FileTransferBootstrapCopyOutcome.Failed
+                : task.Result.Succeeded ? FileTransferBootstrapCopyOutcome.Succeeded
+                : task.Result.Error is OperationCanceledException ? FileTransferBootstrapCopyOutcome.Canceled
+                : FileTransferBootstrapCopyOutcome.Failed;
+
         private sealed class PhysicalSendCompletionTracker
         {
             private readonly object gate = new();
             private readonly List<Task> physicalOperations = [];
+            private readonly PostTunaFallbackPeerProofFrameIdentity? bootstrapFrameIdentity;
+            private readonly List<(string Lane, Task Task, Func<FileTransferBootstrapCopyOutcome>? Capture)> bootstrapCopies = [];
             private CancellationTokenSource? retainedCancellationLifetime;
             private bool sealedForRegistration;
+
+            public PhysicalSendCompletionTracker(PostTunaFallbackPeerProofFrameIdentity? bootstrapFrameIdentity = null)
+                => this.bootstrapFrameIdentity = bootstrapFrameIdentity;
+
+            public void RegisterBootstrapCopy(string lane, Task operation, Func<FileTransferBootstrapCopyOutcome>? capture = null)
+            {
+                if (bootstrapFrameIdentity is null)
+                {
+                    return;
+                }
+                lock (gate)
+                {
+                    if (sealedForRegistration)
+                    {
+                        throw new InvalidOperationException("Physical bootstrap submission is sealed.");
+                    }
+                    physicalOperations.Add(operation);
+                    bootstrapCopies.Add((lane, operation, capture));
+                }
+            }
+
+            public ImmutableArray<FileTransferBootstrapPhysicalCopy> CaptureBootstrapCopies()
+            {
+                lock (gate)
+                {
+                    return bootstrapCopies.Select(copy => new FileTransferBootstrapPhysicalCopy(copy.Lane, bootstrapFrameIdentity!,
+                        copy.Capture?.Invoke() ?? (!copy.Task.IsCompleted ? FileTransferBootstrapCopyOutcome.Pending
+                            : copy.Task.IsCompletedSuccessfully ? FileTransferBootstrapCopyOutcome.Succeeded
+                            : copy.Task.IsCanceled ? FileTransferBootstrapCopyOutcome.Canceled : FileTransferBootstrapCopyOutcome.Failed)))
+                        .ToImmutableArray();
+                }
+            }
 
             public void RetainCancellationLifetime(CancellationTokenSource lifetime)
             {
@@ -9268,14 +9360,15 @@ public sealed partial class NknSignalingTransport
         }
 
         private static bool ShouldPrioritizeQueuedFileTransferDataFrame(FileTransferDataFrame frame)
-            => IsReceiverFeedbackDataFrame(frame) ||
+            => IsCorrelatedBootstrapDataFrame(frame) ||
+               IsReceiverFeedbackDataFrame(frame) ||
                IsV6RecoveryControlDataFrame(frame) ||
                IsTerminalDataFrame(frame) ||
                IsRuntimeUnlockPreCommitProbeFrame(frame) ||
                frame is FileTransferPauseControlFrameV4;
 
         private static bool ShouldBypassRegularQueueCapacityForPriorityControlFrame(FileTransferDataFrame frame)
-            => frame is FileTransferFrontierRequestFrameV6;
+            => frame is FileTransferFrontierRequestFrameV6 or FileTransferFallbackBootstrapRequestFrameV6;
 
         private void LogPriorityControlFrameQueueOutcome(
             FileTransferDataFrame frame,
@@ -9776,7 +9869,7 @@ public sealed partial class NknSignalingTransport
         };
 
     private static bool ShouldResumeSuppressedFileTransferDataSessionForV6RecoveryFrame(FileTransferDataFrame frame)
-        => frame.Type is FileTransferProtocol.ReceiverStateFrameTypeV6
+        => !IsCorrelatedBootstrapDataFrame(frame) && frame.Type is FileTransferProtocol.ReceiverStateFrameTypeV6
             or FileTransferProtocol.TransportEpochFrameTypeV6
             or FileTransferProtocol.TransportProbeFrameTypeV6
             or FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType
@@ -9816,7 +9909,8 @@ public sealed partial class NknSignalingTransport
             or FileTransferErrorFrameV4
             or FileTransferTransportEpochFrameV6
             or FileTransferFrontierRequestFrameV6
-            or FileTransferRepairProofFrameV6;
+            or FileTransferRepairProofFrameV6
+            or FileTransferFallbackBootstrapFrameV6;
     }
 
     private static bool IsV4ReceiverFeedbackBulkRedundancyDisabled()

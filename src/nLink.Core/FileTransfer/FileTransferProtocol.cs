@@ -39,6 +39,8 @@ public static class FileTransferProtocol
     public const string ErrorFrameTypeV6 = "filetransfer.error.v6";
     public const string PauseControlFrameTypeV6 = "filetransfer.pause_control.v6";
     public const string HeartbeatFrameTypeV6 = "filetransfer.heartbeat.v6";
+    public const string FallbackBootstrapRequestFrameTypeV6 = "filetransfer.fallback_bootstrap_request.v6";
+    public const string FallbackBootstrapStateFrameTypeV6 = "filetransfer.fallback_bootstrap_state.v6";
 
     public const string SessionRoleSender = "Sender";
     public const string SessionRoleReceiver = "Receiver";
@@ -90,7 +92,9 @@ public static class FileTransferProtocol
             or FileTransferCancelFrameV6
             or FileTransferErrorFrameV6
             or FileTransferPauseControlFrameV6
-            or FileTransferHeartbeatFrameV6;
+            or FileTransferHeartbeatFrameV6
+            or FileTransferFallbackBootstrapRequestFrameV6
+            or FileTransferFallbackBootstrapStateFrameV6;
 
     public static bool IsV6DataFrameType(string? frameType)
         => frameType is ManifestFrameTypeV6
@@ -107,7 +111,9 @@ public static class FileTransferProtocol
             or SessionCancelFrameTypeV6
             or ErrorFrameTypeV6
             or PauseControlFrameTypeV6
-            or HeartbeatFrameTypeV6;
+            or HeartbeatFrameTypeV6
+            or FallbackBootstrapRequestFrameTypeV6
+            or FallbackBootstrapStateFrameTypeV6;
 
     internal static string CreateFallbackV6ProofBootstrapCorrelationId(
         long bootstrapGeneration)

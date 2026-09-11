@@ -80,7 +80,9 @@ internal sealed record FileTransferCoordinatorRouteTransitionOperationSnapshot(
     string DispositionKind,
     string RetainedFrameType,
     string RetainedFrameFingerprint,
-    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts);
+    ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferBootstrapCorrelationOperationSnapshot? BootstrapCorrelation = null);
 
 internal sealed record FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot(
     string Role,
@@ -3190,6 +3192,7 @@ internal static partial class FileTransferCoordinator
 
         AddRouteRuntimeOperationDescriptors(state, builder);
         AddRouteTransitionOperationDescriptors(state, builder);
+        AddBootstrapCorrelationDescriptors(state, builder);
         AddRuntimeUnlockRetryOperationDescriptors(state, builder);
         AddReceiveRecoveryOperationDescriptors(state, builder);
         AddFallbackTailYieldOperationDescriptors(state, builder);

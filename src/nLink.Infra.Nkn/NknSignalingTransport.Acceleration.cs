@@ -2499,6 +2499,12 @@ public sealed partial class NknSignalingTransport
     {
         lock (accelerationGate)
         {
+            if (activeCorrelatedBootstrapPhase is not null)
+            {
+                return Task.FromResult(new FileTransferFallbackV6ProofBootstrapReceipt(command,
+                    FileTransferFallbackV6ProofBootstrapReceiptStatus.Rejected, null,
+                    "filetransfer_fallback_v6_proof_bootstrap_execution_conflict"));
+            }
             if (lastFallbackV6ProofBootstrapReceipt is { } terminal &&
                 terminal.Command == command &&
                 terminal.Status is not FileTransferFallbackV6ProofBootstrapReceiptStatus.Held)

@@ -5,7 +5,7 @@ using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
 
-public static class FileTransferDataFrameCodec
+public static partial class FileTransferDataFrameCodec
 {
     private const uint BinaryMagic = 0x3246544E; // "NFT2"
     private const byte BinaryVersion = 1;
@@ -85,6 +85,11 @@ public static class FileTransferDataFrameCodec
 
     private static byte[] SerializeBinary(FileTransferDataFrame frame)
     {
+        if (frame is FileTransferFallbackBootstrapFrameV6 bootstrap &&
+            !FileTransferBootstrapCorrelation.IsValidFrame(bootstrap))
+        {
+            throw new InvalidOperationException("Correlated fallback bootstrap frame was invalid.");
+        }
         using var buffer = new MemoryStream();
         buffer.Write(BitConverter.GetBytes(BinaryMagic));
         buffer.WriteByte(BinaryVersion);
@@ -98,6 +103,9 @@ public static class FileTransferDataFrameCodec
 
         switch (frame)
         {
+            case FileTransferFallbackBootstrapFrameV6 correlatedBootstrap:
+                WriteBootstrapCorrelationFields(buffer, correlatedBootstrap);
+                break;
             case FileTransferManifestFrameV4 manifest:
                 if (!IsValidV4ManifestTuple(manifest.FileSizeBytes, manifest.ChunkSizeBytes, manifest.ChunkCount))
                 {
@@ -301,13 +309,22 @@ public static class FileTransferDataFrameCodec
 
         var metadata = default(TransportMetadata);
         if (!legacyV4FrameCode &&
-            !TryReadTransportMetadata(ref reader, out metadata))
+            !TryReadTransportMetadata(ref reader, out metadata, preserveExact: frameCode is 55 or 56))
         {
             return false;
         }
 
         switch (frameCode)
         {
+            case 55:
+            case 56:
+                if (!TryReadBootstrapCorrelationFrame(ref reader, frameCode, sessionId, transferId, metadata, out var correlatedFrame) ||
+                    correlatedFrame is null || !SerializeBinary(correlatedFrame).AsSpan().SequenceEqual(payload))
+                {
+                    return false;
+                }
+                frame = correlatedFrame;
+                return true;
             case 18:
                 if (!reader.TryReadString(out var v4FileName) ||
                     !reader.TryReadInt64(out var v4FileSizeBytes) ||
@@ -1566,7 +1583,7 @@ public static class FileTransferDataFrameCodec
         WriteOptionalString(stream, frame.PredecessorAuthorityId);
     }
 
-    private static bool TryReadTransportMetadata(ref BinaryFrameReader reader, out TransportMetadata metadata)
+    private static bool TryReadTransportMetadata(ref BinaryFrameReader reader, out TransportMetadata metadata, bool preserveExact = false)
     {
         metadata = default;
         if (!reader.TryReadInt64(out var transportEpoch) ||
@@ -1580,10 +1597,10 @@ public static class FileTransferDataFrameCodec
 
         metadata = new TransportMetadata(
             transportEpoch,
-            NormalizeTransportMetadataToken(batchId),
-            NormalizeTransportMetadataToken(repairRequestId),
-            NormalizeTransportMetadataToken(priority),
-            NormalizeTransportMetadataToken(recoveryMode));
+            preserveExact ? batchId : NormalizeTransportMetadataToken(batchId),
+            preserveExact ? repairRequestId : NormalizeTransportMetadataToken(repairRequestId),
+            preserveExact ? priority : NormalizeTransportMetadataToken(priority),
+            preserveExact ? recoveryMode : NormalizeTransportMetadataToken(recoveryMode));
         return true;
     }
 
@@ -1869,6 +1886,8 @@ public static class FileTransferDataFrameCodec
             FileTransferRuntimeUnlockPreCommitProbeFrame => 52,
             FileTransferRuntimeUnlockPreCommitProbeAckFrame => 53,
             FileTransferFallbackTailYieldFrameV6 => 54,
+            FileTransferFallbackBootstrapRequestFrameV6 => 55,
+            FileTransferFallbackBootstrapStateFrameV6 => 56,
             _ => throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'."),
         };
 

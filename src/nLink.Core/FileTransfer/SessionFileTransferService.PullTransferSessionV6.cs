@@ -37,6 +37,10 @@ public sealed partial class SessionFileTransferService
                 ChunkSizeBytes = context.ChunkSizeBytes,
                 InitialPipelineDepth = ResolveOutboundInitialPipelineDepth(context),
             };
+            lock (gate)
+            {
+                if (!TryPrepareBootstrapSessionOpenLocked(context, ref sessionOpen)) { return; }
+            }
 
             dataSession = await currentTransport
                 .OpenFileTransferDataSessionAsync(context.SessionId, context.TransferId, context.LifetimeCts.Token)
@@ -216,6 +220,8 @@ public sealed partial class SessionFileTransferService
                 {
                     continue;
                 }
+
+                if (TryHandleBootstrapCorrelationFrame(FileTransferDirection.Outbound, dataSession, received)) { continue; }
 
                 if (!FileTransferProtocol.IsV6DataFrame(frame))
                 {
@@ -4759,6 +4765,8 @@ public sealed partial class SessionFileTransferService
                 {
                     continue;
                 }
+
+                if (TryHandleBootstrapCorrelationFrame(FileTransferDirection.Inbound, dataSession, received)) { continue; }
 
                 if (!FileTransferProtocol.IsV6DataFrame(frame))
                 {

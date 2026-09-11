@@ -2222,6 +2222,10 @@ public sealed partial class SessionFileTransferService
                 ChunkSizeBytes = context.ChunkSizeBytes,
                 InitialPipelineDepth = V4SenderPumpDepth,
             };
+            lock (gate)
+            {
+                if (!TryPrepareBootstrapSessionOpenLocked(context, ref sessionOpen)) { return; }
+            }
 
             if (startupSessionOpenDispatched &&
                 !startupManifestDispatched &&
@@ -3566,6 +3570,9 @@ public sealed partial class SessionFileTransferService
                         "stale_outbound_sparse_receive_dispatch");
                     continue;
                 }
+
+                if (completedReceiveDataSession is { } bootstrapSession &&
+                    TryHandleBootstrapCorrelationFrame(FileTransferDirection.Outbound, bootstrapSession, received)) { continue; }
 
                 var fallbackProofHandled = false;
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
@@ -22461,6 +22468,8 @@ public sealed partial class SessionFileTransferService
                 {
                     continue;
                 }
+
+                if (TryHandleBootstrapCorrelationFrame(FileTransferDirection.Inbound, dataSession, received)) { continue; }
 
                 var fallbackProofHandled = false;
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))

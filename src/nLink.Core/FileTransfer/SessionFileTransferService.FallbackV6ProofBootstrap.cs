@@ -187,6 +187,19 @@ public sealed partial class SessionFileTransferService
             RaiseTransferChanged(issuedSnapshot);
         }
 
+        if (proofFrame is FileTransferFallbackBootstrapFrameV6)
+        {
+            FileTransferBootstrapPhaseCommand? phase;
+            lock (gate)
+            {
+                var state = GetBootstrapCorrelationStateLocked(command.Observation.Direction, dataSession, proofFrame, out _);
+                phase = state is null ? null : FileTransferCoordinator.GetCurrentFallbackBootstrapPhaseCommand(state);
+                if (phase?.Bootstrap != command || phase.Frame != proofFrame) { return; }
+            }
+            await ExecuteBootstrapCorrelationPhaseAsync(bridge, phase, dataSession).ConfigureAwait(false);
+            return;
+        }
+
         FileTransferFallbackV6ProofBootstrapReceipt receipt;
         try
         {
@@ -327,13 +340,14 @@ public sealed partial class SessionFileTransferService
                     evaluation,
                     checkpoint) ||
                 (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation) &&
-                 (evaluation.FallbackEpoch <= 1 ||
+                 ((!UsesBootstrapCorrelation(CreateCoordinatorStateLocked(context)) &&
+                   (evaluation.FallbackEpoch <= 1 ||
                   !IsPostRecoveryFileTunaV4LiveActivationEpoch(
                      context.CurrentLiveRouteEpoch,
                      context.LastRecoveredV6TransportLiveRouteEpochId) ||
                   !IsStalePostReactivationFallbackV6Proof(
                       context,
-                      evaluation.TriggerTransportEpoch) ||
+                      evaluation.TriggerTransportEpoch))) ||
                   !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
                       evaluation,
                       checkpoint,
@@ -348,6 +362,19 @@ public sealed partial class SessionFileTransferService
                 evaluation,
                 context.TransferId,
                 checkpoint);
+            var correlationState = CreateCoordinatorStateLocked(context);
+            if (UsesBootstrapCorrelation(correlationState))
+            {
+                if (context.UserPaused) { return false; }
+                var phase = IssueBootstrapCorrelationPhaseLocked(correlationState, observation, null, null);
+                if (phase is null) { return false; }
+                command = phase.Bootstrap;
+                epochFrame = phase.EpochFrame!;
+                proofFrame = phase.Frame;
+                dataSession = currentDataSession;
+                snapshot = CreateSnapshotLocked();
+                return true;
+            }
             var decision = FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
                 CreateCoordinatorStateLocked(context),
                 observation);
@@ -460,6 +487,38 @@ public sealed partial class SessionFileTransferService
             evaluation,
             inbound.TransferId,
             inboundCheckpoint);
+        var inboundCorrelationState = CreateCoordinatorStateLocked(inbound);
+        if (UsesBootstrapCorrelation(inboundCorrelationState))
+        {
+            if (inbound.UserPaused) { return false; }
+            var staged = inbound.PendingFallbackV6ProofBootstrapPeerFrameEvidence as FileTransferFallbackBootstrapFrameV6;
+            if (staged is not null &&
+                (inbound.PendingFallbackV6ProofBootstrapPeerFrameBinding is not { } stagedBinding ||
+                 !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(inbound, staged, FileTransferDirection.Inbound, out var currentBinding) ||
+                 !MatchesFallbackV6ProofBootstrapPeerFrameBinding(stagedBinding, currentBinding)))
+            {
+                return false;
+            }
+            var phase = IssueBootstrapCorrelationPhaseLocked(inboundCorrelationState, inboundObservation,
+                new FileTransferFallbackBootstrapStateFrameV6
+                {
+                    SessionId = inbound.SessionId, TransferId = inbound.TransferId, Epoch = Math.Max(1, inboundCheckpoint.StateEpoch + 1),
+                    ContiguousCommittedChunkIndex = inboundCheckpoint.ContiguousCommittedChunkIndex,
+                    DurableReceivedHighestChunkIndex = inboundCheckpoint.DurableHighestChunkIndex,
+                    CreditUntilChunkIndexExclusive = inboundCheckpoint.ContiguousCommittedChunkIndex,
+                    BytesCommitted = ResolveInboundV4StateBytesCommittedLocked(inbound), TransferPaused = true,
+                    TransferPauseReason = FileTransferBootstrapCorrelation.RecoveryMode,
+                }, staged);
+            inbound.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
+            inbound.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
+            if (phase is null) { return false; }
+            command = phase.Bootstrap;
+            epochFrame = phase.EpochFrame!;
+            proofFrame = phase.Frame;
+            dataSession = inboundDataSession;
+            snapshot = CreateSnapshotLocked();
+            return true;
+        }
         var inboundDecision = FileTransferCoordinator.IssueFileTransferFallbackV6ProofBootstrap(
             CreateCoordinatorStateLocked(inbound),
             inboundObservation);
@@ -1624,6 +1683,13 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         FileTransferFallbackV6ProofBootstrapEvaluation evaluation)
     {
+        var correlationState = CreateCoordinatorStateLocked(context);
+        if (UsesBootstrapCorrelation(correlationState))
+        {
+            return FileTransferCoordinator.CanStartFallbackBootstrapExchange(correlationState) &&
+                (context.PendingFallbackV6ProofBootstrapPeerFrameEvidence is not FileTransferFallbackBootstrapFrameV6 correlated ||
+                 FileTransferCoordinator.CanRetainFallbackBootstrapPeerFrame(correlationState, correlated));
+        }
         if (evaluation.FallbackEpoch <= 1)
         {
             var initialTransitionState =

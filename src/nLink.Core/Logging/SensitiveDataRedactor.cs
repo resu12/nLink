@@ -114,13 +114,13 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\boperation_key=(?<value>[A-Za-z0-9._/:-]+\|[A-Za-z0-9._/:-]+\|(?:fte1-[a-f0-9]{24}|\(none\))\|[0-9]+\|[A-Za-z0-9._/:-]+)(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceOperationKeyValueRegex();
 
-    [GeneratedRegex(@"\bsnapshot_catalog_version=(?<value>snapshot-authority-v1(?:-receiver-barrier-v1(?:-checkpoint-repair-continuity-v1)?)?)(?=;\s|$)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\bsnapshot_catalog_version=(?<value>snapshot-authority-v1(?:-receiver-barrier-v1(?:-checkpoint-repair-continuity-v1(?:-fallback-bootstrap-correlation-v1)?)?)?)(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex SnapshotEvidenceCatalogVersionRegex();
 
     [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_fallback_frontier_repair_(?:authority_granted|contract_settled|dispatched|progress_observed)|filetransfer_v6_frontier_request_(?:sent|deferred)|filetransfer_v6_frontier_stall_grace_recheck_decided|filetransfer_v6_fallback_frontier_repair_progress_state_forced|filetransfer_v6_receiver_state_sent|filetransfer_control_plane_delivery_observed)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex CheckpointContinuityEvidenceLineRegex();
 
-    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>continuity_profile)=(?<value>snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1)|(?<key>continuity_(?:coordinator_id|source_fingerprint|acceptance_id|origin_receipt_id|origin_receipt_fingerprint|receipt_id|receipt_fingerprint|current_scope_fingerprint|repair_authority_id|request_id|correlation_id))=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>continuity_profile)=(?<value>snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1(?:-fallback-bootstrap-correlation-v1)?)|(?<key>continuity_(?:coordinator_id|source_fingerprint|acceptance_id|origin_receipt_id|origin_receipt_fingerprint|receipt_id|receipt_fingerprint|current_scope_fingerprint|repair_authority_id|request_id|correlation_id))=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex CheckpointContinuityEvidenceValueRegex();
 
     [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=(?:filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_(?:peer_visible|mismatch)|filetransfer_data_frame_ignored)(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]

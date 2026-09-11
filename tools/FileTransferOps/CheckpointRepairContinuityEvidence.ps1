@@ -93,7 +93,14 @@ function Test-FileTransferCoordinatorReceiverBarrierCatalogCapability {
     param($Catalog)
     return [string]$Catalog.Version -cin @(
         $script:FileTransferCoordinatorReceiverBarrierCatalogVersion,
-        $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion)
+        $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
+        $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion)
+}
+
+function Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability {
+    param([string]$Version)
+    return $Version -cin @($script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
+        $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion)
 }
 
 function Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog {
@@ -223,7 +230,7 @@ function Test-FileTransferCheckpointRepairContinuityAggregateScope {
 function Test-FileTransferCoordinatorCheckpointRepairContinuityOperation {
     param($Envelope, $Operation, $Catalog)
     try {
-        if ($Catalog.Version -cne $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion -or
+        if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability $Catalog.Version) -or
             $Operation.family -cne 'route_runtime' -or
             $Operation.operationKind -cne 'FallbackCheckpointRepairScopeContinuity' -or
             $Operation.operationRole -cnotin $script:FileTransferCoordinatorCheckpointRepairContinuityCatalog.operationRoles -or
@@ -404,7 +411,7 @@ function Get-FileTransferCheckpointRepairContinuityEvidence {
     $errors = [System.Collections.Generic.List[string]]::new()
     $origins = @{}
     $bindings = @{}
-    if ($Catalog.Version -cne $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion) {
+    if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability $Catalog.Version)) {
         return [pscustomobject]@{ CatalogVersion=$Catalog.Version; CatalogHash=$Catalog.Hash;
             OriginsByKey=$origins; BindingsByReceiptKey=$bindings; Errors=@() }
     }
@@ -508,7 +515,7 @@ function ConvertTo-FileTransferCheckpointRepairContinuityDiagnosticStamp {
         if ($null -eq $value) { return $null }
         $kind = $script:FileTransferCoordinatorCheckpointRepairContinuityCatalog.diagnosticFields[$name]
         if ($kind -ceq 'profile') {
-            if ([string]$value -cne $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion) { return $null }
+            if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability ([string]$value))) { return $null }
             $stamp[$name] = [string]$value
         }
         elseif ($kind -ceq 'fte1') {
@@ -530,10 +537,11 @@ function Resolve-FileTransferCheckpointRepairContinuityBinding {
     if ($null -eq $SnapshotEvidence -or $SnapshotEvidence.ArtifactEvidenceVerdict -cne 'pass' -or
         $SnapshotEvidence.PSObject.Properties.Name -notcontains '__CheckpointRepairContinuityEvidence') { return $null }
     $index = $SnapshotEvidence.__CheckpointRepairContinuityEvidence
-    if ($null -eq $index -or $index.CatalogVersion -cne $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion) { return $null }
+    if ($null -eq $index -or -not (Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability $index.CatalogVersion)) { return $null }
     $source = ConvertTo-FileTransferCheckpointRepairContinuityDiagnosticStamp $SourceFields -SourceOnly
     $current = ConvertTo-FileTransferCheckpointRepairContinuityDiagnosticStamp $CurrentFields
     if ($null -eq $source -or $null -eq $current -or
+        $source.continuity_profile -cne $index.CatalogVersion -or $current.continuity_profile -cne $index.CatalogVersion -or
         $source.continuity_coordinator_id -cne $current.continuity_coordinator_id -or
         $source.continuity_source_fingerprint -cne $current.continuity_source_fingerprint) { return $null }
     $key = @($current.continuity_coordinator_id, $current.continuity_receipt_id,

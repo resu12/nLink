@@ -877,6 +877,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportLastPauseReason = reason;
             context.PullTransportResumeRequestPending = false;
             context.SparseSenderPumpLastWakeReason = "tuna_activation_barrier";
+            InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused");
             return true;
         }
 
@@ -886,6 +887,7 @@ public sealed partial class SessionFileTransferService
         context.PullTransportPauseReason = reason;
         context.PullTransportLastPauseReason = reason;
         context.PullTransportResumeRequestPending = requiresResumeRequest;
+        InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused");
         return true;
     }
 
@@ -932,6 +934,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportGraceDeadlineUtc = context.PullTransportPausedSinceUtc.Value.AddMilliseconds(PullSessionTransportRecoveryGraceMs);
             context.PullTransportPauseReason = reason;
             context.PullTransportResumeRequestPending = false;
+            InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused");
             return true;
         }
 
@@ -940,6 +943,7 @@ public sealed partial class SessionFileTransferService
         context.PullTransportGraceDeadlineUtc = context.PullTransportPausedSinceUtc.Value.AddMilliseconds(PullSessionTransportRecoveryGraceMs);
         context.PullTransportPauseReason = reason;
         context.PullTransportResumeRequestPending = requiresResumeRequest;
+        InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused");
         return true;
     }
 

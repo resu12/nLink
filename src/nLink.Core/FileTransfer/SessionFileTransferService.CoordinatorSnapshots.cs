@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d";
+        "ebbaf19d291129caa47b34e69395de2b38985661560791c7c762c437ed6e679b";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3428,12 +3428,16 @@ public sealed partial class SessionFileTransferService
                     {
                         SourceBoundary = CreateEvidenceBoundary(
                             transition.SourceBoundary),
+                        TargetBoundary = transition.ProofBoundaryKind == "fallback-bootstrap-correlation-v1"
+                            ? CreateEvidenceBoundary(transition.TargetBoundary) : transition.TargetBoundary,
                         ProofBoundaryFingerprint = EvidenceToken(
                             transition.ProofBoundaryFingerprint),
                         DurableCheckpointFingerprint = EvidenceToken(
                             transition.DurableCheckpointFingerprint),
                         RetainedFrameFingerprint = EvidenceToken(
                             transition.RetainedFrameFingerprint),
+                        BootstrapCorrelation = transition.BootstrapCorrelation is { } correlation
+                            ? CreateBootstrapCorrelationEvidence(correlation) : null,
                         Receipts = transition.Receipts
                             .Select(CreateEvidenceReceipt)
                             .ToImmutableArray(),
@@ -3584,6 +3588,29 @@ public sealed partial class SessionFileTransferService
                 RetainedLegCheckpointRequestId = EvidenceToken(scope.RetainedLegCheckpointRequestId),
                 ScopeFingerprint = EvidenceToken(scope.ScopeFingerprint),
             };
+
+        private static FileTransferBootstrapCorrelationOperationSnapshot CreateBootstrapCorrelationEvidence(
+            FileTransferBootstrapCorrelationOperationSnapshot value)
+            => value with
+            {
+                AgreementFingerprint = EvidenceToken(value.AgreementFingerprint),
+                SenderIssuerFingerprint = EvidenceToken(value.SenderIssuerFingerprint),
+                ReceiverIssuerFingerprint = EvidenceToken(value.ReceiverIssuerFingerprint),
+                LocalIdFingerprint = EvidenceToken(value.LocalIdFingerprint),
+                PeerIdFingerprint = EvidenceToken(value.PeerIdFingerprint),
+                CompletedPeerIdFingerprint = EvidenceToken(value.CompletedPeerIdFingerprint),
+                RetainedPeerFrameIdentityFingerprint = EvidenceToken(value.RetainedPeerFrameIdentityFingerprint),
+                PredecessorIdentity = EvidenceToken(value.PredecessorIdentity),
+                EpochFrameFingerprint = EvidenceToken(value.EpochFrameFingerprint),
+                ProofFrameFingerprint = EvidenceToken(value.ProofFrameFingerprint),
+                ProofFrameIdentityFingerprint = EvidenceToken(value.ProofFrameIdentityFingerprint),
+                DeliveryCopies = value.DeliveryCopies.Select(CreateBootstrapCopyEvidence).ToImmutableArray(),
+                SettlementCopies = value.SettlementCopies.Select(CreateBootstrapCopyEvidence).ToImmutableArray(),
+                FailureCopies = value.FailureCopies.Select(CreateBootstrapCopyEvidence).ToImmutableArray(),
+            };
+
+        private static FileTransferBootstrapPhysicalCopySnapshot CreateBootstrapCopyEvidence(FileTransferBootstrapPhysicalCopySnapshot value)
+            => value with { FrameFingerprint = EvidenceToken(value.FrameFingerprint) };
 
         private static FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot
             CreateCheckpointContinuityEvidence(FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot value)

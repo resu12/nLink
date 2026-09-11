@@ -19125,17 +19125,8 @@ public sealed partial class FileTransferCoordinatorTests
     [Fact]
     public void RuntimeUnlockAdmissionDecision_ReportsFallbackOwnerAndTerminalReasons()
     {
-        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
-        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
-        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
-
-        var state = FallBack(
-            ActivateTuna(StartRegular(regular).State, tuna, committedChunk: 5).State,
-            fallback,
-            committedChunk: 5,
-            transportEpoch: 2).State;
-        state.CurrentLeg!.State = FileTransferLegState.Active;
-        state.CurrentLeg.CanSendData = true;
+        var state = ActiveFallbackStateWithoutCheckpoint();
+        Assert.Null(state.CurrentLeg!.CheckpointRequestId);
 
         var blocked = FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
             isTerminal: false,
@@ -19225,17 +19216,8 @@ public sealed partial class FileTransferCoordinatorTests
     [Fact]
     public void RuntimeUnlockAdmission_DoesNotTrustProjectedPairedYieldBoolean()
     {
-        var regular = FileTransferRouteResolver.Resolve(
-            FileTransferRoute.RegularNknV4Fast);
-        var fallback = FileTransferRouteResolver.Resolve(
-            FileTransferRoute.PostTunaFallbackV6);
-        var state = FallBack(
-            StartRegular(regular).State,
-            fallback,
-            committedChunk: 4,
-            transportEpoch: 2).State;
-        state.CurrentLeg!.State = FileTransferLegState.Active;
-        state.CurrentLeg.CanSendData = true;
+        var state = ActiveFallbackStateWithoutCheckpoint();
+        Assert.Null(state.CurrentLeg!.CheckpointRequestId);
         state = state with
         {
             RuntimeUnlockFallbackSurvivalState =
@@ -19260,6 +19242,40 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.False(
             admission.FallbackSurvivalState
                 .PairedFallbackYieldGranted);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RuntimeUnlockAdmission_RejectsCheckpointOwnerDespiteProjectedActiveState(
+        bool projectedPairedYieldGranted)
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var state = FallBack(StartRegular(regular).State, fallback, committedChunk: 4, transportEpoch: 2).State;
+        state.CurrentLeg!.State = FileTransferLegState.Active;
+        state.CurrentLeg.CanSendData = true;
+        var checkpointRequestId = state.CurrentLeg.CheckpointRequestId;
+        Assert.False(string.IsNullOrWhiteSpace(checkpointRequestId));
+        state = state with
+        {
+            RuntimeUnlockFallbackSurvivalState = state.RuntimeUnlockFallbackSurvivalState with
+            {
+                PairedFallbackYieldGranted = projectedPairedYieldGranted,
+            },
+        };
+
+        var decision = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
+
+        var admission = decision.RuntimeUnlockAdmissionDecision!.Value;
+        Assert.False(admission.Granted);
+        Assert.Equal(RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner, admission.Status);
+        Assert.Equal("fallback_checkpoint_owner_active", admission.Reason);
+        Assert.Null(admission.AdmissionToken);
+        Assert.False(admission.FallbackSurvivalState.PairedFallbackYieldGranted);
+        Assert.Equal(checkpointRequestId, decision.State.CurrentLeg!.CheckpointRequestId);
+        Assert.Equal(state.CurrentRuntimeOwner, decision.State.CurrentRuntimeOwner);
+        Assert.Equal(state.CurrentLiveRouteEpoch, decision.State.CurrentLiveRouteEpoch);
     }
 
     [Fact]

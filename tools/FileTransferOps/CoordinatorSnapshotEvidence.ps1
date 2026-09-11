@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'CheckpointRepairContinuityEvidence.ps1')
+. (Join-Path $PSScriptRoot 'BootstrapCorrelationEvidence.ps1')
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
@@ -530,6 +531,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion) {
+        return Get-FileTransferCoordinatorBootstrapCorrelationCatalog
+    }
     if ($ProfileVersion -ceq $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion) {
         return Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog
     }
@@ -936,7 +940,8 @@ function Test-FileTransferCoordinatorSnapshotEffectScope {
         [Parameter(Mandatory = $true)]$Effect
     )
 
-    if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) { return $false }
+    if ((Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) -or
+        (Test-FileTransferCoordinatorBootstrapCorrelationMarker $Operation)) { return $false }
     $scope = if ($Operation.PSObject.Properties.Name -contains 'routeRuntime' -and
         $null -ne $Operation.routeRuntime) {
         $Operation.routeRuntime.boundary
@@ -1009,7 +1014,8 @@ function Test-FileTransferCoordinatorSnapshotEffectReceipt {
         [Parameter(Mandatory = $true)]$Effect
     )
 
-    if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) { return $false }
+    if ((Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $Operation) -or
+        (Test-FileTransferCoordinatorBootstrapCorrelationMarker $Operation)) { return $false }
     if ([bool]$Operation.receiptValidated -and
         [string]$Operation.receiptIdentity -ceq
             [string]$Effect.ReceiptIdentity -and
@@ -2410,7 +2416,8 @@ function Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry {
 function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
     param(
         [Parameter(Mandatory = $true)]$Envelope,
-        [Parameter(Mandatory = $true)]$Operation
+        [Parameter(Mandatory = $true)]$Operation,
+        $Catalog = $null
     )
 
     if ([string]$Operation.family -notin
@@ -2433,6 +2440,7 @@ function Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog {
     if (([string]$Envelope.decisionKind -notin
             $script:FileTransferCoordinatorSnapshotFamily1DecisionKinds -and
          -not $isExactFallbackCheckpointOperation -and
+         -not (Test-FileTransferBootstrapCorrelationBaseRecord $Envelope $Operation $Catalog) -and
          -not (Test-FileTransferCoordinatorSnapshotReceiveRecoveryRouteCarry $Envelope $Operation)) -or
         [string]$Envelope.decisionStatus -notin @(
             'Accepted', 'Idempotent', 'Rejected', 'Prepared', 'Draining',
@@ -9994,7 +10002,8 @@ function Test-FileTransferCoordinatorFallbackV6BootstrapLineageEqual {
 
 function Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle {
     param(
-        [Parameter(Mandatory = $true)][object[]]$History
+        [Parameter(Mandatory = $true)][object[]]$History,
+        [hashtable]$CorrelatedRetirements
     )
 
     $ordered = @($History | Sort-Object {
@@ -10074,6 +10083,16 @@ function Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle {
             Closed = $false
             Candidate = $latest
             StructuralFailure = 'retirement_without_delivery'
+        }
+    }
+
+    if ($null -ne $CorrelatedRetirements -and $latest.Boundary.decisionKind -ceq 'StartFallbackBootstrapExchange') {
+        $key = "$($latest.Boundary.coordinatorInstanceId)|$($latest.Boundary.boundaryId)|$($latest.Operation.operationKey)"
+        $validated = $CorrelatedRetirements.ContainsKey($key)
+        return [pscustomobject]@{
+            Closed = $validated
+            Candidate = if ($validated) { $null } else { $latest }
+            StructuralFailure = if ($validated) { '' } else { 'correlated_retirement_history_missing' }
         }
     }
 
@@ -10190,7 +10209,8 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         if ($null -eq $selectedCatalogIdentity) {
             $selectedCatalogIdentity = $profileIdentity
             if ($profileVersion -cin @($script:FileTransferCoordinatorReceiverBarrierCatalogVersion,
-                    $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion)) {
+                    $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
+                    $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -10513,6 +10533,13 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_operation_identity_incomplete:$($record.LineIndex)")
                         break
                     }
+                    if (Test-FileTransferCoordinatorBootstrapCorrelationMarker $operation) {
+                        if (-not (Test-FileTransferCoordinatorBootstrapCorrelationOperation $envelope $operation $catalog)) {
+                            $errors.Add("snapshot_bootstrap_correlation_operation_invalid:$($record.LineIndex)")
+                            break
+                        }
+                        continue
+                    }
                     if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $operation) {
                         if (-not (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $operation $catalog)) {
                             $continuityReason = 'snapshot_checkpoint_repair_continuity_operation_invalid'
@@ -10535,7 +10562,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog `
                             -Envelope $envelope `
-                            -Operation $operation)) {
+                            -Operation $operation -Catalog $catalog)) {
                         $attemptVariant =
                             Get-FileTransferCoordinatorSnapshotFamily1AttemptReceiptStageVariant `
                                 -Envelope $envelope `
@@ -11004,6 +11031,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    if ($catalog.Version -ceq $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion -and $errors.Count -eq 0) {
+        foreach ($error in @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
+    }
+
     $operationIndex = @{}
     $operationIndexSeparator = [char]31
     foreach ($boundary in $boundaries) {
@@ -11092,6 +11123,11 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
         else {
             @()
+        }
+        if (@($candidates | Where-Object {
+                Test-FileTransferCoordinatorBootstrapCorrelationMarker $_.Operation }).Count -gt 0) {
+            $errors.Add("snapshot_bootstrap_correlation_authority_effect_forbidden:$($effect.LineIndex)")
+            continue
         }
         if (@($candidates | Where-Object {
                 Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_.Operation }).Count -gt 0) {
@@ -12048,10 +12084,17 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         }
     }
 
+    $correlatedRetirements = $null
+    if ($catalog.Version -ceq $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion) {
+        $retirementEvidence = Get-FileTransferBootstrapCorrelationRetirementEvidence -Boundaries @($boundaries) -Catalog $catalog
+        $correlatedRetirements = $retirementEvidence.Validated
+        foreach ($error in $retirementEvidence.Errors) { $errors.Add($error) }
+    }
     $operationHistory = @(
         foreach ($boundary in @($boundaries)) {
             foreach ($operation in @($boundary.operations)) {
-                if (Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $operation) { continue }
+                if ((Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $operation) -or
+                    (Test-FileTransferCoordinatorBootstrapCorrelationMarker $operation)) { continue }
                 if ([string]$operation.family -in
                     (@($script:FileTransferCoordinatorSnapshotFamily1) +
                      @($script:FileTransferCoordinatorSnapshotFamily2) +
@@ -12149,7 +12192,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
             if ($isBootstrap) {
                 $bootstrapLifecycle =
                 Get-FileTransferCoordinatorFallbackV6BootstrapLifecycle `
-                    -History $history
+                    -History $history -CorrelatedRetirements $correlatedRetirements
                 if (-not [bool]$bootstrapLifecycle.Closed) {
                     $candidate = $bootstrapLifecycle.Candidate
                     if (-not [string]::IsNullOrWhiteSpace(

@@ -1297,7 +1297,9 @@ internal readonly record struct FileTransferRouteTransitionSubstate(
     long LastTransitionGeneration = 0,
     FileTransferFallbackV6ProofBootstrapCommand? PendingFallbackV6ProofBootstrap = null,
     FileTransferFallbackV6ProofBootstrapReceipt? LastFallbackV6ProofBootstrapReceipt = null,
-    long LastFallbackV6ProofBootstrapGeneration = 0)
+    long LastFallbackV6ProofBootstrapGeneration = 0,
+    FileTransferBootstrapAgreement? BootstrapAgreement = null,
+    FileTransferBootstrapExchange? BootstrapExchange = null)
 {
     internal static FileTransferRouteTransitionSubstate Empty => default;
 }
@@ -6236,9 +6238,10 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferFallbackV6ProofBootstrapObservation observation)
     {
-        var decision = IssueFileTransferFallbackV6ProofBootstrapCore(
-            state,
-            observation);
+        var decision = IsFallbackBootstrapCorrelationSelected(state)
+            ? new FileTransferFallbackV6ProofBootstrapDecision(FileTransferFallbackV6ProofBootstrapDecisionStatus.Rejected,
+                "bootstrap_correlated_exchange_required") { State = state }
+            : IssueFileTransferFallbackV6ProofBootstrapCore(state, observation);
         return FinalizeFallbackV6ProofBootstrapDecisionSnapshot(
             state,
             decision,
@@ -6380,9 +6383,10 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferFallbackV6ProofBootstrapReceipt receipt)
     {
-        var decision = ApplyFileTransferFallbackV6ProofBootstrapReceiptCore(
-            state,
-            receipt);
+        var decision = IsFallbackBootstrapCorrelationSelected(state)
+            ? new FileTransferFallbackV6ProofBootstrapDecision(FileTransferFallbackV6ProofBootstrapDecisionStatus.Rejected,
+                "bootstrap_correlated_phase_receipt_required") { State = state }
+            : ApplyFileTransferFallbackV6ProofBootstrapReceiptCore(state, receipt);
         return FinalizeFallbackV6ProofBootstrapDecisionSnapshot(
             state,
             decision,
@@ -6469,6 +6473,10 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state)
     {
         var substate = state.PersistentState.FileTransferRouteTransition;
+        if (IsFallbackBootstrapCorrelationSelected(state))
+        {
+            return GetCurrentFallbackBootstrapPhaseCommand(state, heldOnly: true)?.Bootstrap;
+        }
         return substate.PendingFallbackV6ProofBootstrap is { } pending &&
                substate.LastFallbackV6ProofBootstrapReceipt is
                    { Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Held } held &&
@@ -6524,6 +6532,20 @@ internal static partial class FileTransferCoordinator
     {
         command = null!;
         reasonCode = "bootstrap_not_current";
+        if (IsFallbackBootstrapCorrelationSelected(state))
+        {
+            var exchange = state.PersistentState.FileTransferRouteTransition.BootstrapExchange;
+            reasonCode = "bootstrap_correlated_exchange_incomplete";
+            if (exchange is not { Completed: true } || !IsFallbackBootstrapExchangeCurrent(state, exchange) ||
+                peerFrame is not FileTransferFallbackBootstrapFrameV6 correlated || exchange.RetainedPeerFrame != correlated ||
+                GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(state) != exchange.Bootstrap)
+            {
+                return false;
+            }
+            command = exchange.Bootstrap;
+            reasonCode = "exact_correlated_bootstrap_boundary";
+            return true;
+        }
         if (GetCurrentFileTransferFallbackV6ProofBootstrapBoundary(state) is not
             { } current)
         {
@@ -7756,10 +7778,14 @@ internal static partial class FileTransferCoordinator
                 fallbackProof!.PeerProofEvidence.ProofKind,
                 "fallback_v6_proof_bootstrap_peer_frame",
                 StringComparison.Ordinal) &&
-            string.Equals(
-                fallbackProof.RetainedFrameIdentity.FrameType,
-                FileTransferProtocol.FrontierRequestFrameTypeV6,
-                StringComparison.Ordinal);
+            (string.Equals(
+                 fallbackProof.RetainedFrameIdentity.FrameType,
+                 FileTransferProtocol.FrontierRequestFrameTypeV6,
+                 StringComparison.Ordinal) ||
+             IsFallbackBootstrapCorrelationSelected(state) && string.Equals(
+                 fallbackProof.RetainedFrameIdentity.FrameType,
+                 FileTransferProtocol.FallbackBootstrapRequestFrameTypeV6,
+                 StringComparison.Ordinal));
         if (inboundBootstrapCheckpoint &&
             !IsInboundFallbackBootstrapCheckpointBoundaryCurrent(state, authority))
         {
@@ -7854,6 +7880,13 @@ internal static partial class FileTransferCoordinator
 
         // The retained peer frame is evidence for this already-issued local
         // bootstrap, not a checkpoint request or an independent authority.
+        if (IsFallbackBootstrapCorrelationSelected(state))
+        {
+            return state.PersistentState.FileTransferRouteTransition.BootstrapExchange is
+                { Completed: true, RetainedPeerFrame: FileTransferFallbackBootstrapRequestFrameV6 confirm } exchange &&
+                exchange.Bootstrap == command && IsFallbackBootstrapExchangeCurrent(state, exchange) &&
+                confirm.ReceiverChallengeId == exchange.LocalId && fallback.RetainedFrameIdentity.Matches(confirm);
+        }
         return fallback.RetainedFrameIdentity.Matches(new FileTransferFrontierRequestFrameV6
         {
             SessionId = command.Observation.SessionId,
@@ -29296,6 +29329,13 @@ internal static partial class FileTransferCoordinator
     {
         rejectionReason = "accepted";
         var evidence = fallback.PeerProofEvidence;
+        if (request.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
+            IsFallbackBootstrapCorrelationSelected(state) &&
+            !IsFallbackBootstrapProofCurrent(state, fallback, request.DurableCheckpoint))
+        {
+            rejectionReason = "bootstrap_correlated_exchange_incomplete";
+            return false;
+        }
         if (fallback.IsDefault ||
             !evidence.IsComplete ||
             !evidence.IsExactFrameBound ||
@@ -30110,6 +30150,14 @@ internal static partial class FileTransferCoordinator
         rejectionReason = "accepted";
         if (authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6)
         {
+            if (authority.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
+                IsFallbackBootstrapCorrelationSelected(state) &&
+                (authority.ProofBoundary is not FileTransferFallbackTransitionProofBoundary correlatedFallback ||
+                 !IsFallbackBootstrapProofCurrent(state, correlatedFallback, authority.DurableCheckpoint)))
+            {
+                rejectionReason = "bootstrap_correlated_exchange_incomplete";
+                return false;
+            }
             if (finalProof is not null ||
                 authority.ProofBoundary is not
                     FileTransferFallbackTransitionProofBoundary fallback ||

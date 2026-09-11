@@ -611,7 +611,8 @@ public sealed partial class SessionFileTransferV4SenderTests
         SessionFileTransferService service,
         LoopbackFileTransferTransport bridge,
         InitialBootstrapRecordingDataSession dataSession,
-        bool receiverBarrier = false)
+        bool receiverBarrier = false,
+        Action<object>? beforeActivation = null)
     {
         await Task.Yield();
         const string reason = "test_initial_peer_first_bootstrap";
@@ -619,6 +620,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         var context = CreateRegularNknV4InboundContext(dataSession.TransferId,
             chunkCount: 256, nextChunkIndex: 100,
             durableHighestChunkIndex: 99, creditUntilChunkIndexExclusive: 128);
+        beforeActivation?.Invoke(context);
         if (!receiverBarrier)
         {
             SeedInitialRegularV4RuntimeScopeForTest(context, reason);
@@ -770,7 +772,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         public void Dispose() => recording.Dispose();
     }
 
-    private sealed class InitialBootstrapCheckpointTransport(InitialBootstrapRecordingDataSession dataSession) :
+    private class InitialBootstrapCheckpointTransport(InitialBootstrapRecordingDataSession dataSession) :
         LoopbackFileTransferTransport(dataSession.SessionId), IFileTransferControlPlaneDeliveryTransport
     {
         public List<FileTransferControlPlaneDeliveryRequest> Requests { get; } = [];

@@ -11,7 +11,7 @@ $definition = @($ast.FindAll({param($node) $node -is [Management.Automation.Lang
     $node.Name -ceq 'Get-TunaGuiFallbackFrontierStallGraceRecheckFailure'}, $true))
 if ($definition.Count -ne 1) { throw 'Expected actual GUI consumer' }
 Invoke-Expression $definition[0].Extent.Text
-$profile = 'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1'
+$profile = 'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1'
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profile
 $captured = [IO.File]::ReadAllLines($InputPath)
 function Name([string]$Line) { Get-FileTransferCoordinatorSnapshotEventName $Line }
@@ -429,6 +429,7 @@ $cases = if ($DelayedDisposition) {
     'unknown_profile','forged_effect','source_aba') + @($copiedStampMutations.Keys) }
 foreach ($case in $cases) {
     $lines = [Collections.Generic.List[string]]::new()
+    $copiedStampMutationCount = 0
     foreach ($original in $captured) {
         $line = $original
         if ($case -ceq 'missing_disposition_effect' -and $original -ceq $dispositionEffectLine) { continue }
@@ -464,6 +465,7 @@ foreach ($case in $cases) {
             foreach ($field in $copiedStampMutations[$case].Keys) {
                 if (-not [string]::IsNullOrWhiteSpace((Field $line $field))) {
                     $line = Set-Field $line $field $copiedStampMutations[$case][$field]
+                    $copiedStampMutationCount++
                 }
             }
         }
@@ -518,6 +520,9 @@ foreach ($case in $cases) {
             $effectScope = "route=$($boundary.route); protocol_version=$($boundary.protocolVersion); live_route_epoch=$($boundary.liveRouteEpoch); route_publication_generation=$($boundary.routePublicationGeneration); route_commit_generation=$($boundary.routeCommitGeneration); runtime_generation=$($boundary.runtimeGeneration); terminal_generation=$($boundary.terminalGeneration); leg_generation=$($boundary.legGeneration); transport_epoch=$($boundary.transportEpoch); bridge_recovery_generation=$($boundary.bridgeRecoveryGeneration); checkpoint_generation=$($boundary.checkpointGeneration); checkpoint_request_id=$($boundary.checkpointRequestId); data_session_identity=$($boundary.dataSessionIdentity); data_session_generation=$($boundary.dataSessionGeneration)"
             $lines.Add("event=filetransfer_coordinator_authority_effect; $prefix; transition_id=$($attempt.transitionId); coordinator_state_generation=$($attempt.aggregate.afterStateGeneration); operation_family=route_runtime; operation_key=$($operation.operationKey); operation_authority_id=$($operation.authorityId); operation_generation=$($operation.operationGeneration); effect_kind=checkpoint_repair_continuity_validated; effect_identity=$($receipt.receiptIdentity); effect_generation=$($receipt.receiptGeneration); receipt_identity=$($receipt.receiptIdentity); receipt_generation=$($receipt.receiptGeneration); receipt_status=$($receipt.receiptStatus); receipt_fingerprint=$($receipt.receiptFingerprint); $effectScope; authority_effect=applied")
         }
+    }
+    if ($copiedStampMutations.Contains($case) -and $copiedStampMutationCount -eq 0) {
+        throw "$case did not mutate the current producer's diagnostic profile"
     }
     $fullLines = @(for ($i=0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]

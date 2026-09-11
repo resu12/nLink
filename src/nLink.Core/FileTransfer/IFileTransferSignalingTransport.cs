@@ -501,6 +501,16 @@ internal interface IFileTransferRegularV4FrontierRepairPressureInstallBridge
 
 internal interface IFileTransferRouteTransitionBridge
 {
+    bool SupportsFallbackBootstrapCorrelation => false;
+
+    // A Coordinator-pinned selection only suppresses legacy bootstrap side effects.
+    void ObserveFallbackBootstrapAgreement(FileTransferBootstrapAgreement agreement) { }
+
+    FileTransferBootstrapPhaseExecution ExecuteFallbackBootstrapPhase(
+        FileTransferBootstrapPhaseCommand command, IFileTransferDataSession dataSession,
+        Func<bool> isCommandCurrent, CancellationToken ct)
+        => FileTransferBootstrapPhaseExecution.Rejected(command, "bootstrap_phase_transport_unsupported");
+
     event EventHandler<FileTransferFallbackV6ProofBootstrapEvaluationRequestedEventArgs>?
         FallbackV6ProofBootstrapEvaluationRequested;
 
@@ -965,6 +975,7 @@ internal sealed record PostTunaFallbackPeerProofFrameIdentity(
         {
             FileTransferReceiverStateFrameV6 state => state.TransportEpoch,
             FileTransferFrontierRequestFrameV6 request => request.TransportEpoch,
+            FileTransferFallbackBootstrapFrameV6 bootstrap => bootstrap.TransportEpoch,
             _ => 0,
         };
         if (frame is null ||
@@ -2939,7 +2950,10 @@ public interface IFileTransferDataPathAuthoritySession
 
 internal sealed record FileTransferPhysicalSendSubmission(
     Task DeliveryTask,
-    Task PhysicalCompletionTask);
+    Task PhysicalCompletionTask)
+{
+    internal Func<System.Collections.Immutable.ImmutableArray<FileTransferBootstrapPhysicalCopy>>? BootstrapCopies { get; init; }
+}
 
 internal interface IFileTransferPhysicalSendSubmissionSession
 {

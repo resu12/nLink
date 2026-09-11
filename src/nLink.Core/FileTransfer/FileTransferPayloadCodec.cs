@@ -89,6 +89,7 @@ public static class FileTransferPayloadCodec
         msg = default!;
         if (!TryDeserialize(utf8Json, out FileTransferOfferV2? parsed) ||
             parsed is null ||
+            !FileTransferBootstrapCorrelation.IsValidSelection(parsed.FallbackBootstrapCorrelationVersion, parsed.FallbackBootstrapIssuerId) ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.OfferTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !TryNormalizeFileName(parsed.FileName, out var fileName) ||
             parsed.FileSizeBytes <= 0 ||
@@ -116,6 +117,7 @@ public static class FileTransferPayloadCodec
         msg = default!;
         if (!TryDeserialize(utf8Json, out FileTransferAcceptV1? parsed) ||
             parsed is null ||
+            !FileTransferBootstrapCorrelation.IsValidSelection(parsed.FallbackBootstrapCorrelationVersion, parsed.FallbackBootstrapIssuerId) ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.AcceptTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !TryNormalizeRequiredProtocolVersion(parsed.AcceptedDataProtocolVersion, out var acceptedDataProtocolVersion) ||
             !TryNormalizeOptionalRouteToken(parsed.FileTransferRoute, acceptedDataProtocolVersion, out var fileTransferRoute))
@@ -184,6 +186,7 @@ public static class FileTransferPayloadCodec
         msg = default!;
         if (!TryDeserialize(utf8Json, out FileTransferSessionOpenV2? parsed) ||
             parsed is null ||
+            !FileTransferBootstrapCorrelation.IsValidSelection(parsed.FallbackBootstrapCorrelationVersion, parsed.FallbackBootstrapIssuerId) ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.SessionOpenTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !IsSupportedDataProtocolVersion(parsed.ProtocolVersion) ||
             !TryNormalizeOptionalRouteToken(parsed.FileTransferRoute, parsed.ProtocolVersion, out var fileTransferRoute) ||
