@@ -1,10 +1,7 @@
-using System.Linq.Expressions;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 using NLink.Core;
 using NLink.Core.FileTransfer;
 using NLink.Core.SessionConnect;
-using NLink.Core.SessionSecurity;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -12,7 +9,7 @@ namespace NLink.SmokeTests;
 public sealed partial class NknAccelerationTransportTests
 {
     [Fact]
-    public Task JoinedBootstrapCorrelation_RealServicesNegotiateWithoutProductionEnablement()
+    public Task JoinedBootstrapCorrelation_RealServicesNegotiateWithProductionCapability()
         => RunJoinedBootstrapCorrelationAsync(runExchange: false);
 
     [Fact]
@@ -64,14 +61,12 @@ public sealed partial class NknAccelerationTransportTests
                 NknTunaAccelerationOptions.Disabled, helperLane, helperPressure);
             var sessionId = await ApproveNknSessionAsync(host, helper, timeout.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer, suppressAutomaticAccelerationNegotiation: true);
-            Assert.False(((IFileTransferRouteTransitionBridge)host).SupportsFallbackBootstrapCorrelation);
-            Assert.False(((IFileTransferRouteTransitionBridge)helper).SupportsFallbackBootstrapCorrelation);
-            var senderTransport = JoinedBootstrapTransportProxy.Create(host);
-            var receiverTransport = JoinedBootstrapTransportProxy.Create(helper);
+            Assert.True(((IFileTransferRouteTransitionBridge)host).SupportsFallbackBootstrapCorrelation);
+            Assert.True(((IFileTransferRouteTransitionBridge)helper).SupportsFallbackBootstrapCorrelation);
             using var sender = new SessionFileTransferService();
             using var receiver = new SessionFileTransferService();
-            sender.AttachTransport(senderTransport);
-            receiver.AttachTransport(receiverTransport);
+            sender.AttachTransport(host);
+            receiver.AttachTransport(helper);
             await sender.TryStartSendAsync(new("joined-bootstrap.bin", 64 * 1024, transferId),
                 _ => Task.FromResult<Stream>(runExchange && Interlocked.Increment(ref streamOpens) > 1
                     ? new JoinedBootstrapReadGate(new byte[64 * 1024], releaseReads.Task)
@@ -94,11 +89,11 @@ public sealed partial class NknAccelerationTransportTests
                     State(receiver, inbound).CurrentRoutePublicationToken is not null &&
                     Assert.IsType<bool>(ContextValue(inbound, "PullManifestReceived")));
                 // This is the ordinary user-requested activation path. No authority or receipt is seeded.
-                await senderTransport.RequestAccelerationNegotiationAsync("runtime_unlock", timeout.Token);
+                await host.RequestAccelerationNegotiationAsync("runtime_unlock", timeout.Token);
                 await WaitFor("initial Tuna publication", () => Published(sender, outbound, FileTransferRoute.FileTunaV4) &&
                     Published(receiver, inbound, FileTransferRoute.FileTunaV4));
-                if (stopMode != 1) { await senderTransport.StopAccelerationAsync("runtime_disabled", timeout.Token); }
-                if (stopMode != 0) { await receiverTransport.StopAccelerationAsync("runtime_disabled", timeout.Token); }
+                if (stopMode != 1) { await host.StopAccelerationAsync("runtime_disabled", timeout.Token); }
+                if (stopMode != 0) { await helper.StopAccelerationAsync("runtime_disabled", timeout.Token); }
                 // Resume the real source after activation/stop; fallback discovery needs ordinary traffic.
                 releaseReads.TrySetResult();
                 await WaitFor("correlated fallback publication", () => Published(sender, outbound, FileTransferRoute.PostTunaFallbackV6) &&
@@ -202,8 +197,8 @@ public sealed partial class NknAccelerationTransportTests
         Assert.Equal(sessionId, senderAgreement.Offer.SessionId);
         Assert.False(senderAgreement.ReceiverSessionOpenValidated);
         Assert.True(receiverAgreement.ReceiverSessionOpenValidated);
-        Assert.False(((IFileTransferRouteTransitionBridge)host).SupportsFallbackBootstrapCorrelation);
-        Assert.False(((IFileTransferRouteTransitionBridge)helper).SupportsFallbackBootstrapCorrelation);
+        Assert.True(((IFileTransferRouteTransitionBridge)host).SupportsFallbackBootstrapCorrelation);
+        Assert.True(((IFileTransferRouteTransitionBridge)helper).SupportsFallbackBootstrapCorrelation);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
@@ -268,65 +263,6 @@ public sealed partial class NknAccelerationTransportTests
         {
             await release.WaitAsync(ct);
             return await base.ReadAsync(buffer, offset, count, ct);
-        }
-    }
-
-    // Preserve the production file-transfer interfaces. Only capability advertisement is overridden.
-    internal interface IJoinedBootstrapTransport : IFileTransferSignalingTransport,
-        ISignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport,
-        ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl,
-        IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities,
-        IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport,
-        IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController,
-        IFileTransferBridgeRecoveryExecutionBridge, IFileTransferTerminalObserver,
-        IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairPressureInstallBridge,
-        IFileTransferRouteTransitionBridge, IFileTransferRegularV4FrontierRepairSettlementObserver,
-        IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver,
-        IFileTransferRouteHintObserver, IFileTransferInitialTunaReadinessProvider,
-        IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockPeerPreCommitAnswerAcceptanceObserver,
-        IRuntimeUnlockPreCommitProbeLaunchObserver, IRuntimeUnlockRetryDispatchAuthorityBridge,
-        IRuntimeUnlockInitialActivationReceiveRecoveryHoldBridge, IInitialActivationReceiverBarrierBridge
-    { }
-
-    public class JoinedBootstrapTransportProxy : DispatchProxy
-    {
-        private NknSignalingTransport target = null!;
-        private readonly Dictionary<(string Event, Delegate Handler), Delegate> handlers = [];
-
-        internal static IJoinedBootstrapTransport Create(NknSignalingTransport target)
-        {
-            var proxy = Create<IJoinedBootstrapTransport, JoinedBootstrapTransportProxy>();
-            ((JoinedBootstrapTransportProxy)proxy).target = target;
-            return proxy;
-        }
-
-        protected override object? Invoke(MethodInfo? method, object?[]? args)
-        {
-            if (method!.Name == "get_SupportsFallbackBootstrapCorrelation") { return true; }
-            // A forwarding transport must remain the event sender seen by Service identity checks.
-            if (method.IsSpecialName && args is [Delegate handler] &&
-                (method.Name.StartsWith("add_", StringComparison.Ordinal) || method.Name.StartsWith("remove_", StringComparison.Ordinal)))
-            {
-                var key = (method.Name[(method.Name.IndexOf('_') + 1)..], handler);
-                lock (handlers)
-                {
-                    if (method.Name.StartsWith("add_", StringComparison.Ordinal))
-                    {
-                        var parameters = handler.GetType().GetMethod("Invoke")!.GetParameters()
-                            .Select(parameter => Expression.Parameter(parameter.ParameterType)).ToArray();
-                        var call = Expression.Invoke(Expression.Constant(handler),
-                            parameters.Select((parameter, index) => index == 0 ? (Expression)Expression.Constant(this, typeof(object)) : parameter));
-                        args[0] = handlers[key] = Expression.Lambda(handler.GetType(), call, parameters).Compile();
-                    }
-                    else if (handlers.Remove(key, out var forwarded)) { args[0] = forwarded; }
-                }
-            }
-            try { return method.Invoke(target, args); }
-            catch (TargetInvocationException ex) when (ex.InnerException is not null)
-            {
-                ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-                throw;
-            }
         }
     }
 }

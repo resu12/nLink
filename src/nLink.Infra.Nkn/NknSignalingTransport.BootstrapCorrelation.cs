@@ -12,8 +12,8 @@ public sealed partial class NknSignalingTransport
     private BootstrapPhaseExecutionSlot? activeCorrelatedBootstrapPhase;
     private readonly Dictionary<FileTransferBootstrapPhase, BootstrapPhaseExecutionSlot> correlatedBootstrapPhaseReceipts = [];
 
-    // Enabled only after service and evidence-catalog integration gates are complete.
-    bool IFileTransferRouteTransitionBridge.SupportsFallbackBootstrapCorrelation => false;
+    // Advertised for fresh transfers; Core requires mutual selection before use.
+    bool IFileTransferRouteTransitionBridge.SupportsFallbackBootstrapCorrelation => true;
 
     void IFileTransferRouteTransitionBridge.ObserveFallbackBootstrapAgreement(FileTransferBootstrapAgreement agreement)
     {

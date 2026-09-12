@@ -1,12 +1,11 @@
 # Bootstrap source-send callback ownership: approved bounded implementation
 
-Status: the user approved the scoped commit in23.17 after the23.16 review found no actionable
-blocker in the23.15 same-epoch recovery fix. Core retains exact committed source/capture
-provenance and advances its publication linkage only through Core issuance. The three
-callback install predicates share that proof without replacing ordinary runtime authority
-checks. Recovery before/after cleanup passes. The scoped commit includes the accumulated
-correlation dependencies but excludes unrelated frontier files. Production remains disabled;
-no push, packaging, enablement or live/GUI acceptance is authorized by this commit gate.
+Status: callback ownership is committed as e9350a4d. Section23.22 authorizes routine
+continuation with the five-file capability follow-up commit and local-only portable build;
+actual commit/package results are retained in the ignored WIP checkpoint. Section23.21's
+rebuilt focused testPASS1 and the15 selected23.19 passes are retained. Backend ownership
+and callback/runtime authority are unchanged. Deployment, fresh live/report allowance and
+full off-on-off acceptance remain separate gates.
 
 ## Implementation and verification result
 

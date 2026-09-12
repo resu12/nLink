@@ -1,14 +1,15 @@
 # Bounded fallback-bootstrap correlation contract
 
-Current status: section23.17 records the approved scoped commit boundary on2026-09-12.
-The reviewed candidate includes the accumulated initiation/source-hold/callback dependencies,
-same-epoch lineage fix and supporting deterministic tests/evidence. Three unrelated frontier
-files are excluded. Production remains disabled; packaging, enablement, push and live
-validation are separate gates. Post-commit identity is recorded in the local WIP checkpoint.
+Current status: section23.22 records authorization to proceed with routine reversible work
+on2026-09-12, including the verified five-file commit and local-only portable packaging.
+Section23.21 resolved the stale capability assertion; its focused pass and the prior15
+selected enablement passes are retained. Backend ownership and runtime authority are unchanged.
+Deployment, live execution, exhausted campaign/report allowances and unrelated frontier
+files remain separate boundaries. Commit/package results are recorded in the ignored WIP checkpoint.
 The authority boundary is in
 [the bounded callback contract](file-transfer-bootstrap-source-callback-ownership-contract.md).
 Earlier green/unfinished/awaiting-approval statements below are historical checkpoints.
-Production capability remains disabled; deployment and live validation are separate gates.
+Capability is enabled in the local candidate; deployment and live validation remain separate gates.
 Design/source baseline: `d654e55d308fbe1208e84c80ead035b2664a6c86`.
 Preceding evidence: [final-off RCA](file-transfer-final-off-bootstrap-rca-and-fix-plan.md).
 The original12/12 characterization is historical, not implementation acceptance.
@@ -4912,3 +4913,219 @@ After this scoped commit, the next gate is production-enablement readiness revie
 automatic enablement or live execution. Existing attempts9/reports3, attempt9FAIL,
 historical unreconciled interval and allowance remain unchanged; no renewed budget.
 Commit-turn accounting and final scope/hash verification are in the local WIP/phase records.
+
+### 23.18 Production-enablement readiness review, 2026-09-12
+
+The user requested the next readiness review, not enablement. HEAD is
+e9350a4dec4b5685c7c153136a93d691853ed6c3; all81 committed manifest SHA256 values matched before
+review documentation. No new runtime defect was identified in this scoped review. The
+candidate is suitable for a bounded enablement implementation gate, not production release.
+
+Reviewed boundaries:
+
+- NknSignalingTransport.BootstrapCorrelation.cs:16 still advertises false. Service Offer
+  and Accept construction select version1 only when supported/offered. Core pins exact
+  agreement/issuers, rejects malformed or unsolicited upgrades and conflicting duplicates,
+  and requires the receiver's matching sender SessionOpen before enabling its agreement.
+  Negotiation does not issue route/runtime authority. Existing transfers do not migrate.
+- Retained Service handshake cases cover all four support pairings in
+  bootstrap-initiation-peer-regression.trx. Core one-way negotiation, stale/mismatch and
+  no-upgrade cases pass in resumed-focused-core-service-infra.trx. These are historical
+  retained results, not new passes on this turn. A future capability edit must rerun the
+  directly affected negotiation checks; codec shape and frozen legacy vectors stay intact.
+- Service snapshot profile/hash, independent callback catalog and GUI ledger profile
+  agree on source-callback-v1/hash0ad879a93ec4d4639ecffd0fecf1c64d2aa32dc594bd39c680b8ca30c3c492dd.
+  Frozen initiation hash40a8177eae51664f06bc2bc7aaa4dc2fb62983fc2262c3c2f99d030401efd7db remains
+  separate. Callback/initiation markers cannot satisfy physical route-effect acceptance.
+- Mixed-version/unsupported peers intentionally retain legacy behavior. This preserves
+  compatibility, not a claim that the known legacy replay defect is fixed for those peers.
+  Requiring version1 for all transfers or disabling old-peer Tuna is separate product scope.
+
+First missing shipping-path proof: NknBootstrapCorrelationJoinedTests.cs:67-70 asserts
+the real transports are disabled, then attaches JoinedBootstrapTransportProxy, whose
+capability getter returns true at:305. The four joined cases therefore verify selected
+behavior through forwarded real Services/Infra, not enabled direct transport attachment.
+Simply flipping the four Assert.False calls to Assert.True while keeping the proxy would
+leave this evidence gap. This is an enablement test prerequisite, not a newly reproduced
+runtime defect. The exchange cases end at the first correlated fallback, then cancel the
+contexts; they do not prove the full live off-on-off cycle or the second Tuna publication.
+
+Recommended bounded implementation, requiring approval:
+
+1. Enable only the production SupportsFallbackBootstrapCorrelation capability. Update its
+   stale gate comment and the joined fixture to attach the actual NknSignalingTransport
+   instances with no capability-forcing proxy. Rename the disabled-production test to its
+   new claim; remove only proxy code/usings made unused. Do not add configuration, in-flight
+   negotiation changes, authority fallbacks, or transport/performance policy changes.
+2. Verify direct negotiation plus sender-only, receiver-only and dual-stop joined cases
+   with existing deadlines/source release/route receipts. Preserve and rerun the four
+   supported/unsupported Service pairings and exact Core negotiation negatives. Run only
+   directly affected checks; reuse unchanged focused callback/hold/evidence results unless
+   implementation changes those paths. No automatic full aggregate or GUI matrix.
+3. Review the enabled candidate and exact diff before its separate commit/package/live
+   gates. Rollback is disabling advertisement in a subsequent build and using fresh
+   transfers; never downgrade an already negotiated transfer or reinterpret its receipts.
+
+Live acceptance remains a later gate: a fresh canonical win-x64 package from the approved
+enabled candidate on both peers, frozen source/binary/config/evidence hashes, explicit new
+attempt and necessary report-finalization allowance, then one serialized
+regular-v4-live-activation-off-on-off-256mb run outside the restricted sandbox. Use
+StrictCampaignPreflight, GoodputOnlyRerunLimit0 and SetupOnlyRerunLimit0; stop on failed
+preflight, first missing proof edge or hash drift. Do not run scenarios past failed preflight.
+Require the second Coordinator-published file_tuna_v4 route in addition to fallback, SHA
+and finalization; retain correctness and performance as separate outcomes. No existing
+package/artifact establishes this new live claim. Three unrelated frontier files remain
+outside implementation scope and must not be silently incorporated into the frozen run.
+
+This turn changed review/checkpoint documents only. No source/test edit, build/test rerun,
+staging/commit/push, package, GUI/preflight/live NKN, report/campaign or agents. Production
+remains false. Conservative5m root-only12:33-to12:38 bound, idle excluded: root4202m/
+cross-agent7368.9m. No new TRX or unattended build/test time. Attempts9/reports3 consumed,
+attempt9FAIL, historical unreconciled interval and allowance unchanged; no renewed budget.
+
+### 23.19 Approved capability enablement and direct-transport verification, 2026-09-12
+
+The user approved the23.18 bounded patch/offline checks. The only production change is
+NknSignalingTransport.BootstrapCorrelation.cs:16 returning true for capability support,
+with its comment clarifying that Core still requires mutual selection on fresh transfers.
+No negotiation, route/runtime authority, callback, source-hold, wire/catalog, liveness,
+transport/performance or compatibility policy was changed.
+
+NknBootstrapCorrelationJoinedTests now attaches the actual host/helper NknSignalingTransport
+instances and invokes their activation/stop methods directly. The capability-forcing proxy,
+its interface and its three now-unused imports were removed. The negotiation test is named
+JoinedBootstrapCorrelation_RealServicesNegotiateWithProductionCapability and asserts actual
+production capability support. Existing agreement, readiness, exchange, exact physical
+receipt, route-publication and pressure-settlement assertions remain. An explicit source
+comparison against HEAD, allowing only this capability/direct-attachment conversion,
+verifies the original body/order, source-release points and3s/8s/40s deadlines are preserved.
+
+Retained default-.NET8 Debug verification in bootstrap-correlation-implementation:
+
+- bootstrap-production-capability-red-20260912.trx: expected FAIL1 before production
+  enablement. The direct negotiation fixture fails its real-host capability assertion at
+  line64 (expected true, actual false), establishing that no proxy masks the shipping gate.
+- bootstrap-production-capability-negotiation-20260912.trx: PASS12 after enablement.
+  One direct joined negotiation case, all four Service support pairings and seven Core
+  agreement/issuer/mismatch/stale/no-upgrade cases pass. No receiver SessionOpen is invented,
+  and legacy/unsupported behavior remains mode-separated.
+- bootstrap-production-capability-joined-20260912.trx: PASS3 for direct sender-only,
+  receiver-only and dual-stop. Real Services/Infra execute over deterministic FakeNkn and
+  test Tuna lanes; the existing real pressure backends are never network-connected.
+  Initial Tuna and correlated fallback publication/receipt checks pass on both peers.
+
+Two incremental build/test invocations plus the no-build joined invocation completed.
+Existing compiler/analyzer warnings were emitted; no build errors or new stack workaround.
+No aggregate contract/analyzer/Smoke lane, full report, GUI or live NKN run was added.
+Unchanged callback/hold/readers retain their preceding focused evidence, not new passes.
+The joined cases still stop after first fallback; the second Tuna publication and complete
+off-on-off cycle require the separately authorized future live gate from23.18.
+
+Final source SHA256: capabilityFC1BA17178B72A8354F44F6635CD841765E8EABE1BC9D39A601B03972E7A4D2B;
+joined fixtureA9AA9C179EF810701D1746220AA85A88775E29362198BF4AA89CD6C256C5E326.
+All other77 files from the81-file commit manifest are unchanged (excluding these two and
+the two current-status docs). Protected frontier/StallGrace/ArtifactWriters pins unchanged;
+whitespace PASS. HEAD e9350a4dec4b5685c7c153136a93d691853ed6c3/index empty. The capability is
+enabled only in this local source/Debug candidate; no package, deployment, staging/commit,
+push, GUI/preflight/live run, report/campaign or agents. Next is scoped pre-commit review.
+
+Accounting: conservative6m root-only12:38-to12:44 bound, idle excluded: root4208m/
+cross-agent7374.9m. Three TRX windows total11.9096703s, including the expected red run;
+build and audit time is included in the root bound and not double-added. Attempts9/reports3
+consumed, attempt9FAIL, historical unreconciled interval and allowance remain unchanged.
+
+### 23.20 Pre-commit review: stale pressure-backend assertion blocks commit, 2026-09-12
+
+One P2 finding: tests/nLink.SmokeTests.Core/NknRegularV4PressureBackendTests.cs:210,
+NknPressureBackend_ProductionClientRemainsTheOnlyBackend, still requires the real transport's
+SupportsFallbackBootstrapCorrelation to be false. The approved23.19 capability change makes
+that expectation obsolete. This existing assertion was outside the15 selected enablement
+checks and was missed in that implementation's affected-test inventory.
+
+Confirmed with the current23.19 Debug binaries and no build:
+bootstrap-production-capability-review-pressure-red-20260912.trx retains FAIL1 at line210,
+Assert.False expectedfalse/actualtrue. The preceding Assert.Same verifies that the real
+production client remains the pressure backend despite the supplied alternate test adapter;
+execution passes that ownership assertion before failing on the old capability expectation.
+This is a stale test contract, not a reproduced pressure-backend or route-authority defect.
+
+Recommended correction, requiring approval: change only that capability expectation to
+Assert.True while retaining Assert.Same and all receipt/ownership/lifecycle controls. Rebuild
+and rerun this one directly affected test. No pressure implementation, capability rollback,
+deadline adjustment, generic suite or live run is needed for this first missing test edge.
+The old red artifact remains historical evidence; do not relabel it as passing.
+
+The rest of this scoped review found no actionable issue in the two-file enablement diff:
+only Nkn advertises true (the default interface remainsfalse); Core mutual selection and
+no-upgrade rules remain; direct joined transports have no proxy or capability override;
+existing source-release/deadline/agreement/receipt/route assertions are unchanged. Verified
+the retained12/12 negotiation and3/3 direct-stop results. Those results remain valid for
+their exact selected cases, not a claim that the omitted backend test passed. The second
+Tuna publication/full live cycle and mixed-version legacy limitation remain unchanged gates.
+
+Review changed checkpoint documents only. Capability/fixture SHA256 match23.19; the failing
+test file is unchanged. HEAD e9350a4dec4b5685c7c153136a93d691853ed6c3/index empty, unrelated
+frontier/StallGrace/ArtifactWriters pins unchanged, whitespace PASS. No source/test edits,
+build, aggregate lane, stage/commit/push, package, GUI/preflight/live, report/campaign or agents.
+
+Accounting: conservative4m root-only12:44-to12:48 bound, idle excluded: root4212m/
+cross-agent7378.9m. One new failed TRX window1.0961369s overlaps that bound, not double-added;
+no build time. Attempts9/reports3 consumed, attempt9FAIL, historical unreconciled interval
+and allowance remain unchanged. Next: approve the one-line test correction and focused rerun.
+
+### 23.21 Approved stale-expectation correction verified, 2026-09-12
+
+The user approved the23.20 narrow correction. Changed only
+NknRegularV4PressureBackendTests.cs:210 from Assert.False to Assert.True for the production
+correlation capability. The preceding Assert.Same still verifies that the production client
+is the selected pressure backend despite an alternate adapter argument. Exact comparison
+against HEAD confirms the rest of this file, including receipt/ownership/lifecycle checks,
+is unchanged. This aligns the test with approved capability enablement; no runtime fix.
+
+Rebuilt with the ordinary .NET8 Debug configuration and reran only
+NknPressureBackend_ProductionClientRemainsTheOnlyBackend. Retained
+bootstrap-production-capability-pressure-fix-20260912.trx: PASS1,0 failures. The23.20 FAIL1
+artifact is preserved. The prior12 negotiation and3 direct-joined passes are reused, not
+new passes; no aggregate lane or unrelated test rerun. Existing build warnings remain;
+no errors, deadline/assertion removal, stack/JIT policy or authority change.
+
+Final test SHA256D5CC417A475A18352F66146FC20F41D128C115D23D4DB890397DCC04132BF8A5.
+Capability and joined-fixture hashes remain the23.19 pins; the three unrelated frontier
+pins remain unchanged. Capability-use inventory found no remaining production-disabled
+assertion; the default interface'sfalse and explicit unsupported-peer fixtures remain.
+Whitespace PASS, HEADe9350a4dec4b5685c7c153136a93d691853ed6c3/index empty. The only known
+scoped pre-commit finding is resolved; no further implementation is required for that finding.
+
+Next: explicit scoped commit approval for five paths: this contract, the callback ownership
+contract, NknSignalingTransport.BootstrapCorrelation.cs, NknBootstrapCorrelationJoinedTests.cs
+and NknRegularV4PressureBackendTests.cs. Three unrelated frontier files and ignored evidence
+remain excluded. No stage/commit/push, package/deployment, GUI/preflight/live, report/campaign
+or agents ran. Capability remains enabled only in the uncommitted local source/Debug
+candidate; full off-on-off live acceptance and its fresh allowance remain separate gates.
+
+Accounting: conservative3m root-only12:53-to12:56 bound, intervening user idle excluded:
+root4215m/cross-agent7381.9m. One new PASS1 TRX window2.1042101s; build and verification
+time are inside the root bound, not double-added. Attempts9/reports3 consumed, attempt9FAIL,
+historical unreconciled interval and allowance unchanged; no new campaign budget inferred.
+
+### 23.22 Routine continuation: scoped commit and local packaging, 2026-09-12
+
+The user requested proceeding without approval for every action, reserving approval for
+potentially harmful actions. This supersedes23.21's extra routine commit-approval request.
+Proceed with exactly the two contract docs, production capability file, direct joined
+fixture and pressure-backend test. Preserve and exclude the three unrelated frontier files.
+Retained verification is12 negotiation,3 direct joined and1 backend-ownership passes;
+the two earlier expected/failing red artifacts remain failures. Source pins are unchanged.
+
+After the scoped local commit, rebuild the canonical Release win-x64 portable with
+Build-Portable.ps1 -LocalOnly, retaining the preceding package before generated-output
+replacement. Validate resolved output paths and package manifests; freeze commit/package
+hashes in ignored evidence. No source/test changes or aggregate reruns are needed here.
+Local bridge hello/ping/shutdown and sidecar version probes are packaging checks, not live
+NKN readiness or off-on-off acceptance. No push, installer, deployment or GUI launch.
+
+The attempts9/reports3 consumption, attempt9FAIL and historical accounting interval remain
+unchanged. Routine continuation does not reset an explicit cap: a fresh targeted live
+attempt/report allowance remains required, with strict preflight and both rerun limits0.
+The second Core-published file_tuna_v4 route is still an unproven live acceptance condition.
+Actual commit, packaging outcome and this turn's accounting follow in WORK-IN-PROGRESS.md.

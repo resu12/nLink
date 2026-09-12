@@ -207,7 +207,7 @@ public sealed partial class FileTransferCoordinatorTests
             NknTunaAccelerationOptions.Disabled, null, unused);
         Assert.Same(client, typeof(NknSignalingTransport).GetField("regularV4PressureAdapter",
             BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(transport));
-        Assert.False(((IFileTransferRouteTransitionBridge)transport).SupportsFallbackBootstrapCorrelation);
+        Assert.True(((IFileTransferRouteTransitionBridge)transport).SupportsFallbackBootstrapCorrelation);
     }
 
     private static RegularV4FrontierRepairPressureBindingDecision StageNknPressure(string sessionId)
