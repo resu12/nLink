@@ -84,10 +84,24 @@ public sealed partial class FileTransferCoordinatorTests
     private static void RetireRetainedRecheckRoute(RetainedRecheckFixture fixture)
     {
         var setup = CreateFallbackV6ToTunaRouteTransitionSetup(fixture.State, fixture.Capture);
+        CompleteRetainedRecheckRouteRetirement(fixture, setup);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void CompleteRetainedRecheckRouteRetirement(RetainedRecheckFixture fixture,
+        (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
+            RuntimeUnlockRouteCommitProof FinalProof) setup)
+    {
         fixture.State = CommitEmptyFileTransferRouteTransitionForTest(
             setup.State, setup.Request, setup.FinalProof, capture: fixture.Capture).State;
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         fixture.State = FallBack(fixture.State, fallback, 4, 4, fixture.Capture).State;
+        AssertRetainedRecheckRouteRetired(fixture);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertRetainedRecheckRouteRetired(RetainedRecheckFixture fixture)
+    {
         Assert.Null(fixture.State.PersistentState.FallbackTailYield.CurrentOperation);
         Assert.Equal(fixture.Receipt, fixture.State.PersistentState.FallbackTailYield.LastRetryDispatchRecheckReceipt);
         Assert.Equal(fixture.Receipt.Command.RecheckGeneration,

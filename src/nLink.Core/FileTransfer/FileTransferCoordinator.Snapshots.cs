@@ -82,7 +82,11 @@ internal sealed record FileTransferCoordinatorRouteTransitionOperationSnapshot(
     string RetainedFrameFingerprint,
     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    FileTransferBootstrapCorrelationOperationSnapshot? BootstrapCorrelation = null);
+    FileTransferBootstrapCorrelationOperationSnapshot? BootstrapCorrelation = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferBootstrapInitiationOperationSnapshot? BootstrapInitiation = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferBootstrapCallbackSnapshot? BootstrapCallbacks = null);
 
 internal sealed record FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot(
     string Role,
@@ -506,6 +510,7 @@ internal static partial class FileTransferCoordinator
                 operation.InvalidatingAdmissionFingerprint, operation.ReplacementPauseGeneration));
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     internal static
         RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision
         FinalizeResponderProbeHandoffSnapshot(
@@ -523,6 +528,33 @@ internal static partial class FileTransferCoordinator
             return decision;
         }
 
+        var operations = CreateResponderProbeHandoffOperationSnapshots(before, decision, decisionKind, observation);
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            decisionKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            operations,
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative,
+            suppliedOperationsAreComplete: true);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateResponderProbeHandoffOperationSnapshots(
+            FileTransferCoordinatorState before,
+            in RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision decision,
+            string decisionKind,
+            in RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation)
+    {
         var attempted = CreateResponderProbeHandoffAttemptSnapshot(
             before,
             decisionKind,
@@ -575,22 +607,7 @@ internal static partial class FileTransferCoordinator
                 descriptor.State,
                 stateApplied: handoffStateApplied));
         }
-        var snapshot = CreateTransitionSnapshot(
-            before,
-            decision.State,
-            coordinatorInstanceId,
-            before.PersistentState.SnapshotStateGeneration,
-            decisionKind,
-            decision.Status.ToString(),
-            decision.Reason,
-            operations.ToImmutable(),
-            FileTransferCoordinatorSnapshotSelectionMode.Authoritative,
-            suppliedOperationsAreComplete: true);
-        return decision with
-        {
-            State = snapshot.State,
-            SnapshotEnvelope = snapshot.Envelope,
-        };
+        return operations.ToImmutable();
     }
 
     internal static FileTransferCoordinatorSnapshotResult
@@ -2138,6 +2155,7 @@ internal static partial class FileTransferCoordinator
                     ImmutableArray.Create(decisionReceipt))));
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorSnapshotResult CreateTransitionSnapshot(
         FileTransferCoordinatorState before,
         FileTransferCoordinatorState after,
@@ -2154,6 +2172,17 @@ internal static partial class FileTransferCoordinator
     {
         ArgumentNullException.ThrowIfNull(before);
         ArgumentNullException.ThrowIfNull(after);
+        ReconcileTransitionSnapshotState(before, ref after, ref attemptedOperations, suppliedOperationsAreComplete);
+        return CreateReconciledTransitionSnapshot(before, after, coordinatorInstanceId, beforeStateGeneration,
+            decisionKind, decisionStatus, decisionReason, attemptedOperations, selectionMode, suppliedOperationsAreComplete);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ReconcileTransitionSnapshotState(
+        FileTransferCoordinatorState before, ref FileTransferCoordinatorState after,
+        ref ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot> attemptedOperations,
+        bool suppliedOperationsAreComplete)
+    {
         var unreconciledAfter = after;
         if (!ReferenceEquals(before, after))
         {
@@ -2176,28 +2205,22 @@ internal static partial class FileTransferCoordinator
                 ? continuityOperations
                 : attemptedOperations.AddRange(continuityOperations);
         }
-        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
-        {
-            throw new ArgumentException(
-                "Coordinator instance identity is required.",
-                nameof(coordinatorInstanceId));
-        }
-        if ((!string.IsNullOrWhiteSpace(
-                 before.PersistentState.CoordinatorInstanceId) &&
-             !string.Equals(
-                 before.PersistentState.CoordinatorInstanceId,
-                 coordinatorInstanceId,
-                 StringComparison.Ordinal)) ||
-            (!string.IsNullOrWhiteSpace(
-                 after.PersistentState.CoordinatorInstanceId) &&
-             !string.Equals(
-                 after.PersistentState.CoordinatorInstanceId,
-                 coordinatorInstanceId,
-                 StringComparison.Ordinal)))
-        {
-            throw new InvalidOperationException(
-                "Coordinator snapshot instance identity changed.");
-        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorSnapshotResult CreateReconciledTransitionSnapshot(
+        FileTransferCoordinatorState before,
+        FileTransferCoordinatorState after,
+        string coordinatorInstanceId,
+        long beforeStateGeneration,
+        string decisionKind,
+        string decisionStatus,
+        string decisionReason,
+        ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot> attemptedOperations,
+        FileTransferCoordinatorSnapshotSelectionMode selectionMode,
+        bool suppliedOperationsAreComplete)
+    {
+        ValidateTransitionSnapshotIdentity(before, after, coordinatorInstanceId);
 
         var beforeBoundary = CreateStateBoundarySnapshot(before);
         var afterBoundary = CreateStateBoundarySnapshot(after);
@@ -2210,10 +2233,7 @@ internal static partial class FileTransferCoordinator
             ? ImmutableArray<
                 FileTransferCoordinatorOperationTransitionSnapshot>.Empty
             : CreateOperationTransitionSnapshots(before, after);
-        var beforeFingerprint = string.IsNullOrWhiteSpace(
-            before.PersistentState.SnapshotStateFingerprint)
-            ? CalculateStateFingerprint(before)
-            : before.PersistentState.SnapshotStateFingerprint!;
+        var beforeFingerprint = ResolveTransitionSnapshotBeforeFingerprint(before);
         var stateApplied = operations.Any(operation => operation.StateApplied) ||
             beforeBoundary != afterBoundary ||
             (!ReferenceEquals(before, after) &&
@@ -2255,17 +2275,7 @@ internal static partial class FileTransferCoordinator
         var afterStateGeneration = stateApplied
             ? checked(beforeStateGeneration + 1)
             : beforeStateGeneration;
-        var stampedState = stateApplied
-            ? after with
-            {
-                PersistentState = after.PersistentState with
-                {
-                    CoordinatorInstanceId = coordinatorInstanceId,
-                    SnapshotStateGeneration = afterStateGeneration,
-                    SnapshotStateFingerprint = afterFingerprint,
-                },
-            }
-            : after;
+        var stampedState = StampTransitionSnapshotState(after, stateApplied, coordinatorInstanceId, afterStateGeneration, afterFingerprint);
         if (!stateApplied &&
             string.Equals(normalizedStatus, "Accepted", StringComparison.Ordinal))
         {
@@ -2317,6 +2327,56 @@ internal static partial class FileTransferCoordinator
 
         return new FileTransferCoordinatorSnapshotResult(stampedState, envelope);
     }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState StampTransitionSnapshotState(FileTransferCoordinatorState after,
+        bool stateApplied, string coordinatorInstanceId, long afterStateGeneration, string afterFingerprint)
+        => stateApplied
+            ? after with
+            {
+                PersistentState = after.PersistentState with
+                {
+                    CoordinatorInstanceId = coordinatorInstanceId,
+                    SnapshotStateGeneration = afterStateGeneration,
+                    SnapshotStateFingerprint = afterFingerprint,
+                },
+            }
+            : after;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ValidateTransitionSnapshotIdentity(FileTransferCoordinatorState before,
+        FileTransferCoordinatorState after, string coordinatorInstanceId)
+    {
+        if (string.IsNullOrWhiteSpace(coordinatorInstanceId))
+        {
+            throw new ArgumentException(
+                "Coordinator instance identity is required.",
+                nameof(coordinatorInstanceId));
+        }
+        if ((!string.IsNullOrWhiteSpace(
+                 before.PersistentState.CoordinatorInstanceId) &&
+             !string.Equals(
+                 before.PersistentState.CoordinatorInstanceId,
+                 coordinatorInstanceId,
+                 StringComparison.Ordinal)) ||
+            (!string.IsNullOrWhiteSpace(
+                 after.PersistentState.CoordinatorInstanceId) &&
+             !string.Equals(
+                 after.PersistentState.CoordinatorInstanceId,
+                 coordinatorInstanceId,
+                 StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                "Coordinator snapshot instance identity changed.");
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static string ResolveTransitionSnapshotBeforeFingerprint(FileTransferCoordinatorState before)
+        => string.IsNullOrWhiteSpace(
+            before.PersistentState.SnapshotStateFingerprint)
+            ? CalculateStateFingerprint(before)
+            : before.PersistentState.SnapshotStateFingerprint!;
 
     private static long GetNextSnapshotDecisionUtcMilliseconds()
     {
@@ -2572,6 +2632,61 @@ internal static partial class FileTransferCoordinator
             return decision;
         }
 
+        // Release the value-heavy attempt construction frame before collecting state snapshots.
+        var attemptedOperations = CreateRouteTransitionAttemptedOperationSnapshots(
+            before,
+            decision,
+            operationKind,
+            attemptedCommand,
+            attemptedAuthority,
+            attemptedReceipt,
+            operationRole);
+        var snapshot = CreateTransitionSnapshot(
+            before,
+            decision.State,
+            coordinatorInstanceId,
+            before.PersistentState.SnapshotStateGeneration,
+            operationKind,
+            decision.Status.ToString(),
+            decision.Reason,
+            attemptedOperations,
+            FileTransferCoordinatorSnapshotSelectionMode.Authoritative);
+        return decision with
+        {
+            State = snapshot.State,
+            SnapshotEnvelope = snapshot.Envelope,
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>
+        CreateRouteTransitionAttemptedOperationSnapshots(
+            FileTransferCoordinatorState before,
+            FileTransferRouteTransitionDecision decision,
+            string operationKind,
+            object attemptedCommand,
+            FileTransferRouteTransitionAuthority? attemptedAuthority,
+            object? attemptedReceipt,
+            string operationRole)
+    {
+        var attemptedOperation = CreateRouteTransitionAttemptedOperationSnapshot(
+            before, decision, operationKind, attemptedCommand, attemptedAuthority,
+            attemptedReceipt, operationRole);
+        return AddRouteTransitionResponderAttemptSnapshot(
+            decision, operationKind, attemptedAuthority ?? decision.Authority, attemptedOperation);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorOperationTransitionSnapshot
+        CreateRouteTransitionAttemptedOperationSnapshot(
+            FileTransferCoordinatorState before,
+            FileTransferRouteTransitionDecision decision,
+            string operationKind,
+            object attemptedCommand,
+            FileTransferRouteTransitionAuthority? attemptedAuthority,
+            object? attemptedReceipt,
+            string operationRole)
+    {
         var commandFingerprint = CalculateSnapshotFingerprint(attemptedCommand);
         var authority = attemptedAuthority ?? decision.Authority;
         var authorityId = authority?.AuthorityId.ToString() ??
@@ -2668,6 +2783,17 @@ internal static partial class FileTransferCoordinator
                             FileTransferCoordinatorReceiptTransitionSnapshot>
                             .Empty
                         : ImmutableArray.Create(attemptedReceiptSnapshot)));
+        return attemptedOperation;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ImmutableArray<FileTransferCoordinatorOperationTransitionSnapshot>
+        AddRouteTransitionResponderAttemptSnapshot(
+            FileTransferRouteTransitionDecision decision,
+            string operationKind,
+            FileTransferRouteTransitionAuthority? authority,
+            FileTransferCoordinatorOperationTransitionSnapshot attemptedOperation)
+    {
         var attemptedOperations = ImmutableArray.Create(attemptedOperation);
         if (authority?.ProofBoundary is
             FileTransferTunaActivationTransitionProofBoundary activation)
@@ -2705,21 +2831,7 @@ internal static partial class FileTransferCoordinator
                     });
             }
         }
-        var snapshot = CreateTransitionSnapshot(
-            before,
-            decision.State,
-            coordinatorInstanceId,
-            before.PersistentState.SnapshotStateGeneration,
-            operationKind,
-            decision.Status.ToString(),
-            decision.Reason,
-            attemptedOperations,
-            FileTransferCoordinatorSnapshotSelectionMode.Authoritative);
-        return decision with
-        {
-            State = snapshot.State,
-            SnapshotEnvelope = snapshot.Envelope,
-        };
+        return attemptedOperations;
     }
 
     private static FileTransferCoordinatorReceiptTransitionSnapshot?
@@ -2972,12 +3084,21 @@ internal static partial class FileTransferCoordinator
             state.CurrentDataSessionGeneration);
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static string CalculateStateFingerprint(
         FileTransferCoordinatorState state)
     {
         var operations = CreateOperationDescriptors(
             state,
             includeResponderProbeHandoff: false);
+        return CalculateStateFingerprintFromDescriptors(state, operations);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string CalculateStateFingerprintFromDescriptors(
+        FileTransferCoordinatorState state,
+        ImmutableArray<CoordinatorOperationDescriptor> operations)
+    {
         var responderHandoff = state.PersistentState
             .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff;
         var retryLifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
@@ -4072,11 +4193,23 @@ internal static partial class FileTransferCoordinator
         }
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static void AddFallbackTailYieldOperationDescriptors(
         FileTransferCoordinatorState state,
         ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
     {
         var fallback = state.PersistentState.FallbackTailYield;
+        AddFallbackTailYieldRootOperationDescriptors(state, fallback, builder);
+        AddFallbackTailYieldPendingProofAndReauthorizationDescriptors(state, fallback, builder);
+        AddFallbackTailYieldRetryAndReservationDescriptors(state, fallback, builder);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AddFallbackTailYieldRootOperationDescriptors(
+        FileTransferCoordinatorState state,
+        in FileTransferFallbackTailYieldSubstate fallback,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
         if (fallback.CurrentOperation is { } current)
         {
             builder.Add(CreateFallbackTailYieldOperationDescriptor(
@@ -4103,7 +4236,14 @@ internal static partial class FileTransferCoordinator
                 retainedOperation,
                 "yield_retained_predecessor"));
         }
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AddFallbackTailYieldPendingProofAndReauthorizationDescriptors(
+        FileTransferCoordinatorState state,
+        FileTransferFallbackTailYieldSubstate fallback,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
         AddPeerProof(
             "peer_proof_pending_initial",
             fallback.PendingPeerProofBeforeLocalYield);
@@ -4134,6 +4274,28 @@ internal static partial class FileTransferCoordinator
                 fallback.LastReauthorizationInvalidationReason));
         }
 
+        return;
+
+        void AddPeerProof(
+            string role,
+            FileTransferFallbackTailPeerProofReceipt? receipt)
+        {
+            if (receipt is { } exact)
+            {
+                builder.Add(CreateFallbackTailYieldPeerProofDescriptor(
+                    state,
+                    role,
+                    exact));
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AddFallbackTailYieldRetryAndReservationDescriptors(
+        FileTransferCoordinatorState state,
+        FileTransferFallbackTailYieldSubstate fallback,
+        ImmutableArray<CoordinatorOperationDescriptor>.Builder builder)
+    {
         if (fallback.CurrentOperation is { } retryOperation)
         {
             if (fallback.PendingRetryRecheckRequest is { } retryRequest)
@@ -4212,27 +4374,12 @@ internal static partial class FileTransferCoordinator
                     fallback.LastConsumingInstallReceipt));
             }
         }
-
-        return;
-
-        void AddPeerProof(
-            string role,
-            FileTransferFallbackTailPeerProofReceipt? receipt)
-        {
-            if (receipt is { } exact)
-            {
-                builder.Add(CreateFallbackTailYieldPeerProofDescriptor(
-                    state,
-                    role,
-                    exact));
-            }
-        }
     }
 
     private static CoordinatorOperationDescriptor
         CreateFallbackTailYieldOperationDescriptor(
             FileTransferCoordinatorState state,
-            FileTransferFallbackTailYieldOperation operation,
+            in FileTransferFallbackTailYieldOperation operation,
             string role)
     {
         var receipts = CreateFallbackTailYieldReceiptSnapshots(operation);
@@ -4573,7 +4720,7 @@ internal static partial class FileTransferCoordinator
         CreateFallbackTailYieldSnapshot(
             FileTransferCoordinatorState state,
             string role,
-            FileTransferFallbackTailYieldOperation operation,
+            in FileTransferFallbackTailYieldOperation operation,
             ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot>
                 receipts)
     {
@@ -4636,8 +4783,8 @@ internal static partial class FileTransferCoordinator
     }
 
     private static bool FallbackTailRetryRecheckSnapshotBelongsToOperation(
-        FileTransferFallbackTailYieldOperation operation,
-        FileTransferFallbackTailYieldRetryDispatchRecheckCommand command)
+        in FileTransferFallbackTailYieldOperation operation,
+        in FileTransferFallbackTailYieldRetryDispatchRecheckCommand command)
     {
         var hold = command.Hold;
         // A retained receipt belongs to its original release, not whichever yield is
@@ -4654,8 +4801,8 @@ internal static partial class FileTransferCoordinator
     }
 
     private static bool FallbackTailReservationSnapshotBelongsToOperation(
-        FileTransferFallbackTailYieldOperation operation,
-        FileTransferFallbackTailPairedReleaseReservation reservation)
+        in FileTransferFallbackTailYieldOperation operation,
+        in FileTransferFallbackTailPairedReleaseReservation reservation)
     {
         if (reservation.IsDefault || operation.PairedRelease != reservation.Release ||
             reservation.Release.LocalProof.Decision != operation.Decision ||
@@ -4680,8 +4827,8 @@ internal static partial class FileTransferCoordinator
     }
 
     private static bool FallbackTailConsumptionSnapshotMatchesReservation(
-        FileTransferFallbackTailPairedReleaseReservation reservation,
-        RuntimeUnlockRetryDispatchInstallReceipt? receipt)
+        in FileTransferFallbackTailPairedReleaseReservation reservation,
+        in RuntimeUnlockRetryDispatchInstallReceipt? receipt)
         => receipt is { IsDefault: false } exact && exact.Authority == reservation.RetryAuthority;
 
     private static ImmutableArray<

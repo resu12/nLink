@@ -6549,13 +6549,16 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Directory.CreateDirectory(tempRoot);
         try
         {
-            var envelopes = FileTransferCoordinatorTests.CreateProofPublicationCancellationSnapshotFixture(
-                recoveryGeneration, heldRecheck: true);
+            var fixture = FileTransferCoordinatorTests.CreateCompleteHeldProofPublicationSnapshotFixture(recoveryGeneration);
+            var envelopes = fixture.Proof;
             var fixturePath = Path.Combine(tempRoot, "envelopes.json");
             var projected = envelopes.Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
             await File.WriteAllTextAsync(fixturePath,
                 "{\"raw\":[" + string.Join(",", envelopes.Select(e => e.ToCanonicalJson())) +
-                "],\"projected\":[" + string.Join(",", projected.Select(e => e.ToCanonicalJson())) + "]}");
+                "],\"projected\":[" + string.Join(",", projected.Select(e => e.ToCanonicalJson())) +
+                "],\"gui\":[" + string.Join(",", fixture.Complete
+                    .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting)
+                    .Select(e => e.ToCanonicalJson())) + "]}");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "HeldPublicationNaturalProofSnapshotEvidence.ps1"));
             var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);

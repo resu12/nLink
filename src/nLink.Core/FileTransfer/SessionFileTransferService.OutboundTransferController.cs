@@ -34,7 +34,7 @@ public sealed partial class SessionFileTransferService
         context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, acknowledgedBytes);
     }
 
-    private async Task<bool> TransitionOutboundToTerminalAsync(
+    private Task<bool> TransitionOutboundToTerminalAsync(
         OutboundTransferContext context,
         FileTransferTransferState terminalState,
         string? errorCode,
@@ -43,6 +43,101 @@ public sealed partial class SessionFileTransferService
         string? cancelReason,
         CancellationToken ct,
         OutboundSparsePumpInstall? requiredSparsePumpInstall = null)
+        => TransitionOutboundToTerminalCoreAsync(context, terminalState, errorCode, statusMessage, notifyPeer,
+            cancelReason, ct, requiredSparsePumpInstall, null);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryPrepareOutboundTerminalAuthorityLocked(OutboundTransferContext context, FileTransferTransferState terminalState,
+        string? errorCode, OutboundSparsePumpInstall? requiredSparsePumpInstall, OutboundBootstrapSourceCallback? requiredBootstrapCallback)
+    {
+        if (requiredBootstrapCallback is not null &&
+            ResolveBootstrapSourceCallbackLocked(context, requiredBootstrapCallback) != FileTransferBootstrapSourceCallbackDisposition.Current)
+        { return false; }
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            return false;
+        }
+
+        if (context.IsTerminal)
+        {
+            LogTerminalStaleUpdateRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.State,
+                context.ErrorCode,
+                terminalState,
+                NormalizeErrorCode(errorCode),
+                "transition_outbound_terminal",
+                "already_terminal");
+            return false;
+        }
+
+        if (requiredSparsePumpInstall is not null &&
+            !IsOutboundSparsePumpInstallCurrentLocked(
+                context,
+                requiredSparsePumpInstall,
+                context.DataSession,
+                out var sparseInstallRejectionReason))
+        {
+            LogOutboundSparsePumpInstallRejected(
+                context,
+                requiredSparsePumpInstall,
+                "terminal_transition",
+                sparseInstallRejectionReason);
+            return false;
+        }
+
+        if (context.CoordinatorPersistentState.FileTransferRouteTransition
+                .CurrentOperation is { } activeRouteTransition)
+        {
+            InvalidateOutboundFileTransferRouteTransitionLocked(
+                context,
+                activeRouteTransition.Authority,
+                terminalInvalidation: true,
+                "outbound_transfer_terminal");
+
+            if (context.CoordinatorPersistentState.FileTransferRouteTransition
+                    .CurrentOperation is not null)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_to_tuna_transition_invalidation_failed");
+                return false;
+            }
+        }
+
+        if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
+                context,
+                "outbound_transfer_terminal",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal) ||
+            !SettleAndClearRegularV4FrontierRepairContractLocked(
+                context,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                "outbound_transfer_terminal"))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
+            return false;
+        }
+
+        if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
+                context,
+                "retry_dispatch_outbound_transfer_terminal"))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
+            return false;
+        }
+        return true;
+    }
+
+    private async Task<bool> TransitionOutboundToTerminalCoreAsync(
+        OutboundTransferContext context, FileTransferTransferState terminalState, string? errorCode,
+        string statusMessage, bool notifyPeer, string? cancelReason, CancellationToken ct,
+        OutboundSparsePumpInstall? requiredSparsePumpInstall, OutboundBootstrapSourceCallback? requiredBootstrapCallback)
     {
         SessionFileTransferSnapshot? snapshot = null;
         bool shouldNotifyPeer;
@@ -61,85 +156,10 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
-            if (!ReferenceEquals(outboundTransfer, context))
-            {
-                return false;
-            }
+            if (!TryPrepareOutboundTerminalAuthorityLocked(context, terminalState, errorCode, requiredSparsePumpInstall, requiredBootstrapCallback))
+            { return false; }
 
-            if (context.IsTerminal)
-            {
-                LogTerminalStaleUpdateRejected(
-                    FileTransferDirection.Outbound,
-                    context.TransferId,
-                    context.SessionId,
-                    context.State,
-                    context.ErrorCode,
-                    terminalState,
-                    NormalizeErrorCode(errorCode),
-                    "transition_outbound_terminal",
-                    "already_terminal");
-                return false;
-            }
-
-            if (requiredSparsePumpInstall is not null &&
-                !IsOutboundSparsePumpInstallCurrentLocked(
-                    context,
-                    requiredSparsePumpInstall,
-                    context.DataSession,
-                    out var sparseInstallRejectionReason))
-            {
-                LogOutboundSparsePumpInstallRejected(
-                    context,
-                    requiredSparsePumpInstall,
-                    "terminal_transition",
-                    sparseInstallRejectionReason);
-                return false;
-            }
-
-            if (context.CoordinatorPersistentState.FileTransferRouteTransition
-                    .CurrentOperation is { } activeRouteTransition)
-            {
-                InvalidateOutboundFileTransferRouteTransitionLocked(
-                    context,
-                    activeRouteTransition.Authority,
-                    terminalInvalidation: true,
-                    "outbound_transfer_terminal");
-
-                if (context.CoordinatorPersistentState.FileTransferRouteTransition
-                        .CurrentOperation is not null)
-                {
-                    LocalOperationalLog.Info(
-                        "FileTransferService",
-                        $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_to_tuna_transition_invalidation_failed");
-                    return false;
-                }
-            }
-
-            if (!TryRetireRegularV4FrontierRepairPressureForScopeReplacementLocked(
-                    context,
-                    "outbound_transfer_terminal",
-                    FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal) ||
-                !SettleAndClearRegularV4FrontierRepairContractLocked(
-                    context,
-                    FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
-                    "outbound_transfer_terminal"))
-            {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=regular_v4_frontier_repair_pressure_retirement_failed");
-                return false;
-            }
-
-            if (!TryInvalidateRuntimeUnlockRetryLifecycleForScopeReplacementLocked(
-                    context,
-                    "retry_dispatch_outbound_transfer_terminal"))
-            {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_terminal_transition_rejected; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; decision_reason=runtime_unlock_retry_scope_invalidation_failed");
-                return false;
-            }
-
+            RetireBootstrapSourceCallbackLocked(context, requiredBootstrapCallback, "terminal");
             context.CancelLifetime();
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
@@ -361,7 +381,13 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private async Task TransitionInboundToTerminalAsync(
+    private Task TransitionInboundToTerminalAsync(
+        InboundTransferContext context, FileTransferTransferState terminalState, string? errorCode,
+        string statusMessage, bool sendError, string? errorMessage, string? cancelReason, CancellationToken ct)
+        => TransitionInboundToTerminalCoreAsync(context, terminalState, errorCode, statusMessage,
+            sendError, errorMessage, cancelReason, ct, requiredFeedbackOperation: null);
+
+    private async Task TransitionInboundToTerminalCoreAsync(
         InboundTransferContext context,
         FileTransferTransferState terminalState,
         string? errorCode,
@@ -369,7 +395,9 @@ public sealed partial class SessionFileTransferService
         bool sendError,
         string? errorMessage,
         string? cancelReason,
-        CancellationToken ct)
+        CancellationToken ct,
+        InboundBootstrapFeedbackOperation? requiredFeedbackOperation,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         SessionFileTransferSnapshot? snapshot = null;
         bool shouldSendError;
@@ -390,6 +418,11 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
+            if (requiredFeedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, requiredFeedbackOperation))
+            {
+                return;
+            }
             if (!ReferenceEquals(inboundTransfer, context))
             {
                 return;

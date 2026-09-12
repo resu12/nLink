@@ -857,12 +857,35 @@ public sealed partial class SessionFileTransferService
         return false;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private bool TryPrepareOutboundFallbackRouteTransitionLocked(
         OutboundTransferContext context,
         FileTransferRouteTransitionExecutionShadow evidenceShadow,
         out SessionFileTransferSnapshot? snapshot)
     {
         snapshot = null;
+        if (!TryCreateOutboundFallbackRouteTransitionPreparationLocked(
+                context, evidenceShadow, out var currentOperation,
+                out var supersedeUncommittedTuna, out var prepared))
+        {
+            return false;
+        }
+
+        return TryApplyPreparedOutboundFallbackRouteTransitionLocked(
+            context, evidenceShadow, currentOperation, supersedeUncommittedTuna, prepared, out snapshot);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryCreateOutboundFallbackRouteTransitionPreparationLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionExecutionShadow evidenceShadow,
+        out FileTransferRouteTransitionOperation? currentOperation,
+        out bool supersedeUncommittedTuna,
+        out FileTransferRouteTransitionDecision prepared)
+    {
+        currentOperation = null;
+        supersedeUncommittedTuna = false;
+        prepared = default;
         if (!evidenceShadow.HasExactPeerBoundary ||
             !ReferenceEquals(outboundTransfer, context) ||
             context.IsTerminal ||
@@ -876,10 +899,10 @@ public sealed partial class SessionFileTransferService
         }
 
         var state = CreateCoordinatorStateLocked(context);
-        var currentOperation =
+        currentOperation =
             FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(state)
                 .CurrentOperation;
-        var supersedeUncommittedTuna =
+        supersedeUncommittedTuna =
             context.RouteRuntime.UsesRegularNknV4FastRuntime &&
             currentOperation is
             {
@@ -941,7 +964,6 @@ public sealed partial class SessionFileTransferService
             NormalizeReason(evidenceShadow.Reason) ??
             "peer_post_tuna_fallback_v6_proof");
 
-        FileTransferRouteTransitionDecision prepared;
         if (supersedeUncommittedTuna)
         {
             prepared = FileTransferCoordinator.StageFileTransferRouteTransitionSupersession(
@@ -964,6 +986,19 @@ public sealed partial class SessionFileTransferService
                 state,
                 request);
         }
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryApplyPreparedOutboundFallbackRouteTransitionLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionExecutionShadow evidenceShadow,
+        FileTransferRouteTransitionOperation? currentOperation,
+        bool supersedeUncommittedTuna,
+        FileTransferRouteTransitionDecision prepared,
+        out SessionFileTransferSnapshot? snapshot)
+    {
+        snapshot = null;
 
         _ = AdoptCoordinatorStateLocked(context, prepared);
 
@@ -1031,101 +1066,8 @@ public sealed partial class SessionFileTransferService
         FileTransferRouteTransitionDecision draining;
         if (supersedeUncommittedTuna)
         {
-            var predecessor = currentOperation!.Value.Authority;
-            var committedSupersession =
-                FileTransferCoordinator.CommitFileTransferRouteTransitionSupersession(
-                    CreateCoordinatorStateLocked(context),
-                    pauseReceipt);
-            _ = AdoptCoordinatorStateLocked(context, committedSupersession);
-            LogFileTransferRouteTransitionSupersessionDecision(
-                context.SessionId,
-                context.TransferId,
-                FileTransferDirection.Outbound,
-                "commit",
-                predecessor,
-                committedSupersession.Authority,
-                committedSupersession.Status.ToString(),
-                committedSupersession.Reason);
-            if (committedSupersession.Status is not (
-                    FileTransferRouteTransitionDecisionStatus.Prepared or
-                    FileTransferRouteTransitionDecisionStatus.Draining or
-                    FileTransferRouteTransitionDecisionStatus.Idempotent) ||
-                committedSupersession.Authority != authority)
-            {
-                return false;
-            }
-
-            if (!ApplyFileTransferRouteTransitionDispositionWhileLocked(
-                    context,
-                    committedSupersession.DispositionCommand))
-            {
-                return false;
-            }
-
-            var current =
-                FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
-                    CreateCoordinatorStateLocked(context)).CurrentOperation;
-            if (current is null ||
-                current.Value.Authority != authority)
-            {
-                return false;
-            }
-
-            if (current.Value is
-                {
-                    State: FileTransferRouteTransitionState.Draining,
-                    DrainCommand: { } inheritedDrain,
-                })
-            {
-                draining = new FileTransferRouteTransitionDecision(
-                    FileTransferRouteTransitionDecisionStatus.Draining,
-                    committedSupersession.Reason,
-                    authority,
-                    pauseCommand,
-                    inheritedDrain,
-                    committedSupersession.DispositionCommand)
-                {
-                    State = CreateCoordinatorStateLocked(context),
-                };
-            }
-            else if (current.Value is
-                     {
-                         State: FileTransferRouteTransitionState.Prepared,
-                         DrainCommand: null,
-                     })
-            {
-                var capturedThrough =
-                    context.LastOutboundPhysicalSendLeaseGeneration;
-                var capturedIds = context.ActiveOutboundPhysicalSendLeases.Values
-                    .Where(lease =>
-                        lease.LeaseGeneration <= capturedThrough &&
-                        IsOutboundPhysicalSendLeaseForTransitionAuthority(
-                            lease,
-                            authority))
-                    .Select(static lease => lease.LeaseGeneration)
-                    .OrderBy(static generation => generation)
-                    .ToArray();
-                draining =
-                    FileTransferCoordinator
-                        .BeginFileTransferRouteTransitionPhysicalDrain(
-                            CreateCoordinatorStateLocked(context),
-                            authority,
-                            pauseReceipt,
-                            capturedThrough,
-                            capturedIds,
-                            FileTransferCoordinator
-                                .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
-                                    capturedIds));
-                _ = AdoptCoordinatorStateLocked(context, draining);
-                if (draining.Status is not (
-                        FileTransferRouteTransitionDecisionStatus.Draining or
-                        FileTransferRouteTransitionDecisionStatus.Idempotent) ||
-                    draining.DrainCommand is null)
-                {
-                    return false;
-                }
-            }
-            else
+            if (!TryBeginSupersededOutboundFallbackDrainLocked(
+                    context, currentOperation, authority, pauseCommand, pauseReceipt, out draining))
             {
                 return false;
             }
@@ -1238,12 +1180,146 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryBeginSupersededOutboundFallbackDrainLocked(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionOperation? currentOperation,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPauseBindCommand pauseCommand,
+        FileTransferRouteTransitionPauseBindReceipt pauseReceipt,
+        out FileTransferRouteTransitionDecision draining)
+    {
+        draining = default;
+        var predecessor = currentOperation!.Value.Authority;
+        var committedSupersession =
+            FileTransferCoordinator.CommitFileTransferRouteTransitionSupersession(
+                CreateCoordinatorStateLocked(context),
+                pauseReceipt);
+        _ = AdoptCoordinatorStateLocked(context, committedSupersession);
+        LogFileTransferRouteTransitionSupersessionDecision(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            "commit",
+            predecessor,
+            committedSupersession.Authority,
+            committedSupersession.Status.ToString(),
+            committedSupersession.Reason);
+        if (committedSupersession.Status is not (
+                FileTransferRouteTransitionDecisionStatus.Prepared or
+                FileTransferRouteTransitionDecisionStatus.Draining or
+                FileTransferRouteTransitionDecisionStatus.Idempotent) ||
+            committedSupersession.Authority != authority)
+        {
+            return false;
+        }
+
+        if (!ApplyFileTransferRouteTransitionDispositionWhileLocked(
+                context,
+                committedSupersession.DispositionCommand))
+        {
+            return false;
+        }
+
+        var current =
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
+                CreateCoordinatorStateLocked(context)).CurrentOperation;
+        if (current is null ||
+            current.Value.Authority != authority)
+        {
+            return false;
+        }
+
+        if (current.Value is
+            {
+                State: FileTransferRouteTransitionState.Draining,
+                DrainCommand: { } inheritedDrain,
+            })
+        {
+            draining = new FileTransferRouteTransitionDecision(
+                FileTransferRouteTransitionDecisionStatus.Draining,
+                committedSupersession.Reason,
+                authority,
+                pauseCommand,
+                inheritedDrain,
+                committedSupersession.DispositionCommand)
+            {
+                State = CreateCoordinatorStateLocked(context),
+            };
+        }
+        else if (current.Value is
+                 {
+                     State: FileTransferRouteTransitionState.Prepared,
+                     DrainCommand: null,
+                 })
+        {
+            var capturedThrough =
+                context.LastOutboundPhysicalSendLeaseGeneration;
+            var capturedIds = context.ActiveOutboundPhysicalSendLeases.Values
+                .Where(lease =>
+                    lease.LeaseGeneration <= capturedThrough &&
+                    IsOutboundPhysicalSendLeaseForTransitionAuthority(
+                        lease,
+                        authority))
+                .Select(static lease => lease.LeaseGeneration)
+                .OrderBy(static generation => generation)
+                .ToArray();
+            draining =
+                FileTransferCoordinator
+                    .BeginFileTransferRouteTransitionPhysicalDrain(
+                        CreateCoordinatorStateLocked(context),
+                        authority,
+                        pauseReceipt,
+                        capturedThrough,
+                        capturedIds,
+                        FileTransferCoordinator
+                            .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
+                                capturedIds));
+            _ = AdoptCoordinatorStateLocked(context, draining);
+            if (draining.Status is not (
+                    FileTransferRouteTransitionDecisionStatus.Draining or
+                    FileTransferRouteTransitionDecisionStatus.Idempotent) ||
+                draining.DrainCommand is null)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private bool TryPrepareInboundFallbackRouteTransitionLocked(
         InboundTransferContext context,
         FileTransferRouteTransitionExecutionShadow evidenceShadow,
         out SessionFileTransferSnapshot? snapshot)
     {
         snapshot = null;
+        if (!TryCreateInboundFallbackRouteTransitionPreparationLocked(
+                context, evidenceShadow, out var currentOperation,
+                out var supersedeUncommittedTuna, out var prepared))
+        {
+            return false;
+        }
+
+        return TryApplyPreparedInboundFallbackRouteTransitionLocked(
+            context, evidenceShadow, currentOperation, supersedeUncommittedTuna, prepared, out snapshot);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryCreateInboundFallbackRouteTransitionPreparationLocked(
+        InboundTransferContext context,
+        FileTransferRouteTransitionExecutionShadow evidenceShadow,
+        out FileTransferRouteTransitionOperation? currentOperation,
+        out bool supersedeUncommittedTuna,
+        out FileTransferRouteTransitionDecision prepared)
+    {
+        currentOperation = null;
+        supersedeUncommittedTuna = false;
+        prepared = default;
         if (!evidenceShadow.HasExactPeerBoundary ||
             !ReferenceEquals(inboundTransfer, context) ||
             context.IsTerminal ||
@@ -1259,10 +1335,10 @@ public sealed partial class SessionFileTransferService
         }
 
         var state = CreateCoordinatorStateLocked(context);
-        var currentOperation =
+        currentOperation =
             FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(state)
                 .CurrentOperation;
-        var supersedeUncommittedTuna =
+        supersedeUncommittedTuna =
             context.RouteRuntime.UsesRegularNknV4FastRuntime &&
             currentOperation is
             {
@@ -1322,7 +1398,7 @@ public sealed partial class SessionFileTransferService
             predecessorId,
             NormalizeReason(evidenceShadow.Reason) ??
             "peer_post_tuna_fallback_v6_proof");
-        var prepared = supersedeUncommittedTuna
+        prepared = supersedeUncommittedTuna
             ? FileTransferCoordinator.StageFileTransferRouteTransitionSupersession(
                 state,
                 currentOperation!.Value.Authority,
@@ -1330,6 +1406,19 @@ public sealed partial class SessionFileTransferService
             : FileTransferCoordinator.PrepareFileTransferRouteTransition(
                 state,
                 request);
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryApplyPreparedInboundFallbackRouteTransitionLocked(
+        InboundTransferContext context,
+        FileTransferRouteTransitionExecutionShadow evidenceShadow,
+        FileTransferRouteTransitionOperation? currentOperation,
+        bool supersedeUncommittedTuna,
+        FileTransferRouteTransitionDecision prepared,
+        out SessionFileTransferSnapshot? snapshot)
+    {
+        snapshot = null;
         _ = AdoptCoordinatorStateLocked(context, prepared);
         if (supersedeUncommittedTuna)
         {
@@ -1408,91 +1497,8 @@ public sealed partial class SessionFileTransferService
         FileTransferRouteTransitionDecision draining;
         if (supersedeUncommittedTuna)
         {
-            var predecessor = currentOperation!.Value.Authority;
-            var committedSupersession =
-                FileTransferCoordinator.CommitFileTransferRouteTransitionSupersession(
-                    CreateCoordinatorStateLocked(context),
-                    pauseReceipt);
-            _ = AdoptCoordinatorStateLocked(context, committedSupersession);
-            LogFileTransferRouteTransitionSupersessionDecision(
-                context.SessionId,
-                context.TransferId,
-                FileTransferDirection.Inbound,
-                "commit",
-                predecessor,
-                committedSupersession.Authority,
-                committedSupersession.Status.ToString(),
-                committedSupersession.Reason);
-            if (committedSupersession.Status is not (
-                    FileTransferRouteTransitionDecisionStatus.Prepared or
-                    FileTransferRouteTransitionDecisionStatus.Draining or
-                    FileTransferRouteTransitionDecisionStatus.Idempotent) ||
-                committedSupersession.Authority != authority)
-            {
-                return false;
-            }
-
-            if (!ApplyFileTransferRouteTransitionDispositionWhileLocked(
-                    context,
-                    committedSupersession.DispositionCommand))
-            {
-                return false;
-            }
-
-            var current =
-                FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
-                    CreateCoordinatorStateLocked(context)).CurrentOperation;
-            if (current is null ||
-                current.Value.Authority != authority)
-            {
-                return false;
-            }
-
-            if (current.Value is
-                {
-                    State: FileTransferRouteTransitionState.Draining,
-                    DrainCommand: { } inheritedDrain,
-                })
-            {
-                draining = new FileTransferRouteTransitionDecision(
-                    FileTransferRouteTransitionDecisionStatus.Draining,
-                    committedSupersession.Reason,
-                    authority,
-                    pauseCommand,
-                    inheritedDrain,
-                    committedSupersession.DispositionCommand)
-                {
-                    State = CreateCoordinatorStateLocked(context),
-                };
-            }
-            else if (current.Value is
-                     {
-                         State: FileTransferRouteTransitionState.Prepared,
-                         DrainCommand: null,
-                     })
-            {
-                var emptyIds = Array.Empty<long>();
-                draining =
-                    FileTransferCoordinator
-                        .BeginFileTransferRouteTransitionPhysicalDrain(
-                            CreateCoordinatorStateLocked(context),
-                            authority,
-                            pauseReceipt,
-                            capturedThroughPhysicalSendGeneration: 0,
-                            emptyIds,
-                            FileTransferCoordinator
-                                .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
-                                    emptyIds));
-                _ = AdoptCoordinatorStateLocked(context, draining);
-                if (draining.Status is not (
-                        FileTransferRouteTransitionDecisionStatus.Draining or
-                        FileTransferRouteTransitionDecisionStatus.Idempotent) ||
-                    draining.DrainCommand is null)
-                {
-                    return false;
-                }
-            }
-            else
+            if (!TryBeginSupersededInboundFallbackDrainLocked(
+                    context, currentOperation, authority, pauseCommand, pauseReceipt, out draining))
             {
                 return false;
             }
@@ -1576,6 +1582,107 @@ public sealed partial class SessionFileTransferService
             context,
             execution,
             "fallback_transition_empty_inbound_drain");
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryBeginSupersededInboundFallbackDrainLocked(
+        InboundTransferContext context,
+        FileTransferRouteTransitionOperation? currentOperation,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPauseBindCommand pauseCommand,
+        FileTransferRouteTransitionPauseBindReceipt pauseReceipt,
+        out FileTransferRouteTransitionDecision draining)
+    {
+        draining = default;
+        var predecessor = currentOperation!.Value.Authority;
+        var committedSupersession =
+            FileTransferCoordinator.CommitFileTransferRouteTransitionSupersession(
+                CreateCoordinatorStateLocked(context),
+                pauseReceipt);
+        _ = AdoptCoordinatorStateLocked(context, committedSupersession);
+        LogFileTransferRouteTransitionSupersessionDecision(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            "commit",
+            predecessor,
+            committedSupersession.Authority,
+            committedSupersession.Status.ToString(),
+            committedSupersession.Reason);
+        if (committedSupersession.Status is not (
+                FileTransferRouteTransitionDecisionStatus.Prepared or
+                FileTransferRouteTransitionDecisionStatus.Draining or
+                FileTransferRouteTransitionDecisionStatus.Idempotent) ||
+            committedSupersession.Authority != authority)
+        {
+            return false;
+        }
+
+        if (!ApplyFileTransferRouteTransitionDispositionWhileLocked(
+                context,
+                committedSupersession.DispositionCommand))
+        {
+            return false;
+        }
+
+        var current =
+            FileTransferCoordinator.GetFileTransferRouteTransitionSubstate(
+                CreateCoordinatorStateLocked(context)).CurrentOperation;
+        if (current is null ||
+            current.Value.Authority != authority)
+        {
+            return false;
+        }
+
+        if (current.Value is
+            {
+                State: FileTransferRouteTransitionState.Draining,
+                DrainCommand: { } inheritedDrain,
+            })
+        {
+            draining = new FileTransferRouteTransitionDecision(
+                FileTransferRouteTransitionDecisionStatus.Draining,
+                committedSupersession.Reason,
+                authority,
+                pauseCommand,
+                inheritedDrain,
+                committedSupersession.DispositionCommand)
+            {
+                State = CreateCoordinatorStateLocked(context),
+            };
+        }
+        else if (current.Value is
+                 {
+                     State: FileTransferRouteTransitionState.Prepared,
+                     DrainCommand: null,
+                 })
+        {
+            var emptyIds = Array.Empty<long>();
+            draining =
+                FileTransferCoordinator
+                    .BeginFileTransferRouteTransitionPhysicalDrain(
+                        CreateCoordinatorStateLocked(context),
+                        authority,
+                        pauseReceipt,
+                        capturedThroughPhysicalSendGeneration: 0,
+                        emptyIds,
+                        FileTransferCoordinator
+                            .CreateFileTransferRouteTransitionPhysicalDrainFingerprint(
+                                emptyIds));
+            _ = AdoptCoordinatorStateLocked(context, draining);
+            if (draining.Status is not (
+                    FileTransferRouteTransitionDecisionStatus.Draining or
+                    FileTransferRouteTransitionDecisionStatus.Idempotent) ||
+                draining.DrainCommand is null)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
         return true;
     }
 
@@ -3190,18 +3297,19 @@ public sealed partial class SessionFileTransferService
             dataSession,
             queuedCheckpointRequestId: null);
 
-    private async Task TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameCoreAsync(
-        OutboundTransferContext context,
-        OutboundSparsePumpInstall install,
-        IFileTransferDataSession dataSession,
-        string? queuedCheckpointRequestId)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private bool TryCaptureOutboundCommittedRetainedFrameApply(
+        OutboundTransferContext context, OutboundSparsePumpInstall install, IFileTransferDataSession dataSession,
+        string? queuedCheckpointRequestId, out FileTransferRouteTransitionExecutionShadow execution,
+        out FileTransferRouteTransitionRetainedFrameApplyCommand command,
+        out OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding fallbackCheckpointDispatch,
+        out bool exactCheckpointAlreadyQueued, out long receiveSupervisorGeneration)
     {
-        FileTransferRouteTransitionExecutionShadow execution;
-        FileTransferRouteTransitionRetainedFrameApplyCommand command;
-        OutboundFileTransferRouteTransitionFallbackCheckpointDispatchBinding
-            fallbackCheckpointDispatch;
-        var exactCheckpointAlreadyQueued = false;
-        long receiveSupervisorGeneration;
+        execution = null!;
+        command = default;
+        fallbackCheckpointDispatch = default;
+        exactCheckpointAlreadyQueued = false;
+        receiveSupervisorGeneration = 0;
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
@@ -3237,7 +3345,7 @@ public sealed partial class SessionFileTransferService
                     pendingFallbackCheckpointDispatch,
                     out _))
             {
-                return;
+                return false;
             }
 
             execution = current with { FrameApplyInFlight = true };
@@ -3253,6 +3361,21 @@ public sealed partial class SessionFileTransferService
                     StringComparison.Ordinal);
             receiveSupervisorGeneration =
                 context.ActiveOutboundSparseReceiveSupervisorGeneration;
+        }
+        return true;
+    }
+
+    private async Task TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameCoreAsync(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall install,
+        IFileTransferDataSession dataSession,
+        string? queuedCheckpointRequestId)
+    {
+        if (!TryCaptureOutboundCommittedRetainedFrameApply(context, install, dataSession, queuedCheckpointRequestId,
+                out var execution, out var command, out var fallbackCheckpointDispatch,
+                out var exactCheckpointAlreadyQueued, out var receiveSupervisorGeneration))
+        {
+            return;
         }
 
         if (!exactCheckpointAlreadyQueued &&
@@ -3369,6 +3492,17 @@ public sealed partial class SessionFileTransferService
                 $"filetransfer_route_transition_retained_frame_apply_failed_{NormalizeReason(ex.GetType().Name)}";
         }
 
+        CompleteOutboundCommittedRetainedFrameApply(context, execution, command, applied, applyReason);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void CompleteOutboundCommittedRetainedFrameApply(
+        OutboundTransferContext context,
+        FileTransferRouteTransitionExecutionShadow execution,
+        FileTransferRouteTransitionRetainedFrameApplyCommand command,
+        bool applied,
+        string applyReason)
+    {
         SessionFileTransferSnapshot? snapshot = null;
         lock (gate)
         {

@@ -43,21 +43,28 @@ function Assert-Consumers([string]$Name, [string[]]$Lines, [bool]$EvidenceValid,
     if (($fullEffects -join "`n") -cne ($compactEffects -join "`n")) { throw "$Name lost effect witnesses." }
     $boundary = $full.FirstUnresolvedBoundary
     if ($EvidenceValid) {
-        # This deliberately Regular-only contract fixture never establishes a
-        # live route epoch. Preserve that separate projection finding; assert
-        # receive-recovery closure independently without fabricating a route.
+        # Initial Regular-v4 legitimately has epoch zero when the complete
+        # StartTransfer/publication lineage proves its exact initial owner.
+        # Require that proof instead of expecting an obsolete projection failure.
         # The evaluator has already validated byte-equivalent duplicates above.
         $publications = @((Get-Envelopes $Lines) | Where-Object decisionKind -CEQ 'RoutePublication' | Sort-Object transitionId -Unique)
         if ($publications.Count -ne 1) { throw "$Name lost its unique initial publication." }
         $terminalDecisions = @((Get-Envelopes $Lines) | Where-Object decisionKind -CEQ 'Terminalized' | Sort-Object transitionId -Unique)
-        $projectionCount = if ($terminalDecisions.Count -eq 1) { 0 } else { 1 }
-        $expectedFirstId = if ($projectionCount -eq 1) { $publications[0].transitionId } else { $ExpectedId }
-        $expectedFirstClass = if ($projectionCount -eq 1) {
-            'filetransfer_live_route_epoch_projection_missing'
-        } else { 'filetransfer_receive_recovery_completed_unproven_successor_missing' }
-        if ($null -eq $boundary -or
-            $terminalDecisions.Count -gt 1 -or $boundary.boundaryId -cne $expectedFirstId -or
-            $boundary.taxonomyClass -cne $expectedFirstClass) {
+        foreach ($evaluation in @($full, $compact)) {
+            $index = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries @(
+                $evaluation.Boundaries | ForEach-Object { [pscustomobject]@{ Boundary = $_ } })
+            $proofs = Get-FileTransferCoordinatorSnapshotInitialRegularPublications `
+                -AggregateIndex $index -Effects $evaluation.__RoutePublicationEffects
+            if ($proofs.Count -ne 1 -or
+                @($proofs.Keys | Where-Object { $_ -clike "*|$($publications[0].transitionId)|*" }).Count -ne 1) {
+                throw "$Name lost its exact initial Regular publication proof."
+            }
+        }
+        if ($terminalDecisions.Count -gt 1 -or
+            ($ExpectedId -ceq '' -and $null -ne $boundary) -or
+            ($ExpectedId -cne '' -and ($null -eq $boundary -or
+                $boundary.boundaryId -cne $ExpectedId -or
+                $boundary.taxonomyClass -cne 'filetransfer_receive_recovery_completed_unproven_successor_missing'))) {
             throw "$Name changed the explicit fixture boundary: $($boundary | Select-Object * -ExcludeProperty operations | ConvertTo-Json -Compress)"
         }
         $recoveryBoundaries = @($full.Boundaries | Where-Object {
@@ -76,7 +83,7 @@ function Assert-Consumers([string]$Name, [string[]]$Lines, [bool]$EvidenceValid,
             throw "$Name did not preserve the exact remaining recovery obligation."
         }
         $unresolved = @($full.Boundaries | Where-Object unresolvedCount -GT 0)
-        if ($unresolved.Count -ne ($projectionCount + $recoveryBoundaries.Count)) {
+        if ($unresolved.Count -ne $recoveryBoundaries.Count) {
             throw "$Name introduced an unrelated lifecycle failure."
         }
     }

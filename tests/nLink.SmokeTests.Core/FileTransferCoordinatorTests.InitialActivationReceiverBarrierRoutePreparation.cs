@@ -16,6 +16,7 @@ public sealed partial class FileTransferCoordinatorTests
     public void ReceiverBarrier_RoutePreparationInvalidationSurvivesRealRouteAndTerminalCarries()
         => CreateReceiverBarrierRoutePreparationFixture(completeLifecycle: true);
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateReceiverBarrierRoutePreparationFixture(bool completeLifecycle = false,
             Func<FileTransferCoordinatorState, Action<FileTransferCoordinatorTransitionEnvelope>, FileTransferCoordinatorState>? prepareSource = null,
@@ -41,6 +42,16 @@ public sealed partial class FileTransferCoordinatorTests
             Assert.NotNull(source);
             fixture = (state, source!, fixture.Negotiation);
         }
+        return CompleteReceiverBarrierRoutePreparationFixture(fixture, completeLifecycle, observeInitialCommit, envelopes, Capture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CompleteReceiverBarrierRoutePreparationFixture(
+        (FileTransferCoordinatorState State, InitialActivationReceiverBarrierSource Source,
+            InitialActivationReceiverBarrierNegotiation Negotiation) fixture,
+        bool completeLifecycle, Action<FileTransferCoordinatorState>? observeInitialCommit,
+        List<FileTransferCoordinatorTransitionEnvelope> envelopes, Action<FileTransferCoordinatorTransitionEnvelope> Capture)
+    {
         // These are the retained transaction/offer and payer observations used by
         // the existing real pending-probe/initial-responder fixture below.
         var negotiation = fixture.Negotiation with

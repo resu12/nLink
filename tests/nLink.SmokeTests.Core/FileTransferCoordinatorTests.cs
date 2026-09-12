@@ -1763,7 +1763,18 @@ public sealed partial class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void FallbackTailYield_PairedReleaseIsReservedAndConsumedOnceAcrossRetrySuccessors()
+    {
+        var source = CreatePairedReleaseReservationSource();
+        var (state, request, tailYield) =
+            AuthorizeFallbackRuntimeUnlockRetryDispatchSource(source);
+        var successorInstall = AssertPairedReleaseReservedAndConsumedAcrossRetrySuccessors(state, request, tailYield);
+        AssertPairedReleaseSuccessorTransition(successorInstall);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState CreatePairedReleaseReservationSource()
     {
         var source = ActiveFallbackStateWithoutCheckpoint();
         source = source with
@@ -1774,8 +1785,15 @@ public sealed partial class FileTransferCoordinatorTests
                 SnapshotStateGeneration = 0,
             },
         };
-        var (state, request, tailYield) =
-            AuthorizeFallbackRuntimeUnlockRetryDispatchSource(source);
+        return source;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static PersistentRetryInstallFixture AssertPairedReleaseReservedAndConsumedAcrossRetrySuccessors(
+        FileTransferCoordinatorState state,
+        in RuntimeUnlockRetryDispatchAuthorityRequest request,
+        in FallbackTailYieldDecision tailYield)
+    {
         var release =
             Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(
                 FileTransferCoordinator.GetFallbackTailYieldSubstate(state)
@@ -1905,7 +1923,12 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Null(afterSuccessorInstall.CurrentReservation);
         Assert.Equal(reserved, afterSuccessorInstall.LastConsumedReservation);
         Assert.Equal(receipt, afterSuccessorInstall.LastConsumingInstallReceipt);
+        return successorInstall;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertPairedReleaseSuccessorTransition(PersistentRetryInstallFixture successorInstall)
+    {
         var transitionSetup =
             CreateFallbackV6ToTunaRouteTransitionSetup(
                 successorInstall.State);
@@ -1930,11 +1953,27 @@ public sealed partial class FileTransferCoordinatorTests
     public void FallbackTailYield_FreshFailedYieldDoesNotInheritConsumedReservation()
         => CreateFailedYieldAfterConsumedReservationSnapshotFixture();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateFailedYieldAfterConsumedReservationSnapshotFixture()
     {
         var snapshots = new List<FileTransferCoordinatorTransitionEnvelope>();
-        void Capture(FileTransferCoordinatorTransitionEnvelope envelope) => snapshots.Add(envelope);
         var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource(snapshotCapture: snapshots);
+        var (installed, receipt) = InstallFailedYieldConsumedReservationFixture(snapshots, state, request, tailYield);
+        var (reservation, consumed, immutable) = InspectConsumedReservationSnapshot(installed, receipt);
+        var failed = CreateFreshYieldAfterConsumedReservation(snapshots, state, installed, reservation);
+        return CompleteFailedYieldAfterConsumedReservationSnapshotFixture(
+            snapshots, installed, receipt, reservation, consumed, immutable, failed);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RuntimeUnlockRetryLifecycleTransitionDecision Installed, RuntimeUnlockRetryDispatchInstallReceipt Receipt)
+        InstallFailedYieldConsumedReservationFixture(
+        List<FileTransferCoordinatorTransitionEnvelope> snapshots,
+        FileTransferCoordinatorState state,
+        in RuntimeUnlockRetryDispatchAuthorityRequest request,
+        in FallbackTailYieldDecision tailYield)
+    {
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope) => snapshots.Add(envelope);
         var grant = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(state, request,
             RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield, tailYield.AuthorityId,
             tailYield.YieldGeneration, tailYield.YieldKind.ToString());
@@ -1949,6 +1988,16 @@ public sealed partial class FileTransferCoordinatorTests
             new(RuntimeUnlockRetryDispatchInstallStatus.Installed, "installed", receipt), 25_002);
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, installed.Status);
         Capture(installed.SnapshotEnvelope!);
+        return (installed, receipt);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferFallbackTailPairedReleaseReservation? Reservation,
+        FileTransferCoordinatorOperationTransitionSnapshot Consumed, string Immutable)
+        InspectConsumedReservationSnapshot(
+            in RuntimeUnlockRetryLifecycleTransitionDecision installed,
+            in RuntimeUnlockRetryDispatchInstallReceipt receipt)
+    {
         var reservation = installed.State.PersistentState.FallbackTailYield.LastConsumedReservation;
         var consumed = Assert.Single(installed.SnapshotEnvelope!.Aggregate.Operations,
             operation => operation.OperationRole == "release_reservation_consumed");
@@ -1956,6 +2005,71 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.True(consumed.ReceiptValidated);
         Assert.Equal(receipt.InstallGeneration, consumed.FallbackTailYield!.ConsumingInstallGeneration);
         var immutable = installed.SnapshotEnvelope.ToCanonicalJson();
+        AssertConsumedReservationOwnership(installed, reservation, receipt);
+        return (reservation, consumed, immutable);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorDecision CreateFreshYieldAfterConsumedReservation(
+        List<FileTransferCoordinatorTransitionEnvelope> snapshots,
+        FileTransferCoordinatorState state,
+        in RuntimeUnlockRetryLifecycleTransitionDecision installed,
+        in FileTransferFallbackTailPairedReleaseReservation? reservation)
+    {
+        void Capture(FileTransferCoordinatorTransitionEnvelope envelope) => snapshots.Add(envelope);
+        var setup = CreateFallbackV6ToTunaRouteTransitionSetup(installed.State);
+        state = CommitEmptyFileTransferRouteTransitionForTest(setup.State, setup.Request, setup.FinalProof, capture: Capture).State;
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        state = FallBack(state, fallback, 4, 4, Capture).State;
+        AssertConsumedReservationSurvivesRouteCycle(state, reservation);
+        var failed = MarkFallbackTailFailed(state, fallback, 4);
+        Assert.Null(failed.MutationRejectedReason);
+        Capture(failed.SnapshotEnvelope!);
+        return failed;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertConsumedReservationSurvivesRouteCycle(
+        FileTransferCoordinatorState state,
+        in FileTransferFallbackTailPairedReleaseReservation? reservation)
+    {
+        Assert.Equal(reservation, state.PersistentState.FallbackTailYield.LastConsumedReservation);
+        Assert.Null(state.PersistentState.FallbackTailYield.CurrentOperation);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorTransitionEnvelope[] CompleteFailedYieldAfterConsumedReservationSnapshotFixture(
+        List<FileTransferCoordinatorTransitionEnvelope> snapshots,
+        in RuntimeUnlockRetryLifecycleTransitionDecision installed,
+        in RuntimeUnlockRetryDispatchInstallReceipt receipt,
+        in FileTransferFallbackTailPairedReleaseReservation? reservation,
+        FileTransferCoordinatorOperationTransitionSnapshot consumed,
+        string immutable,
+        in FileTransferCoordinatorDecision failed)
+    {
+        var fresh = Assert.Single(failed.SnapshotEnvelope!.Aggregate.Operations,
+            operation => operation.OperationRole == "yield_current");
+        Assert.Equal("Failed", fresh.OperationKind);
+        Assert.Equal("None", fresh.BeforeState);
+        Assert.Equal("YieldIssued", fresh.AfterState);
+        Assert.NotEqual(consumed.AuthorityId, fresh.AuthorityId);
+        Assert.Equal(0, fresh.FallbackTailYield!.ReservationGeneration);
+        Assert.Equal("(none)", fresh.FallbackTailYield.ReservedRetryAuthorityId);
+        Assert.Equal(0, fresh.FallbackTailYield.ConsumingInstallGeneration);
+        Assert.DoesNotContain(failed.SnapshotEnvelope.Aggregate.Operations,
+            operation => operation.OperationRole.StartsWith("release_reservation_", StringComparison.Ordinal));
+        Assert.Equal(reservation, failed.State.PersistentState.FallbackTailYield.LastConsumedReservation);
+        Assert.Equal(receipt, failed.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
+        Assert.Equal(immutable, installed.SnapshotEnvelope.ToCanonicalJson());
+        return snapshots.ToArray();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertConsumedReservationOwnership(
+        in RuntimeUnlockRetryLifecycleTransitionDecision installed,
+        in FileTransferFallbackTailPairedReleaseReservation? reservation,
+        in RuntimeUnlockRetryDispatchInstallReceipt receipt)
+    {
         var owner = installed.State.PersistentState.FallbackTailYield.CurrentOperation!.Value;
         var ownedReservation = reservation!.Value;
         var ownership = typeof(FileTransferCoordinator).GetMethod("FallbackTailReservationSnapshotBelongsToOperation",
@@ -1981,30 +2095,6 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.False(Belongs(owner with { PairedReleaseCarryForward = new(owner.Decision, ownedReservation.Release,
             owner.Scope with { TransportEpoch = owner.Scope.TransportEpoch + 2 }, carryTarget with { TransportEpoch = owner.Scope.TransportEpoch + 3 }, "wrong_source") }, ownedReservation));
 
-        var setup = CreateFallbackV6ToTunaRouteTransitionSetup(installed.State);
-        state = CommitEmptyFileTransferRouteTransitionForTest(setup.State, setup.Request, setup.FinalProof, capture: Capture).State;
-        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
-        state = FallBack(state, fallback, 4, 4, Capture).State;
-        Assert.Equal(reservation, state.PersistentState.FallbackTailYield.LastConsumedReservation);
-        Assert.Null(state.PersistentState.FallbackTailYield.CurrentOperation);
-        var failed = MarkFallbackTailFailed(state, fallback, 4);
-        Assert.Null(failed.MutationRejectedReason);
-        Capture(failed.SnapshotEnvelope!);
-        var fresh = Assert.Single(failed.SnapshotEnvelope!.Aggregate.Operations,
-            operation => operation.OperationRole == "yield_current");
-        Assert.Equal("Failed", fresh.OperationKind);
-        Assert.Equal("None", fresh.BeforeState);
-        Assert.Equal("YieldIssued", fresh.AfterState);
-        Assert.NotEqual(consumed.AuthorityId, fresh.AuthorityId);
-        Assert.Equal(0, fresh.FallbackTailYield!.ReservationGeneration);
-        Assert.Equal("(none)", fresh.FallbackTailYield.ReservedRetryAuthorityId);
-        Assert.Equal(0, fresh.FallbackTailYield.ConsumingInstallGeneration);
-        Assert.DoesNotContain(failed.SnapshotEnvelope.Aggregate.Operations,
-            operation => operation.OperationRole.StartsWith("release_reservation_", StringComparison.Ordinal));
-        Assert.Equal(reservation, failed.State.PersistentState.FallbackTailYield.LastConsumedReservation);
-        Assert.Equal(receipt, failed.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
-        Assert.Equal(immutable, installed.SnapshotEnvelope.ToCanonicalJson());
-        return snapshots.ToArray();
     }
 
     [Fact]
@@ -4133,12 +4223,21 @@ public sealed partial class FileTransferCoordinatorTests
     [InlineData(FileTransferDirection.Inbound, FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled)]
     [Trait("FileTransferCoordinatorSuite", "RegularV4FrontierRepairPressure")]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void RegularV4FrontierRepairPressure_FileTunaSettlementRetiresExactAuthorityWithoutRetryRelease(
         FileTransferDirection direction,
         FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
     {
         var installed = StateWithInstalledRegularV4FrontierRepairPressure(
             CreateFileTunaPressureSource(direction));
+        AssertFileTunaPressureSettlementRetiresExactAuthority(installed, outcome);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertFileTunaPressureSettlementRetiresExactAuthority(
+        FileTransferCoordinatorState installed,
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
+    {
         var binding = PressureState(installed).InstalledBinding!.Value;
         Assert.Equal(FileTransferTransportKind.Tuna, binding.Authority.TargetTransport);
         Assert.True(binding.Authority.RouteCommitGeneration > 0);
@@ -5397,6 +5496,7 @@ public sealed partial class FileTransferCoordinatorTests
             direction,
             proveSuccessorWithTerminalRollover: true);
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateReceiveRecoveryRouteCarrySnapshotFixture(
             FileTransferDirection direction,
@@ -5409,6 +5509,14 @@ public sealed partial class FileTransferCoordinatorTests
                 direction);
         }
 
+        return CreateReceiveRecoveryNonRolloverRouteCarrySnapshotFixture(direction, terminalizeUnprovenSuccessor);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CreateReceiveRecoveryNonRolloverRouteCarrySnapshotFixture(
+            FileTransferDirection direction, bool terminalizeUnprovenSuccessor)
+    {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
         {
@@ -5603,6 +5711,7 @@ public sealed partial class FileTransferCoordinatorTests
         }
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateReceiveRecoveryRouteCarryTerminalRolloverSnapshotFixture(
             FileTransferDirection direction)
@@ -5625,6 +5734,16 @@ public sealed partial class FileTransferCoordinatorTests
             envelopes.Add(envelope);
         }
 
+        var (state, owner, leg) = CreateReceiveRecoveryRolloverInitialState(direction);
+        var (firstProof, firstAuthority) = CreateReceiveRecoveryRolloverFirstProof(state, direction, Capture);
+        return CompleteReceiveRecoveryRouteCarryTerminalRollover(
+            direction, envelopes, Capture, owner, leg, firstProof, firstAuthority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, RuntimeOwnerToken Owner, FileTransferLeg Leg)
+        CreateReceiveRecoveryRolloverInitialState(FileTransferDirection direction)
+    {
         var regular = FileTransferRouteResolver.Resolve(
             FileTransferRoute.RegularNknV4Fast);
         var state = StartRegular(regular, direction).State with
@@ -5663,6 +5782,14 @@ public sealed partial class FileTransferCoordinatorTests
             },
         };
 
+        return (state, owner, leg);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferReceiveRecoveryDecision FirstProof, FileTransferReceiveRecoveryOperationAuthority FirstAuthority)
+        CreateReceiveRecoveryRolloverFirstProof(FileTransferCoordinatorState state,
+            FileTransferDirection direction, Action<FileTransferCoordinatorTransitionEnvelope> Capture)
+    {
         var firstIssued = FileTransferCoordinator.IssueReceiveRecoveryOperation(
             state,
             CreateReceiveRecoveryObservationForTest(
@@ -5704,6 +5831,16 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.True(firstProof.Accepted, firstProof.Reason);
         Capture(firstProof.SnapshotEnvelope!);
 
+        return (firstProof, firstAuthority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CompleteReceiveRecoveryRouteCarryTerminalRollover(
+            FileTransferDirection direction, List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+            Action<FileTransferCoordinatorTransitionEnvelope> Capture, RuntimeOwnerToken owner, FileTransferLeg leg,
+            FileTransferReceiveRecoveryDecision firstProof, FileTransferReceiveRecoveryOperationAuthority firstAuthority)
+    {
         FileTransferCoordinatorState tuna;
         if (direction == FileTransferDirection.Inbound)
         {
@@ -5875,6 +6012,13 @@ public sealed partial class FileTransferCoordinatorTests
     public void FileTransferReceiveRecovery_CoordinatorAuthorsExactSnapshotBoundaries()
     {
         var fixture = CreateReceiveRecoveryOperationFixture();
+        AssertReceiveRecoveryAuthorsExactSnapshotBoundaries(fixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertReceiveRecoveryAuthorsExactSnapshotBoundaries(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture)
+    {
         var state = fixture.State with
         {
             PersistentState = fixture.State.PersistentState with
@@ -5980,9 +6124,16 @@ public sealed partial class FileTransferCoordinatorTests
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "CoordinatorSnapshots")]
     [Trait("FileTransferCoordinatorSuite", "ReceiveRecoveryOperation")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void RuntimeUnlockInitialActivationReceiveRecoveryHold_NoCurrentRecoveryProjectsOnlyFamilyAttempt()
     {
         var testCase = CreateNoCurrentRecoverySnapshotAttemptTestCase();
+        AssertNoCurrentRecoverySnapshotAttempt(testCase);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertNoCurrentRecoverySnapshotAttempt(NoCurrentRecoverySnapshotAttemptTestCase testCase)
+    {
         var state = testCase.State;
         var request = testCase.Request;
         var fingerprint = testCase.Fingerprint;
@@ -7000,6 +7151,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent,
             duplicateInstall.Status);
+        Assert.Null(duplicateInstall.CompensationContext);
         Assert.Same(installed.State, duplicateInstall.State);
         Assert.Equal(
             installedAttempt.DispatchDeadlineUtcMs,
@@ -7097,6 +7249,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             "retry_dispatch_install_receipt_mismatch",
             decision.Reason);
+        Assert.Null(decision.CompensationContext);
         Assert.Same(fixture.StagedState, decision.State);
         var lifecycle =
             FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
@@ -7142,6 +7295,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockRetryLifecycleTransitionStatus.Rejected,
             rejectedInstall.Status);
+        Assert.Null(rejectedInstall.CompensationContext);
         Assert.Same(issuance.State, rejectedInstall.State);
         var retainedIssuance =
             FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
@@ -7165,6 +7319,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockRetryLifecycleTransitionStatus.Expired,
             commitAfterExpiry.Status);
+        Assert.Null(commitAfterExpiry.CompensationContext);
         var commitExpiredLifecycle =
             FileTransferCoordinator.GetRuntimeUnlockRetryLifecycle(
                 commitAfterExpiry.State);
@@ -8101,6 +8256,7 @@ public sealed partial class FileTransferCoordinatorTests
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RuntimeUnlockRetryLifecycle")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void RuntimeUnlockRetryLifecycle_ClosureBackedPendingAttemptPreservesBothClosuresUntilInstall()
     {
         var boundedState = ClosePersistentRetryLifecycleForTest();
@@ -8113,7 +8269,16 @@ public sealed partial class FileTransferCoordinatorTests
         var closureSource =
             AuthorizeReceiveRecoveryLeaseClosureRetrySource(
                 boundedLifecycle);
+        AssertClosureBackedRetryInstall(boundedClosure, closureSource);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertClosureBackedRetryInstall(
+        in RuntimeUnlockRetryLifecycleBoundedClosure boundedClosure,
+        in (FileTransferCoordinatorState State,
+            RuntimeUnlockRetryDispatchAuthorityRequest Request,
+            RecoveryLivenessLease RetiredLease) closureSource)
+    {
         var granted =
             FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
                 closureSource.State,
@@ -8925,6 +9090,14 @@ public sealed partial class FileTransferCoordinatorTests
             coordinatorInstanceId: "receive-proof-receipt-first");
         var proofFirst = CreateReceiveRecoveryOperationFixture(
             coordinatorInstanceId: "receive-proof-proof-first");
+        AssertReceiveRecoveryReceiptAndProofArrivalOrders(receiptFirst, proofFirst);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertReceiveRecoveryReceiptAndProofArrivalOrders(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) receiptFirst,
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) proofFirst)
+    {
         var receiptFirstAuthority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 receiptFirst.Decision.Authority);
@@ -9373,12 +9546,42 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal("Armed", arm.AfterState); // The earlier graph remains immutable.
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    internal static (FileTransferCoordinatorTransitionEnvelope[] Proof, FileTransferCoordinatorTransitionEnvelope[] Complete)
+        CreateCompleteHeldProofPublicationSnapshotFixture(long recoveryGeneration)
+    {
+        var startup = new List<FileTransferCoordinatorTransitionEnvelope>();
+        var fixture = CreateReceiveRecoveryOperationFixture(FileTransferDirection.Inbound,
+            "proof-cancellation-generations", recoveryGeneration - 1, startup.Add);
+        var proof = CompleteProofPublicationCancellationSnapshotFixture(fixture, heldRecheck: true);
+        return (proof, startup.Concat(proof).ToArray());
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope[] CreateProofPublicationCancellationSnapshotFixture(
         long recoveryGeneration, bool heldRecheck = false)
     {
         var fixture = CreateReceiveRecoveryOperationFixture(FileTransferDirection.Inbound,
             "proof-cancellation-generations", recoveryGeneration - 1);
+        return CompleteProofPublicationCancellationSnapshotFixture(fixture, heldRecheck);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorTransitionEnvelope[] CompleteProofPublicationCancellationSnapshotFixture(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture,
+        bool heldRecheck)
+    {
         var authority = Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(fixture.Decision.Authority);
+        var (decisions, delivered) = DeliverProofPublicationCancellationFixture(fixture, authority);
+        return FinishProofPublicationCancellationFixture(authority, decisions, delivered, heldRecheck);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (List<FileTransferReceiveRecoveryDecision> Decisions, FileTransferReceiveRecoveryDecision Delivered)
+        DeliverProofPublicationCancellationFixture(
+            (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture,
+            FileTransferReceiveRecoveryOperationAuthority authority)
+    {
         var execution = new FileTransferBridgeRecoveryExecutionReceipt(authority.ExecutionCommand,
             FileTransferBridgeRecoveryExecutionOutcome.Completed, "hard", "bridge_recovery_completed");
         var started = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(fixture.Decision.State,
@@ -9394,6 +9597,16 @@ public sealed partial class FileTransferCoordinatorTests
             new FileTransferReceiveRecoveryProofStatePublicationReceipt(command,
                 FileTransferReceiveRecoveryProofStatePublicationOutcome.Delivered, "published-state", "delivered"), 350);
         var decisions = new List<FileTransferReceiveRecoveryDecision> { fixture.Decision, started, completed, reachable, delivered };
+        return (decisions, delivered);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorTransitionEnvelope[] FinishProofPublicationCancellationFixture(
+        FileTransferReceiveRecoveryOperationAuthority authority,
+        List<FileTransferReceiveRecoveryDecision> decisions,
+        FileTransferReceiveRecoveryDecision delivered,
+        bool heldRecheck)
+    {
         var proofState = delivered.State;
         if (heldRecheck)
         {
@@ -10127,6 +10340,23 @@ public sealed partial class FileTransferCoordinatorTests
         var fixture = CreateReceiveRecoveryOperationFixture(
             coordinatorInstanceId:
                 "initial-activation-envelope-refresh-proof-duplicate");
+        AssertHeldReleaseCommitsOneExactSuccessorEnvelope(fixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertHeldReleaseCommitsOneExactSuccessorEnvelope(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture)
+    {
+        var (authority, request, held) = CreateHeldReleaseEnvelopeFixture(fixture);
+        AssertReleasedEnvelopeRefresh(authority, request, held);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferReceiveRecoveryOperationAuthority Authority,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest Request,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision Held) CreateHeldReleaseEnvelopeFixture(
+            (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture)
+    {
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);
@@ -10143,6 +10373,14 @@ public sealed partial class FileTransferCoordinatorTests
             RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus.Held,
             held.Decision.Status);
 
+        return (authority, request, held);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertReleasedEnvelopeRefresh(FileTransferReceiveRecoveryOperationAuthority authority,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision held)
+    {
         var receipt =
             new FileTransferBridgeRecoveryExecutionReceipt(
                 authority.ExecutionCommand,
@@ -10171,6 +10409,14 @@ public sealed partial class FileTransferCoordinatorTests
             completed.State,
             receiveProof);
 
+        AssertReleasedEnvelopeRefreshReceipt(authority, request, receiveProof, proof);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertReleasedEnvelopeRefreshReceipt(FileTransferReceiveRecoveryOperationAuthority authority,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request, FileTransferReceiveRecoveryProof receiveProof,
+        FileTransferReceiveRecoveryDecision proof)
+    {
         var release = Assert.IsType<
             RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision>(
             proof.InitialActivationHoldDecision);
@@ -10285,6 +10531,13 @@ public sealed partial class FileTransferCoordinatorTests
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
             receiptObservedUtcMs: 100);
+        AssertCompletedUnprovenSuccessorRebindsAndInvalidationTerminates(completed);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCompletedUnprovenSuccessorRebindsAndInvalidationTerminates(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryOperation Operation) completed)
+    {
         var request =
             CreateInitialActivationReceiveRecoveryHoldRequest(
                 completed.State,
@@ -10458,6 +10711,13 @@ public sealed partial class FileTransferCoordinatorTests
     {
         var completed = CreateCompletedUnprovenReceiveRecoveryOperation(
             receiptObservedUtcMs: 100);
+        AssertProvenSuccessorHoldCarriesCapturedPredecessor(completed);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertProvenSuccessorHoldCarriesCapturedPredecessor(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryOperation Operation) completed)
+    {
         var predecessorProof =
             FileTransferCoordinator.ObserveReceiveRecoveryProof(
                 completed.State,
@@ -10848,6 +11108,15 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferRoute.RegularNknV4Fast);
 
         var terminalFixture = CreateReceiveRecoveryOperationFixture();
+        AssertTerminalInvalidationRetiresExactActiveGate(regular, terminalFixture);
+        var scopeFixture = CreateReceiveRecoveryOperationFixture();
+        AssertScopeInvalidationRetiresExactActiveGate(regular, scopeFixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertTerminalInvalidationRetiresExactActiveGate(FileTransferRouteSelection regular,
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) terminalFixture)
+    {
         var terminalOfferRequest =
             CreateInitialActivationReceiveRecoveryHoldRequest(
                 terminalFixture.Decision.State,
@@ -10874,7 +11143,12 @@ public sealed partial class FileTransferCoordinatorTests
             "terminal_state",
             terminalRecovery.LastInitialActivationHold?.Reason);
 
-        var scopeFixture = CreateReceiveRecoveryOperationFixture();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertScopeInvalidationRetiresExactActiveGate(FileTransferRouteSelection regular,
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) scopeFixture)
+    {
         var offerRequest =
             CreateInitialActivationReceiveRecoveryHoldRequest(
                 scopeFixture.Decision.State,
@@ -11266,6 +11540,13 @@ public sealed partial class FileTransferCoordinatorTests
     public void RuntimeUnlockInitialActivationReceiveRecoveryHold_CommandlessCaptureRejectsCurrentOperationAndExactCommandIsAccepted()
     {
         var fixture = CreateReceiveRecoveryOperationFixture();
+        AssertCommandlessHoldCaptureAndExactCommand(fixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCommandlessHoldCaptureAndExactCommand(
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture)
+    {
         var exactRequest =
             CreateInitialActivationReceiveRecoveryHoldRequest(
                 fixture.Decision.State,
@@ -13542,6 +13823,14 @@ public sealed partial class FileTransferCoordinatorTests
         var proofFirst = nonRegularV4
             ? CreateNonRegularV4ReceiveRecoveryOperationFixture()
             : CreateReceiveRecoveryOperationFixture();
+        AssertTerminalReceiptAndProofArrivalOrders(outcome, receiptFirst, proofFirst);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertTerminalReceiptAndProofArrivalOrders(FileTransferBridgeRecoveryExecutionOutcome outcome,
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) receiptFirst,
+        (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) proofFirst)
+    {
         var receiptFirstAuthority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 receiptFirst.Decision.Authority);
@@ -14906,6 +15195,14 @@ public sealed partial class FileTransferCoordinatorTests
     public void FallbackTailUnblockRecheck_ExactRepairSettlementRequeuesHeldRequestOnce()
     {
         var source = ActiveFallbackStateWithoutCheckpoint();
+        var (pairedState, request) = CreateRecheckSettlementPairedFixture(source);
+        AssertExactRepairSettlementRequeuesHeldRequest(pairedState, request);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState PairedState, RuntimeUnlockRetryDispatchAuthorityRequest Request)
+        CreateRecheckSettlementPairedFixture(FileTransferCoordinatorState source)
+    {
         source = source with
         {
             PersistentState = source.PersistentState with
@@ -14916,6 +15213,13 @@ public sealed partial class FileTransferCoordinatorTests
         };
         var (pairedState, request, _) =
             AuthorizeFallbackRuntimeUnlockRetryDispatchSource(source);
+        return (pairedState, request);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertExactRepairSettlementRequeuesHeldRequest(FileTransferCoordinatorState pairedState,
+        RuntimeUnlockRetryDispatchAuthorityRequest request)
+    {
         var repairDecision = FileTransferCoordinator.AuthorizeAction(
             pairedState,
             RecoveryActionRequest(
@@ -20951,6 +21255,7 @@ public sealed partial class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_InitialResponderObservationUsesOnlyRegularV4AuthorityMode()
         => CreatePreparationFirstResponderSnapshotFixture();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static System.Collections.Immutable.ImmutableArray<FileTransferCoordinatorTransitionEnvelope>
         CreatePreparationFirstResponderSnapshotFixture()
     {
@@ -20965,6 +21270,15 @@ public sealed partial class FileTransferCoordinatorTests
             CurrentDataSessionGeneration = 17,
         };
         var setup = CreateRegularV4ToTunaRouteTransitionSetup(inbound);
+        return CompletePreparationFirstResponderSnapshotFixture(setup);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static System.Collections.Immutable.ImmutableArray<FileTransferCoordinatorTransitionEnvelope>
+        CompletePreparationFirstResponderSnapshotFixture(
+            (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
+                RuntimeUnlockRouteCommitProof FinalProof) setup)
+    {
         var state = setup.State;
         var activation = Assert.IsType<
             FileTransferTunaActivationTransitionProofBoundary>(
@@ -21022,6 +21336,23 @@ public sealed partial class FileTransferCoordinatorTests
             ProofBoundary = initialBoundary,
         };
 
+        var (preparedState, prepared) = PrepareInitialResponderSnapshotFixture(
+            state, setup, initialRequest);
+        var (authority, draining, command, acceptance) = VerifyPreparedInitialResponderSnapshotFixture(
+            observation, prepared);
+        return CommitInitialResponderSnapshotFixture(
+            setup, preparedState, observation, receiveScope, initialBoundary,
+            prepared, authority, draining, command, acceptance);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, FileTransferRouteTransitionDecision Prepared)
+        PrepareInitialResponderSnapshotFixture(
+            FileTransferCoordinatorState state,
+            (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
+                RuntimeUnlockRouteCommitProof FinalProof) setup,
+            FileTransferRouteTransitionPrepareRequest initialRequest)
+    {
         var missingObservation =
             FileTransferCoordinator.PrepareFileTransferRouteTransition(
                 state,
@@ -21045,6 +21376,18 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             FileTransferRouteTransitionDecisionStatus.Prepared,
             prepared.Status);
+        return (state, prepared);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferRouteTransitionAuthority Authority,
+        FileTransferRouteTransitionDecision Draining,
+        FileTransferRouteTransitionPhysicalDrainCommand Command,
+        FileTransferCoordinatorSnapshotResult Acceptance)
+        VerifyPreparedInitialResponderSnapshotFixture(
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            FileTransferRouteTransitionDecision prepared)
+    {
         var authority = Assert.IsType<FileTransferRouteTransitionAuthority>(
             prepared.Authority);
         var emptyFingerprint = FileTransferCoordinator
@@ -21072,6 +21415,24 @@ public sealed partial class FileTransferCoordinatorTests
             acceptance.State.PersistentState.SnapshotStateGeneration);
         Assert.Equal(draining.State.PersistentState.SnapshotStateFingerprint,
             acceptance.State.PersistentState.SnapshotStateFingerprint);
+        return (authority, draining, command, acceptance);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static System.Collections.Immutable.ImmutableArray<FileTransferCoordinatorTransitionEnvelope>
+        CommitInitialResponderSnapshotFixture(
+            (FileTransferCoordinatorState State, FileTransferRouteTransitionPrepareRequest Request,
+                RuntimeUnlockRouteCommitProof FinalProof) setup,
+            FileTransferCoordinatorState state,
+            RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+            RuntimeUnlockPeerPreCommitAnswerAcceptanceScope receiveScope,
+            FileTransferTunaActivationTransitionProofBoundary initialBoundary,
+            FileTransferRouteTransitionDecision prepared,
+            FileTransferRouteTransitionAuthority authority,
+            FileTransferRouteTransitionDecision draining,
+            FileTransferRouteTransitionPhysicalDrainCommand command,
+            FileTransferCoordinatorSnapshotResult acceptance)
+    {
         var finalProof = setup.FinalProof with
         {
             Reason = "runtime_unlock_transaction_peer_proof",
@@ -21479,7 +21840,19 @@ public sealed partial class FileTransferCoordinatorTests
     [InlineData(false)]
     [InlineData(true)]
     [Trait("FileTransferCoordinatorSuite", "FileTransferRouteTransition")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void FileTransferRouteTransition_TunaFallbackCommitsAndAppliesRetainedFrameOnce(bool installedPressure)
+    {
+        var (activationApplied, emptyFingerprint) = CreateTunaRetainedFrameActivation();
+        var tunaState = installedPressure
+            ? StateWithInstalledRegularV4FrontierRepairPressure(activationApplied.State)
+            : activationApplied.State;
+        AssertTunaFallbackRetainedFrame(tunaState, emptyFingerprint, installedPressure);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferRouteTransitionDecision ActivationApplied, string EmptyFingerprint)
+        CreateTunaRetainedFrameActivation()
     {
         var setup = CreateRegularV4ToTunaRouteTransitionSetup();
         var snapshotState = setup.State with
@@ -21555,9 +21928,13 @@ public sealed partial class FileTransferCoordinatorTests
             nameof(FileTransferCoordinator
                 .ApplyFileTransferRouteTransitionDispositionReceipt),
             "disposition");
-        var tunaState = installedPressure
-            ? StateWithInstalledRegularV4FrontierRepairPressure(activationApplied.State)
-            : activationApplied.State;
+        return (activationApplied, emptyFingerprint);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertTunaFallbackRetainedFrame(
+        FileTransferCoordinatorState tunaState, string emptyFingerprint, bool installedPressure)
+    {
         var tunaOwner = tunaState.CurrentRuntimeOwner!.Value;
         var tunaPublication = tunaState.CurrentRoutePublicationToken!.Value;
         var tunaCommit = tunaState.CurrentRouteCommit!.Value;
@@ -22435,12 +22812,25 @@ public sealed partial class FileTransferCoordinatorTests
     public void FileTransferRouteTransition_InboundResponderAckedProbeUsesPairedReceiptWithoutPhase2Release()
         => CreatePairedResponderHandoffForCheckpoint();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorState CreatePairedResponderHandoffForCheckpoint()
     {
         var fallback = FileTransferRouteResolver.Resolve(
             FileTransferRoute.PostTunaFallbackV6);
         var state = ActiveFallbackStateWithoutCheckpoint(
             FileTransferDirection.Inbound);
+        var (bound, pairedRelease, observation, admission, pending, peerReceiveScope) = CreatePairedResponderHandoffBinding(state, fallback);
+        return CompletePairedResponderHandoffForCheckpoint(bound, pairedRelease, observation, admission, pending, peerReceiveScope);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision Bound,
+        FileTransferFallbackTailPairedReleaseReceipt PairedRelease,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation Observation,
+        RuntimeUnlockAdmissionToken Admission, RuntimeUnlockPendingPreCommitProbeRequest Pending,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope PeerReceiveScope)
+        CreatePairedResponderHandoffBinding(FileTransferCoordinatorState state, FileTransferRouteSelection fallback)
+    {
         state = state with
         {
             PersistentState = state.PersistentState with
@@ -22579,6 +22969,30 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Accepted,
             bound.Status);
+        return (bound, pairedRelease, observation, admission, pending, peerReceiveScope);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState CompletePairedResponderHandoffForCheckpoint(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision bound,
+        FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+        RuntimeUnlockAdmissionToken admission,
+        RuntimeUnlockPendingPreCommitProbeRequest pending,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope peerReceiveScope)
+    {
+        var responderAuthority = AssertBoundResponderHandoffDuplicates(bound, observation, admission, pending);
+        AssertResponderHandoffRejections(bound, observation, admission, pending, peerReceiveScope, responderAuthority);
+        return CommitPairedResponderHandoffForCheckpoint(bound, pairedRelease, observation, admission, pending, responderAuthority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority AssertBoundResponderHandoffDuplicates(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision bound,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+        RuntimeUnlockAdmissionToken admission,
+        RuntimeUnlockPendingPreCommitProbeRequest pending)
+    {
         var boundEnvelope = Assert.IsType<
             FileTransferCoordinatorTransitionEnvelope>(
                 bound.SnapshotEnvelope);
@@ -22623,7 +23037,18 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(
             held.State.PersistentState.SnapshotStateGeneration,
             duplicateHeld.State.PersistentState.SnapshotStateGeneration);
+        return responderAuthority;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertResponderHandoffRejections(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision bound,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+        RuntimeUnlockAdmissionToken admission,
+        RuntimeUnlockPendingPreCommitProbeRequest pending,
+        RuntimeUnlockPeerPreCommitAnswerAcceptanceScope peerReceiveScope,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority responderAuthority)
+    {
         var observationMutations =
             new RuntimeUnlockResponderPeerProbeRouteTransitionObservation[]
             {
@@ -22861,7 +23286,17 @@ public sealed partial class FileTransferCoordinatorTests
             RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Invalidated,
             staleReplay.Status);
         Assert.Null(staleReplay.Authority);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState CommitPairedResponderHandoffForCheckpoint(
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffDecision bound,
+        FileTransferFallbackTailPairedReleaseReceipt pairedRelease,
+        RuntimeUnlockResponderPeerProbeRouteTransitionObservation observation,
+        RuntimeUnlockAdmissionToken admission,
+        RuntimeUnlockPendingPreCommitProbeRequest pending,
+        RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority responderAuthority)
+    {
         var transaction = BuildCommitReadyRuntimeUnlockTransaction(
             bound.State,
             pending.TransactionGeneration,
@@ -22957,9 +23392,17 @@ public sealed partial class FileTransferCoordinatorTests
     public void ResponderHandoff_InvalidatedTerminalSurvivesFallbackCheckpointCarry()
         => CreateCheckpointResponderCarrySnapshotFixture();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateCheckpointResponderCarrySnapshotFixture()
     {
         var setup = CreatePairedResponderHandoffForCheckpoint();
+        return CompleteCheckpointResponderCarrySnapshotFixture(setup);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CompleteCheckpointResponderCarrySnapshotFixture(FileTransferCoordinatorState setup)
+    {
         // Begin this contract stream on the already established Tuna route. The
         // paired authority itself retains its exact historical PostFallback scope.
         var state = setup with { PersistentState = setup.PersistentState with
@@ -23017,10 +23460,18 @@ public sealed partial class FileTransferCoordinatorTests
     public void ResponderHandoff_RepairReplayAtomicallyInvalidatesCurrentScope()
         => CreateRepairReplayResponderScopeInvalidationSnapshotFixture();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferCoordinatorTransitionEnvelope
         CreateRepairReplayResponderScopeInvalidationSnapshotFixture()
     {
         var state = CreatePairedResponderHandoffForCheckpoint();
+        return CompleteRepairReplayResponderScopeInvalidationSnapshotFixture(state);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorTransitionEnvelope
+        CompleteRepairReplayResponderScopeInvalidationSnapshotFixture(FileTransferCoordinatorState state)
+    {
         var beforeGeneration = state.PersistentState.SnapshotStateGeneration;
         var repair = FileTransferCoordinator.AuthorizeAction(
             state,
@@ -23986,6 +24437,7 @@ public sealed partial class FileTransferCoordinatorTests
                 canSendData: true),
             EmptyState(regular, direction));
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferFallbackV6ProofBootstrapDecision
         IssueFallbackV6ProofBootstrapForPeerBoundary(
             FileTransferDirection direction,
@@ -24000,6 +24452,13 @@ public sealed partial class FileTransferCoordinatorTests
                 regularState,
                 FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4),
                 committedChunk: 4);
+        return CompleteFallbackV6ProofBootstrapForPeerBoundary(activatedTuna, direction, coordinatorInstanceId);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferFallbackV6ProofBootstrapDecision CompleteFallbackV6ProofBootstrapForPeerBoundary(
+        FileTransferCoordinatorDecision activatedTuna, FileTransferDirection direction, string? coordinatorInstanceId)
+    {
         var tuna = activatedTuna.State with
         {
             CurrentDataSessionIdentity =
@@ -25209,25 +25668,7 @@ public sealed partial class FileTransferCoordinatorTests
             }
             envelopes.Add(envelope);
         }
-        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
-        var state = StartRegular(regular, direction).State with
-        {
-            CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
-            CurrentDataSessionGeneration = 17,
-        };
-        var publication = FileTransferCoordinator.AuthorizeAction(state,
-            RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
-                state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
-                targetRoute: regular.Route, targetProtocolVersion: 4,
-                targetTransport: FileTransferTransportKind.RegularNkn));
-        Assert.True(publication.Accepted);
-        state = publication.State with
-        {
-            PersistentState = publication.State.PersistentState with
-            {
-                CoordinatorInstanceId = $"cross-route-pressure-{direction}",
-            },
-        };
+        var state = CreateCrossRoutePressureSettlementInitialState(direction);
 
         FileTransferCoordinatorState Settle(FileTransferCoordinatorState source)
         {
@@ -25260,6 +25701,15 @@ public sealed partial class FileTransferCoordinatorTests
             return settled.State;
         }
 
+        return CompleteCrossRoutePressureSettlementFixture(state, direction, envelopes, Capture, Settle);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CompleteCrossRoutePressureSettlementFixture(
+        FileTransferCoordinatorState state, FileTransferDirection direction,
+        List<FileTransferCoordinatorTransitionEnvelope> envelopes, Action<FileTransferCoordinatorTransitionEnvelope> Capture,
+        Func<FileTransferCoordinatorState, FileTransferCoordinatorState> Settle)
+    {
         state = Settle(state);
         var firstTerminal = Assert.Single(envelopes[^1].Aggregate.Operations,
             operation => operation.OperationRole == "pressure_settlement_terminal");
@@ -25332,6 +25782,31 @@ public sealed partial class FileTransferCoordinatorTests
         return envelopes;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState CreateCrossRoutePressureSettlementInitialState(FileTransferDirection direction)
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular, direction).State with
+        {
+            CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var publication = FileTransferCoordinator.AuthorizeAction(state,
+            RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
+                state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
+                targetRoute: regular.Route, targetProtocolVersion: 4,
+                targetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+        state = publication.State with
+        {
+            PersistentState = publication.State.PersistentState with
+            {
+                CoordinatorInstanceId = $"cross-route-pressure-{direction}",
+            },
+        };
+        return state;
+    }
+
     [Theory]
     [InlineData(FileTransferDirection.Outbound)]
     [InlineData(FileTransferDirection.Inbound)]
@@ -25354,27 +25829,7 @@ public sealed partial class FileTransferCoordinatorTests
             }
             envelopes.Add(envelope);
         }
-        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
-        var state = StartRegular(regular, direction).State with
-        {
-            CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
-            CurrentDataSessionGeneration = 17,
-        };
-        var publication = FileTransferCoordinator.AuthorizeAction(state,
-            RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
-                state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
-                targetRoute: regular.Route, targetProtocolVersion: 4,
-                targetTransport: FileTransferTransportKind.RegularNkn));
-        Assert.True(publication.Accepted);
-        state = publication.State with
-        {
-            LastRepairReplayGeneration = 2,
-            PersistentState = publication.State.PersistentState with
-            {
-                CoordinatorInstanceId = $"retained-handoff-receipt-{direction}",
-                RegularV4FrontierRepairPressure = PressureState(publication.State) with { LastInstallGeneration = 2 },
-            },
-        };
+        var state = CreateRetainedHandoffReceiptInitialState(direction);
 
         void Install(string key)
         {
@@ -25463,28 +25918,7 @@ public sealed partial class FileTransferCoordinatorTests
             duplicateB.SnapshotEnvelope.Aggregate.AfterStateGeneration);
         Assert.Equal(duplicateB.SnapshotEnvelope.Aggregate.BeforeStateFingerprint,
             duplicateB.SnapshotEnvelope.Aggregate.AfterStateFingerprint);
-        foreach (var invalidReceipt in new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?[] { null, receiptB })
-        {
-            var malformed = state with
-            {
-                PersistentState = state.PersistentState with
-                {
-                    RegularV4FrontierRepairPressure = PressureState(state) with
-                    {
-                        LastRecoveryHandoffApplyReceipt = invalidReceipt,
-                    },
-                },
-            };
-            var projection = FileTransferCoordinator.CreateTransitionSnapshot(state, malformed,
-                state.PersistentState.CoordinatorInstanceId!, state.PersistentState.SnapshotStateGeneration,
-                "LegacyFamilyCoordinatorDecision", "Accepted", "missing_retained_receipt_control");
-            var terminal = Assert.Single(projection.Envelope.Aggregate.Operations,
-                operation => operation.OperationRole == "recovery_handoff_terminal");
-            Assert.Equal("Committed", terminal.AfterState);
-            Assert.Equal("Prepared", terminal.ReceiptStatus);
-            Assert.False(terminal.ReceiptValidated);
-            Assert.Equal("(none)", terminal.ReceiptFingerprint);
-        }
+        AssertRetainedHandoffMalformedReceipts(state, receiptB);
 
         Install("replacement-handoff-C");
         var receiptC = Handoff();
@@ -25522,6 +25956,63 @@ public sealed partial class FileTransferCoordinatorTests
                 Assert.Single(operation.RegularV4FrontierRepairPressure!.Receipts).ReceiptFingerprint);
         }
         return envelopes;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState CreateRetainedHandoffReceiptInitialState(FileTransferDirection direction)
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular, direction).State with
+        {
+            CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
+            CurrentDataSessionGeneration = 17,
+        };
+        var publication = FileTransferCoordinator.AuthorizeAction(state,
+            RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
+                state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
+                targetRoute: regular.Route, targetProtocolVersion: 4,
+                targetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+        state = publication.State with
+        {
+            LastRepairReplayGeneration = 2,
+            PersistentState = publication.State.PersistentState with
+            {
+                CoordinatorInstanceId = $"retained-handoff-receipt-{direction}",
+                RegularV4FrontierRepairPressure = PressureState(publication.State) with { LastInstallGeneration = 2 },
+            },
+        };
+        return state;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertRetainedHandoffMalformedReceipts(
+        FileTransferCoordinatorState state,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receiptB)
+    {
+        foreach (var invalidReceipt in new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?[] { null, receiptB })
+        {
+            var malformed = state with
+            {
+                PersistentState = state.PersistentState with
+                {
+                    RegularV4FrontierRepairPressure = PressureState(state) with
+                    {
+                        LastRecoveryHandoffApplyReceipt = invalidReceipt,
+                    },
+                },
+            };
+            var projection = FileTransferCoordinator.CreateTransitionSnapshot(state, malformed,
+                state.PersistentState.CoordinatorInstanceId!, state.PersistentState.SnapshotStateGeneration,
+                "LegacyFamilyCoordinatorDecision", "Accepted", "missing_retained_receipt_control");
+            var terminal = Assert.Single(projection.Envelope.Aggregate.Operations,
+                operation => operation.OperationRole == "recovery_handoff_terminal");
+            Assert.Equal("Committed", terminal.AfterState);
+            Assert.Equal("Prepared", terminal.ReceiptStatus);
+            Assert.False(terminal.ReceiptValidated);
+            Assert.Equal("(none)", terminal.ReceiptFingerprint);
+        }
+
     }
 
     private static FileTransferCoordinatorState StateWithInstalledRegularV4FrontierRepairPressure(
@@ -25696,6 +26187,15 @@ public sealed partial class FileTransferCoordinatorTests
             long receiptObservedUtcMs)
     {
         var fixture = CreateReceiveRecoveryOperationFixture();
+        return CompleteUnprovenReceiveRecoveryOperationFixture(fixture, receiptObservedUtcMs);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, FileTransferReceiveRecoveryOperation Operation)
+        CompleteUnprovenReceiveRecoveryOperationFixture(
+            (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture,
+            long receiptObservedUtcMs)
+    {
         var authority =
             Assert.IsType<FileTransferReceiveRecoveryOperationAuthority>(
                 fixture.Decision.Authority);
@@ -25775,6 +26275,7 @@ public sealed partial class FileTransferCoordinatorTests
             };
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (
         FileTransferCoordinatorState State,
         FileTransferReceiveRecoveryDecision Decision)
@@ -25788,6 +26289,20 @@ public sealed partial class FileTransferCoordinatorTests
         var regular =
             FileTransferRouteResolver.Resolve(
                 FileTransferRoute.RegularNknV4Fast);
+        var state = StartReceiveRecoveryOperationFixture(
+            regular, direction, coordinatorInstanceId, lastOperationGeneration, captureInitial);
+        return CompleteReceiveRecoveryOperationFixture(
+            state, regular, coordinatorInstanceId, lastOperationGeneration, captureInitial);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState StartReceiveRecoveryOperationFixture(
+        FileTransferRouteSelection regular,
+        FileTransferDirection direction,
+        string? coordinatorInstanceId,
+        long lastOperationGeneration,
+        Action<FileTransferCoordinatorTransitionEnvelope>? captureInitial)
+    {
         var initialState = EmptyState(regular) with { Direction = direction };
         if (captureInitial is not null)
         {
@@ -25818,6 +26333,39 @@ public sealed partial class FileTransferCoordinatorTests
         captureInitial?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(
             started.SnapshotEnvelope));
         var state = started.State;
+        return state;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision)
+        CompleteReceiveRecoveryOperationFixture(
+            FileTransferCoordinatorState state,
+            FileTransferRouteSelection regular,
+            string? coordinatorInstanceId,
+            long lastOperationGeneration,
+            Action<FileTransferCoordinatorTransitionEnvelope>? captureInitial)
+    {
+        var (preparedState, observation, leg) = PrepareReceiveRecoveryOperationFixture(
+            state, regular, coordinatorInstanceId, lastOperationGeneration, captureInitial);
+        var decision =
+            FileTransferCoordinator.IssueReceiveRecoveryOperation(
+                preparedState,
+                observation,
+                BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                leg.CheckpointRequestId);
+        Assert.True(decision.Accepted, decision.Reason);
+        return (preparedState, decision);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, FileTransferReceiveRecoveryObservation Observation, FileTransferLeg Leg)
+        PrepareReceiveRecoveryOperationFixture(
+            FileTransferCoordinatorState state,
+            FileTransferRouteSelection regular,
+            string? coordinatorInstanceId,
+            long lastOperationGeneration,
+            Action<FileTransferCoordinatorTransitionEnvelope>? captureInitial)
+    {
         if (captureInitial is null)
         {
             state = state with
@@ -25878,14 +26426,7 @@ public sealed partial class FileTransferCoordinatorTests
                 },
             };
         }
-        var decision =
-            FileTransferCoordinator.IssueReceiveRecoveryOperation(
-                state,
-                observation,
-                BridgeRecoveryKind.BridgeReceiveStallRecovery,
-                leg.CheckpointRequestId);
-        Assert.True(decision.Accepted, decision.Reason);
-        return (state, decision);
+        return (state, observation, leg);
     }
 
     private static FileTransferReceiveRecoveryPeerReachabilityObservation
@@ -26267,6 +26808,7 @@ public sealed partial class FileTransferCoordinatorTests
         return closed.State;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (
         FileTransferCoordinatorState State,
         RuntimeUnlockRetryDispatchAuthorityRequest Request,
@@ -26275,6 +26817,18 @@ public sealed partial class FileTransferCoordinatorTests
             RuntimeUnlockRetryLifecycleSubstate preservedRetryLifecycle)
     {
         var adopted = CreateAdoptedReceiveRecoveryClosure();
+        return CompleteReceiveRecoveryLeaseClosureRetrySource(adopted, preservedRetryLifecycle);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State,
+        RuntimeUnlockRetryDispatchAuthorityRequest Request, RecoveryLivenessLease RetiredLease)
+        CompleteReceiveRecoveryLeaseClosureRetrySource(
+            in (FileTransferCoordinatorState State,
+                FileTransferReceiveRecoveryOperationAuthority Authority,
+                RecoveryLivenessLease RetiredLease) adopted,
+            RuntimeUnlockRetryLifecycleSubstate preservedRetryLifecycle)
+    {
         var request = CreateReceiveRecoveryRetryRequest(
             adopted.State,
             adopted.Authority,
@@ -26646,18 +27200,7 @@ public sealed partial class FileTransferCoordinatorTests
             }
             else
             {
-                var checkpoint = RequestFallbackCheckpoint(state, fallback, "applied-invalidation-checkpoint", leg.TransportEpochId);
-                Assert.Null(checkpoint.MutationRejectedReason);
-                var accepted = AcceptFallbackCheckpoint(checkpoint.State, fallback, "applied-invalidation-checkpoint",
-                    leg.TransportEpochId, Math.Max(0, leg.ProvenCommittedChunkIndex), leg.ProvenHighestObservedChunkIndex);
-                Assert.Null(accepted.MutationRejectedReason);
-                state = accepted.State;
-                state = state with { PersistentState = state.PersistentState with
-                {
-                    CoordinatorInstanceId = "applied-invalidation-fallback",
-                    SnapshotStateGeneration = 0,
-                    FileTransferRouteTransition = default,
-                } };
+                state = PrepareFallbackRetryCheckpointSnapshotState(state, fallback, leg);
             }
         }
         var yielded = FileTransferCoordinator.Apply(
@@ -26724,6 +27267,25 @@ public sealed partial class FileTransferCoordinatorTests
                     paired.State)
                 .PendingRetryRecheckRequest);
         return (paired.State, request, tailYield);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState PrepareFallbackRetryCheckpointSnapshotState(
+        FileTransferCoordinatorState state, FileTransferRouteSelection fallback, FileTransferLeg leg)
+    {
+        var checkpoint = RequestFallbackCheckpoint(state, fallback, "applied-invalidation-checkpoint", leg.TransportEpochId);
+        Assert.Null(checkpoint.MutationRejectedReason);
+        var accepted = AcceptFallbackCheckpoint(checkpoint.State, fallback, "applied-invalidation-checkpoint",
+            leg.TransportEpochId, Math.Max(0, leg.ProvenCommittedChunkIndex), leg.ProvenHighestObservedChunkIndex);
+        Assert.Null(accepted.MutationRejectedReason);
+        state = accepted.State;
+        state = state with { PersistentState = state.PersistentState with
+        {
+            CoordinatorInstanceId = "applied-invalidation-fallback",
+            SnapshotStateGeneration = 0,
+            FileTransferRouteTransition = default,
+        } };
+        return state;
     }
 
     private static FallbackPairedTailYieldReleaseEvidence
@@ -26802,10 +27364,19 @@ public sealed partial class FileTransferCoordinatorTests
         FileTransferCoordinatorState state)
         => FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(state);
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static NoCurrentRecoverySnapshotAttemptTestCase
         CreateNoCurrentRecoverySnapshotAttemptTestCase()
     {
         var recoveryFixture = CreateReceiveRecoveryOperationFixture();
+        return CompleteNoCurrentRecoverySnapshotAttemptTestCase(recoveryFixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static NoCurrentRecoverySnapshotAttemptTestCase
+        CompleteNoCurrentRecoverySnapshotAttemptTestCase(
+            (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) recoveryFixture)
+    {
         var request = CreateInitialActivationReceiveRecoveryHoldRequest(
             recoveryFixture.Decision.State,
             payerDecisionId: 46321);

@@ -4,11 +4,21 @@ namespace NLink.SmokeTests;
 
 public sealed partial class FileTransferCoordinatorTests
 {
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
         IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes)
         CreateCheckpointRepairContinuityFixture(int frontierChunkIndex = 100, int highestObservedChunkIndex = 255)
     {
         var established = ActiveFallbackStateWithoutCheckpoint(FileTransferDirection.Inbound);
+        return CompleteCheckpointRepairContinuityFixture(established, frontierChunkIndex, highestObservedChunkIndex);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
+        IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes)
+        CompleteCheckpointRepairContinuityFixture(FileTransferCoordinatorState established,
+            int frontierChunkIndex, int highestObservedChunkIndex)
+    {
         var state = established with
         {
             CurrentFallbackCheckpointLease = null,

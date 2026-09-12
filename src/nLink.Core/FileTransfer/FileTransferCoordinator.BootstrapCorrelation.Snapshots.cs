@@ -6,6 +6,15 @@ internal sealed record FileTransferBootstrapPhysicalCopySnapshot(
     string Lane, string FrameType, long TransportEpoch, string FrameFingerprint,
     FileTransferBootstrapCopyOutcome Outcome);
 
+internal sealed record FileTransferBootstrapInitiationOperationSnapshot(
+    string Kind, string Source, string ProofKind, string ObservationFingerprint,
+    string LocalStopFingerprint, string PeerWakeFingerprint, string SourceFingerprint,
+    FileTransferCoordinatorStateBoundarySnapshot SourceBoundary, string AgreementFingerprint,
+    string HoldIdentity, long HoldGeneration, string HoldCommandFingerprint,
+    string CaptureFingerprint, long PauseInstance, string CapturedWorkFingerprint,
+    string DrainReceiptFingerprint, string SettledWorkFingerprint, string FrozenCheckpointFingerprint,
+    string BaseCommandIdentity, long BaseCommandGeneration, string BaseCommandFingerprint);
+
 internal sealed record FileTransferBootstrapCorrelationOperationSnapshot(
     int Version, bool AgreementEnabled, string AgreementFingerprint,
     string SenderIssuerFingerprint, string ReceiverIssuerFingerprint,
@@ -61,6 +70,17 @@ internal static partial class FileTransferCoordinator
         builder.Add(CreateBootstrapCorrelationDescriptor(state, "fallback_bootstrap_agreement", "FallbackBootstrapAgreement",
             agreementId, 1, agreement.IsEnabled ? "Enabled" : agreement.Accept is null ? "Offered" : "Selected",
             CalculateSnapshotFingerprint(agreement), agreement.SourceBoundary, agreementEvidence, []));
+        if (substate.BootstrapSourceHold is { } hold)
+        {
+            var receipts = hold.Receipt is { } receipt
+                ? ImmutableArray.Create(CreateRouteTransitionReceiptSnapshot("bootstrap_source_hold_drain", hold.Command.Identity,
+                    hold.Command.Generation, hold.Command, hold.Command.Identity + ":drained", hold.Command.Generation,
+                    "Drained", "bootstrap_source_hold_drained", receipt, true)) : [];
+            builder.Add(CreateBootstrapCorrelationDescriptor(state, "fallback_bootstrap_source_hold", "FallbackBootstrapSourceHold",
+                hold.Command.Identity, hold.Command.Generation, hold.Invalidated ? "Invalidated" : hold.Receipt is not null ? "Drained" : hold.Capture is not null ? "Applied" : "Prepared",
+                CalculateSnapshotFingerprint(hold.Command), CreateBootstrapSourceHoldBoundary(hold.Command), null, receipts,
+                CreateBootstrapInitiationEvidence(hold.Command, hold, null), CreateBootstrapCallbackCaptureSnapshot(hold)));
+        }
         if (substate.BootstrapExchange is not { } exchange) { return; }
         var command = exchange.Bootstrap;
         var boundary = new FileTransferCoordinatorStateBoundarySnapshot(command.SourceRuntimeOwner.RouteToken, 4,
@@ -71,7 +91,8 @@ internal static partial class FileTransferCoordinator
         builder.Add(CreateBootstrapCorrelationDescriptor(state, "fallback_bootstrap_exchange", "FallbackBootstrapExchange",
             command.AuthorityId.Value, command.BootstrapGeneration,
             exchange.Invalidated ? "Invalidated" : exchange.Completed ? "Completed" : "Pending",
-            CalculateSnapshotFingerprint(exchange), boundary, CreateBootstrapCorrelationEvidence(agreement, exchange, null), []));
+            CalculateSnapshotFingerprint(exchange), boundary, CreateBootstrapCorrelationEvidence(agreement, exchange, null), [],
+            exchange.SourceHoldCommand is { } sourceHold ? CreateBootstrapInitiationEvidence(sourceHold, null, exchange) : null));
         AddPhase(exchange.First);
         if (exchange.Final is { } final) { AddPhase(final); }
 
@@ -85,7 +106,8 @@ internal static partial class FileTransferCoordinator
             builder.Add(CreateBootstrapCorrelationDescriptor(state, "fallback_bootstrap_phase", "FallbackBootstrapPhase",
                 phase.Command.Identity, command.BootstrapGeneration,
                 phase.Failure is not null ? "Failed" : phase.IsReady ? "Ready" : phase.Held ? "Held" : phase.Delivery is not null ? "Delivered" : phase.Settlement is not null ? "Settled" : "Issued",
-                CalculateSnapshotFingerprint(phase.Command), boundary, CreateBootstrapCorrelationEvidence(agreement, exchange, phase), receipts));
+                CalculateSnapshotFingerprint(phase.Command), boundary, CreateBootstrapCorrelationEvidence(agreement, exchange, phase), receipts,
+                exchange.SourceHoldCommand is { } phaseHold ? CreateBootstrapInitiationEvidence(phaseHold, null, exchange) : null));
         }
     }
 
@@ -113,23 +135,54 @@ internal static partial class FileTransferCoordinator
             copy.FrameIdentity.FrameType, copy.FrameIdentity.TransportEpoch, copy.FrameIdentity.Sha256,
             copy.Outcome)).ToImmutableArray() ?? [];
 
+    private static FileTransferCoordinatorStateBoundarySnapshot CreateBootstrapSourceHoldBoundary(
+        FileTransferBootstrapSourceHoldCommand command)
+    {
+        var source = command.Source.Source;
+        return new(source.RouteToken, source.ProtocolVersion, source.LiveRouteEpoch,
+            source.RoutePublicationGeneration, source.RouteCommitGeneration, source.RuntimeGeneration,
+            source.TerminalGeneration, checked((int)source.LegGeneration), source.TransportEpoch, source.BridgeRecoveryGeneration,
+            source.CheckpointGeneration, source.CheckpointRequestId, command.DataSessionIdentity, command.DataSessionGeneration);
+    }
+
+    private static FileTransferBootstrapInitiationOperationSnapshot CreateBootstrapInitiationEvidence(
+        FileTransferBootstrapSourceHoldCommand command, FileTransferBootstrapSourceHoldOperation? hold,
+        FileTransferBootstrapExchange? exchange)
+        => new(command.Initiation.InitiationKind.ToString(), command.Initiation.Source, command.Initiation.ProofKind,
+            CalculateSnapshotFingerprint(command.Initiation), CalculateSnapshotFingerprint(command.Initiation.LocalStop),
+            CalculateSnapshotFingerprint(command.PeerWake), CalculateSnapshotFingerprint(command.Source),
+            CreateBootstrapSourceHoldBoundary(command), CalculateSnapshotFingerprint(command.Agreement),
+            command.Identity, command.Generation, CalculateSnapshotFingerprint(command),
+            CalculateSnapshotFingerprint(hold?.Capture), hold?.Capture?.PauseInstance ?? 0,
+            CalculateSnapshotFingerprint(hold?.Capture is { } capture
+                ? new { capture.OutboundPhysicalLeases, capture.InboundWrites, capture.InboundFeedback } : null),
+            CalculateSnapshotFingerprint(hold?.Receipt),
+            CalculateSnapshotFingerprint(hold?.Receipt is { } receipt
+                ? new { OutboundPhysicalLeases = receipt.SettledOutboundPhysicalLeases,
+                    InboundWrites = receipt.SettledInboundWrites, InboundFeedback = receipt.SettledInboundFeedback } : null),
+            CalculateSnapshotFingerprint(exchange?.Bootstrap.Observation.DurableCheckpoint ?? hold?.Receipt?.DurableCheckpoint),
+            exchange?.Bootstrap.AuthorityId.Value ?? "(none)", exchange?.Bootstrap.BootstrapGeneration ?? 0,
+            CalculateSnapshotFingerprint(exchange?.Bootstrap));
+
     private static CoordinatorOperationDescriptor CreateBootstrapCorrelationDescriptor(
         FileTransferCoordinatorState state, string role, string kind, string authority, long generation, string lifecycle,
         string fingerprint, FileTransferCoordinatorStateBoundarySnapshot boundary,
-        FileTransferBootstrapCorrelationOperationSnapshot? evidence, ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> receipts)
+        FileTransferBootstrapCorrelationOperationSnapshot? evidence, ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> receipts,
+        FileTransferBootstrapInitiationOperationSnapshot? initiation = null, FileTransferBootstrapCallbackSnapshot? callbacks = null)
     {
         var receipt = receipts.LastOrDefault();
-        var exchange = role == "fallback_bootstrap_agreement" ? null : state.PersistentState.FileTransferRouteTransition.BootstrapExchange;
+        var exchange = role is "fallback_bootstrap_agreement" or "fallback_bootstrap_source_hold" or "fallback_bootstrap_source_callback"
+            ? null : state.PersistentState.FileTransferRouteTransition.BootstrapExchange;
         return new("route_transition", kind, authority, evidence?.PredecessorIdentity ?? "(none)", generation, lifecycle,
             authority, generation, fingerprint, receipt?.ReceiptIdentity ?? "(none)", receipt?.ReceiptGeneration ?? 0,
             receipt?.ReceiptStatus ?? "(none)", receipt?.ReceiptFingerprint ?? "(none)", receipt?.ReceiptValidated ?? false,
             role, CreateCoordinatorOperationKey("route_transition", role, authority, generation, kind),
             RouteTransition: new(role, "TunaV4ToPostTunaFallbackV6", boundary, boundary,
                 "Tuna", "fallback-bootstrap-correlation-v1", "fallback-bootstrap-correlation-v1", fingerprint,
-                CalculateSnapshotFingerprint(exchange?.Bootstrap.Observation.DurableCheckpoint), "post_tuna_fallback_v6", 6,
+                initiation?.FrozenCheckpointFingerprint ?? CalculateSnapshotFingerprint(exchange?.Bootstrap.Observation.DurableCheckpoint), "post_tuna_fallback_v6", 6,
                 "RegularNkn", "TunaToNormalFallback", lifecycle,
                 exchange?.RetainedPeerFrame?.Type ?? "(none)",
                 exchange?.RetainedPeerFrame is { } retained ? PostTunaFallbackPeerProofFrameIdentity.Create(retained).Sha256 : "(none)",
-                receipts, evidence));
+                receipts, evidence, initiation, callbacks));
     }
 }

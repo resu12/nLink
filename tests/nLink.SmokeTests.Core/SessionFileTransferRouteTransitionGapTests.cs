@@ -3027,6 +3027,29 @@ public sealed partial class SessionFileTransferV4SenderTests
             BindingFlags.Instance | BindingFlags.NonPublic)!;
         contextField.SetValue(service, context);
 
+        var (state, sourceOwner, sourcePublication, sourceCommit, dataSession, targetTransportEpoch,
+            frameIdentity, peerProof, transportAliasProof, proofBoundary, checkpoint, authority) =
+            CreateLatePeerProofDispositionFixture(context, direction, transferId, independentTransportProofGeneration);
+        if (independentTransportProofGeneration)
+        {
+            authority = CommitIndependentLatePeerProofDisposition(context, state, authority,
+                sourceOwner, sourcePublication, sourceCommit, proofBoundary, checkpoint);
+            transportAliasProof = transportAliasProof with { ProofGeneration = peerProof.ProofGeneration + 1 };
+        }
+
+        AssertLatePeerProofDoesNotRecreateShadow(service, context, direction, independentTransportProofGeneration,
+            state, dataSession, targetTransportEpoch, frameIdentity, peerProof, transportAliasProof, authority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, RuntimeOwnerToken SourceOwner,
+        RoutePublicationToken SourcePublication, RouteCommitToken SourceCommit, IFileTransferDataSession DataSession,
+        long TargetTransportEpoch, PostTunaFallbackPeerProofFrameIdentity FrameIdentity,
+        PostTunaFallbackPeerProofEvidence PeerProof, PostTunaFallbackPeerProofEvidence TransportAliasProof,
+        FileTransferFallbackTransitionProofBoundary ProofBoundary, FileTransferRouteTransitionDurableCheckpoint Checkpoint,
+        FileTransferRouteTransitionAuthority Authority) CreateLatePeerProofDispositionFixture(
+            object context, FileTransferDirection direction, string transferId, bool independentTransportProofGeneration)
+    {
         var state = CreateCoordinatorStateForTest(context);
         var sourceOwner = Assert.IsType<RuntimeOwnerToken>(
             state.CurrentRuntimeOwner);
@@ -3142,58 +3165,73 @@ public sealed partial class SessionFileTransferV4SenderTests
                         LastTransitionGeneration: 1),
             });
 
-        if (independentTransportProofGeneration)
-        {
-            SetPrivateProperty(context, "CoordinatorPersistentState", state.PersistentState);
-            var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
-                state,
-                new FileTransferRouteTransitionPrepareRequest(
-                    authority.Kind, sourceOwner, sourcePublication, sourceCommit,
-                    authority.SourceRoute, authority.SourceProtocolVersion, authority.SourceTransport,
-                    proofBoundary, checkpoint, authority.TargetRoute, authority.TargetProtocolVersion,
-                    authority.TargetTransport, authority.HandoffKind, null, authority.Reason));
-            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Prepared, prepared.Status);
-            AdoptFileTransferRouteTransitionDecisionForGapTest(context, prepared);
-            authority = prepared.Authority!.Value;
-            var ids = Array.Empty<long>();
-            var fingerprint = FileTransferCoordinator.CreateFileTransferRouteTransitionPhysicalDrainFingerprint(ids);
-            var draining = FileTransferCoordinator.BeginFileTransferRouteTransitionPhysicalDrain(
-                prepared.State, authority,
-                new FileTransferRouteTransitionPauseBindReceipt(prepared.PauseBindCommand!.Value,
-                    FileTransferRouteTransitionPauseBindStatus.Installed, "filetransfer_route_transition_pause_bound"),
-                0, ids, fingerprint);
-            Assert.True(draining.Status == FileTransferRouteTransitionDecisionStatus.Draining, draining.Reason);
-            AdoptFileTransferRouteTransitionDecisionForGapTest(context, draining);
-            var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
-                draining.State, authority,
-                new FileTransferRouteTransitionPhysicalDrainReceipt(draining.DrainCommand!.Value,
-                    ids, 0, fingerprint, FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
-                    "physical_drain_completed"));
-            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, committed.Status);
-            AdoptFileTransferRouteTransitionDecisionForGapTest(context, committed);
-            typeof(SessionFileTransferService).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-                .Single(method => method.Name == "ApplyCoordinatorDecisionToContextLocked" &&
-                    method.GetParameters() is var parameters && parameters.Length == 4 &&
-                    parameters[0].ParameterType == context.GetType() &&
-                    parameters[1].ParameterType == typeof(FileTransferCoordinatorDecision))
-                .Invoke(null, [context, committed.RouteDecision!, false, false]);
-            var terminal = committed.State.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
-            var frameApplied = FileTransferCoordinator.ApplyFileTransferRouteTransitionRetainedFrameReceipt(
-                committed.State,
-                new FileTransferRouteTransitionRetainedFrameApplyReceipt(terminal.RetainedFrameApplyCommand!.Value,
-                    FileTransferRouteTransitionRetainedFrameApplyStatus.Applied, "filetransfer_route_transition_retained_frame_applied"));
-            Assert.True(frameApplied.Status == FileTransferRouteTransitionDecisionStatus.Committed, frameApplied.Reason);
-            AdoptFileTransferRouteTransitionDecisionForGapTest(context, frameApplied);
-            var disposed = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(
-                frameApplied.State,
-                new FileTransferRouteTransitionDispositionReceipt(terminal.DispositionCommand!.Value,
-                    FileTransferRouteTransitionDispositionApplyStatus.Applied, terminal.DispositionCommand.Value.Reason));
-            Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, disposed.Status);
-            AdoptFileTransferRouteTransitionDecisionForGapTest(context, disposed);
-            Assert.Equal(FileTransferRoute.PostTunaFallbackV6, CreateCoordinatorStateForTest(context).RouteSelection.Route);
-            transportAliasProof = transportAliasProof with { ProofGeneration = peerProof.ProofGeneration + 1 };
-        }
+        return (state, sourceOwner, sourcePublication, sourceCommit, dataSession, targetTransportEpoch,
+            frameIdentity, peerProof, transportAliasProof, proofBoundary, checkpoint, authority);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRouteTransitionAuthority CommitIndependentLatePeerProofDisposition(object context,
+        FileTransferCoordinatorState state, FileTransferRouteTransitionAuthority authority, RuntimeOwnerToken sourceOwner,
+        RoutePublicationToken sourcePublication, RouteCommitToken sourceCommit,
+        FileTransferFallbackTransitionProofBoundary proofBoundary, FileTransferRouteTransitionDurableCheckpoint checkpoint)
+    {
+        SetPrivateProperty(context, "CoordinatorPersistentState", state.PersistentState);
+        var prepared = FileTransferCoordinator.PrepareFileTransferRouteTransition(
+            state,
+            new FileTransferRouteTransitionPrepareRequest(
+                authority.Kind, sourceOwner, sourcePublication, sourceCommit,
+                authority.SourceRoute, authority.SourceProtocolVersion, authority.SourceTransport,
+                proofBoundary, checkpoint, authority.TargetRoute, authority.TargetProtocolVersion,
+                authority.TargetTransport, authority.HandoffKind, null, authority.Reason));
+        Assert.Equal(FileTransferRouteTransitionDecisionStatus.Prepared, prepared.Status);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(context, prepared);
+        authority = prepared.Authority!.Value;
+        var ids = Array.Empty<long>();
+        var fingerprint = FileTransferCoordinator.CreateFileTransferRouteTransitionPhysicalDrainFingerprint(ids);
+        var draining = FileTransferCoordinator.BeginFileTransferRouteTransitionPhysicalDrain(
+            prepared.State, authority,
+            new FileTransferRouteTransitionPauseBindReceipt(prepared.PauseBindCommand!.Value,
+                FileTransferRouteTransitionPauseBindStatus.Installed, "filetransfer_route_transition_pause_bound"),
+            0, ids, fingerprint);
+        Assert.True(draining.Status == FileTransferRouteTransitionDecisionStatus.Draining, draining.Reason);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(context, draining);
+        var committed = FileTransferCoordinator.CommitFileTransferRouteTransition(
+            draining.State, authority,
+            new FileTransferRouteTransitionPhysicalDrainReceipt(draining.DrainCommand!.Value,
+                ids, 0, fingerprint, FileTransferRouteTransitionPhysicalDrainOutcome.Completed,
+                "physical_drain_completed"));
+        Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, committed.Status);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(context, committed);
+        typeof(SessionFileTransferService).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method => method.Name == "ApplyCoordinatorDecisionToContextLocked" &&
+                method.GetParameters() is var parameters && parameters.Length == 4 &&
+                parameters[0].ParameterType == context.GetType() &&
+                parameters[1].ParameterType == typeof(FileTransferCoordinatorDecision))
+            .Invoke(null, [context, committed.RouteDecision!, false, false]);
+        var terminal = committed.State.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+        var frameApplied = FileTransferCoordinator.ApplyFileTransferRouteTransitionRetainedFrameReceipt(
+            committed.State,
+            new FileTransferRouteTransitionRetainedFrameApplyReceipt(terminal.RetainedFrameApplyCommand!.Value,
+                FileTransferRouteTransitionRetainedFrameApplyStatus.Applied, "filetransfer_route_transition_retained_frame_applied"));
+        Assert.True(frameApplied.Status == FileTransferRouteTransitionDecisionStatus.Committed, frameApplied.Reason);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(context, frameApplied);
+        var disposed = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(
+            frameApplied.State,
+            new FileTransferRouteTransitionDispositionReceipt(terminal.DispositionCommand!.Value,
+                FileTransferRouteTransitionDispositionApplyStatus.Applied, terminal.DispositionCommand.Value.Reason));
+        Assert.Equal(FileTransferRouteTransitionDecisionStatus.Committed, disposed.Status);
+        AdoptFileTransferRouteTransitionDecisionForGapTest(context, disposed);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, CreateCoordinatorStateForTest(context).RouteSelection.Route);
+        return authority;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertLatePeerProofDoesNotRecreateShadow(SessionFileTransferService service, object context,
+        FileTransferDirection direction, bool independentTransportProofGeneration, FileTransferCoordinatorState state,
+        IFileTransferDataSession dataSession, long targetTransportEpoch, PostTunaFallbackPeerProofFrameIdentity frameIdentity,
+        PostTunaFallbackPeerProofEvidence peerProof, PostTunaFallbackPeerProofEvidence transportAliasProof,
+        FileTransferRouteTransitionAuthority authority)
+    {
         var retainMethod = typeof(SessionFileTransferService).GetMethod(
             direction == FileTransferDirection.Outbound
                 ? "TryRetainOutboundFileTransferRouteTransitionPeerProofLocked"
@@ -3380,6 +3418,28 @@ public sealed partial class SessionFileTransferV4SenderTests
                 "outboundTransfer",
                 BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        var (sourceState, targetTransportEpoch, expectedCheckpointRequestId, draining, authority,
+            drainCommand, emptyIds, emptyFingerprint, dataSession, CreateExecution) =
+            CreateFallbackCheckpointDispatchFixture(context, transport);
+
+        if (!verifyStaleBindings)
+        {
+            await VerifyFallbackCheckpointReplayOrderAsync(service, transport, context, dataSession,
+                sourceState, targetTransportEpoch, expectedCheckpointRequestId, CreateExecution);
+            return;
+        }
+
+        await VerifyFallbackCheckpointStaleBindingsAsync(service, transport, context, dataSession,
+            sourceState, draining, authority, drainCommand, emptyIds, emptyFingerprint, CreateExecution);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState SourceState, long TargetTransportEpoch,
+        string ExpectedCheckpointRequestId, FileTransferRouteTransitionDecision Draining,
+        FileTransferRouteTransitionAuthority Authority, FileTransferRouteTransitionPhysicalDrainCommand DrainCommand,
+        long[] EmptyIds, string EmptyFingerprint, IFileTransferDataSession DataSession, Func<object> CreateExecution)
+        CreateFallbackCheckpointDispatchFixture(object context, LoopbackFileTransferTransport transport)
+    {
         var sourceState = CreateCoordinatorStateForTest(context);
         var sourceOwner = Assert.IsType<RuntimeOwnerToken>(
             sourceState.CurrentRuntimeOwner);
@@ -3530,335 +3590,367 @@ public sealed partial class SessionFileTransferV4SenderTests
                     "test_committed_fallback_pause",
                 ],
                 culture: null)!;
+        return (sourceState, targetTransportEpoch, expectedCheckpointRequestId, draining, authority,
+            drainCommand, emptyIds, emptyFingerprint, dataSession, CreateExecution);
+    }
 
-        if (!verifyStaleBindings)
-        {
-            var serviceExecution = CreateExecution();
-            SetPrivateProperty(
+    private async Task VerifyFallbackCheckpointReplayOrderAsync(
+        SessionFileTransferService service, LoopbackFileTransferTransport transport, object context,
+        IFileTransferDataSession dataSession, FileTransferCoordinatorState sourceState,
+        long targetTransportEpoch, string expectedCheckpointRequestId, Func<object> CreateExecution)
+    {
+        var serviceExecution = CreateExecution();
+        SetPrivateProperty(
+            context,
+            "FileTransferRouteTransitionExecution",
+            serviceExecution);
+        object?[] commitArguments =
+        [
+            context,
+            serviceExecution,
+            null,
+            null,
+            null,
+        ];
+        var committedThroughService = Assert.IsType<bool>(
+            typeof(SessionFileTransferService)
+                .GetMethod(
+                    "TryCommitOutboundFileTransferRouteTransitionAndCaptureFallbackCheckpointLocked",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(service, commitArguments));
+        Assert.True(
+            committedThroughService,
+            commitArguments[3] as string ?? "commit rejected");
+        Assert.Null(commitArguments[4]);
+
+        var serviceCommittedCheckpointLease =
+            Assert.IsType<FallbackCheckpointLease>(
+                GetPrivatePropertyValue(
+                    context,
+                    "CurrentFallbackCheckpointLease"));
+        Assert.Equal(
+            expectedCheckpointRequestId,
+            serviceCommittedCheckpointLease.CheckpointRequestId);
+        AssertFallbackCheckpointReplayNotYetApplied(context);
+
+        var checkpointSendObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCheckpointSend = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var olderSendObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseOlderSend = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        const string olderRequestId =
+            "older-active-frontier-repair";
+        var checkpointSendPrecededReplay = false;
+        transport.OutboundDataFrameDeliveryOverrideAsync =
+            async (_, frame, _) =>
+            {
+                if (frame is not FileTransferFrontierRequestFrameV6 request)
+                {
+                    return true;
+                }
+
+                if (string.Equals(
+                        request.RepairRequestId,
+                        olderRequestId,
+                        StringComparison.Ordinal))
+                {
+                    olderSendObserved.TrySetResult();
+                    await releaseOlderSend.Task.ConfigureAwait(false);
+                }
+                else if (string.Equals(
+                             request.RepairRequestId,
+                             expectedCheckpointRequestId,
+                             StringComparison.Ordinal))
+                {
+                    CaptureCheckpointSendReplayOrder(context, out checkpointSendPrecededReplay);
+                    checkpointSendObserved.TrySetResult();
+                    await releaseCheckpointSend.Task.ConfigureAwait(false);
+                }
+
+                return true;
+            };
+
+        var targetOwner = GetPrivateProperty<RuntimeOwnerToken>(
+            context,
+            "CurrentRuntimeOwner");
+        var targetPublication =
+            GetPrivateProperty<RoutePublicationToken>(
                 context,
-                "FileTransferRouteTransitionExecution",
-                serviceExecution);
-            object?[] commitArguments =
+                "CurrentRoutePublicationToken");
+        var targetLeg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        var installType = typeof(SessionFileTransferService).GetNestedType(
+            "OutboundSparsePumpInstall",
+            BindingFlags.NonPublic)!;
+        var install = Activator.CreateInstance(
+            installType,
+            BindingFlags.Instance |
+                BindingFlags.Public |
+                BindingFlags.NonPublic,
+            binder: null,
+            args:
             [
-                context,
-                serviceExecution,
-                null,
-                null,
-                null,
-            ];
-            var committedThroughService = Assert.IsType<bool>(
-                typeof(SessionFileTransferService)
-                    .GetMethod(
-                        "TryCommitOutboundFileTransferRouteTransitionAndCaptureFallbackCheckpointLocked",
-                        BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .Invoke(service, commitArguments));
-            Assert.True(
-                committedThroughService,
-                commitArguments[3] as string ?? "commit rejected");
-            Assert.Null(commitArguments[4]);
+                1L,
+                0L,
+                targetOwner,
+                targetPublication,
+                GetPrivateProperty<int>(context, "TerminalGeneration"),
+                targetLeg.Generation,
+                GetPrivateProperty<long>(
+                    context,
+                    "DataSessionGeneration"),
+                "test_fallback_retained_replay",
+            ],
+            culture: null)!;
+        SetPrivateProperty(
+            context,
+            "InstalledOutboundSparsePump",
+            install);
+        var replayMethod = typeof(SessionFileTransferService)
+            .GetMethod(
+                "TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-            var serviceCommittedCheckpointLease =
-                Assert.IsType<FallbackCheckpointLease>(
-                    GetPrivatePropertyValue(
-                        context,
-                        "CurrentFallbackCheckpointLease"));
-            Assert.Equal(
-                expectedCheckpointRequestId,
-                serviceCommittedCheckpointLease.CheckpointRequestId);
-            var terminalBeforeReplay =
-                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+        Task InvokeReplayAsync()
+            => Assert.IsAssignableFrom<Task>(
+                replayMethod.Invoke(
+                    service,
+                    [context, install, dataSession]));
+
+        void AssertRetainedReplayPending()
+        {
+            var pendingTerminal =
+                GetPrivateProperty<
+                        FileTransferCoordinatorPersistentState>(
                         context,
                         "CoordinatorPersistentState")
-                    .FileTransferRouteTransition.LastTerminalOperation!.Value;
-            Assert.NotNull(terminalBeforeReplay.RetainedFrameApplyCommand);
-            Assert.Null(terminalBeforeReplay.RetainedFrameApplyReceipt);
-            Assert.Null(terminalBeforeReplay.DispositionReceipt);
-
-            var checkpointSendObserved = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var releaseCheckpointSend = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var olderSendObserved = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var releaseOlderSend = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            const string olderRequestId =
-                "older-active-frontier-repair";
-            var checkpointSendPrecededReplay = false;
-            transport.OutboundDataFrameDeliveryOverrideAsync =
-                async (_, frame, _) =>
-                {
-                    if (frame is not FileTransferFrontierRequestFrameV6 request)
-                    {
-                        return true;
-                    }
-
-                    if (string.Equals(
-                            request.RepairRequestId,
-                            olderRequestId,
-                            StringComparison.Ordinal))
-                    {
-                        olderSendObserved.TrySetResult();
-                        await releaseOlderSend.Task.ConfigureAwait(false);
-                    }
-                    else if (string.Equals(
-                                 request.RepairRequestId,
-                                 expectedCheckpointRequestId,
-                                 StringComparison.Ordinal))
-                    {
-                        var terminalAtSend =
-                            GetPrivateProperty<
-                                    FileTransferCoordinatorPersistentState>(
-                                    context,
-                                    "CoordinatorPersistentState")
-                                .FileTransferRouteTransition
-                                .LastTerminalOperation!.Value;
-                        checkpointSendPrecededReplay =
-                            terminalAtSend.RetainedFrameApplyReceipt is null &&
-                            terminalAtSend.DispositionReceipt is null;
-                        checkpointSendObserved.TrySetResult();
-                        await releaseCheckpointSend.Task.ConfigureAwait(false);
-                    }
-
-                    return true;
-                };
-
-            var targetOwner = GetPrivateProperty<RuntimeOwnerToken>(
+                    .FileTransferRouteTransition
+                    .LastTerminalOperation!.Value;
+            Assert.Null(pendingTerminal.RetainedFrameApplyReceipt);
+            Assert.Null(pendingTerminal.DispositionReceipt);
+            var pendingExecution = GetPrivatePropertyValue(
                 context,
-                "CurrentRuntimeOwner");
-            var targetPublication =
-                GetPrivateProperty<RoutePublicationToken>(
-                    context,
-                    "CurrentRoutePublicationToken");
-            var targetLeg = Assert.IsType<FileTransferLeg>(
-                GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-            var installType = typeof(SessionFileTransferService).GetNestedType(
-                "OutboundSparsePumpInstall",
-                BindingFlags.NonPublic)!;
-            var install = Activator.CreateInstance(
-                installType,
-                BindingFlags.Instance |
-                    BindingFlags.Public |
-                    BindingFlags.NonPublic,
-                binder: null,
-                args:
-                [
-                    1L,
-                    0L,
-                    targetOwner,
-                    targetPublication,
-                    GetPrivateProperty<int>(context, "TerminalGeneration"),
-                    targetLeg.Generation,
-                    GetPrivateProperty<long>(
-                        context,
-                        "DataSessionGeneration"),
-                    "test_fallback_retained_replay",
-                ],
-                culture: null)!;
-            SetPrivateProperty(
-                context,
-                "InstalledOutboundSparsePump",
-                install);
-            var replayMethod = typeof(SessionFileTransferService)
-                .GetMethod(
-                    "TryApplyOutboundCommittedFileTransferRouteTransitionRetainedFrameAsync",
-                    BindingFlags.Instance | BindingFlags.NonPublic)!;
-
-            Task InvokeReplayAsync()
-                => Assert.IsAssignableFrom<Task>(
-                    replayMethod.Invoke(
-                        service,
-                        [context, install, dataSession]));
-
-            void AssertRetainedReplayPending()
-            {
-                var pendingTerminal =
-                    GetPrivateProperty<
-                            FileTransferCoordinatorPersistentState>(
-                            context,
-                            "CoordinatorPersistentState")
-                        .FileTransferRouteTransition
-                        .LastTerminalOperation!.Value;
-                Assert.Null(pendingTerminal.RetainedFrameApplyReceipt);
-                Assert.Null(pendingTerminal.DispositionReceipt);
-                var pendingExecution = GetPrivatePropertyValue(
-                    context,
-                    "FileTransferRouteTransitionExecution");
-                Assert.NotNull(pendingExecution);
-                Assert.False(GetPrivateProperty<bool>(
-                    pendingExecution!,
-                    "FrameApplyInFlight"));
-                Assert.DoesNotContain(
-                    transport.SentDataFrames,
-                    frame => frame is FileTransferFrontierRequestFrameV6 request &&
-                        string.Equals(
-                            request.RepairRequestId,
-                            expectedCheckpointRequestId,
-                            StringComparison.Ordinal));
-            }
-
-            var olderCheckpoint = new FileTransferFrontierRequestFrameV6
-            {
-                SessionId = sourceState.SessionId,
-                TransferId = sourceState.TransferId,
-                TransportEpoch = targetTransportEpoch,
-                RepairRequestId = olderRequestId,
-                MissingRanges = [],
-                Priority = "frontier_repair",
-                RecoveryMode = "regular_nkn_frontier_repair",
-            };
-            const long olderSendGeneration = 41;
-            SetPrivateProperty(
-                context,
-                "V6RegularNknStateRefreshSendInFlight",
-                1);
-            SetPrivateProperty(
-                context,
-                "V6RegularNknStateRefreshActiveSendGeneration",
-                olderSendGeneration);
-            SetPrivateProperty(
-                context,
-                "V6RegularNknStateRefreshActiveRequestId",
-                olderRequestId);
-            SetPrivateProperty(
-                context,
-                "V6RegularNknStateRefreshActivePriority",
-                "frontier_repair");
-            SetPrivateProperty(
-                context,
-                "V6RegularNknStateRefreshActiveStartedUtc",
-                DateTimeOffset.UtcNow);
-            var targetLegBeforeOlderSend = Assert.IsType<FileTransferLeg>(
-                GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-            SetPrivateProperty(
-                context,
-                "CurrentTransferLeg",
-                null);
-            var olderSendTask = Assert.IsAssignableFrom<Task>(
-                typeof(SessionFileTransferService)
-                    .GetMethod(
-                        "SendOutboundV4SparseRuntimeStateRefreshAsync",
-                        BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .Invoke(
-                        service,
-                        [
-                            context,
-                            dataSession,
-                            olderCheckpoint,
-                            olderSendGeneration,
-                        ]));
-            await olderSendObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            SetPrivateProperty(
-                context,
-                "CurrentTransferLeg",
-                targetLegBeforeOlderSend);
-            await InvokeReplayAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            AssertRetainedReplayPending();
-
-            SetPrivateProperty(
-                context,
-                "V6RegularNknFallbackCheckpointDeliveryRecoveryPending",
-                true);
-            SetPrivateProperty(
-                context,
-                "V6RegularNknFallbackCheckpointDeliveryRecoveryStartedUtc",
-                DateTimeOffset.UtcNow);
-            SetPrivateProperty(
-                context,
-                "V6RegularNknFallbackCheckpointDeliveryRecoveryReason",
-                "test_checkpoint_delivery_deferred");
-            SetPrivateProperty(
-                context,
-                "V6RegularNknFallbackCheckpointDeliveryRecoveryRequestId",
-                expectedCheckpointRequestId);
-            releaseOlderSend.TrySetResult();
-            await olderSendTask.WaitAsync(TimeSpan.FromSeconds(5));
-            await WaitUntilAsync(
-                () => GetPrivatePropertyValue(
-                    context,
-                    "V6RegularNknDeferredStateRefreshRequest") is
-                        FileTransferFrontierRequestFrameV6 request &&
+                "FileTransferRouteTransitionExecution");
+            Assert.NotNull(pendingExecution);
+            Assert.False(GetPrivateProperty<bool>(
+                pendingExecution!,
+                "FrameApplyInFlight"));
+            Assert.DoesNotContain(
+                transport.SentDataFrames,
+                frame => frame is FileTransferFrontierRequestFrameV6 request &&
                     string.Equals(
                         request.RepairRequestId,
                         expectedCheckpointRequestId,
-                        StringComparison.Ordinal),
-                timeoutMs: 5000);
-            AssertRetainedReplayPending();
+                        StringComparison.Ordinal));
+        }
+
+        var olderCheckpoint = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = sourceState.SessionId,
+            TransferId = sourceState.TransferId,
+            TransportEpoch = targetTransportEpoch,
+            RepairRequestId = olderRequestId,
+            MissingRanges = [],
+            Priority = "frontier_repair",
+            RecoveryMode = "regular_nkn_frontier_repair",
+        };
+        const long olderSendGeneration = 41;
+        SetPrivateProperty(
+            context,
+            "V6RegularNknStateRefreshSendInFlight",
+            1);
+        SetPrivateProperty(
+            context,
+            "V6RegularNknStateRefreshActiveSendGeneration",
+            olderSendGeneration);
+        SetPrivateProperty(
+            context,
+            "V6RegularNknStateRefreshActiveRequestId",
+            olderRequestId);
+        SetPrivateProperty(
+            context,
+            "V6RegularNknStateRefreshActivePriority",
+            "frontier_repair");
+        SetPrivateProperty(
+            context,
+            "V6RegularNknStateRefreshActiveStartedUtc",
+            DateTimeOffset.UtcNow);
+        var targetLegBeforeOlderSend = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        SetPrivateProperty(
+            context,
+            "CurrentTransferLeg",
+            null);
+        var olderSendTask = Assert.IsAssignableFrom<Task>(
             typeof(SessionFileTransferService)
                 .GetMethod(
-                    "QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume",
+                    "SendOutboundV4SparseRuntimeStateRefreshAsync",
                     BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(
                     service,
                     [
                         context,
-                        "route_transition_checkpoint_recovery_completed",
-                        FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
-                            .RecoveryCompleted,
-                    ]);
-            await checkpointSendObserved.Task.WaitAsync(
-                TimeSpan.FromSeconds(5));
-            await WaitUntilAsync(
-                () => GetPrivatePropertyValue(
-                    context,
-                    "FileTransferRouteTransitionExecution") is null,
-                timeoutMs: 5000);
-            releaseCheckpointSend.TrySetResult();
-            await WaitUntilAsync(
-                () => GetPrivateProperty<int>(
-                    context,
-                    "V6RegularNknStateRefreshSendInFlight") == 0,
-                timeoutMs: 5000);
+                        dataSession,
+                        olderCheckpoint,
+                        olderSendGeneration,
+                    ]));
+        await olderSendObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        SetPrivateProperty(
+            context,
+            "CurrentTransferLeg",
+            targetLegBeforeOlderSend);
+        await InvokeReplayAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        AssertRetainedReplayPending();
 
-            Assert.True(checkpointSendPrecededReplay);
-            var serviceSentCheckpoint = Assert.IsType<
-                FileTransferFrontierRequestFrameV6>(
-                Assert.Single(transport.SentDataFrames.Where(frame =>
-                    frame is FileTransferFrontierRequestFrameV6 request &&
-                    string.Equals(
-                        request.RepairRequestId,
-                        expectedCheckpointRequestId,
-                        StringComparison.Ordinal))));
-            Assert.Equal(
-                expectedCheckpointRequestId,
-                serviceSentCheckpoint.RepairRequestId);
-            Assert.Equal(
-                targetTransportEpoch,
-                serviceSentCheckpoint.TransportEpoch);
-            var terminalAfterReplay =
-                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                        context,
-                        "CoordinatorPersistentState")
-                    .FileTransferRouteTransition.LastTerminalOperation!.Value;
-            Assert.NotNull(terminalAfterReplay.RetainedFrameApplyReceipt);
-            Assert.NotNull(terminalAfterReplay.DispositionReceipt);
-            var pendingLegAfterReplay = Assert.IsType<FileTransferLeg>(
-                GetPrivatePropertyValue(context, "CurrentTransferLeg"));
-            Assert.Equal(
-                FileTransferLegState.CheckpointPending,
-                pendingLegAfterReplay.State);
-            Assert.False(pendingLegAfterReplay.CanSendData);
-            Assert.Equal(
-                expectedCheckpointRequestId,
-                pendingLegAfterReplay.CheckpointRequestId);
-            Assert.Equal(
-                serviceCommittedCheckpointLease,
-                GetPrivateProperty<FallbackCheckpointLease>(
-                    context,
-                    "CurrentFallbackCheckpointLease"));
-            Assert.False(GetPrivateProperty<bool>(
+        SetPrivateProperty(
+            context,
+            "V6RegularNknFallbackCheckpointDeliveryRecoveryPending",
+            true);
+        SetPrivateProperty(
+            context,
+            "V6RegularNknFallbackCheckpointDeliveryRecoveryStartedUtc",
+            DateTimeOffset.UtcNow);
+        SetPrivateProperty(
+            context,
+            "V6RegularNknFallbackCheckpointDeliveryRecoveryReason",
+            "test_checkpoint_delivery_deferred");
+        SetPrivateProperty(
+            context,
+            "V6RegularNknFallbackCheckpointDeliveryRecoveryRequestId",
+            expectedCheckpointRequestId);
+        releaseOlderSend.TrySetResult();
+        await olderSendTask.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(
+            () => GetPrivatePropertyValue(
                 context,
-                "V6RegularNknFallbackCheckpointDeliveryRecoveryPending"));
-            Assert.Null(GetPrivatePropertyValue(
-                context,
-                "V6RegularNknDeferredStateRefreshRequest"));
-            Assert.Null(
-                GetPrivatePropertyValue(
+                "V6RegularNknDeferredStateRefreshRequest") is
+                    FileTransferFrontierRequestFrameV6 request &&
+                string.Equals(
+                    request.RepairRequestId,
+                    expectedCheckpointRequestId,
+                    StringComparison.Ordinal),
+            timeoutMs: 5000);
+        AssertRetainedReplayPending();
+        typeof(SessionFileTransferService)
+            .GetMethod(
+                "QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume",
+                BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
                     context,
-                    "FileTransferRouteTransitionExecution"));
-            return;
-        }
+                    "route_transition_checkpoint_recovery_completed",
+                    FileTransferReceiveRecoveryFallbackCheckpointResumeTrigger
+                        .RecoveryCompleted,
+                ]);
+        await checkpointSendObserved.Task.WaitAsync(
+            TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(
+            () => GetPrivatePropertyValue(
+                context,
+                "FileTransferRouteTransitionExecution") is null,
+            timeoutMs: 5000);
+        releaseCheckpointSend.TrySetResult();
+        await WaitUntilAsync(
+            () => GetPrivateProperty<int>(
+                context,
+                "V6RegularNknStateRefreshSendInFlight") == 0,
+            timeoutMs: 5000);
 
+        AssertFallbackCheckpointReplayCompleted(context, transport, expectedCheckpointRequestId,
+            targetTransportEpoch, checkpointSendPrecededReplay, serviceCommittedCheckpointLease);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertFallbackCheckpointReplayCompleted(object context, LoopbackFileTransferTransport transport,
+        string expectedCheckpointRequestId, long targetTransportEpoch, bool checkpointSendPrecededReplay,
+        FallbackCheckpointLease serviceCommittedCheckpointLease)
+    {
+        Assert.True(checkpointSendPrecededReplay);
+        var serviceSentCheckpoint = Assert.IsType<
+            FileTransferFrontierRequestFrameV6>(
+            Assert.Single(transport.SentDataFrames.Where(frame =>
+                frame is FileTransferFrontierRequestFrameV6 request &&
+                string.Equals(
+                    request.RepairRequestId,
+                    expectedCheckpointRequestId,
+                    StringComparison.Ordinal))));
+        Assert.Equal(
+            expectedCheckpointRequestId,
+            serviceSentCheckpoint.RepairRequestId);
+        Assert.Equal(
+            targetTransportEpoch,
+            serviceSentCheckpoint.TransportEpoch);
+        var terminalAfterReplay =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.LastTerminalOperation!.Value;
+        Assert.NotNull(terminalAfterReplay.RetainedFrameApplyReceipt);
+        Assert.NotNull(terminalAfterReplay.DispositionReceipt);
+        var pendingLegAfterReplay = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        Assert.Equal(
+            FileTransferLegState.CheckpointPending,
+            pendingLegAfterReplay.State);
+        Assert.False(pendingLegAfterReplay.CanSendData);
+        Assert.Equal(
+            expectedCheckpointRequestId,
+            pendingLegAfterReplay.CheckpointRequestId);
+        Assert.Equal(
+            serviceCommittedCheckpointLease,
+            GetPrivateProperty<FallbackCheckpointLease>(
+                context,
+                "CurrentFallbackCheckpointLease"));
+        Assert.False(GetPrivateProperty<bool>(
+            context,
+            "V6RegularNknFallbackCheckpointDeliveryRecoveryPending"));
+        Assert.Null(GetPrivatePropertyValue(
+            context,
+            "V6RegularNknDeferredStateRefreshRequest"));
+        Assert.Null(
+            GetPrivatePropertyValue(
+                context,
+                "FileTransferRouteTransitionExecution"));
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void CaptureCheckpointSendReplayOrder(object context, out bool checkpointSendPrecededReplay)
+    {
+        var terminalAtSend =
+            GetPrivateProperty<
+                    FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition
+                .LastTerminalOperation!.Value;
+        checkpointSendPrecededReplay =
+            terminalAtSend.RetainedFrameApplyReceipt is null &&
+            terminalAtSend.DispositionReceipt is null;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertFallbackCheckpointReplayNotYetApplied(object context)
+    {
+        var terminalBeforeReplay =
+            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                    context,
+                    "CoordinatorPersistentState")
+                .FileTransferRouteTransition.LastTerminalOperation!.Value;
+        Assert.NotNull(terminalBeforeReplay.RetainedFrameApplyCommand);
+        Assert.Null(terminalBeforeReplay.RetainedFrameApplyReceipt);
+        Assert.Null(terminalBeforeReplay.DispositionReceipt);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferRouteTransitionDecision Committed, FallbackCheckpointLease CommittedCheckpointLease)
+        CreateCommittedFallbackCheckpointBindingFixture(object context, FileTransferRouteTransitionDecision draining,
+            FileTransferRouteTransitionAuthority authority, FileTransferRouteTransitionPhysicalDrainCommand drainCommand,
+            long[] emptyIds, string emptyFingerprint)
+    {
         var committed =
             FileTransferCoordinator.CommitFileTransferRouteTransition(
                 draining.State,
@@ -3936,6 +4028,18 @@ public sealed partial class SessionFileTransferV4SenderTests
                     false,
                     false,
                 ]);
+        return (committed, committedCheckpointLease);
+    }
+
+    private async Task VerifyFallbackCheckpointStaleBindingsAsync(
+        SessionFileTransferService service, LoopbackFileTransferTransport transport, object context,
+        IFileTransferDataSession dataSession, FileTransferCoordinatorState sourceState,
+        FileTransferRouteTransitionDecision draining, FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainCommand drainCommand, long[] emptyIds,
+        string emptyFingerprint, Func<object> CreateExecution)
+    {
+        var (committed, committedCheckpointLease) = CreateCommittedFallbackCheckpointBindingFixture(
+            context, draining, authority, drainCommand, emptyIds, emptyFingerprint);
 
         var execution = CreateExecution();
         SetPrivateProperty(

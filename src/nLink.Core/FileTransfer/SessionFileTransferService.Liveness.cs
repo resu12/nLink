@@ -494,6 +494,7 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_receive_recovery_proof_state_publication_receipt_applied; session_id={FormatProtocolLogValue(observation.SessionId)}; transfer_id={FormatProtocolLogValue(observation.TransferId)}; direction={observation.Direction.ToString().ToLowerInvariant()}; {FormatReceiveRecoveryObservationScopeFields(observation)}; recovery_operation_authority_id={FormatProtocolLogValue(command.Authority.AuthorityId.ToString())}; recovery_operation_generation={command.Authority.OperationGeneration}; closure_generation={command.ClosureGeneration}; closure_state={operation?.ClosureState.ToString() ?? "none"}; publication_generation={command.PublicationGeneration}; publication_attempt={(predecessorReceipt is null ? "initial" : "post_delivery_recheck")}; predecessor_publication_generation={predecessorReceipt?.Command.PublicationGeneration ?? 0}; predecessor_frame_fingerprint={FormatProtocolLogValue(predecessorReceipt?.FrameFingerprint ?? "(none)")}; predecessor_receipt_observed_utc_ms={command.PredecessorReceiptObservedUtcMs}; recheck_heartbeat_generation={recheckEvidence?.HeartbeatGeneration ?? 0}; recheck_heartbeat_sequence={recheckEvidence?.HeartbeatSequence ?? 0}; recheck_proof_kind={FormatProtocolLogValue(recheckEvidence?.ProofKind ?? "(none)")}; recheck_lane={FormatProtocolLogValue(recheckEvidence?.Lane ?? "(none)")}; submission_epoch={command.Observation.SubmissionEpoch}; process_epoch={command.Observation.ProcessEpoch}; frame_fingerprint={FormatProtocolLogValue(sendResult.FrameFingerprint)}; v4_state_wire_fingerprint={FormatProtocolLogValue(sendResult.FrameFingerprint)}; publication_outcome={sendResult.Outcome}; publication_reason={FormatProtocolLogValue(sendResult.Reason)}; decision_status={decision?.Status.ToString() ?? "Rejected"}; decision_reason={FormatProtocolLogValue(decision?.Reason ?? "filetransfer_receive_recovery_transfer_replaced")}");
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private void ProcessReceiveRecoveryProofObserved(
         IFileTransferBridgeRecoveryExecutionBridge executionBridge,
         FileTransferReceiveRecoveryProofObservation observation)
@@ -511,132 +512,14 @@ public sealed partial class SessionFileTransferService
             }
 
             if (outboundTransfer is { IsTerminal: false } outbound &&
-                (outbound.CoordinatorPersistentState
-                     .FileTransferReceiveRecovery.CurrentOperation?.Authority
-                     .ExecutionCommand == observation.Command ||
-                 outbound.CoordinatorPersistentState
-                     .FileTransferReceiveRecovery.LastTerminalOperation
-                     ?.Authority.ExecutionCommand == observation.Command))
+                MatchesOutboundReceiveRecoveryProofLocked(outbound, observation))
             {
-                var recovery =
-                    outbound.CoordinatorPersistentState
-                        .FileTransferReceiveRecovery;
-                FileTransferReceiveRecoveryOperation? outboundOperation =
-                    recovery.CurrentOperation is { } current &&
-                    current.Authority.ExecutionCommand ==
-                        observation.Command
-                        ? current
-                        : recovery.LastTerminalOperation is { } terminal &&
-                          terminal.Authority.ExecutionCommand ==
-                              observation.Command
-                            ? terminal
-                            : null;
-                if (outboundOperation is { } matchedOutboundOperation)
-                {
-                    var proof = new FileTransferReceiveRecoveryProof(
-                        matchedOutboundOperation.Authority,
-                        observation.ProofIdentity,
-                        observation.Reason,
-                        observation.ObservedUtcMs);
-                    decision =
-                        FileTransferCoordinator.ObserveReceiveRecoveryProof(
-                            CreateCoordinatorStateLocked(outbound),
-                            proof);
-                    ApplyReceiveRecoveryStateLocked(
-                        outbound,
-                        decision.Value,
-                        initialActivationHoldDecision:
-                            decision.Value.InitialActivationHoldDecision);
-                    retryDispatchDecision =
-                        decision.Value.RetryDispatchDecision;
-                    if (retryDispatchDecision is
-                        { Granted: true } exactRetry)
-                    {
-                        ApplyRuntimeUnlockRetryLifecycleStateLocked(
-                            outbound,
-                            exactRetry.State,
-                            exactRetry.SnapshotEnvelope);
-                    }
-                    var appliedRecovery =
-                        outbound.CoordinatorPersistentState
-                            .FileTransferReceiveRecovery;
-                    operation =
-                        appliedRecovery.CurrentOperation is { } appliedCurrent &&
-                        appliedCurrent.Authority ==
-                            matchedOutboundOperation.Authority
-                            ? appliedCurrent
-                            : appliedRecovery.LastTerminalOperation is
-                                  { } appliedTerminal &&
-                              appliedTerminal.Authority ==
-                                  matchedOutboundOperation.Authority
-                                ? appliedTerminal
-                                : null;
-                }
+                ProcessOutboundReceiveRecoveryProofLocked(outbound, observation, ref decision, ref operation, ref retryDispatchDecision);
             }
             else if (inboundTransfer is { IsTerminal: false } inbound &&
-                     (inbound.CoordinatorPersistentState
-                          .FileTransferReceiveRecovery.CurrentOperation
-                          ?.Authority.ExecutionCommand ==
-                      observation.Command ||
-                      inbound.CoordinatorPersistentState
-                          .FileTransferReceiveRecovery.LastTerminalOperation
-                          ?.Authority.ExecutionCommand ==
-                      observation.Command))
+                MatchesInboundReceiveRecoveryProofLocked(inbound, observation))
             {
-                var recovery =
-                    inbound.CoordinatorPersistentState
-                        .FileTransferReceiveRecovery;
-                FileTransferReceiveRecoveryOperation? inboundOperation =
-                    recovery.CurrentOperation is { } current &&
-                    current.Authority.ExecutionCommand ==
-                        observation.Command
-                        ? current
-                        : recovery.LastTerminalOperation is { } terminal &&
-                          terminal.Authority.ExecutionCommand ==
-                              observation.Command
-                            ? terminal
-                            : null;
-                if (inboundOperation is { } matchedInboundOperation)
-                {
-                    var proof = new FileTransferReceiveRecoveryProof(
-                        matchedInboundOperation.Authority,
-                        observation.ProofIdentity,
-                        observation.Reason,
-                        observation.ObservedUtcMs);
-                    decision =
-                        FileTransferCoordinator.ObserveReceiveRecoveryProof(
-                            CreateCoordinatorStateLocked(inbound),
-                            proof);
-                    ApplyReceiveRecoveryStateLocked(
-                        inbound,
-                        decision.Value,
-                        initialActivationHoldDecision:
-                            decision.Value.InitialActivationHoldDecision);
-                    retryDispatchDecision =
-                        decision.Value.RetryDispatchDecision;
-                    if (retryDispatchDecision is
-                        { Granted: true } exactRetry)
-                    {
-                        ApplyRuntimeUnlockRetryLifecycleStateLocked(
-                            inbound,
-                            exactRetry.State,
-                            exactRetry.SnapshotEnvelope);
-                    }
-                    var appliedRecovery =
-                        inbound.CoordinatorPersistentState
-                            .FileTransferReceiveRecovery;
-                    operation =
-                        appliedRecovery.CurrentOperation is { } appliedCurrent &&
-                        appliedCurrent.Authority ==
-                            matchedInboundOperation.Authority
-                            ? appliedCurrent
-                            : appliedRecovery.LastTerminalOperation is
-                                  { } appliedTerminal &&
-                              appliedTerminal.Authority ==
-                                  matchedInboundOperation.Authority
-                                ? appliedTerminal
-                                : null;
-                }
+                ProcessInboundReceiveRecoveryProofLocked(inbound, observation, ref decision, ref operation, ref retryDispatchDecision);
             }
         }
 
@@ -650,6 +533,152 @@ public sealed partial class SessionFileTransferService
                 exactDecision);
         }
         ProcessReceiveRecoveryRetryDispatchDecision(retryDispatchDecision);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool MatchesInboundReceiveRecoveryProofLocked(
+        InboundTransferContext inbound, FileTransferReceiveRecoveryProofObservation observation)
+        => (inbound.CoordinatorPersistentState
+                .FileTransferReceiveRecovery.CurrentOperation
+                ?.Authority.ExecutionCommand ==
+            observation.Command ||
+            inbound.CoordinatorPersistentState
+                .FileTransferReceiveRecovery.LastTerminalOperation
+                ?.Authority.ExecutionCommand ==
+            observation.Command);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void ProcessInboundReceiveRecoveryProofLocked(
+        InboundTransferContext inbound, FileTransferReceiveRecoveryProofObservation observation,
+        ref FileTransferReceiveRecoveryDecision? decision, ref FileTransferReceiveRecoveryOperation? operation,
+        ref RuntimeUnlockRetryDispatchDecision? retryDispatchDecision)
+    {
+        var recovery =
+            inbound.CoordinatorPersistentState
+                .FileTransferReceiveRecovery;
+        FileTransferReceiveRecoveryOperation? inboundOperation =
+            recovery.CurrentOperation is { } current &&
+            current.Authority.ExecutionCommand ==
+                observation.Command
+                ? current
+                : recovery.LastTerminalOperation is { } terminal &&
+                  terminal.Authority.ExecutionCommand ==
+                      observation.Command
+                    ? terminal
+                    : null;
+        if (inboundOperation is { } matchedInboundOperation)
+        {
+            var proof = new FileTransferReceiveRecoveryProof(
+                matchedInboundOperation.Authority,
+                observation.ProofIdentity,
+                observation.Reason,
+                observation.ObservedUtcMs);
+            decision =
+                FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                    CreateCoordinatorStateLocked(inbound),
+                    proof);
+            ApplyReceiveRecoveryStateLocked(
+                inbound,
+                decision.Value,
+                initialActivationHoldDecision:
+                    decision.Value.InitialActivationHoldDecision);
+            retryDispatchDecision =
+                decision.Value.RetryDispatchDecision;
+            if (retryDispatchDecision is
+                { Granted: true } exactRetry)
+            {
+                ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                    inbound,
+                    exactRetry.State,
+                    exactRetry.SnapshotEnvelope);
+            }
+            var appliedRecovery =
+                inbound.CoordinatorPersistentState
+                    .FileTransferReceiveRecovery;
+            operation =
+                appliedRecovery.CurrentOperation is { } appliedCurrent &&
+                appliedCurrent.Authority ==
+                    matchedInboundOperation.Authority
+                    ? appliedCurrent
+                    : appliedRecovery.LastTerminalOperation is
+                          { } appliedTerminal &&
+                      appliedTerminal.Authority ==
+                          matchedInboundOperation.Authority
+                        ? appliedTerminal
+                        : null;
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool MatchesOutboundReceiveRecoveryProofLocked(
+        OutboundTransferContext outbound, FileTransferReceiveRecoveryProofObservation observation)
+        => (outbound.CoordinatorPersistentState
+                .FileTransferReceiveRecovery.CurrentOperation?.Authority
+                .ExecutionCommand == observation.Command ||
+            outbound.CoordinatorPersistentState
+                .FileTransferReceiveRecovery.LastTerminalOperation
+                ?.Authority.ExecutionCommand == observation.Command);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void ProcessOutboundReceiveRecoveryProofLocked(
+        OutboundTransferContext outbound, FileTransferReceiveRecoveryProofObservation observation,
+        ref FileTransferReceiveRecoveryDecision? decision, ref FileTransferReceiveRecoveryOperation? operation,
+        ref RuntimeUnlockRetryDispatchDecision? retryDispatchDecision)
+    {
+        var recovery =
+            outbound.CoordinatorPersistentState
+                .FileTransferReceiveRecovery;
+        FileTransferReceiveRecoveryOperation? outboundOperation =
+            recovery.CurrentOperation is { } current &&
+            current.Authority.ExecutionCommand ==
+                observation.Command
+                ? current
+                : recovery.LastTerminalOperation is { } terminal &&
+                  terminal.Authority.ExecutionCommand ==
+                      observation.Command
+                    ? terminal
+                    : null;
+        if (outboundOperation is { } matchedOutboundOperation)
+        {
+            var proof = new FileTransferReceiveRecoveryProof(
+                matchedOutboundOperation.Authority,
+                observation.ProofIdentity,
+                observation.Reason,
+                observation.ObservedUtcMs);
+            decision =
+                FileTransferCoordinator.ObserveReceiveRecoveryProof(
+                    CreateCoordinatorStateLocked(outbound),
+                    proof);
+            ApplyReceiveRecoveryStateLocked(
+                outbound,
+                decision.Value,
+                initialActivationHoldDecision:
+                    decision.Value.InitialActivationHoldDecision);
+            retryDispatchDecision =
+                decision.Value.RetryDispatchDecision;
+            if (retryDispatchDecision is
+                { Granted: true } exactRetry)
+            {
+                ApplyRuntimeUnlockRetryLifecycleStateLocked(
+                    outbound,
+                    exactRetry.State,
+                    exactRetry.SnapshotEnvelope);
+            }
+            var appliedRecovery =
+                outbound.CoordinatorPersistentState
+                    .FileTransferReceiveRecovery;
+            operation =
+                appliedRecovery.CurrentOperation is { } appliedCurrent &&
+                appliedCurrent.Authority ==
+                    matchedOutboundOperation.Authority
+                    ? appliedCurrent
+                    : appliedRecovery.LastTerminalOperation is
+                          { } appliedTerminal &&
+                      appliedTerminal.Authority ==
+                          matchedOutboundOperation.Authority
+                        ? appliedTerminal
+                        : null;
+        }
     }
 
     private void ProcessReceiveRecoveryRetryDispatchDecision(

@@ -101,12 +101,15 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task<bool> SendInboundV6RepairRequestAsync(InboundTransferContext context, string reason)
+    private async Task<bool> SendInboundV6RepairRequestAsync(InboundTransferContext context, string reason,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         FileTransferFrontierRequestFrameV6? frame;
         IFileTransferDataSession? dataSession;
         lock (gate)
         {
+            if (HasBootstrapSourceHoldLocked(context)) { return false; }
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 context.DataSession is null ||
@@ -141,7 +144,17 @@ public sealed partial class SessionFileTransferService
 
         try
         {
-            await dataSession.SendAsync(frame, context.LifetimeCts.Token).ConfigureAwait(false);
+            Task sending;
+            if (requiredWriteSource is not null)
+            {
+                lock (gate)
+                {
+                    if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
+                    sending = dataSession.SendAsync(frame, context.LifetimeCts.Token);
+                }
+            }
+            else { sending = dataSession.SendAsync(frame, context.LifetimeCts.Token); }
+            await sending.ConfigureAwait(false);
             var firstRange = frame.MissingRanges[0];
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -840,6 +853,7 @@ public sealed partial class SessionFileTransferService
 
     private bool TryPauseOutboundTransportLocked(OutboundTransferContext context, string reason, bool requiresResumeRequest)
     {
+        if (HasBootstrapSourceHoldLocked(context)) { InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused"); }
         if (context.IsTerminal)
         {
             return false;
@@ -893,6 +907,7 @@ public sealed partial class SessionFileTransferService
 
     private bool TryPauseInboundTransportLocked(InboundTransferContext context, string reason, bool requiresResumeRequest)
     {
+        if (HasBootstrapSourceHoldLocked(context)) { InvalidatePendingBootstrapCorrelationLocked(CreateCoordinatorStateLocked(context), "bootstrap_transport_paused"); }
         if (context.IsTerminal)
         {
             return false;
@@ -1528,6 +1543,7 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
+        if (HasBootstrapSourceHoldLocked(context)) { return false; }
         if (context.IsTerminal)
         {
             return false;
@@ -1759,6 +1775,7 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
+        if (HasBootstrapSourceHoldLocked(context)) { return false; }
         if (context.IsTerminal)
         {
             return false;

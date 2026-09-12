@@ -1299,7 +1299,8 @@ internal readonly record struct FileTransferRouteTransitionSubstate(
     FileTransferFallbackV6ProofBootstrapReceipt? LastFallbackV6ProofBootstrapReceipt = null,
     long LastFallbackV6ProofBootstrapGeneration = 0,
     FileTransferBootstrapAgreement? BootstrapAgreement = null,
-    FileTransferBootstrapExchange? BootstrapExchange = null)
+    FileTransferBootstrapExchange? BootstrapExchange = null,
+    FileTransferBootstrapSourceHoldOperation? BootstrapSourceHold = null)
 {
     internal static FileTransferRouteTransitionSubstate Empty => default;
 }
@@ -1321,6 +1322,12 @@ internal readonly record struct FileTransferFallbackV6ProofBootstrapObservation(
     long ObservedUtcMilliseconds,
     FileTransferRouteTransitionDurableCheckpoint DurableCheckpoint)
 {
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public FileTransferBootstrapInitiationKind InitiationKind { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public FileTransferBootstrapLocalStopObservation? LocalStop { get; init; }
+
     public bool IsDefault =>
         string.IsNullOrWhiteSpace(SessionId) ||
         string.IsNullOrWhiteSpace(TransferId) ||
@@ -2684,6 +2691,8 @@ internal readonly record struct FileTransferCoordinatorPersistentState(
 
     internal CheckpointRepairContinuityOrigin? CheckpointRepairContinuityOrigin { get; init; }
 
+    internal FileTransferBootstrapSourceCallbackLineage? BootstrapSourceCallbackLineage { get; init; }
+
     private readonly RuntimeUnlockRetryLifecycleSubstate?
         runtimeUnlockRetryLifecycle;
     private readonly FileTransferFallbackTailYieldSubstate?
@@ -3915,10 +3924,28 @@ internal static partial class FileTransferCoordinator
             ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static RuntimeUnlockRetryLifecycleTransitionDecision
         CommitRuntimeUnlockRetryDispatchInstall(
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryDispatchInstallResult installResult,
+            long observedUtcMs)
+    {
+        var decision = CommitRuntimeUnlockRetryDispatchInstallCore(
+            state,
+            in installResult,
+            observedUtcMs);
+        return FinalizeRuntimeUnlockRetryDispatchInstallDecision(
+            state,
+            in installResult,
+            in decision);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockRetryLifecycleTransitionDecision
+        CommitRuntimeUnlockRetryDispatchInstallCore(
+            FileTransferCoordinatorState state,
+            in RuntimeUnlockRetryDispatchInstallResult installResult,
             long observedUtcMs)
     {
         RuntimeUnlockRetryLifecycleTransitionDecision Decision(
@@ -3927,31 +3954,12 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState? nextState = null,
             RuntimeUnlockRetryDispatchSettlementDecision?
                 predecessorSettlementDecision = null)
-        {
-            var finalized = FinalizeRuntimeUnlockRetrySnapshot(
-                state,
-                new RuntimeUnlockRetryLifecycleTransitionDecision(status, reason)
+            => new(status, reason)
             {
                 State = nextState ?? state,
                 PredecessorSettlementDecision =
                     predecessorSettlementDecision,
-            },
-                nameof(CommitRuntimeUnlockRetryDispatchInstall),
-                installResult,
-                installResult.Receipt.Authority.AuthorityId);
-            if (status != RuntimeUnlockRetryLifecycleTransitionStatus.Accepted ||
-                finalized.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt is null)
-            {
-                return finalized;
-            }
-
-            return finalized with
-            {
-                CompensationContext = CreateRuntimeUnlockRetryConfirmationCompensationContext(
-                    finalized.State, installResult.Receipt,
-                    state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt),
             };
-        }
 
         if (state.IsTerminal)
         {
@@ -4343,6 +4351,33 @@ internal static partial class FileTransferCoordinator
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockRetryLifecycleTransitionDecision
+        FinalizeRuntimeUnlockRetryDispatchInstallDecision(
+            FileTransferCoordinatorState state,
+            in RuntimeUnlockRetryDispatchInstallResult installResult,
+            in RuntimeUnlockRetryLifecycleTransitionDecision decision)
+    {
+        var finalized = FinalizeRuntimeUnlockRetrySnapshot(
+            state,
+            decision,
+            nameof(CommitRuntimeUnlockRetryDispatchInstall),
+            installResult,
+            installResult.Receipt.Authority.AuthorityId);
+        if (decision.Status != RuntimeUnlockRetryLifecycleTransitionStatus.Accepted ||
+            finalized.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt is null)
+        {
+            return finalized;
+        }
+
+        return finalized with
+        {
+            CompensationContext = CreateRuntimeUnlockRetryConfirmationCompensationContext(
+                finalized.State, installResult.Receipt,
+                state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt),
+        };
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static RuntimeUnlockRetryConfirmationCompensationContext
         CreateRuntimeUnlockRetryConfirmationCompensationContext(
             FileTransferCoordinatorState committedState,
@@ -4372,21 +4407,32 @@ internal static partial class FileTransferCoordinator
     // Operational confirmation is not persisted in the Coordinator aggregate.
     // Callers must invoke this only for the synchronous false-confirmation
     // branch, never after confirmation succeeded or execution was released.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static RuntimeUnlockRetryLifecycleTransitionDecision
         CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(
             FileTransferCoordinatorState state,
             RuntimeUnlockRetryConfirmationCompensationContext? context)
     {
-        const string reason = "retry_dispatch_install_confirmation_rejected";
         var receipt = context?.Receipt ?? default;
+        var decision = CompensateRejectedRuntimeUnlockRetryDispatchConfirmationCore(state, context, receipt);
+        return FinalizeRuntimeUnlockRetrySnapshot(state, decision,
+            nameof(CompensateRejectedRuntimeUnlockRetryDispatchConfirmation),
+            new { receipt, predecessorBeforeInstall = context?.PredecessorBeforeInstall }, receipt.Authority.AuthorityId);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockRetryLifecycleTransitionDecision
+        CompensateRejectedRuntimeUnlockRetryDispatchConfirmationCore(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryConfirmationCompensationContext? context,
+            in RuntimeUnlockRetryDispatchInstallReceipt receipt)
+    {
+        const string reason = "retry_dispatch_install_confirmation_rejected";
         RuntimeUnlockRetryLifecycleTransitionDecision Decision(
             RuntimeUnlockRetryLifecycleTransitionStatus status,
             string decisionReason,
             FileTransferCoordinatorState? nextState = null)
-            => FinalizeRuntimeUnlockRetrySnapshot(state,
-                new RuntimeUnlockRetryLifecycleTransitionDecision(status, decisionReason) { State = nextState ?? state },
-                nameof(CompensateRejectedRuntimeUnlockRetryDispatchConfirmation),
-                new { receipt, predecessorBeforeInstall = context?.PredecessorBeforeInstall }, receipt.Authority.AuthorityId);
+            => new RuntimeUnlockRetryLifecycleTransitionDecision(status, decisionReason) { State = nextState ?? state };
 
         var lifecycle = state.PersistentState.RuntimeUnlockRetryLifecycle;
         if (context is null || receipt.IsDefault || state.IsTerminal ||
@@ -6238,7 +6284,8 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferFallbackV6ProofBootstrapObservation observation)
     {
-        var decision = IsFallbackBootstrapCorrelationSelected(state)
+        var decision = IsFallbackBootstrapCorrelationSelected(state) ||
+            observation.InitiationKind != FileTransferBootstrapInitiationKind.PeerEvidence || observation.LocalStop is not null
             ? new FileTransferFallbackV6ProofBootstrapDecision(FileTransferFallbackV6ProofBootstrapDecisionStatus.Rejected,
                 "bootstrap_correlated_exchange_required") { State = state }
             : IssueFileTransferFallbackV6ProofBootstrapCore(state, observation);
@@ -6783,6 +6830,36 @@ internal static partial class FileTransferCoordinator
         state =
             InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
                 state);
+        if (TryResolveExistingFileTransferRouteTransitionPreparation(
+                state,
+                request,
+                out var existingDecision))
+        {
+            return existingDecision;
+        }
+
+        if (!TryValidateFileTransferRouteTransitionPrepareRequest(
+                state,
+                request,
+                out var rejectionReason))
+        {
+            return FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+        }
+
+        // Construct the operation only after the validation stack has unwound.
+        return CreatePreparedFileTransferRouteTransitionDecision(state, request);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryResolveExistingFileTransferRouteTransitionPreparation(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionPrepareRequest request,
+        out FileTransferRouteTransitionDecision existingDecision)
+    {
+        existingDecision = default;
         var transitionState = state.PersistentState.FileTransferRouteTransition;
         if (transitionState.CurrentOperation is { } current)
         {
@@ -6799,19 +6876,21 @@ internal static partial class FileTransferCoordinator
                     out _,
                     allowCurrentOperation: true))
             {
-                return FileTransferRouteTransitionDecisionFor(
+                existingDecision = FileTransferRouteTransitionDecisionFor(
                     state,
                     FileTransferRouteTransitionDecisionStatus.Idempotent,
                     "filetransfer_route_transition_already_prepared",
                     current.Authority,
                     new FileTransferRouteTransitionPauseBindCommand(current.Authority),
                     current.DrainCommand);
+                return true;
             }
 
-            return FileTransferRouteTransitionDecisionFor(
+            existingDecision = FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Rejected,
                 "filetransfer_route_transition_conflict");
+            return true;
         }
 
         if (transitionState.LastTerminalOperation is
@@ -6824,7 +6903,7 @@ internal static partial class FileTransferCoordinator
             IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(
                 committed))
         {
-            return FileTransferRouteTransitionDecisionFor(
+            existingDecision = FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Idempotent,
                 "filetransfer_route_transition_already_committed",
@@ -6832,6 +6911,7 @@ internal static partial class FileTransferCoordinator
                 dispositionCommand: committed.DispositionCommand,
                 retainedFrameApplyCommand:
                     committed.RetainedFrameApplyCommand);
+            return true;
         }
 
         if (transitionState.LastTerminalOperation is
@@ -6848,13 +6928,14 @@ internal static partial class FileTransferCoordinator
                 request,
                 terminalInvalidated.Authority))
         {
-            return FileTransferRouteTransitionDecisionFor(
+            existingDecision = FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Idempotent,
                 "filetransfer_route_transition_terminally_invalidated",
                 terminalInvalidated.Authority,
                 dispositionCommand:
                     terminalInvalidated.DispositionCommand);
+            return true;
         }
 
         if (transitionState.LastTerminalOperation is
@@ -6863,26 +6944,25 @@ internal static partial class FileTransferCoordinator
                 DispositionReceipt: null,
             } pendingTerminal)
         {
-            return FileTransferRouteTransitionDecisionFor(
+            existingDecision = FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Rejected,
                 "filetransfer_route_transition_disposition_receipt_pending",
                 pendingTerminal.Authority,
                 drainCommand: pendingTerminal.DrainCommand,
                 dispositionCommand: pendingDisposition);
+            return true;
         }
 
-        if (!TryValidateFileTransferRouteTransitionPrepareRequest(
-                state,
-                request,
-                out var rejectionReason))
-        {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
-        }
+        return false;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRouteTransitionDecision CreatePreparedFileTransferRouteTransitionDecision(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionPrepareRequest request)
+    {
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
         var owner = state.CurrentRuntimeOwner!.Value;
         var leg = state.CurrentLeg!;
         var transitionGeneration = Math.Max(
@@ -7442,126 +7522,19 @@ internal static partial class FileTransferCoordinator
         FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
             pressureSettlementReceipt = null)
     {
-        var transitionState = state.PersistentState.FileTransferRouteTransition;
-        if (transitionState.LastTerminalOperation is
-            {
-                State: FileTransferRouteTransitionState.Committed,
-                DrainReceipt: { } committedDrain,
-            } terminal &&
-            terminal.Authority == authority &&
-            IsExactOrCanonicalIdempotentFileTransferRouteTransitionDrainReceipt(
-                committedDrain,
-                drainReceipt) &&
-            terminal.FinalProof == finalProof &&
-            IsExactFileTransferRouteTransitionPressureReceiptDuplicate(
-                terminal.PressureSettlementReceipt,
-                pressureSettlementReceipt) &&
-            IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(terminal))
-        {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Idempotent,
-                "filetransfer_route_transition_already_committed",
-                authority,
-                drainCommand: terminal.DrainCommand,
-                dispositionCommand: terminal.DispositionCommand,
-                retainedFrameApplyCommand: terminal.RetainedFrameApplyCommand);
-        }
-
-        if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
-        {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Rejected,
-                "runtime_unlock_retry_scope_invalidation_required");
-        }
-
-        if (!TryValidateFileTransferRouteTransitionDrainReceipt(
+        // Keep the large preparation/completion value copies off the route-mutation stack.
+        if (!TryPrepareFileTransferRouteTransitionCommit(
                 state,
                 authority,
                 drainReceipt,
-                out var rejectionReason) ||
-            !TryValidateFileTransferRouteTransitionCommitProof(
-                state,
-                authority,
                 finalProof,
-                out rejectionReason))
+                pressureSettlementReceipt,
+                out var projectedState,
+                out var earlyDecision))
         {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Rejected,
-                rejectionReason);
+            return earlyDecision;
         }
 
-        var projectedState = state;
-        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
-        if (pressureState.PendingBinding is not null ||
-            pressureState.RetainedPredecessorBinding is not null)
-        {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Rejected,
-                "filetransfer_route_transition_pressure_lineage_pending");
-        }
-
-        if (pressureState.InstalledBinding is { } installed)
-        {
-            var expectedSettlement =
-                CreateFileTransferRouteTransitionPressureSettlement(
-                    installed.Authority);
-            var preparedPressure =
-                PrepareRegularV4FrontierRepairPressureSettlementCore(
-                    state,
-                    expectedSettlement);
-            if (pressureSettlementReceipt is null ||
-                preparedPressure.Status !=
-                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
-                preparedPressure.SettlementCommand is not { } expectedCommand ||
-                pressureSettlementReceipt.Command != expectedCommand ||
-                !IsCanonicalFileTransferRouteTransitionPressureSettlementReceipt(
-                    pressureSettlementReceipt))
-            {
-                return FileTransferRouteTransitionDecisionFor(
-                    state,
-                    FileTransferRouteTransitionDecisionStatus.Rejected,
-                    "filetransfer_route_transition_pressure_apply_receipt_missing");
-            }
-
-            var pressureCommit =
-                CommitRegularV4FrontierRepairPressureSettlementCore(
-                state,
-                pressureSettlementReceipt);
-            if (pressureCommit.Status !=
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
-            {
-                return FileTransferRouteTransitionDecisionFor(
-                    state,
-                    FileTransferRouteTransitionDecisionStatus.Rejected,
-                    pressureCommit.Reason);
-            }
-
-            projectedState = pressureCommit.State;
-        }
-        else if (pressureSettlementReceipt is not null)
-        {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Rejected,
-                "filetransfer_route_transition_pressure_apply_receipt_unexpected");
-        }
-
-        projectedState = CloneCoordinatorStateGraph(projectedState);
-        projectedState = projectedState with
-        {
-            PersistentState = projectedState.PersistentState with
-            {
-                FileTransferRouteTransition = transitionState with
-                {
-                    CurrentOperation = null,
-                    PendingSupersession = null,
-                },
-            },
-        };
         var targetSelection = FileTransferRouteResolver.Resolve(authority.TargetRoute);
         var toTuna = authority.TargetRoute == FileTransferRoute.FileTunaV4;
         var fallbackProof =
@@ -7587,24 +7560,343 @@ internal static partial class FileTransferCoordinator
             projectedState,
             NormalizeReason(authority.Reason),
             recoverEpoch: toTuna);
-        if (routeDecision.MutationRejectedReason is { } routeRejection)
+        return CompleteFileTransferRouteTransitionCommit(
+            state,
+            authority,
+            drainReceipt,
+            finalProof,
+            pressureSettlementReceipt,
+            routeDecision);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryPrepareFileTransferRouteTransitionCommit(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+        RuntimeUnlockRouteCommitProof? finalProof,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt,
+        out FileTransferCoordinatorState projectedState,
+        out FileTransferRouteTransitionDecision earlyDecision)
+    {
+        projectedState = state;
+        if (TryResolveDuplicateFileTransferRouteTransitionCommit(
+                state,
+                authority,
+                drainReceipt,
+                finalProof,
+                pressureSettlementReceipt,
+                out earlyDecision))
+        {
+            return false;
+        }
+
+        if (RequiresRuntimeUnlockRetryLifecycleScopeInvalidation(state))
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "runtime_unlock_retry_scope_invalidation_required");
+            return false;
+        }
+
+        if (!TryValidateFileTransferRouteTransitionDrainReceipt(
+                state,
+                authority,
+                drainReceipt,
+                out var rejectionReason) ||
+            !TryValidateFileTransferRouteTransitionCommitProof(
+                state,
+                authority,
+                finalProof,
+                out rejectionReason))
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                rejectionReason);
+            return false;
+        }
+
+        // Keep pressure/projection value copies off the proof-validation stack.
+        return TryProjectFileTransferRouteTransitionCommit(
+            state,
+            pressureSettlementReceipt,
+            out projectedState,
+            out earlyDecision);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryResolveDuplicateFileTransferRouteTransitionCommit(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+        RuntimeUnlockRouteCommitProof? finalProof,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt,
+        out FileTransferRouteTransitionDecision earlyDecision)
+    {
+        earlyDecision = default;
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
+        if (transitionState.LastTerminalOperation is
+            {
+                State: FileTransferRouteTransitionState.Committed,
+                DrainReceipt: { } committedDrain,
+            } terminal &&
+            terminal.Authority == authority &&
+            IsExactOrCanonicalIdempotentFileTransferRouteTransitionDrainReceipt(
+                committedDrain,
+                drainReceipt) &&
+            terminal.FinalProof == finalProof &&
+            IsExactFileTransferRouteTransitionPressureReceiptDuplicate(
+                terminal.PressureSettlementReceipt,
+                pressureSettlementReceipt) &&
+            IsCommittedFileTransferRouteTransitionTerminalEvidenceValid(terminal))
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Idempotent,
+                "filetransfer_route_transition_already_committed",
+                authority,
+                drainCommand: terminal.DrainCommand,
+                dispositionCommand: terminal.DispositionCommand,
+                retainedFrameApplyCommand: terminal.RetainedFrameApplyCommand);
+            return true;
+        }
+
+        return false;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryProjectFileTransferRouteTransitionCommit(
+        FileTransferCoordinatorState state,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt,
+        out FileTransferCoordinatorState projectedState,
+        out FileTransferRouteTransitionDecision earlyDecision)
+    {
+        projectedState = state;
+        earlyDecision = default;
+        var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
+        if (pressureState.PendingBinding is not null ||
+            pressureState.RetainedPredecessorBinding is not null)
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_pressure_lineage_pending");
+            return false;
+        }
+
+        if (pressureState.InstalledBinding is { } installed)
+        {
+            var expectedSettlement =
+                CreateFileTransferRouteTransitionPressureSettlement(
+                    installed.Authority);
+            var preparedPressure =
+                PrepareRegularV4FrontierRepairPressureSettlementCore(
+                    state,
+                    expectedSettlement);
+            if (pressureSettlementReceipt is null ||
+                preparedPressure.Status !=
+                    RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted ||
+                preparedPressure.SettlementCommand is not { } expectedCommand ||
+                pressureSettlementReceipt.Command != expectedCommand ||
+                !IsCanonicalFileTransferRouteTransitionPressureSettlementReceipt(
+                    pressureSettlementReceipt))
+            {
+                earlyDecision = FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Rejected,
+                    "filetransfer_route_transition_pressure_apply_receipt_missing");
+                return false;
+            }
+
+            var pressureCommit =
+                CommitRegularV4FrontierRepairPressureSettlementCore(
+                state,
+                pressureSettlementReceipt);
+            if (pressureCommit.Status !=
+                RegularV4FrontierRepairPressureBindingDecisionStatus.Accepted)
+            {
+                earlyDecision = FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Rejected,
+                    pressureCommit.Reason);
+                return false;
+            }
+
+            projectedState = pressureCommit.State;
+        }
+        else if (pressureSettlementReceipt is not null)
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_pressure_apply_receipt_unexpected");
+            return false;
+        }
+
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
+        projectedState = CloneCoordinatorStateGraph(projectedState);
+        projectedState = projectedState with
+        {
+            PersistentState = projectedState.PersistentState with
+            {
+                FileTransferRouteTransition = transitionState with
+                {
+                    CurrentOperation = null,
+                    PendingSupersession = null,
+                },
+            },
+        };
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRouteTransitionDecision CompleteFileTransferRouteTransitionCommit(
+        FileTransferCoordinatorState state,
+        FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+        RuntimeUnlockRouteCommitProof? finalProof,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt,
+        FileTransferCoordinatorDecision routeDecision)
+    {
+        if (!TryPublishFileTransferRouteTransitionCommit(
+                state,
+                in authority,
+                in finalProof,
+                routeDecision,
+                out var publishedState,
+                out var earlyDecision) ||
+            !TryMaterializeFileTransferRouteTransitionCommit(
+                state,
+                in authority,
+                in drainReceipt,
+                in finalProof,
+                pressureSettlementReceipt,
+                routeDecision,
+                publishedState,
+                out var materializedState,
+                out earlyDecision))
+        {
+            return earlyDecision;
+        }
+
+        var committedState = materializedState;
+        var toTuna = authority.TargetRoute == FileTransferRoute.FileTunaV4;
+        var fallbackProof =
+            authority.ProofBoundary as FileTransferFallbackTransitionProofBoundary;
+        FallbackCheckpointLease? routeTransitionFallbackCheckpointLease = null;
+        var inboundBootstrapCheckpoint =
+            !toTuna && state.Direction == FileTransferDirection.Inbound &&
+            string.Equals(
+                fallbackProof!.PeerProofEvidence.ProofKind,
+                "fallback_v6_proof_bootstrap_peer_frame",
+                StringComparison.Ordinal) &&
+            (string.Equals(
+                 fallbackProof.RetainedFrameIdentity.FrameType,
+                 FileTransferProtocol.FrontierRequestFrameTypeV6,
+                 StringComparison.Ordinal) ||
+             IsFallbackBootstrapCorrelationSelected(state) && string.Equals(
+                 fallbackProof.RetainedFrameIdentity.FrameType,
+                 FileTransferProtocol.FallbackBootstrapRequestFrameTypeV6,
+                 StringComparison.Ordinal));
+        if (inboundBootstrapCheckpoint &&
+            !IsInboundFallbackBootstrapCheckpointBoundaryCurrent(state, authority))
         {
             return FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Rejected,
+                "filetransfer_route_transition_inbound_bootstrap_checkpoint_boundary_invalid");
+        }
+
+        if (!toTuna &&
+            (committedState.Direction == FileTransferDirection.Outbound ||
+             inboundBootstrapCheckpoint))
+        {
+            const string checkpointReason =
+                "filetransfer_route_transition_fallback_checkpoint_registered";
+            var checkpointRequestId =
+                $"v6-regular-nkn-state-refresh:route-transition:{authority.TransitionGeneration}:{fallbackProof!.TargetTransportEpoch}";
+            var checkpointDecision = MarkFallbackCheckpointRequested(
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                    committedState.RouteSelection,
+                    authority.HandoffKind,
+                    authority.TargetTransport,
+                    checkpointReason,
+                    FileTransferLegState.CheckpointPending,
+                    CanSendData: false,
+                    authority.DurableCheckpoint.ContiguousCommittedChunkIndex,
+                    authority.DurableCheckpoint.DurableHighestChunkIndex,
+                    fallbackProof.TargetTransportEpoch,
+                    fallbackProof.TargetBridgeRecoveryGeneration,
+                    CheckpointRequestId: checkpointRequestId,
+                    CheckpointPriority: "state_refresh"),
+                committedState,
+                checkpointReason);
+            if (checkpointDecision.MutationRejectedReason is not null ||
+                checkpointDecision.FallbackCheckpointLease is not
+                    { State: FallbackCheckpointLeaseState.Pending } checkpointLease ||
+                !string.Equals(
+                    checkpointLease.CheckpointRequestId,
+                    checkpointRequestId,
+                    StringComparison.Ordinal))
+            {
+                return FileTransferRouteTransitionDecisionFor(
+                    state,
+                    FileTransferRouteTransitionDecisionStatus.Rejected,
+                    checkpointDecision.MutationRejectedReason ??
+                        "filetransfer_route_transition_fallback_checkpoint_registration_failed");
+            }
+
+            committedState = checkpointDecision.State;
+            routeTransitionFallbackCheckpointLease = checkpointLease;
+        }
+
+        return BuildCompletedFileTransferRouteTransitionCommitDecision(
+            materializedState,
+            committedState,
+            in authority,
+            routeDecision,
+            routeTransitionFallbackCheckpointLease);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryPublishFileTransferRouteTransitionCommit(
+        FileTransferCoordinatorState state,
+        in FileTransferRouteTransitionAuthority authority,
+        in RuntimeUnlockRouteCommitProof? finalProof,
+        FileTransferCoordinatorDecision routeDecision,
+        out FileTransferCoordinatorState publishedState,
+        out FileTransferRouteTransitionDecision earlyDecision)
+    {
+        publishedState = state;
+        earlyDecision = default;
+        if (routeDecision.MutationRejectedReason is { } routeRejection)
+        {
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
+                state,
+                FileTransferRouteTransitionDecisionStatus.Rejected,
                 routeRejection);
+            return false;
         }
 
         var committedState = routeDecision.State;
         if (committedState.CurrentRuntimeOwner is not { } runtimeOwner ||
             committedState.CurrentLeg is not { } targetLeg)
         {
-            return FileTransferRouteTransitionDecisionFor(
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Rejected,
                 "filetransfer_route_transition_target_scope_missing");
+            return false;
         }
 
+        var toTuna = authority.TargetRoute == FileTransferRoute.FileTunaV4;
         RouteCommitToken? routeCommitToken = null;
         RoutePublicationToken publicationToken;
         if (toTuna)
@@ -7717,7 +8009,31 @@ internal static partial class FileTransferCoordinator
                     rejectionReason: "accepted",
                     publicationToken));
         }
+        publishedState = committedState;
+        return true;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryMaterializeFileTransferRouteTransitionCommit(
+        FileTransferCoordinatorState state,
+        in FileTransferRouteTransitionAuthority authority,
+        in FileTransferRouteTransitionPhysicalDrainReceipt drainReceipt,
+        in RuntimeUnlockRouteCommitProof? finalProof,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt?
+            pressureSettlementReceipt,
+        FileTransferCoordinatorDecision routeDecision,
+        FileTransferCoordinatorState publishedState,
+        out FileTransferCoordinatorState materializedState,
+        out FileTransferRouteTransitionDecision earlyDecision)
+    {
+        materializedState = state;
+        earlyDecision = default;
+        var committedState = publishedState;
+        var runtimeOwner = routeDecision.State.CurrentRuntimeOwner!.Value;
+        var routeCommitToken = publishedState.CurrentRouteCommit;
+        var publicationToken = publishedState.CurrentRoutePublicationToken!.Value;
+        var fallbackProof =
+            authority.ProofBoundary as FileTransferFallbackTransitionProofBoundary;
         var disposition = new FileTransferRouteTransitionDispositionCommand(
             authority,
             FileTransferRouteTransitionDispositionKind.Committed,
@@ -7740,11 +8056,13 @@ internal static partial class FileTransferCoordinator
             !IsFileTransferRouteTransitionRetainedFrameApplyCommandValid(
                 retainedFrameCommand))
         {
-            return FileTransferRouteTransitionDecisionFor(
+            earlyDecision = FileTransferRouteTransitionDecisionFor(
                 state,
                 FileTransferRouteTransitionDecisionStatus.Rejected,
                 "filetransfer_route_transition_commit_evidence_invalid");
+            return false;
         }
+        var transitionState = state.PersistentState.FileTransferRouteTransition;
         var terminalOperation =
             transitionState.CurrentOperation!.Value with
             {
@@ -7770,81 +8088,28 @@ internal static partial class FileTransferCoordinator
                 },
             },
         };
+        materializedState = RecordBootstrapSourceCallbackSuccessor(committedState, in authority, in terminalOperation,
+            transitionState.BootstrapSourceHold, transitionState.BootstrapExchange, transitionState.BootstrapAgreement);
+        return true;
+    }
 
-        FallbackCheckpointLease? routeTransitionFallbackCheckpointLease = null;
-        var inboundBootstrapCheckpoint =
-            !toTuna && state.Direction == FileTransferDirection.Inbound &&
-            string.Equals(
-                fallbackProof!.PeerProofEvidence.ProofKind,
-                "fallback_v6_proof_bootstrap_peer_frame",
-                StringComparison.Ordinal) &&
-            (string.Equals(
-                 fallbackProof.RetainedFrameIdentity.FrameType,
-                 FileTransferProtocol.FrontierRequestFrameTypeV6,
-                 StringComparison.Ordinal) ||
-             IsFallbackBootstrapCorrelationSelected(state) && string.Equals(
-                 fallbackProof.RetainedFrameIdentity.FrameType,
-                 FileTransferProtocol.FallbackBootstrapRequestFrameTypeV6,
-                 StringComparison.Ordinal));
-        if (inboundBootstrapCheckpoint &&
-            !IsInboundFallbackBootstrapCheckpointBoundaryCurrent(state, authority))
-        {
-            return FileTransferRouteTransitionDecisionFor(
-                state,
-                FileTransferRouteTransitionDecisionStatus.Rejected,
-                "filetransfer_route_transition_inbound_bootstrap_checkpoint_boundary_invalid");
-        }
-
-        if (!toTuna &&
-            (committedState.Direction == FileTransferDirection.Outbound ||
-             inboundBootstrapCheckpoint))
-        {
-            const string checkpointReason =
-                "filetransfer_route_transition_fallback_checkpoint_registered";
-            var checkpointRequestId =
-                $"v6-regular-nkn-state-refresh:route-transition:{authority.TransitionGeneration}:{fallbackProof!.TargetTransportEpoch}";
-            var checkpointDecision = MarkFallbackCheckpointRequested(
-                new FileTransferCoordinatorEvent(
-                    FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
-                    committedState.RouteSelection,
-                    authority.HandoffKind,
-                    authority.TargetTransport,
-                    checkpointReason,
-                    FileTransferLegState.CheckpointPending,
-                    CanSendData: false,
-                    authority.DurableCheckpoint.ContiguousCommittedChunkIndex,
-                    authority.DurableCheckpoint.DurableHighestChunkIndex,
-                    fallbackProof.TargetTransportEpoch,
-                    fallbackProof.TargetBridgeRecoveryGeneration,
-                    CheckpointRequestId: checkpointRequestId,
-                    CheckpointPriority: "state_refresh"),
-                committedState,
-                checkpointReason);
-            if (checkpointDecision.MutationRejectedReason is not null ||
-                checkpointDecision.FallbackCheckpointLease is not
-                    { State: FallbackCheckpointLeaseState.Pending } checkpointLease ||
-                !string.Equals(
-                    checkpointLease.CheckpointRequestId,
-                    checkpointRequestId,
-                    StringComparison.Ordinal))
-            {
-                return FileTransferRouteTransitionDecisionFor(
-                    state,
-                    FileTransferRouteTransitionDecisionStatus.Rejected,
-                    checkpointDecision.MutationRejectedReason ??
-                        "filetransfer_route_transition_fallback_checkpoint_registration_failed");
-            }
-
-            committedState = checkpointDecision.State;
-            routeTransitionFallbackCheckpointLease = checkpointLease;
-        }
-
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRouteTransitionDecision BuildCompletedFileTransferRouteTransitionCommitDecision(
+        FileTransferCoordinatorState materializedState,
+        FileTransferCoordinatorState committedState,
+        in FileTransferRouteTransitionAuthority authority,
+        FileTransferCoordinatorDecision routeDecision,
+        FallbackCheckpointLease? routeTransitionFallbackCheckpointLease)
+    {
+        var terminalOperation = materializedState.PersistentState
+            .FileTransferRouteTransition.LastTerminalOperation!.Value;
+        var toTuna = authority.TargetRoute == FileTransferRoute.FileTunaV4;
         routeDecision = routeDecision with
         {
             State = committedState,
             RuntimeUnlockCommitAccepted = toTuna,
             RuntimeUnlockCommitRejectedReason = null,
-            RouteCommitToken = routeCommitToken,
+            RouteCommitToken = terminalOperation.RouteCommitToken,
             FallbackCheckpointLease = routeTransitionFallbackCheckpointLease,
         };
         return FileTransferRouteTransitionDecisionFor(
@@ -7853,8 +8118,8 @@ internal static partial class FileTransferCoordinator
             "filetransfer_route_transition_committed",
             authority,
             drainCommand: terminalOperation.DrainCommand,
-            dispositionCommand: disposition,
-            retainedFrameApplyCommand: frameApplyCommand,
+            dispositionCommand: terminalOperation.DispositionCommand,
+            retainedFrameApplyCommand: terminalOperation.RetainedFrameApplyCommand,
             routeDecision: routeDecision);
     }
 
@@ -8630,6 +8895,7 @@ internal static partial class FileTransferCoordinator
         };
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorActionDecision AuthorizeActionCore(
         FileTransferCoordinatorState state,
         FileTransferCoordinatorActionRequest request)
@@ -8638,14 +8904,42 @@ internal static partial class FileTransferCoordinator
         state =
             InvalidateRuntimeUnlockResponderPeerProbeRouteTransitionHandoffForScopeReplacement(
                 state);
+        if (TryResolveFileTransferCoordinatorActionEarlyDecision(
+                state,
+                in request,
+                out var earlyDecision))
+        {
+            return earlyDecision;
+        }
+
+        return IssueAndApplyFileTransferCoordinatorAction(state, in request);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryResolveFileTransferCoordinatorActionEarlyDecision(
+        FileTransferCoordinatorState state,
+        in FileTransferCoordinatorActionRequest request,
+        out FileTransferCoordinatorActionDecision earlyDecision)
+        => TryResolveFileTransferCoordinatorActionScopeDecision(state, in request, out earlyDecision) ||
+           TryResolveFileTransferCoordinatorActionTokenDecision(state, in request, out earlyDecision) ||
+           TryResolveFileTransferCoordinatorActionRecoveryDecision(state, in request, out earlyDecision);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryResolveFileTransferCoordinatorActionScopeDecision(
+        FileTransferCoordinatorState state,
+        in FileTransferCoordinatorActionRequest request,
+        out FileTransferCoordinatorActionDecision earlyDecision)
+    {
+        earlyDecision = default;
         if (state.IsTerminal)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "terminal_state",
                 terminalMutationRejected: true);
+            return true;
         }
 
         var effectiveRuntimeOwner = RequiresRouteCommitToken(request.Kind)
@@ -8671,101 +8965,111 @@ internal static partial class FileTransferCoordinator
         {
             if (!IsRuntimeOwnerCurrent(state, runtimeOwner, out var ownerRejectionReason))
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     ownerRejectionReason);
+                return true;
             }
         }
         else if (RequiresRuntimeOwner(request.Kind))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "runtime_owner_missing");
+            return true;
         }
 
         if (request.RuntimeGeneration is { } runtimeGeneration &&
             runtimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "runtime_generation_mismatch");
+            return true;
         }
 
         if (request.TerminalGeneration is { } terminalGeneration &&
             terminalGeneration != state.TerminalGeneration)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "terminal_generation_mismatch");
+            return true;
         }
 
         if (request.Route is { } route && route != state.RouteSelection.Route)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "route_or_protocol_mismatch");
+            return true;
         }
 
         if (request.ProtocolVersion is { } protocolVersion &&
             protocolVersion != state.RouteSelection.ProtocolVersion)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "route_or_protocol_mismatch");
+            return true;
         }
 
         var currentLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
         if (request.LiveRouteEpoch is { } liveRouteEpoch &&
             liveRouteEpoch != currentLiveRouteEpoch)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "live_route_epoch_mismatch");
+            return true;
         }
 
         var currentLegGeneration = state.CurrentLeg?.Generation ?? 0;
         if (request.LegGeneration is { } legGeneration &&
             legGeneration != currentLegGeneration)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "leg_generation_mismatch");
+            return true;
         }
 
         if (request.TransportEpochId is { } transportEpochId &&
             (state.CurrentLeg is null || transportEpochId != state.CurrentLeg.TransportEpochId))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: state.CurrentLeg is null ? "leg_missing" : "transport_epoch_mismatch");
+            return true;
         }
 
         if (request.BridgeRecoveryGeneration is { } bridgeRecoveryGeneration &&
             (state.CurrentLeg is null || bridgeRecoveryGeneration != state.CurrentLeg.BridgeRecoveryGeneration))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: state.CurrentLeg is null ? "leg_missing" : "bridge_recovery_generation_mismatch");
+            return true;
         }
 
         if (request.Kind != FileTransferCoordinatorActionKind.FallbackCheckpointBegin &&
@@ -8773,41 +9077,54 @@ internal static partial class FileTransferCoordinator
             (state.CurrentLeg is null ||
              !string.Equals(checkpointRequestId, state.CurrentLeg.CheckpointRequestId, StringComparison.Ordinal)))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: state.CurrentLeg is null ? "leg_missing" : "checkpoint_request_mismatch");
+            return true;
         }
 
         if (request.CheckpointGeneration is { } checkpointGeneration &&
             (state.CurrentLeg is null || checkpointGeneration != state.CurrentLeg.CheckpointGeneration))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: state.CurrentLeg is null ? "leg_missing" : "checkpoint_generation_mismatch");
+            return true;
         }
+        return false;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryResolveFileTransferCoordinatorActionTokenDecision(
+        FileTransferCoordinatorState state,
+        in FileTransferCoordinatorActionRequest request,
+        out FileTransferCoordinatorActionDecision earlyDecision)
+    {
+        earlyDecision = default;
         if (RequiresRuntimeUnlockAdmissionToken(request.Kind))
         {
             if (request.RuntimeUnlockAdmissionToken is not { } admissionToken)
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     rejectionReason: "runtime_unlock_admission_missing");
+                return true;
             }
 
             if (!IsRuntimeUnlockAdmissionTokenCurrent(state, admissionToken, out var admissionRejectionReason))
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     admissionRejectionReason);
+                return true;
             }
         }
         else if (request.RouteCommitToken is null &&
@@ -8815,80 +9132,97 @@ internal static partial class FileTransferCoordinator
                  request.RuntimeUnlockAdmissionToken is { } optionalAdmissionToken &&
                  !IsRuntimeUnlockAdmissionTokenCurrent(state, optionalAdmissionToken, out var optionalAdmissionRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 optionalAdmissionRejectionReason);
+            return true;
         }
 
         if (RequiresRouteCommitToken(request.Kind))
         {
             if (request.RouteCommitToken is not { } routeCommitToken)
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     rejectionReason: "route_commit_token_missing");
+                return true;
             }
 
             if (!IsRouteCommitTokenCurrent(state, routeCommitToken, out var routeCommitRejectionReason))
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     routeCommitRejectionReason);
+                return true;
             }
         }
         else if (request.RouteCommitToken is { } optionalRouteCommitToken &&
                  !IsRouteCommitTokenCurrent(state, optionalRouteCommitToken, out var optionalRouteCommitRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 optionalRouteCommitRejectionReason);
+            return true;
         }
 
         if (request.RoutePublicationToken is { } routePublicationToken &&
             !IsRoutePublicationTokenCurrent(state, routePublicationToken, out var routePublicationRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 routePublicationRejectionReason);
+            return true;
         }
 
         if (!ValidateRuntimeUnlockCallbackMetadata(request, out var callbackRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 callbackRejectionReason);
+            return true;
         }
 
         if (!ValidateRuntimeUnlockPendingPreCommitProbeAction(state, request, out var pendingProbeRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 pendingProbeRejectionReason);
+            return true;
         }
 
         if (!ValidateRoutePublicationAction(state, request, out var publicationRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 publicationRejectionReason);
+            return true;
         }
+        return false;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryResolveFileTransferCoordinatorActionRecoveryDecision(
+        FileTransferCoordinatorState state,
+        in FileTransferCoordinatorActionRequest request,
+        out FileTransferCoordinatorActionDecision earlyDecision)
+    {
+        earlyDecision = default;
         if (request.Kind is
                 FileTransferCoordinatorActionKind.FallbackTailQuiescent or
                 FileTransferCoordinatorActionKind.FallbackTailFailed)
@@ -8910,12 +9244,13 @@ internal static partial class FileTransferCoordinator
                     request.FallbackTailYieldTransportEpochReauthorization,
                     out var existingYield))
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: true,
                     rejectionReason: "accepted",
                     fallbackTailYieldDecision: existingYield);
+                return true;
             }
 
             if (state.PersistentState.FallbackTailYield.CurrentOperation is
@@ -8933,53 +9268,58 @@ internal static partial class FileTransferCoordinator
                       currentOperation,
                       out _)))
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     rejectionReason:
                         "fallback_tail_yield_operation_conflict");
+                return true;
             }
 
             if (!TryCreateCurrentFallbackTailYieldScope(
                     state,
                     out _))
             {
-                return ActionDecision(
+                earlyDecision = ActionDecision(
                     state,
                     request.Kind,
                     accepted: false,
                     rejectionReason:
                         "fallback_tail_yield_execution_scope_incomplete");
+                return true;
             }
         }
 
         if (!ValidateFallbackOwnershipAction(state, request, out var fallbackRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 fallbackRejectionReason);
+            return true;
         }
 
         if (!ValidateRecoveryAuthorityAction(state, request, out var recoveryRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 recoveryRejectionReason);
+            return true;
         }
 
         if (HasRegularV4FrontierRepairPressureBinding(state) &&
             RequiresRegularV4FrontierRepairPressureRetirement(request.Kind))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 rejectionReason: "regular_v4_frontier_repair_pressure_retirement_required");
+            return true;
         }
 
         if (!ValidateRegularV4FrontierRepairPressureRepairReplayRequest(
@@ -8988,23 +9328,32 @@ internal static partial class FileTransferCoordinator
                 out var idempotentRepairReplayDecision,
                 out var pressureRepairReplayRejectionReason))
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: false,
                 pressureRepairReplayRejectionReason);
+            return true;
         }
 
         if (idempotentRepairReplayDecision is { } existingRepairReplayDecision)
         {
-            return ActionDecision(
+            earlyDecision = ActionDecision(
                 state,
                 request.Kind,
                 accepted: true,
                 rejectionReason: "accepted",
                 repairReplayDecision: existingRepairReplayDecision);
+            return true;
         }
+        return false;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorActionDecision IssueAndApplyFileTransferCoordinatorAction(
+        FileTransferCoordinatorState state,
+        in FileTransferCoordinatorActionRequest request)
+    {
         var issuedControlPlaneToken = request.Kind == FileTransferCoordinatorActionKind.ControlPlaneSend
             ? IssueFallbackControlPlaneToken(
                 state,
@@ -10669,8 +11018,17 @@ internal static partial class FileTransferCoordinator
         return InvalidateRecoveryAuthority(withoutFallbackAuthority);
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorState InvalidateRecoveryAuthority(
         FileTransferCoordinatorState state)
+    {
+        var recoveryState = InvalidateCurrentReceiveRecoveryOperation(ref state);
+        return ClearInvalidatedRecoveryAuthority(state, ref recoveryState);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoverySubstate InvalidateCurrentReceiveRecoveryOperation(
+        ref FileTransferCoordinatorState state)
     {
         var recoveryState =
             state.PersistentState.FileTransferReceiveRecovery;
@@ -10757,7 +11115,13 @@ internal static partial class FileTransferCoordinator
                     currentOperation.Authority,
                     invalidationReason);
         }
+        return recoveryState;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState ClearInvalidatedRecoveryAuthority(
+        FileTransferCoordinatorState state, ref FileTransferReceiveRecoverySubstate recoveryState)
+    {
         var fallbackCheckpoint =
             GetReceiveRecoveryFallbackCheckpointSubstate(recoveryState);
         if (fallbackCheckpoint.PendingFrontierRequestHold is not null ||
@@ -11312,6 +11676,7 @@ internal static partial class FileTransferCoordinator
             CurrentRoutePublicationToken = token,
             LastRoutePublicationGeneration = token.PublicationGeneration,
         };
+        next = AdvanceBootstrapSourceCallbackPublication(next, token);
         if (next.PersistentState.FallbackTailYield.CurrentOperation is
                 { } operation &&
             GetEffectiveFallbackTailYieldScope(operation).RoutePublication !=
@@ -15717,6 +16082,7 @@ internal static partial class FileTransferCoordinator
             nameof(CommitRegularV4FrontierRepairPressureRecoveryHandoff),
             new { transition, receipt });
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static RegularV4FrontierRepairPressureRecoveryHandoffDecision
         CommitRegularV4FrontierRepairPressureRecoveryHandoffCore(
             FileTransferCoordinatorState state,
@@ -15762,6 +16128,16 @@ internal static partial class FileTransferCoordinator
                 "regular_v4_frontier_repair_pressure_recovery_handoff_apply_receipt_mismatch");
         }
 
+        return CommitValidatedRegularV4FrontierRepairPressureRecoveryHandoff(state, transition, receipt);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        CommitValidatedRegularV4FrontierRepairPressureRecoveryHandoff(
+            FileTransferCoordinatorState state,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+    {
         var pressureCommit = CommitRegularV4FrontierRepairPressureSettlementCore(
             state,
             receipt);
@@ -15793,6 +16169,16 @@ internal static partial class FileTransferCoordinator
                     : operationCommit.Reason);
         }
 
+        return CompleteRegularV4FrontierRepairPressureRecoveryHandoff(operationCommit, transition, receipt);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RegularV4FrontierRepairPressureRecoveryHandoffDecision
+        CompleteRegularV4FrontierRepairPressureRecoveryHandoff(
+            FileTransferReceiveRecoveryDecision operationCommit,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt receipt)
+    {
         var committedState = operationCommit.State;
         var committedPressureState =
             committedState.PersistentState.RegularV4FrontierRepairPressure with
@@ -15932,11 +16318,47 @@ internal static partial class FileTransferCoordinator
         return true;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static bool TryValidateRegularV4FrontierRepairPressureRecoveryHandoffTransition(
         FileTransferCoordinatorState state,
         RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
         out string rejectionReason)
     {
+        if (!TryProjectValidatedRegularV4FrontierRepairPressureRecoveryHandoff(
+                state, transition, out var projectedState, out rejectionReason))
+        {
+            return false;
+        }
+
+        var observation = transition.ReceiveRecoveryOperation.Observation;
+        var projectedOperation = IssueReceiveRecoveryOperation(
+            projectedState,
+            observation,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            observation.CheckpointRequestId);
+        if (projectedOperation.Status !=
+                FileTransferReceiveRecoveryTransitionStatus.Accepted ||
+            projectedOperation.Authority != transition.ReceiveRecoveryOperation)
+        {
+            rejectionReason =
+                projectedOperation.Status ==
+                    FileTransferReceiveRecoveryTransitionStatus.Accepted
+                    ? "regular_v4_frontier_repair_pressure_recovery_handoff_operation_mismatch"
+                    : projectedOperation.Reason;
+            return false;
+        }
+
+        return true;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool TryProjectValidatedRegularV4FrontierRepairPressureRecoveryHandoff(
+        FileTransferCoordinatorState state,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+        out FileTransferCoordinatorState projectedState,
+        out string rejectionReason)
+    {
+        projectedState = state;
         rejectionReason = "accepted";
         var pressureState = state.PersistentState.RegularV4FrontierRepairPressure;
         if (state.IsTerminal)
@@ -16091,7 +16513,7 @@ internal static partial class FileTransferCoordinator
             InstalledInstallReceipt = null,
             LastSettlement = expectedSettlement,
         };
-        var projectedState = state with
+        projectedState = state with
         {
             CurrentRepairReplayDecision = null,
             PersistentState = state.PersistentState with
@@ -16099,23 +16521,6 @@ internal static partial class FileTransferCoordinator
                 RegularV4FrontierRepairPressure = projectedPressureState,
             },
         };
-        var projectedOperation = IssueReceiveRecoveryOperation(
-            projectedState,
-            observation,
-            BridgeRecoveryKind.BridgeReceiveStallRecovery,
-            observation.CheckpointRequestId);
-        if (projectedOperation.Status !=
-                FileTransferReceiveRecoveryTransitionStatus.Accepted ||
-            projectedOperation.Authority != transition.ReceiveRecoveryOperation)
-        {
-            rejectionReason =
-                projectedOperation.Status ==
-                    FileTransferReceiveRecoveryTransitionStatus.Accepted
-                    ? "regular_v4_frontier_repair_pressure_recovery_handoff_operation_mismatch"
-                    : projectedOperation.Reason;
-            return false;
-        }
-
         return true;
     }
 
@@ -17421,11 +17826,28 @@ internal static partial class FileTransferCoordinator
             ApplyRuntimeUnlockRetryLifecycle(state, nextLifecycle));
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferReceiveRecoveryDecision IssueReceiveRecoveryOperation(
         FileTransferCoordinatorState state,
         FileTransferReceiveRecoveryObservation observation,
         BridgeRecoveryKind recoveryKind,
         string? checkpointRequestId = null)
+    {
+        var decision = IssueReceiveRecoveryOperationCore(state, observation, recoveryKind, checkpointRequestId);
+        return FinalizeReceiveRecoverySnapshot(
+            state,
+            decision,
+            nameof(IssueReceiveRecoveryOperation),
+            observation,
+            decision.Authority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision IssueReceiveRecoveryOperationCore(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryObservation observation,
+        BridgeRecoveryKind recoveryKind,
+        string? checkpointRequestId)
     {
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,
@@ -17440,12 +17862,7 @@ internal static partial class FileTransferCoordinator
             {
                 State = nextState ?? state,
             };
-            return FinalizeReceiveRecoverySnapshot(
-                state,
-                decision,
-                nameof(IssueReceiveRecoveryOperation),
-                observation,
-                authority);
+            return decision;
         }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
@@ -17826,12 +18243,29 @@ internal static partial class FileTransferCoordinator
                 },
         };
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static
         RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
         EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold(
             FileTransferCoordinatorState state,
             RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request)
     {
+        var decision = EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHoldCore(
+            state, request, out var finalizeSnapshot);
+        return finalizeSnapshot
+            ? FinalizeReceiveRecoverySnapshot(
+                state, decision, nameof(EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold), request)
+            : decision;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
+        EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHoldCore(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockInitialActivationReceiveRecoveryHoldRequest request,
+            out bool finalizeSnapshot)
+    {
+        finalizeSnapshot = true;
         RuntimeUnlockInitialActivationReceiveRecoveryHoldCoordinatorDecision
             Decision(
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldStatus status,
@@ -17854,11 +18288,7 @@ internal static partial class FileTransferCoordinator
                 {
                     State = nextState ?? state,
                 };
-            return FinalizeReceiveRecoverySnapshot(
-                state,
-                decision,
-                nameof(EvaluateRuntimeUnlockInitialActivationReceiveRecoveryHold),
-                request);
+            return decision;
         }
 
         if (request.IsDefault)
@@ -17919,6 +18349,7 @@ internal static partial class FileTransferCoordinator
                         };
                     }
 
+                    finalizeSnapshot = false;
                     return new(exactDecision)
                     {
                         State = reconciliation.State,
@@ -18582,6 +19013,7 @@ internal static partial class FileTransferCoordinator
             : null;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (
         FileTransferCoordinatorState State,
         RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? Decision)
@@ -18599,6 +19031,21 @@ internal static partial class FileTransferCoordinator
             return (state, null);
         }
 
+        return ReconcileCurrentRuntimeUnlockInitialActivationHold(
+            state, recoveryState, activeHold, previousAuthority, reason);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (
+        FileTransferCoordinatorState State,
+        RuntimeUnlockInitialActivationReceiveRecoveryHoldDecision? Decision)
+        ReconcileCurrentRuntimeUnlockInitialActivationHold(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoverySubstate recoveryState,
+            RuntimeUnlockInitialActivationReceiveRecoveryHold activeHold,
+            FileTransferReceiveRecoveryOperationAuthority? previousAuthority,
+            string reason)
+    {
         var normalizedReason = NormalizeReason(reason);
         if (recoveryState.CurrentOperation is { } current &&
             current.Authority == activeHold.ReceiveRecoveryAuthority)
@@ -19722,11 +20169,32 @@ internal static partial class FileTransferCoordinator
             nameof(RecoveryLivenessLeaseState.Retired));
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferReceiveRecoveryDecision
         ObserveReceiveRecoveryExecutionStart(
             FileTransferCoordinatorState state,
             FileTransferBridgeRecoveryExecutionStartResult result,
             long observedUtcMs = 0)
+    {
+        var decision = ObserveReceiveRecoveryExecutionStartCore(state, result, observedUtcMs);
+        return FinalizeReceiveRecoverySnapshot(
+            state,
+            decision,
+            nameof(ObserveReceiveRecoveryExecutionStart),
+            new
+            {
+                result.Command,
+                result.Status,
+                result.Reason,
+            });
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision
+        ObserveReceiveRecoveryExecutionStartCore(
+            FileTransferCoordinatorState state,
+            FileTransferBridgeRecoveryExecutionStartResult result,
+            long observedUtcMs)
     {
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,
@@ -19743,16 +20211,7 @@ internal static partial class FileTransferCoordinator
             {
                 State = nextState ?? state,
             };
-            return FinalizeReceiveRecoverySnapshot(
-                state,
-                decision,
-                nameof(ObserveReceiveRecoveryExecutionStart),
-                new
-                {
-                    result.Command,
-                    result.Status,
-                    result.Reason,
-                });
+            return decision;
         }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
@@ -19871,11 +20330,28 @@ internal static partial class FileTransferCoordinator
             nextState);
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferReceiveRecoveryDecision
         ObserveReceiveRecoveryExecutionReceipt(
             FileTransferCoordinatorState state,
             FileTransferBridgeRecoveryExecutionReceipt receipt,
             long observedUtcMs = 0)
+    {
+        var decision = ObserveReceiveRecoveryExecutionReceiptCore(state, receipt, observedUtcMs);
+        return FinalizeReceiveRecoverySnapshot(
+            state,
+            decision,
+            nameof(ObserveReceiveRecoveryExecutionReceipt),
+            receipt,
+            decision.Authority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision
+        ObserveReceiveRecoveryExecutionReceiptCore(
+            FileTransferCoordinatorState state,
+            FileTransferBridgeRecoveryExecutionReceipt receipt,
+            long observedUtcMs)
     {
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,
@@ -19890,12 +20366,7 @@ internal static partial class FileTransferCoordinator
             {
                 State = nextState ?? state,
             };
-            return FinalizeReceiveRecoverySnapshot(
-                state,
-                decision,
-                nameof(ObserveReceiveRecoveryExecutionReceipt),
-                receipt,
-                authority);
+            return decision;
         }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
@@ -20813,8 +21284,24 @@ internal static partial class FileTransferCoordinator
         };
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferReceiveRecoveryDecision
         ObserveReceiveRecoveryProof(
+            FileTransferCoordinatorState state,
+            FileTransferReceiveRecoveryProof proof)
+    {
+        var decision = ObserveReceiveRecoveryProofCore(state, proof);
+        return FinalizeReceiveRecoverySnapshot(
+            state,
+            decision,
+            nameof(ObserveReceiveRecoveryProof),
+            proof,
+            proof.Authority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision
+        ObserveReceiveRecoveryProofCore(
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryProof proof)
     {
@@ -20830,12 +21317,7 @@ internal static partial class FileTransferCoordinator
             {
                 State = nextState ?? state,
             };
-            return FinalizeReceiveRecoverySnapshot(
-                state,
-                decision,
-                nameof(ObserveReceiveRecoveryProof),
-                proof,
-                proof.Authority);
+            return decision;
         }
 
         if (proof.IsDefault)
@@ -27010,10 +27492,19 @@ internal static partial class FileTransferCoordinator
             },
         };
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorState
         ApplyIssuedReceiveRecoveryOperation(
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryOperationAuthority authority)
+    {
+        var next = PrepareIssuedReceiveRecoveryOperationState(state, authority);
+        return StoreIssuedReceiveRecoveryOperation(next, authority);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState PrepareIssuedReceiveRecoveryOperationState(
+        FileTransferCoordinatorState state, FileTransferReceiveRecoveryOperationAuthority authority)
     {
         var next = state;
         var bridgeRecovery = authority.BridgeRecoveryDecision;
@@ -27067,6 +27558,13 @@ internal static partial class FileTransferCoordinator
                 RepairSettlementRelease = null,
             });
 
+        return next;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorState StoreIssuedReceiveRecoveryOperation(
+        FileTransferCoordinatorState next, FileTransferReceiveRecoveryOperationAuthority authority)
+    {
         var recoveryState =
             next.PersistentState.FileTransferReceiveRecovery;
         var livenessDeadlineUtcMs =

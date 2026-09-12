@@ -2280,7 +2280,7 @@ public sealed partial class NknSignalingTransport
             ? "regular_v4_control_feedback_pressure"
             : pressure.Reason.Trim();
 
-        if (client is not RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is not { } realClient)
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
@@ -2307,7 +2307,7 @@ public sealed partial class NknSignalingTransport
         var pressureReason = pressure.Reason;
         var authority = pressure.RepairAuthority;
 
-        if (client is not RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is not { } realClient)
         {
             const string decisionReason = "regular_v4_frontier_repair_pressure_install_unsupported";
             LocalOperationalLog.Info(
@@ -2328,7 +2328,7 @@ public sealed partial class NknSignalingTransport
         IFileTransferRegularV4FrontierRepairPressureInstallBridge.ApplyRegularV4FrontierRepairPressureSettlement(
             FileTransferRegularV4FrontierRepairPressureSettlementCommand command)
     {
-        if (client is RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is { } realClient)
         {
             return realClient.ApplyRegularV4FrontierRepairPressureSettlement(command);
         }
@@ -3057,7 +3057,7 @@ public sealed partial class NknSignalingTransport
             : settlement.SessionId.Trim();
         var transferId = string.IsNullOrWhiteSpace(settlement.TransferId) ? "(none)" : settlement.TransferId.Trim();
 
-        if (client is not RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is not { } realClient)
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
@@ -40685,6 +40685,7 @@ public sealed partial class NknSignalingTransport
     public async Task StopAccelerationAsync(string reason, CancellationToken ct)
     {
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : SanitizeLogToken(reason);
+        var bootstrapLocalStops = CaptureFallbackBootstrapLocalStopSources(normalizedReason);
         var shouldNotifyRemoteDown = TryCaptureAccelerationNegotiation(out var downSessionId, out var downLanes);
         if (!ResetAccelerationNegotiation(
                 normalizedReason,
@@ -40695,6 +40696,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        PublishFallbackBootstrapLocalStops(bootstrapLocalStops);
         if (shouldNotifyRemoteDown && IsUserRequestedAccelerationStopReason(normalizedReason))
         {
             MarkAccelerationUserStoppedForCurrentSession(downSessionId);

@@ -11,7 +11,7 @@ $definition = @($ast.FindAll({param($node) $node -is [Management.Automation.Lang
     $node.Name -ceq 'Get-TunaGuiFallbackFrontierStallGraceRecheckFailure'}, $true))
 if ($definition.Count -ne 1) { throw 'Expected actual GUI consumer' }
 Invoke-Expression $definition[0].Extent.Text
-$profile = 'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1'
+$profile = $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profile
 $captured = [IO.File]::ReadAllLines($InputPath)
 function Name([string]$Line) { Get-FileTransferCoordinatorSnapshotEventName $Line }

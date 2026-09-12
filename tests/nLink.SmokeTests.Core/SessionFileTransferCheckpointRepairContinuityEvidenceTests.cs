@@ -124,67 +124,10 @@ public sealed partial class SessionFileTransferV4SenderTests
             PublicationAuthority: FileTransferCoordinator.CreateRoutePublicationAuthority(initial.CurrentRoutePublicationToken, "accepted"),
             FallbackTransportEpoch: leg.TransportEpochId, FallbackBridgeRecoveryGeneration: leg.BridgeRecoveryGeneration));
 
-        const string checkpointRequest = "checkpoint-continuity:service:1";
-        object wake;
-        lock (GetServiceGate(service))
-        {
-            var requested = ApplyCheckpoint(FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
-                FileTransferLegState.CheckpointPending, false, checkpointRequest);
-            var requestedLease = Assert.IsType<FallbackCheckpointLease>(requested.State.CurrentFallbackCheckpointLease);
-            var now = DateTimeOffset.UtcNow;
-            Assert.False(Assert.IsType<bool>(serviceType.GetMethod("ShouldSendInboundV6FrontierRequestLocked",
-                BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [context, now, false, "chunk_batch_committed"])));
-            wake = GetPrivatePropertyValue(context, "CurrentV6FrontierStallGraceWake")!;
-            Assert.NotNull(wake);
-            var heldState = CreateCoordinatorStateForTest(context);
-            Assert.Equal(requestedLease.CheckpointRequestId, heldState.CurrentLeg!.CheckpointRequestId);
-            Assert.Equal(requestedLease, heldState.CurrentFallbackCheckpointLease);
-            var accepted = ApplyCheckpoint(FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
-                FileTransferLegState.RecoveryActive, true, requestedLease.CheckpointRequestId);
-            Assert.Equal(requested.State.PersistentState.SnapshotStateGeneration + 1,
-                accepted.State.PersistentState.SnapshotStateGeneration);
-            Assert.NotNull(accepted.State.PersistentState.CheckpointRepairContinuityOrigin);
-            Assert.Null(accepted.State.CurrentFallbackCheckpointLease);
-            if (delayedDisposition)
-            {
-                var beforeDisposition = CreateCoordinatorStateForTest(context);
-                var disposition = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(beforeDisposition,
-                    new(delayedCommand!.Value, FileTransferRouteTransitionDispositionApplyStatus.Applied,
-                        "filetransfer_route_transition_committed"));
-                Assert.True(disposition.Status == FileTransferRouteTransitionDecisionStatus.Committed, disposition.Reason);
-                FileTransferCheckpointResponderCoexistenceEvidenceTests.EnqueueIntoContext(context, disposition.SnapshotEnvelope!);
-                SetPrivateProperty(context, "CoordinatorPersistentState", disposition.State.PersistentState);
-                Assert.Same(beforeDisposition.PersistentState.CheckpointRepairContinuityOrigin,
-                    disposition.State.PersistentState.CheckpointRepairContinuityOrigin);
-                Assert.Equal(beforeDisposition.CurrentRuntimeOwner, disposition.State.CurrentRuntimeOwner);
-                Assert.Equal(beforeDisposition.CurrentRoutePublicationToken, disposition.State.CurrentRoutePublicationToken);
-                // This is the production event-specific logger. Its unprefixed
-                // activation data-session/checkpoint identities are legitimately absent.
-                serviceType.GetMethod("LogFileTransferRouteTransitionDecision", BindingFlags.Static | BindingFlags.NonPublic)!
-                    .Invoke(null, ["filetransfer_route_transition_disposition_applied", sessionId, transferId,
-                        FileTransferDirection.Inbound, delayedAuthority, "Applied", "filetransfer_route_transition_committed",
-                        0, 0, null, null, disposition.State.CurrentRoutePublicationToken, disposition.State.CurrentRouteCommit,
-                        null, 0]);
-            }
-        }
+        var wake = ApplyContinuityEvidenceCheckpointCycle(service, context, serviceType, delayedDisposition,
+            delayedCommand, delayedAuthority, sessionId, transferId, ApplyCheckpoint);
 
-        var frozenSource = GetPrivateProperty<CheckpointContinuitySourceStamp>(wake, "CheckpointContinuitySource");
-        var beforeWake = CreateCoordinatorStateForTest(context);
-        Assert.NotEqual(frozenSource.SourceScopeFingerprint,
-            FileTransferCoordinator.CreateCheckpointContinuitySourceStamp(beforeWake)!.SourceScopeFingerprint);
-        serviceType.GetMethod("SchedulePendingInboundV6FrontierStallGraceWake",
-            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context]);
-        await CoreSmokeTestsBase.WaitUntilAsync(() => ReadOperationalLogTail(logStart)
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Any(line =>
-                line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal) &&
-                line.Contains("decision_status=stale;", StringComparison.Ordinal)), TimeSpan.FromSeconds(3));
-        var afterWake = CreateCoordinatorStateForTest(context);
-        Assert.Equal(beforeWake.PersistentState, afterWake.PersistentState);
-        Assert.Equal(beforeWake.CurrentRuntimeOwner, afterWake.CurrentRuntimeOwner);
-        Assert.Equal(beforeWake.CurrentRoutePublicationToken, afterWake.CurrentRoutePublicationToken);
-        Assert.Equal(beforeWake.CurrentRepairReplayDecision, afterWake.CurrentRepairReplayDecision);
-        Assert.Equal(beforeWake.PersistentState.SnapshotStateGeneration, afterWake.PersistentState.SnapshotStateGeneration);
-        Assert.Equal(beforeWake.PersistentState.SnapshotStateFingerprint, afterWake.PersistentState.SnapshotStateFingerprint);
+        await AssertContinuityEvidenceStaleWakeAsync(context, wake, serviceType, service, logStart);
         Assert.Equal(0, delivery.SendCount);
         Assert.True(await Assert.IsAssignableFrom<Task<bool>>(serviceType.GetMethod("SendInboundV6FrontierRequestAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context, "chunk_batch_committed", false])));
@@ -304,5 +247,88 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.Contains(adopted.LegHistory, historyLeg => ReferenceEquals(historyLeg, adopted.CurrentLeg));
             return decision;
         }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static object ApplyContinuityEvidenceCheckpointCycle(SessionFileTransferService service, object context,
+        Type serviceType, bool delayedDisposition, FileTransferRouteTransitionDispositionCommand? delayedCommand,
+        FileTransferRouteTransitionAuthority? delayedAuthority, string sessionId, string transferId,
+        Func<FileTransferCoordinatorEventKind, FileTransferLegState, bool, string, FileTransferCoordinatorDecision> ApplyCheckpoint)
+    {
+        const string checkpointRequest = "checkpoint-continuity:service:1";
+        object wake;
+        lock (GetServiceGate(service))
+        {
+            var requested = ApplyCheckpoint(FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                FileTransferLegState.CheckpointPending, false, checkpointRequest);
+            var requestedLease = Assert.IsType<FallbackCheckpointLease>(requested.State.CurrentFallbackCheckpointLease);
+            var now = DateTimeOffset.UtcNow;
+            Assert.False(Assert.IsType<bool>(serviceType.GetMethod("ShouldSendInboundV6FrontierRequestLocked",
+                BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [context, now, false, "chunk_batch_committed"])));
+            wake = GetPrivatePropertyValue(context, "CurrentV6FrontierStallGraceWake")!;
+            Assert.NotNull(wake);
+            var heldState = CreateCoordinatorStateForTest(context);
+            Assert.Equal(requestedLease.CheckpointRequestId, heldState.CurrentLeg!.CheckpointRequestId);
+            Assert.Equal(requestedLease, heldState.CurrentFallbackCheckpointLease);
+            var accepted = ApplyCheckpoint(FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
+                FileTransferLegState.RecoveryActive, true, requestedLease.CheckpointRequestId);
+            Assert.Equal(requested.State.PersistentState.SnapshotStateGeneration + 1,
+                accepted.State.PersistentState.SnapshotStateGeneration);
+            Assert.NotNull(accepted.State.PersistentState.CheckpointRepairContinuityOrigin);
+            Assert.Null(accepted.State.CurrentFallbackCheckpointLease);
+            if (delayedDisposition)
+            {
+                ApplyContinuityEvidenceDelayedDisposition(context, delayedCommand, delayedAuthority, serviceType, sessionId, transferId);
+            }
+        }
+        return wake;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ApplyContinuityEvidenceDelayedDisposition(object context,
+        FileTransferRouteTransitionDispositionCommand? delayedCommand,
+        FileTransferRouteTransitionAuthority? delayedAuthority, Type serviceType, string sessionId, string transferId)
+    {
+        var beforeDisposition = CreateCoordinatorStateForTest(context);
+        var disposition = FileTransferCoordinator.ApplyFileTransferRouteTransitionDispositionReceipt(beforeDisposition,
+            new(delayedCommand!.Value, FileTransferRouteTransitionDispositionApplyStatus.Applied,
+                "filetransfer_route_transition_committed"));
+        Assert.True(disposition.Status == FileTransferRouteTransitionDecisionStatus.Committed, disposition.Reason);
+        FileTransferCheckpointResponderCoexistenceEvidenceTests.EnqueueIntoContext(context, disposition.SnapshotEnvelope!);
+        SetPrivateProperty(context, "CoordinatorPersistentState", disposition.State.PersistentState);
+        Assert.Same(beforeDisposition.PersistentState.CheckpointRepairContinuityOrigin,
+            disposition.State.PersistentState.CheckpointRepairContinuityOrigin);
+        Assert.Equal(beforeDisposition.CurrentRuntimeOwner, disposition.State.CurrentRuntimeOwner);
+        Assert.Equal(beforeDisposition.CurrentRoutePublicationToken, disposition.State.CurrentRoutePublicationToken);
+        // This is the production event-specific logger. Its unprefixed
+        // activation data-session/checkpoint identities are legitimately absent.
+        serviceType.GetMethod("LogFileTransferRouteTransitionDecision", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, ["filetransfer_route_transition_disposition_applied", sessionId, transferId,
+                FileTransferDirection.Inbound, delayedAuthority, "Applied", "filetransfer_route_transition_committed",
+                0, 0, null, null, disposition.State.CurrentRoutePublicationToken, disposition.State.CurrentRouteCommit,
+                null, 0]);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static async Task AssertContinuityEvidenceStaleWakeAsync(object context, object wake,
+        Type serviceType, SessionFileTransferService service, int logStart)
+    {
+        var frozenSource = GetPrivateProperty<CheckpointContinuitySourceStamp>(wake, "CheckpointContinuitySource");
+        var beforeWake = CreateCoordinatorStateForTest(context);
+        Assert.NotEqual(frozenSource.SourceScopeFingerprint,
+            FileTransferCoordinator.CreateCheckpointContinuitySourceStamp(beforeWake)!.SourceScopeFingerprint);
+        serviceType.GetMethod("SchedulePendingInboundV6FrontierStallGraceWake",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [context]);
+        await CoreSmokeTestsBase.WaitUntilAsync(() => ReadOperationalLogTail(logStart)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Any(line =>
+                line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal) &&
+                line.Contains("decision_status=stale;", StringComparison.Ordinal)), TimeSpan.FromSeconds(3));
+        var afterWake = CreateCoordinatorStateForTest(context);
+        Assert.Equal(beforeWake.PersistentState, afterWake.PersistentState);
+        Assert.Equal(beforeWake.CurrentRuntimeOwner, afterWake.CurrentRuntimeOwner);
+        Assert.Equal(beforeWake.CurrentRoutePublicationToken, afterWake.CurrentRoutePublicationToken);
+        Assert.Equal(beforeWake.CurrentRepairReplayDecision, afterWake.CurrentRepairReplayDecision);
+        Assert.Equal(beforeWake.PersistentState.SnapshotStateGeneration, afterWake.PersistentState.SnapshotStateGeneration);
+        Assert.Equal(beforeWake.PersistentState.SnapshotStateFingerprint, afterWake.PersistentState.SnapshotStateFingerprint);
     }
 }

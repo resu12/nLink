@@ -94,13 +94,15 @@ function Test-FileTransferCoordinatorReceiverBarrierCatalogCapability {
     return [string]$Catalog.Version -cin @(
         $script:FileTransferCoordinatorReceiverBarrierCatalogVersion,
         $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
-        $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion)
+        $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
+        $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion)
 }
 
 function Test-FileTransferCoordinatorCheckpointRepairContinuityCatalogCapability {
     param([string]$Version)
     return $Version -cin @($script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
-        $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion)
+        $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
+        $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion)
 }
 
 function Get-FileTransferCoordinatorCheckpointRepairContinuityCatalog {

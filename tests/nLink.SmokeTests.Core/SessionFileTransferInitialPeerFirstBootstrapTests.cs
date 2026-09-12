@@ -40,11 +40,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
         if (pendingWrite)
         {
-            Assert.NotNull(GetPrivatePropertyValue(context, "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
-            var held = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState");
-            Assert.Null(held.FileTransferRouteTransition.PendingFallbackV6ProofBootstrap);
-            Assert.Equal(0, held.FileTransferRouteTransition.LastFallbackV6ProofBootstrapGeneration);
-            Assert.Empty(dataSession.SentFrames.OfType<FileTransferTransportEpochFrameV6>());
+            AssertInitialPeerFirstBootstrapHeldForPendingWrite(context, dataSession);
             await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
         }
 
@@ -79,6 +75,31 @@ public sealed partial class SessionFileTransferV4SenderTests
                     RetainedFrameApplyReceipt.Status: FileTransferRouteTransitionRetainedFrameApplyStatus.Applied,
                 } && GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution") is null,
             timeoutMs: 5000);
+        var receipt = AssertInitialPeerFirstBootstrapCompleted(context, dataSession, frame);
+
+        await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
+        await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation with { ObservationGeneration = 12 });
+        AssertInitialPeerFirstBootstrapDuplicate(context, dataSession, receipt);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertInitialPeerFirstBootstrapHeldForPendingWrite(
+        object context,
+        InitialBootstrapRecordingDataSession dataSession)
+    {
+        Assert.NotNull(GetPrivatePropertyValue(context, "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
+        var held = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState");
+        Assert.Null(held.FileTransferRouteTransition.PendingFallbackV6ProofBootstrap);
+        Assert.Equal(0, held.FileTransferRouteTransition.LastFallbackV6ProofBootstrapGeneration);
+        Assert.Empty(dataSession.SentFrames.OfType<FileTransferTransportEpochFrameV6>());
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferFallbackV6ProofBootstrapReceipt AssertInitialPeerFirstBootstrapCompleted(
+        object context,
+        InitialBootstrapRecordingDataSession dataSession,
+        FileTransferFrontierRequestFrameV6 frame)
+    {
         var completed = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState");
         var receipt = Assert.IsType<FileTransferFallbackV6ProofBootstrapReceipt>(
             completed.FileTransferRouteTransition.LastFallbackV6ProofBootstrapReceipt);
@@ -108,9 +129,15 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackV6ProofBootstrapPendingWriteWake"));
         Assert.Null(GetPrivatePropertyValue(context, "PendingFallbackV6ProofBootstrapPeerFrameEvidence"));
         Assert.Null(GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution"));
+        return receipt;
+    }
 
-        await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
-        await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation with { ObservationGeneration = 12 });
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertInitialPeerFirstBootstrapDuplicate(
+        object context,
+        InitialBootstrapRecordingDataSession dataSession,
+        FileTransferFallbackV6ProofBootstrapReceipt receipt)
+    {
         var duplicate = GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState");
         Assert.Equal(receipt, duplicate.FileTransferRouteTransition.LastFallbackV6ProofBootstrapReceipt);
         Assert.Equal(1, duplicate.FileTransferRouteTransition.LastFallbackV6ProofBootstrapGeneration);
@@ -280,6 +307,15 @@ public sealed partial class SessionFileTransferV4SenderTests
         await ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge, evaluation);
         await WaitUntilAsync(() => GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution") is null, 5000);
         var completed = CreateCoordinatorStateForTest(context);
+        var (input, authority, terminal) = CreateInboundBootstrapCheckpointInput(source, completed, mutation);
+        AssertInboundBootstrapCheckpointCommit(source, input, authority, terminal, mutation);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState Input, FileTransferRouteTransitionAuthority Authority,
+        FileTransferRouteTransitionOperation Terminal) CreateInboundBootstrapCheckpointInput(
+            FileTransferCoordinatorState source, FileTransferCoordinatorState completed, string mutation)
+    {
         var terminal = completed.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
         var bootstrap = completed.PersistentState.FileTransferRouteTransition.LastFallbackV6ProofBootstrapReceipt!;
         var authority = terminal.Authority;
@@ -313,6 +349,14 @@ public sealed partial class SessionFileTransferV4SenderTests
                 },
             },
         };
+        return (input, authority, terminal);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertInboundBootstrapCheckpointCommit(FileTransferCoordinatorState source,
+        FileTransferCoordinatorState input, FileTransferRouteTransitionAuthority authority,
+        FileTransferRouteTransitionOperation terminal, string mutation)
+    {
         var valid = Assert.IsType<bool>(typeof(FileTransferCoordinator)
             .GetMethod("IsInboundFallbackBootstrapCheckpointBoundaryCurrent", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [input, authority]));
@@ -657,6 +701,13 @@ public sealed partial class SessionFileTransferV4SenderTests
         await Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod(
                 "RecheckInboundFileTransferRouteTransitionDrainAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, execution]));
+        AssertCommittedInitialInboundTunaForBootstrap(context);
+        return context;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCommittedInitialInboundTunaForBootstrap(object context)
+    {
         var state = CreateCoordinatorStateForTest(context);
         var terminal = Assert.IsType<FileTransferRouteTransitionOperation>(
             state.PersistentState.FileTransferRouteTransition.LastTerminalOperation);
@@ -671,7 +722,6 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Null(state.PersistentState.FileTransferRouteTransition.LastFallbackV6ProofBootstrapReceipt);
         Assert.Equal(0, state.PersistentState.FileTransferRouteTransition.LastFallbackV6ProofBootstrapGeneration);
         Assert.True(FileTransferCoordinator.IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(state, out var currentReason), currentReason);
-        return context;
     }
 
     internal static async Task<string> CreateInboundBootstrapCheckpointEvidenceFixtureAsync(bool receiverBarrier = false)
@@ -743,16 +793,18 @@ public sealed partial class SessionFileTransferV4SenderTests
             .Invoke(service, arguments)));
     }
 
-    private sealed class InitialBootstrapRecordingDataSession(string sessionId, string transferId) :
-        IFileTransferDataSession, IFileTransferDataSessionGenerationProvider
+    private class InitialBootstrapRecordingDataSession(string sessionId, string transferId) :
+        IFileTransferDataSession, IFileTransferDataSessionGenerationProvider, IFileTransferPhysicalSendSubmissionSession
     {
         private readonly RecordingDataSession recording = new(sessionId, transferId);
 
         public string SessionId => recording.SessionId;
         public string TransferId => recording.TransferId;
-        public long Generation => 7;
+        public long Generation { get; set; } = 7;
         public bool IsAvailable => true;
         public IReadOnlyList<FileTransferDataFrame> SentFrames => recording.SentFrames;
+        public Func<FileTransferDataFrame, CancellationToken, Task>? BeforeSendAsyncForTest { get; set; }
+        public Func<FileTransferDataFrame, CancellationToken, FileTransferPhysicalSendSubmission>? PhysicalSubmissionForTest { get; set; }
 
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
         {
@@ -766,8 +818,20 @@ public sealed partial class SessionFileTransferV4SenderTests
         public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
             => recording.ReceiveWithMetadataAsync(ct);
 
-        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
-            => recording.SendAsync(frame, ct);
+        public async Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
+        {
+            if (BeforeSendAsyncForTest is { } beforeSend) { await beforeSend(frame, ct); }
+            await recording.SendAsync(frame, ct);
+        }
+
+        public FileTransferPhysicalSendSubmission SubmitPhysicalSend(FileTransferDataFrame frame,
+            FileTransferDataPathSendAuthority? authority, CancellationToken ct)
+        {
+            if (PhysicalSubmissionForTest is { } submit) { return submit(frame, ct); }
+            // This recording fixture has exactly one physical task; it does not model NKN redundant copies.
+            var task = SendAsync(frame, ct);
+            return new(task, task);
+        }
 
         public void Dispose() => recording.Dispose();
     }

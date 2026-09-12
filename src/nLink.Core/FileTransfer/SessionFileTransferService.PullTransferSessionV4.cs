@@ -28,6 +28,7 @@ public sealed partial class SessionFileTransferService
 
     internal static Func<string, string, Task>? OutboundSparseTailReconciliationQueueBarrierForTests { get; set; }
     internal static Func<string, string, Task>? OutboundSparseFailureDeferralBarrierForTests { get; set; }
+    internal static Func<string, long, Task>? BootstrapSourceSendFailureBeforeThrowForTests { get; set; }
     internal static Func<string, string, Task>? OutboundSparseStateRefreshPreSendBarrierForTests { get; set; }
     internal static Func<string, string, string, Task>? OutboundSparseBootstrapBarrierForTests { get; set; }
     internal static Func<string, string, string, Task>? OutboundSparseRepairContinuationBarrierForTests { get; set; }
@@ -1041,6 +1042,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!IsBootstrapSourceCallbackInstallAllowedLocked(context))
+        {
+            rejectionReason = "bootstrap_source_callback_successor_required";
+            return false;
+        }
+
         if (!SupportsOutboundSparsePumpInstall(context) ||
             context.DataSession is null ||
             context.DataSessionGeneration <= 0 ||
@@ -1119,6 +1126,13 @@ public sealed partial class SessionFileTransferService
     {
         installed = null;
         rejectionReason = "accepted";
+        if (!IsBootstrapSourceCallbackInstallAllowedLocked(context))
+        {
+            rejectionReason = "bootstrap_source_callback_successor_required";
+            LogOutboundSparsePumpInstallRejected(context, pendingInstall, "commit", rejectionReason);
+            return false;
+        }
+
         if (context.InstalledOutboundSparsePump == pendingInstall)
         {
             if (!IsOutboundSparsePumpInstallCurrentLocked(
@@ -1411,7 +1425,18 @@ public sealed partial class SessionFileTransferService
                     await sourceReopenBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
                 }
 
-                pumpStream = await context.OpenReadStreamAsync(installCancellationToken).ConfigureAwait(false);
+                Task<Stream> sourceOpen;
+                lock (gate)
+                {
+                    if (!IsBootstrapSourceCallbackInstallAllowedLocked(context))
+                    {
+                        LogOutboundSparsePumpInstallRejected(context, pending, "source_open",
+                            "bootstrap_source_callback_successor_required");
+                        return null;
+                    }
+                    sourceOpen = context.OpenReadStreamAsync(installCancellationToken);
+                }
+                pumpStream = await sourceOpen.ConfigureAwait(false);
                 openedReplacementStream = true;
                 ValidateReadableStream(pumpStream);
                 if (reopenSource && !pumpStream.CanSeek && chunksAcceptedForTransport > 0)
@@ -1544,19 +1569,31 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private static async Task DisposeRetiredOutboundSparsePumpAsync(
+    private async Task ObserveRetiredOutboundSparsePumpAsync(OutboundTransferContext context, Task pumpTask)
+    {
+        try
+        {
+            await pumpTask.ConfigureAwait(false);
+        }
+        catch (OutboundBootstrapSourceCallbackException failure)
+        {
+            lock (gate) { RetireBootstrapSourceCallbackLocked(context, failure.Callback); }
+        }
+        catch
+        {
+            // A retired pump may only complete diagnostic cleanup, never affect its successor.
+        }
+    }
+
+    private async Task DisposeRetiredOutboundSparsePumpAsync(
+        OutboundTransferContext context,
         Task pumpTask,
         Stream pumpStream,
         CancellationTokenSource pumpCancellation)
     {
         try
         {
-            await pumpTask.ConfigureAwait(false);
-        }
-        catch
-        {
-            // A retired descriptor is diagnostic-only. Its exact failure is handled by the
-            // supervisor that observed the authority handoff; never let it mutate new state.
+            await ObserveRetiredOutboundSparsePumpAsync(context, pumpTask).ConfigureAwait(false);
         }
         finally
         {
@@ -1617,6 +1654,7 @@ public sealed partial class SessionFileTransferService
             }
 
             await DisposeRetiredOutboundSparsePumpAsync(
+                    context,
                     runtime.PumpTask,
                     runtime.Stream,
                     runtime.Cancellation)
@@ -2607,16 +2645,18 @@ public sealed partial class SessionFileTransferService
                 {
                     if (previousTask is not null &&
                         previousCancellation is not null &&
-                        previousTaskStillRunning &&
                         !previousPumpAlreadyObserved)
                     {
                         _ = DisposeRetiredOutboundSparsePumpAsync(
+                            context,
                             previousTask,
                             previousStream,
                             previousCancellation);
                     }
                     else
                     {
+                        if (previousTask is not null && !previousPumpAlreadyObserved)
+                        { await ObserveRetiredOutboundSparsePumpAsync(context, previousTask).ConfigureAwait(false); }
                         await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(previousStream).ConfigureAwait(false);
                         try
                         {
@@ -2630,6 +2670,8 @@ public sealed partial class SessionFileTransferService
                 else if (previousCancellation is not null &&
                          !ReferenceEquals(previousCancellation, replacement?.Cancellation))
                 {
+                    if (previousTask is not null && !previousPumpAlreadyObserved)
+                    { await ObserveRetiredOutboundSparsePumpAsync(context, previousTask).ConfigureAwait(false); }
                     try
                     {
                         previousCancellation.Dispose();
@@ -2659,15 +2701,21 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
-                pendingPumpInstallCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                    context.LifetimeCts.Token);
-                pendingPumpInstallTask = InstallCurrentPumpAsync(
-                    reason,
-                    reopenSource,
-                    previousPumpAlreadyObserved,
-                    pendingPumpInstallCancellation.Token);
                 lock (gate)
                 {
+                    if (!IsBootstrapSourceCallbackInstallAllowedLocked(context))
+                    {
+                        LogOutboundSparsePumpInstallRejected(context, senderPumpInstall, reason,
+                            "bootstrap_source_callback_successor_required");
+                        return;
+                    }
+                    pendingPumpInstallCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                        context.LifetimeCts.Token);
+                    pendingPumpInstallTask = InstallCurrentPumpAsync(
+                        reason,
+                        reopenSource,
+                        previousPumpAlreadyObserved,
+                        pendingPumpInstallCancellation.Token);
                     pendingPumpInstallDescriptor = context.PendingOutboundSparsePumpInstall;
                 }
             }
@@ -2843,9 +2891,9 @@ public sealed partial class SessionFileTransferService
             {
                 try
                 {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
                 IFileTransferDataSession? currentDataSession;
                 var pumpInstallCurrent = false;
+                var callbackInstallAllowed = false;
                 var pendingInstallInvalidated = false;
                 var pendingReceiveInvalidated = false;
                 var pendingReceiveRejectionReason = "receive_install_replaced";
@@ -2859,7 +2907,9 @@ public sealed partial class SessionFileTransferService
                         return;
                     }
 
+                    context.LifetimeCts.Token.ThrowIfCancellationRequested();
                     currentDataSession = context.DataSession;
+                    callbackInstallAllowed = IsBootstrapSourceCallbackInstallAllowedLocked(context);
                     pumpInstallCurrent = senderPumpInstall is not null &&
                         IsOutboundSparsePumpInstallCurrentLocked(
                             context,
@@ -2934,7 +2984,8 @@ public sealed partial class SessionFileTransferService
                     pumpInstallCurrent = false;
                 }
 
-                if (senderPumpTask is not null && !pumpInstallCurrent)
+                if (senderPumpTask is not null && !pumpInstallCurrent && callbackInstallAllowed &&
+                    senderPumpTask.Exception?.InnerException is not OutboundBootstrapSourceCallbackException)
                 {
                     StartCurrentPumpInstall(
                         "coordinator_authority_handoff",
@@ -2949,6 +3000,7 @@ public sealed partial class SessionFileTransferService
                     {
                         installRequired = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
+                            IsBootstrapSourceCallbackInstallAllowedLocked(context) &&
                             (senderPumpInstall is null ||
                              !IsOutboundSparsePumpInstallCurrentLocked(
                                  context,
@@ -3027,6 +3079,22 @@ public sealed partial class SessionFileTransferService
                     {
                         receiveSupervisorStopReason = "lifetime_cancelled";
                         return;
+                    }
+
+                    if (pumpFailure is OutboundBootstrapSourceCallbackException sourceCallbackFailure)
+                    {
+                        var terminalized = await CompleteBootstrapSourceCallbackFailureAsync(context, dataSession,
+                            senderPumpInstall, sourceCallbackFailure).ConfigureAwait(false);
+                        if (terminalized) { receiveSupervisorStopReason = "current_source_callback_failed"; return; }
+                        lock (gate)
+                        {
+                            if (!IsBootstrapSourceCallbackRetiredLocked(CreateCoordinatorStateLocked(context), sourceCallbackFailure.Callback))
+                            { context.BootstrapCallbackAwaitingSuccessor = sourceCallbackFailure.Callback.Authority.Source; }
+                        }
+                        senderPumpTask = null;
+                        senderPumpCancellation?.Dispose();
+                        senderPumpCancellation = null;
+                        continue;
                     }
 
                     var completedInstall = senderPumpInstall;
@@ -4050,6 +4118,7 @@ public sealed partial class SessionFileTransferService
                 senderPumpCancellation is not null)
             {
                 _ = DisposeRetiredOutboundSparsePumpAsync(
+                    context,
                     senderPumpTask,
                     senderPumpStream,
                     senderPumpCancellation);
@@ -10792,7 +10861,11 @@ public sealed partial class SessionFileTransferService
                         context,
                         out var receiveRecoveryOperation,
                         out var receiveRecoveryHoldReason);
-                if (ShouldCompleteOutboundV4FromTerminalReadyStateLocked(context))
+                if (HasBootstrapSourceHoldLocked(context))
+                {
+                    waitForSignal = context.ResetAndGetSparseSenderPumpSignalTask();
+                }
+                else if (ShouldCompleteOutboundV4FromTerminalReadyStateLocked(context))
                 {
                     completeFromTerminalReady = true;
                     MaybeLogOutboundV4SenderPumpSummaryLocked(context, DateTimeOffset.UtcNow, force: true);
@@ -11791,6 +11864,11 @@ public sealed partial class SessionFileTransferService
                             dataSession);
                         if (idleContinuationCurrent)
                         {
+                            if (HasBootstrapSourceHoldLocked(context))
+                            {
+                                continue;
+                            }
+
                             if (TryGetOutboundReceiveRecoveryPayloadSubmissionHoldLocked(
                                     context,
                                     out var heldOperation,
@@ -13333,6 +13411,10 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession? fallbackCheckpointReissueDataSession = null;
         lock (gate)
         {
+            if (HasBootstrapSourceHoldLocked(context))
+            {
+                return new RetainedPeerProofApplicationResult(RetainedPeerProofApplicationStatus.Held, "bootstrap_source_hold_applied");
+            }
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
                 (receiveDataSession is not null &&
@@ -16972,12 +17054,12 @@ public sealed partial class SessionFileTransferService
         }
 
         bool IsPumpInstallCurrentLocked()
-            => pumpInstall is null ||
+            => !HasBootstrapSourceHoldLocked(context) && (pumpInstall is null ||
                IsOutboundSparsePumpInstallCurrentLocked(
                    context,
                    pumpInstall,
                    dataSession,
-                   out _);
+                   out _));
 
         bool IsRegularV4FrontierRepairSubmissionCurrentLocked(out string rejectionReason)
         {
@@ -17106,9 +17188,9 @@ public sealed partial class SessionFileTransferService
             (regularV4ScheduledDispatch?.RepairReplayKind == RepairReplayKind.PeerSilenceReplay ||
              string.Equals(repairDeliveryReason, "regular_v4_peer_silence_safety_replay", StringComparison.Ordinal));
         var buffer = ArrayPool<byte>.Shared.Rent(context.ChunkSizeBytes);
+        var pending = new Queue<PendingV4TransportSend>();
         try
         {
-            var pending = new Queue<PendingV4TransportSend>();
             long pendingRawBytes = 0;
             var stopForTransportPause = false;
             var stopForLiveRouteChange = false;
@@ -17155,12 +17237,15 @@ public sealed partial class SessionFileTransferService
                 }
 
                 var abandonedFrameCount = 0;
+                var hasBootstrapCallbacks = false;
                 long abandonedBytes = 0;
                 while (pending.Count > 0)
                 {
                     var abandoned = pending.Dequeue();
                     abandonedFrameCount++;
                     abandonedBytes += abandoned.Prepared.RawBytes;
+                    hasBootstrapCallbacks |= abandoned.BootstrapCallback is not null;
+                    lock (gate) { RetireBootstrapSourceCallbackLocked(context, abandoned.BootstrapCallback); }
                     abandoned.SendCts?.Cancel();
                     _ = ObserveAbandonedOutboundV4TransportSendAsync(
                         abandoned.SendTask,
@@ -17174,7 +17259,7 @@ public sealed partial class SessionFileTransferService
                 pendingRawBytes = 0;
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context))
+                    if (!hasBootstrapCallbacks && ReferenceEquals(outboundTransfer, context))
                     {
                         context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - abandonedFrameCount);
                         context.PullSenderPipelineCurrentInFlightBytes = Math.Max(0, context.PullSenderPipelineCurrentInFlightBytes - abandonedBytes);
@@ -17194,12 +17279,15 @@ public sealed partial class SessionFileTransferService
                 }
 
                 var abandonedFrameCount = 0;
+                var hasBootstrapCallbacks = false;
                 long abandonedBytes = 0;
                 while (pending.Count > 0)
                 {
                     var abandoned = pending.Dequeue();
                     abandonedFrameCount++;
                     abandonedBytes += abandoned.Prepared.RawBytes;
+                    hasBootstrapCallbacks |= abandoned.BootstrapCallback is not null;
+                    lock (gate) { RetireBootstrapSourceCallbackLocked(context, abandoned.BootstrapCallback); }
                     abandoned.SendCts?.Cancel();
                     _ = ObserveAbandonedOutboundV4TransportSendAsync(
                         abandoned.SendTask,
@@ -17213,7 +17301,7 @@ public sealed partial class SessionFileTransferService
                 pendingRawBytes = 0;
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context))
+                    if (!hasBootstrapCallbacks && ReferenceEquals(outboundTransfer, context))
                     {
                         context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - abandonedFrameCount);
                         context.PullSenderPipelineCurrentInFlightBytes = Math.Max(0, context.PullSenderPipelineCurrentInFlightBytes - abandonedBytes);
@@ -17228,6 +17316,24 @@ public sealed partial class SessionFileTransferService
             async Task RetireNextAsync()
             {
                 var pendingSend = pending.Dequeue();
+                var transferredToSupervisor = false;
+                try { await RetireSendAsync(pendingSend).ConfigureAwait(false); }
+                catch (OutboundBootstrapSourceCallbackException)
+                {
+                    transferredToSupervisor = true;
+                    throw;
+                }
+                finally
+                {
+                    if (!transferredToSupervisor)
+                    {
+                        lock (gate) { RetireBootstrapSourceCallbackLocked(context, pendingSend.BootstrapCallback); }
+                    }
+                }
+            }
+
+            async Task RetireSendAsync(PendingV4TransportSend pendingSend)
+            {
                 pendingRawBytes = Math.Max(0, pendingRawBytes - pendingSend.Prepared.RawBytes);
                 Exception? sendException = null;
                 var timedOutForBoundTransport = false;
@@ -17238,6 +17344,7 @@ public sealed partial class SessionFileTransferService
                 var abandonedForLiveRouteChange = false;
                 lock (gate)
                 {
+                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                     var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
                     if (ReferenceEquals(outboundTransfer, context) &&
                         !context.IsTerminal &&
@@ -17255,6 +17362,7 @@ public sealed partial class SessionFileTransferService
                     pendingSend.SendCts?.Cancel();
                     lock (gate)
                     {
+                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                         if (ReferenceEquals(outboundTransfer, context))
                         {
                             context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
@@ -17313,6 +17421,7 @@ public sealed partial class SessionFileTransferService
 
                             lock (gate)
                             {
+                                EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                 var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
                                 if (ReferenceEquals(outboundTransfer, context) &&
                                     !context.IsTerminal &&
@@ -17340,6 +17449,7 @@ public sealed partial class SessionFileTransferService
                                 pendingSend.SendCts?.Cancel();
                                 lock (gate)
                                 {
+                                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                     if (ReferenceEquals(outboundTransfer, context))
                                     {
                                         context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
@@ -17366,6 +17476,7 @@ public sealed partial class SessionFileTransferService
                                 pendingSend.SendCts?.Cancel();
                                 lock (gate)
                                 {
+                                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                     if (ReferenceEquals(outboundTransfer, context))
                                     {
                                         context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
@@ -17408,6 +17519,7 @@ public sealed partial class SessionFileTransferService
 
                                 lock (gate)
                                 {
+                                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                     var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
                                     if (ReferenceEquals(outboundTransfer, context) &&
                                         !context.IsTerminal &&
@@ -17425,6 +17537,7 @@ public sealed partial class SessionFileTransferService
                                     pendingSend.SendCts?.Cancel();
                                     lock (gate)
                                     {
+                                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                         if (ReferenceEquals(outboundTransfer, context))
                                         {
                                             context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
@@ -17463,6 +17576,7 @@ public sealed partial class SessionFileTransferService
 
                                 lock (gate)
                                 {
+                                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                     var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
                                     if (ReferenceEquals(outboundTransfer, context) &&
                                         !context.IsTerminal &&
@@ -17490,6 +17604,7 @@ public sealed partial class SessionFileTransferService
                                     pendingSend.SendCts?.Cancel();
                                     lock (gate)
                                     {
+                                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                         if (ReferenceEquals(outboundTransfer, context))
                                         {
                                             context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
@@ -17516,6 +17631,7 @@ public sealed partial class SessionFileTransferService
                                     pendingSend.SendCts?.Cancel();
                                     lock (gate)
                                     {
+                                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                         if (ReferenceEquals(outboundTransfer, context))
                                         {
                                             context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
@@ -17553,6 +17669,7 @@ public sealed partial class SessionFileTransferService
                 var pumpCompletionCurrent = false;
                 lock (gate)
                 {
+                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                     pumpCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
                         !context.IsTerminal &&
                         IsPumpInstallCurrentLocked();
@@ -17585,6 +17702,7 @@ public sealed partial class SessionFileTransferService
 
                 lock (gate)
                 {
+                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                     pumpCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
                         !context.IsTerminal &&
                         IsPumpInstallCurrentLocked();
@@ -17617,6 +17735,7 @@ public sealed partial class SessionFileTransferService
                     var fallbackCompletionRejectionReason = "legacy_sparse_callback_for_stale_context";
                     lock (gate)
                     {
+                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                         pumpAuthorityCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
                             IsPumpInstallCurrentLocked();
@@ -17675,6 +17794,7 @@ public sealed partial class SessionFileTransferService
                             $"event=filetransfer_v4_repair_transport_callback_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(fallbackFrontierRepairContract.Authority.AuthorityId.ToString())}; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={FormatProtocolLogValue(fallbackFrontierRepairContract.Authority.CanonicalRepairKey)}; start_chunk_index={pendingSend.Prepared.StartChunkIndex}; batch_chunk_count={pendingSend.Prepared.ChunkCount}; timed_out={(timedOutForBoundTransport ? 1 : 0)}; decision_reason={FormatProtocolLogValue(fallbackCompletionRejectionReason)}");
                         return;
                     }
+
                 }
 
                 if (regularV4FrontierRepairContract is not null)
@@ -17684,6 +17804,7 @@ public sealed partial class SessionFileTransferService
                     var regularCompletionRejectionReason = "legacy_sparse_callback_for_stale_context";
                     lock (gate)
                     {
+                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                         var pumpAuthorityCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
                             IsPumpInstallCurrentLocked();
@@ -17762,6 +17883,7 @@ public sealed partial class SessionFileTransferService
                     var timeoutHeldForReceiveRecovery = false;
                     lock (gate)
                     {
+                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                         timeoutCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
                             IsPumpInstallCurrentLocked();
@@ -17883,6 +18005,7 @@ public sealed partial class SessionFileTransferService
                 var sendStatisticsRegularContractRejected = false;
                 lock (gate)
                 {
+                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                     sendStatisticsCurrent = ReferenceEquals(outboundTransfer, context) &&
                         !context.IsTerminal &&
                         IsPumpInstallCurrentLocked();
@@ -17936,7 +18059,7 @@ public sealed partial class SessionFileTransferService
 
                 if (sendException is not null)
                 {
-                    if (TryDeferCurrentPostTunaFallbackRecoverySubmissionFailure(
+                    if (pendingSend.BootstrapCallback is null && TryDeferCurrentPostTunaFallbackRecoverySubmissionFailure(
                             context,
                             sendException,
                             pumpInstall,
@@ -17953,6 +18076,7 @@ public sealed partial class SessionFileTransferService
                         {
                             lock (gate)
                             {
+                                EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                                 if (ReferenceEquals(outboundTransfer, context) &&
                                     !context.IsTerminal &&
                                     FileTransferCoordinator.TryGetReceiveRecoveryPayloadSubmissionHold(
@@ -17992,6 +18116,7 @@ public sealed partial class SessionFileTransferService
                     var errorRegularContractRejected = false;
                     lock (gate)
                     {
+                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                         errorCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
                             IsPumpInstallCurrentLocked();
@@ -18089,6 +18214,12 @@ public sealed partial class SessionFileTransferService
                         throw new OperationCanceledException(context.LifetimeCts.Token);
                     }
 
+                    if (BootstrapSourceSendFailureBeforeThrowForTests is { } sourceFailureBarrier)
+                    {
+                        await sourceFailureBarrier(context.TransferId, pendingSend.PhysicalSendLeaseGeneration).ConfigureAwait(false);
+                    }
+                    if (pendingSend.BootstrapCallback is { } callback)
+                    { throw new OutboundBootstrapSourceCallbackException(callback, sendException); }
                     throw new InvalidOperationException("File-transfer V4 sender transport send failed.", sendException);
                 }
 
@@ -18099,6 +18230,7 @@ public sealed partial class SessionFileTransferService
                     var fallbackCompletionRejectionReason = "legacy_sparse_send_completed_for_stale_context";
                     lock (gate)
                     {
+                        EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                         pumpAuthorityCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
                             IsPumpInstallCurrentLocked();
@@ -18150,6 +18282,7 @@ public sealed partial class SessionFileTransferService
                 var progressRegularContractRejected = false;
                 lock (gate)
                 {
+                    EnsureBootstrapSourceCallbackCurrentLocked(context, pendingSend.BootstrapCallback);
                     progressCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
                         !context.IsTerminal &&
                         IsPumpInstallCurrentLocked();
@@ -18215,6 +18348,7 @@ public sealed partial class SessionFileTransferService
                         }
 
                         MaybeLogOutboundV4SenderPumpSummaryLocked(context, sentUtc, force: false);
+                        RetireBootstrapSourceCallbackLocked(context, pendingSend.BootstrapCallback, "progress");
                     }
                 }
 
@@ -18513,7 +18647,8 @@ public sealed partial class SessionFileTransferService
                     sendAttemptCount,
                     scheduledRegularNknV4FastRuntime,
                     physicalSendLease?.LeaseGeneration ?? 0,
-                    physicalSendObservationTask));
+                    physicalSendObservationTask,
+                    physicalSendLease?.BootstrapCallback));
                 pendingRawBytes += prepared.RawBytes;
 
                 lock (gate)
@@ -18777,6 +18912,14 @@ public sealed partial class SessionFileTransferService
         }
         finally
         {
+            while (pending.TryDequeue(out var abandoned))
+            {
+                if (abandoned.BootstrapCallback is null) { continue; }
+                lock (gate) { RetireBootstrapSourceCallbackLocked(context, abandoned.BootstrapCallback); }
+                abandoned.SendCts?.Cancel();
+                _ = ObserveAbandonedOutboundV4TransportSendAsync(abandoned.SendTask, abandoned.SendCts,
+                    context.TransferId, context.SessionId, abandoned.Prepared.StartChunkIndex, abandoned.Prepared.ChunkCount);
+            }
             Array.Clear(buffer, 0, buffer.Length);
             ArrayPool<byte>.Shared.Return(buffer);
         }
@@ -19442,6 +19585,11 @@ public sealed partial class SessionFileTransferService
     {
         lease = null;
         rejectionReason = null;
+        if (HasBootstrapSourceHoldLocked(context))
+        {
+            rejectionReason = "bootstrap_source_hold_applied";
+            return false;
+        }
         if (!TryResolveOutboundPhysicalSendKindLocked(
                 context,
                 repairSend,
@@ -19512,6 +19660,17 @@ public sealed partial class SessionFileTransferService
             chunkCount,
             sendKind,
             repairRequestKey);
+        if (context.RouteRuntime.UsesFileTunaV4Runtime && UsesBootstrapCorrelation(coordinatorState))
+        {
+            var callbackAuthority = FileTransferCoordinator.IssueFallbackBootstrapSourceCallback(coordinatorState, leaseGeneration,
+                (dataSession as IFileTransferDataSessionGenerationProvider)?.Generation ?? 0,
+                context.PullTransportPaused, context.PullTransportPausedSinceUtc?.UtcTicks ?? 0);
+            if (callbackAuthority is null) { lease = null; rejectionReason = "bootstrap_source_callback_unbound"; return false; }
+            var callback = new OutboundBootstrapSourceCallback(callbackAuthority, dataSession);
+            context.ActiveBootstrapSourceCallbacks.Add(leaseGeneration, callback);
+            lease = lease with { BootstrapCallback = callback };
+            RecordBootstrapSourceCallbackLocked(context, callback, "Admitted", "none");
+        }
         context.ActiveOutboundPhysicalSendLeases[leaseGeneration] = lease;
         context.OutboundPhysicalSendRegisteredCount++;
         LogOutboundPhysicalSendLeaseRegistration(
@@ -20656,7 +20815,7 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v4_efficiency_summary; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; terminal_state={terminalState.ToString().ToLowerInvariant()}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; file_size_bytes={fileSizeBytes}; bytes_transferred={context.BytesTransferred}; sparse_bytes_written={context.ReceiverSparseBytesWritten}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; raw_batch_bytes_received_total={context.PullReceiverRawBatchBytesTotal}; raw_batch_frames_received_total={context.PullReceiverRawBatchFramesTotal}; accepted_raw_bytes_received_total={context.PullReceiverAcceptedRawBytesTotal}; duplicate_or_stale_raw_bytes_received_total={context.PullReceiverDuplicateOrStaleRawBytesTotal}; raw_to_file_permille={rawToFilePermille}; accepted_to_file_permille={acceptedToFilePermille}; duplicate_or_stale_to_raw_permille={duplicateToRawPermille}; accepted_to_raw_permille={acceptedToRawPermille}; chunk_count_received_total={context.PullReceiverChunkCountTotal}; accepted_chunk_count_total={context.PullReceiverAcceptedChunkCountTotal}; duplicate_or_stale_chunk_count_total={context.PullReceiverDuplicateOrStaleChunkCountTotal}; repair_overlap_chunk_count_total={context.PullReceiverRepairOverlapChunkCountTotal}; repair_accepted_chunk_count_total={context.PullReceiverRepairAcceptedChunkCountTotal}; repair_duplicate_or_stale_chunk_count_total={context.PullReceiverRepairDuplicateOrStaleChunkCountTotal}; repair_duplicate_or_stale_raw_bytes_total={context.PullReceiverRepairDuplicateOrStaleRawBytesTotal}; sparse_write_batch_count_total={context.PullReceiverSparseWriteBatchCountTotal}; sparse_write_duration_ms_total={context.PullReceiverSparseWriteDurationMsTotal}; receiver_state_sent_total={context.PullV4StateSentCountTotal}; repair_request_count_total={context.PullV4RepairRequestCountTotal}; repair_requested_chunk_count_total={context.PullV4RepairRequestedChunkCountTotal}; repair_suppressed_count_total={context.PullV4RepairSuppressedCountTotal}; frontier_tail_repair_request_count_total={context.PullV4FrontierTailRepairRequestCountTotal}; frontier_stall_suppressed_count_total={context.V4FrontierStallSuppressedCountTotal}; pending_repair_request_count={context.V4ReceiverRepairRequests.Count}; pending_write_chunk_count={context.ReceiverSparseChunksPendingWrite.Count}; pending_bytes={context.BufferedBytes}");
     }
 
-    private async Task<bool> FailOutboundV4Async(
+    private Task<bool> FailOutboundV4Async(
         OutboundTransferContext context,
         IFileTransferDataSession? dataSession,
         RuntimeOwnerToken? runtimeOwner,
@@ -20664,9 +20823,19 @@ public sealed partial class SessionFileTransferService
         string statusMessage,
         bool notifyPeer,
         OutboundSparsePumpInstall? requiredSparsePumpInstall = null)
+        => FailOwnedOutboundV4Async(context, dataSession, runtimeOwner, errorCode, statusMessage, notifyPeer,
+            requiredSparsePumpInstall, null);
+
+    private async Task<bool> FailOwnedOutboundV4Async(
+        OutboundTransferContext context, IFileTransferDataSession? dataSession, RuntimeOwnerToken? runtimeOwner,
+        string errorCode, string statusMessage, bool notifyPeer, OutboundSparsePumpInstall? requiredSparsePumpInstall,
+        OutboundBootstrapSourceCallback? requiredBootstrapCallback)
     {
         lock (gate)
         {
+            if (requiredBootstrapCallback is not null &&
+                ResolveBootstrapSourceCallbackLocked(context, requiredBootstrapCallback) != FileTransferBootstrapSourceCallbackDisposition.Current)
+            { return false; }
             if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
             {
                 return false;
@@ -20694,7 +20863,7 @@ public sealed partial class SessionFileTransferService
             await failureAuthorizationBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
         }
 
-        return await TransitionOutboundToTerminalAsync(
+        return await TransitionOutboundToTerminalCoreAsync(
             context,
             FileTransferTransferState.Failed,
             errorCode: errorCode,
@@ -20702,7 +20871,8 @@ public sealed partial class SessionFileTransferService
             notifyPeer: notifyPeer,
             cancelReason: null,
             ct: CancellationToken.None,
-            requiredSparsePumpInstall: requiredSparsePumpInstall).ConfigureAwait(false);
+            requiredSparsePumpInstall: requiredSparsePumpInstall,
+            requiredBootstrapCallback: requiredBootstrapCallback).ConfigureAwait(false);
     }
 
     private async Task<bool> SendOutboundV4PauseStateAsync(OutboundTransferContext context, string reason)
@@ -22410,11 +22580,13 @@ public sealed partial class SessionFileTransferService
         try
         {
             IFileTransferDataSession? dataSession;
+            InboundBootstrapWriteIngress? writeIngress;
             lock (gate)
             {
                 dataSession = ReferenceEquals(inboundTransfer, context) && !context.IsTerminal
                     ? context.DataSession
                     : null;
+                writeIngress = CaptureInboundBootstrapWriteIngress(context, dataSession);
             }
 
             if (dataSession is null)
@@ -22550,7 +22722,7 @@ public sealed partial class SessionFileTransferService
                     if (frame is FileTransferChunkBatchFrameV4 legacyPostTunaBatch and not FileTransferChunkBatchFrameV6 &&
                         ShouldUsePostTunaFallbackV6SparseRuntimeLocked(context))
                     {
-                        await HandleInboundV4ChunkBatchAsync(context, legacyPostTunaBatch, received.TransportKind).ConfigureAwait(false);
+                        await HandleInboundV4ChunkBatchFromReceiveAsync(context, legacyPostTunaBatch, received.TransportKind, writeIngress).ConfigureAwait(false);
                         continue;
                     }
 
@@ -22717,7 +22889,7 @@ public sealed partial class SessionFileTransferService
                             LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.ReceivingBulk, "chunk_batch_received");
                         }
 
-                        await HandleInboundV4ChunkBatchAsync(context, batch, received.TransportKind).ConfigureAwait(false);
+                        await HandleInboundV4ChunkBatchFromReceiveAsync(context, batch, received.TransportKind, writeIngress).ConfigureAwait(false);
                         if (isPrimaryRegularNknBulkV6)
                         {
                             var completedAfterBatch = false;
@@ -23180,6 +23352,7 @@ public sealed partial class SessionFileTransferService
                 context.ReceiverSparseWriteActive = true;
                 context.ReceiverSparseChunksWritten = new BitArray(manifest.ChunkCount);
                 context.ReceiverSparseChunksPendingWrite.Clear();
+                context.BootstrapPendingWriteOwners.Clear();
                 context.ReceiverSparseBytesWritten = 0;
                 context.PullReceiverSparseWriteBytesRecent = 0;
                 context.PullReceiverSparseWriteBatchCountRecent = 0;
@@ -23250,12 +23423,29 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private async Task HandleInboundV4ChunkBatchAsync(
+    private Task HandleInboundV4ChunkBatchAsync(
         InboundTransferContext context,
         FileTransferChunkBatchFrameV4 batch,
         FileTransferTransportKind receivedTransportKind)
+        => HandleInboundV4ChunkBatchFromReceiveAsync(context, batch, receivedTransportKind, ingress: null);
+
+    private async Task HandleInboundV4ChunkBatchCoreAsync(
+        InboundTransferContext context, FileTransferChunkBatchFrameV4 batch,
+        FileTransferTransportKind receivedTransportKind, InboundBootstrapWriteSource? writeSource)
     {
-        if (!TryValidateInboundV4ChunkBatch(context, batch, out var chunks, out var failureMessage))
+        IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> chunks;
+        string? failureMessage;
+        bool valid;
+        if (writeSource is not null)
+        {
+            lock (gate)
+            {
+                if (!IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+                valid = TryValidateInboundV4ChunkBatch(context, batch, out chunks, out failureMessage);
+            }
+        }
+        else { valid = TryValidateInboundV4ChunkBatch(context, batch, out chunks, out failureMessage); }
+        if (!valid)
         {
             var invalidSegmentCount = batch.ChunkCount == batch.DataSegments.Count ? 0 : 1;
             var invalidSegmentLength = failureMessage?.Contains("segment length", StringComparison.OrdinalIgnoreCase) == true ? 1 : 0;
@@ -23270,7 +23460,7 @@ public sealed partial class SessionFileTransferService
                 context,
                 InvalidStateErrorCode,
                 failureMessage ?? "V4 chunk batch was invalid.",
-                failureMessage ?? "V4 chunk batch was invalid.").ConfigureAwait(false);
+                failureMessage ?? "V4 chunk batch was invalid.", writeSource).ConfigureAwait(false);
             return;
         }
 
@@ -23295,6 +23485,7 @@ public sealed partial class SessionFileTransferService
         Stream? writeStream;
         lock (gate)
         {
+            if (writeSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 !context.PullManifestReceived ||
@@ -23401,6 +23592,8 @@ public sealed partial class SessionFileTransferService
                 }
             }
 
+            if (writeSource is not null && acceptedChunks.Count != 0) { RegisterInboundBootstrapWriteLocked(context, writeSource, acceptedChunks); }
+
             context.PullReceiverRawBatchBytesTotal += batchRawBytes;
             context.PullReceiverRawBatchFramesTotal++;
             context.PullReceiverChunkCountTotal += chunks.Count;
@@ -23475,11 +23668,15 @@ public sealed partial class SessionFileTransferService
                     SelectInboundV4RepairBatchIgnoreReason(repairStaleChunkCount, repairDuplicateChunkCount, repairPendingWriteChunkCount));
             }
 
-            await MaybeSendInboundSparseCreditFrontierStallStateAsync(context).ConfigureAwait(false);
+            await MaybeSendInboundSparseCreditFrontierStallStateWithWriteBindingAsync(context, writeSource).ConfigureAwait(false);
             return;
         }
 
-        MarkInboundV4PeerFrameReceived(context);
+        lock (gate)
+        {
+            if (writeSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+            MarkInboundV4PeerFrameReceived(context);
+        }
 
         var writeStopwatch = Stopwatch.StartNew();
         long sparseWriteBytes = 0;
@@ -23490,9 +23687,24 @@ public sealed partial class SessionFileTransferService
             writeGateEntered = true;
             foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
             {
-                var offset = (long)chunkIndex * Math.Max(1, context.ChunkSizeBytes);
-                writeStream!.Seek(offset, SeekOrigin.Begin);
-                await writeStream.WriteAsync(chunkBytes, context.LifetimeCts.Token).ConfigureAwait(false);
+                if (writeSource is not null)
+                {
+                    ValueTask physicalWrite;
+                    lock (gate)
+                    {
+                        if (!IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource) ||
+                            !OwnsInboundBootstrapWriteChunks(context, writeSource.Operation!)) { return; }
+                        writeSource.Stream.Seek((long)chunkIndex * writeSource.ChunkSize, SeekOrigin.Begin);
+                        physicalWrite = writeSource.Stream.WriteAsync(chunkBytes, context.LifetimeCts.Token);
+                    }
+                    await physicalWrite.ConfigureAwait(false);
+                }
+                else
+                {
+                    var offset = (long)chunkIndex * Math.Max(1, context.ChunkSizeBytes);
+                    writeStream!.Seek(offset, SeekOrigin.Begin);
+                    await writeStream.WriteAsync(chunkBytes, context.LifetimeCts.Token).ConfigureAwait(false);
+                }
                 sparseWriteBytes += chunkBytes.Length;
             }
         }
@@ -23502,7 +23714,7 @@ public sealed partial class SessionFileTransferService
                 context,
                 StreamWriteFailedErrorCode,
                 ex.Message,
-                "Could not write a V4 sparse receiver chunk.").ConfigureAwait(false);
+                "Could not write a V4 sparse receiver chunk.", writeSource).ConfigureAwait(false);
             return;
         }
         finally
@@ -23513,6 +23725,11 @@ public sealed partial class SessionFileTransferService
             }
         }
         writeStopwatch.Stop();
+
+        if (writeSource is not null && BootstrapWriteBeforeCommitForTests is { } writeCommitBarrier)
+        {
+            await writeCommitBarrier(context.TransferId).ConfigureAwait(false);
+        }
 
         int committedChunkCount;
         long committedByteCount;
@@ -23537,6 +23754,8 @@ public sealed partial class SessionFileTransferService
         string? fallbackV6ProofBootstrapRecheckResult = null;
         lock (gate)
         {
+            if (writeSource is not null && (!IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource) ||
+                !OwnsInboundBootstrapWriteChunks(context, writeSource.Operation!))) { return; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 context.ReceiverSparseChunksWritten is null)
@@ -23546,6 +23765,7 @@ public sealed partial class SessionFileTransferService
 
             foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
             {
+                if (writeSource is not null) { context.BootstrapPendingWriteOwners.Remove(chunkIndex); }
                 if (!context.ReceiverSparseChunksPendingWrite.Remove(chunkIndex))
                 {
                     continue;
@@ -23657,6 +23877,7 @@ public sealed partial class SessionFileTransferService
                 context,
                 "receiver_sparse_pending_write_cleared");
             if (context.CurrentFallbackV6ProofBootstrapPendingWriteWake is not null &&
+                !HasUnsettledInboundBootstrapWrites(context) &&
                 context.ReceiverSparseChunksPendingWrite.Count == 0 &&
                 context.PendingChunks.Count == 0)
             {
@@ -23784,8 +24005,20 @@ public sealed partial class SessionFileTransferService
 
         if (snapshot is not null)
         {
-            RaiseTransferChanged(snapshot);
-            MaybeLogProgressMilestone(context, FileTransferDirection.Inbound);
+            if (writeSource is not null)
+            {
+                lock (gate)
+                {
+                    if (!IsInboundBootstrapWriteSourceCurrentLocked(context, writeSource)) { return; }
+                    RaiseTransferChanged(snapshot);
+                    MaybeLogProgressMilestone(context, FileTransferDirection.Inbound);
+                }
+            }
+            else
+            {
+                RaiseTransferChanged(snapshot);
+                MaybeLogProgressMilestone(context, FileTransferDirection.Inbound);
+            }
         }
 
         if (batch is FileTransferChunkBatchFrameV6 v6Batch && committedChunkCount > 0)
@@ -23802,20 +24035,25 @@ public sealed partial class SessionFileTransferService
 
         if (completed)
         {
-            await SendInboundV4TerminalReadyStateBestEffortAsync(context).ConfigureAwait(false);
+            await SendInboundV4TerminalReadyStateBestEffortAsync(context, writeSource).ConfigureAwait(false);
         }
         else
         {
-            var stateSent = await SendInboundSparseCreditStateAsync(context, "chunk_batch_committed", terminalReady: false).ConfigureAwait(false);
+            var stateSent = await SendInboundSparseCreditStateAsync(context, "chunk_batch_committed", terminalReady: false,
+                requiredWriteSource: writeSource).ConfigureAwait(false);
             var suppressFollowupRepair =
                 !stateSent &&
                 TrySuppressInboundV4FollowupRepairForTunaActivationBarrier(
                     context,
                     "chunk_batch_committed",
-                    ShouldUsePostTunaFallbackV6FeedbackEnvelope(context) ? "frontier_request" : "repair_request");
+                    ShouldUsePostTunaFallbackV6FeedbackEnvelope(context) ? "frontier_request" : "repair_request", writeSource);
             if (!suppressFollowupRepair)
             {
-                if (ShouldUsePostTunaFallbackV6FeedbackEnvelope(context))
+                if (writeSource is not null)
+                {
+                    await SendInboundV6RepairRequestAsync(context, "chunk_batch_committed", writeSource).ConfigureAwait(false);
+                }
+                else if (ShouldUsePostTunaFallbackV6FeedbackEnvelope(context))
                 {
                     await SendInboundV6FrontierRequestAsync(context, "chunk_batch_committed", forceSend: false).ConfigureAwait(false);
                 }
@@ -23833,7 +24071,7 @@ public sealed partial class SessionFileTransferService
 
         if (completed)
         {
-            await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
+            await FinalizeInboundTransferWithWriteBindingAsync(context, context.LifetimeCts.Token, writeSource).ConfigureAwait(false);
         }
     }
 
@@ -23844,6 +24082,7 @@ public sealed partial class SessionFileTransferService
         bool shouldSendState;
         lock (gate)
         {
+            if (HasBootstrapSourceHoldLocked(context)) { return; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 !context.PullManifestReceived ||
@@ -24016,8 +24255,12 @@ public sealed partial class SessionFileTransferService
         bool terminalReady,
         bool requireMissingRange = false,
         bool forceMissingRange = false,
-        bool forceSend = false)
-        => ShouldUsePostTunaFallbackV6FeedbackEnvelope(context)
+        bool forceSend = false,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
+        => requiredWriteSource is not null
+            ? SendInboundV4StateWithWriteBindingAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange,
+                forceSend, null, null, requiredWriteSource)
+            : ShouldUsePostTunaFallbackV6FeedbackEnvelope(context)
             ? SendInboundV6ReceiverStateAsync(context, reason, forceSend || requireMissingRange || forceMissingRange, terminalReady)
             : SendInboundV4StateAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange, forceSend);
 
@@ -24108,7 +24351,14 @@ public sealed partial class SessionFileTransferService
             capture.Reason);
     }
 
-    private async Task<bool> SendInboundV4StateCoreAsync(
+    private Task<bool> SendInboundV4StateCoreAsync(
+        InboundTransferContext context, string reason, bool terminalReady, bool requireMissingRange,
+        bool forceMissingRange, bool forceSend, FileTransferReceiveRecoveryProofStatePublicationCommand? proofStatePublicationCommand,
+        ReceiveRecoveryProofStateSendCapture? proofStateSendCapture)
+        => SendInboundV4StateWithWriteBindingAsync(context, reason, terminalReady, requireMissingRange, forceMissingRange,
+            forceSend, proofStatePublicationCommand, proofStateSendCapture, null);
+
+    private async Task<bool> SendInboundV4StateWithWriteBindingAsync(
         InboundTransferContext context,
         string reason,
         bool terminalReady,
@@ -24117,7 +24367,8 @@ public sealed partial class SessionFileTransferService
         bool forceSend,
         FileTransferReceiveRecoveryProofStatePublicationCommand?
             proofStatePublicationCommand,
-        ReceiveRecoveryProofStateSendCapture? proofStateSendCapture)
+        ReceiveRecoveryProofStateSendCapture? proofStateSendCapture,
+        InboundBootstrapWriteSource? requiredWriteSource)
     {
         FileTransferStateFrameV4? state;
         IFileTransferDataSession dataSession;
@@ -24131,8 +24382,11 @@ public sealed partial class SessionFileTransferService
         int regularV4FrontierRepairCreditCapChunkIndexExclusive;
         InboundRegularV4FrontierRepairProjection? stateProjection;
         InboundRegularV4FrontierTailRepairStateAuthority? stateAttemptAuthority;
+        InboundBootstrapFeedbackOperation? feedbackOperation = null;
         lock (gate)
         {
+            if (HasBootstrapSourceHoldLocked(context)) { return false; }
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return false; }
             var currentDataSession = context.DataSession;
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
@@ -24197,6 +24451,11 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (UsesInboundBootstrapFeedbackTrackingLocked(context) &&
+                (context.UserPaused || currentDataSession is not IFileTransferPhysicalSendSubmissionSession))
+            {
+                return false;
+            }
             context.V4MixedScreenShareTransfer = context.V4MixedScreenShareTransfer || IsV4MixedScreenShareActive();
             context.V4CreditUntilChunkIndexExclusive = ComputeV4CreditUntilExclusiveLocked(context);
             state = CreateInboundV4StateLocked(context, reason, terminalReady, forceMissingRange);
@@ -24360,6 +24619,12 @@ public sealed partial class SessionFileTransferService
             // The guarded snapshot is the exact session bound to this state send.
             dataSession = currentDataSession ??
                 throw new InvalidOperationException("Inbound V4 state send lost its guarded data session.");
+            if (!TryRegisterInboundBootstrapFeedbackLocked(context, dataSession, state, out feedbackOperation)) { return false; }
+            if (feedbackOperation is not null && requiredWriteSource is not null)
+            {
+                feedbackOperation = feedbackOperation with { WriteSource = requiredWriteSource };
+                context.ActiveBootstrapFeedbackOperations[feedbackOperation.Generation] = feedbackOperation;
+            }
             if (stateAttemptAuthority is { } authorizedAttempt)
             {
                 LogInboundRegularV4FrontierTailRepairStateAuthority(
@@ -24373,6 +24638,10 @@ public sealed partial class SessionFileTransferService
             CreateFileTransferV4StateWireFingerprint(state);
         try
         {
+            if (feedbackOperation is not null && BootstrapFeedbackBeforeSubmissionForTests is { } feedbackBarrier)
+            {
+                await feedbackBarrier(context.TransferId).ConfigureAwait(false);
+            }
             if (stateProjection is not null &&
                 InboundRegularV4ProjectionPreSendBarrierForTests is { } projectionPreSendBarrier)
             {
@@ -24389,6 +24658,7 @@ public sealed partial class SessionFileTransferService
             var peerVisibleControlPlaneProof = false;
             lock (gate)
             {
+                if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
                 if (!ReferenceEquals(inboundTransfer, context) ||
                     context.IsTerminal ||
                     !ReferenceEquals(context.DataSession, dataSession))
@@ -24592,7 +24862,13 @@ public sealed partial class SessionFileTransferService
                     // Invoking SendAsync is the direct-session commit point. Keep the
                     // validation and invocation atomic under the Core lock, but await
                     // completion outside it so callbacks cannot nest Core/transport locks.
-                    directSendTask = dataSession.SendAsync(state, context.LifetimeCts.Token);
+                    if (feedbackOperation is not null)
+                    {
+                        feedbackOperation.Submission = ((IFileTransferPhysicalSendSubmissionSession)dataSession)
+                            .SubmitPhysicalSend(state, authority: null, context.LifetimeCts.Token);
+                        directSendTask = feedbackOperation.Submission.DeliveryTask;
+                    }
+                    else { directSendTask = dataSession.SendAsync(state, context.LifetimeCts.Token); }
                 }
             }
 
@@ -24651,6 +24927,7 @@ public sealed partial class SessionFileTransferService
 
             lock (gate)
             {
+                if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
                 if (ReferenceEquals(inboundTransfer, context))
                 {
                     context.PullV4StateSentCountTotal++;
@@ -24728,6 +25005,10 @@ public sealed partial class SessionFileTransferService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            lock (gate)
+            {
+                if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
+            }
             if (proofStateSendCapture is not null)
             {
                 var proofActivationUnavailable =
@@ -24772,6 +25053,7 @@ public sealed partial class SessionFileTransferService
             var explicitActivationUnavailable = IsTunaActivationNegotiationDataSessionUnavailableException(ex);
             lock (gate)
             {
+                if (feedbackOperation is not null && !IsInboundBootstrapFeedbackCurrentLocked(context, feedbackOperation)) { return false; }
                 if (ReferenceEquals(inboundTransfer, context) &&
                     !context.IsTerminal &&
                     (context.PullTransportPaused &&
@@ -24794,12 +25076,12 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            if (TryDeferInboundRegularNknV4ReceiverStateSendFailureForRecovery(context, dataSession, state, reason, ex))
+            if (feedbackOperation is null && TryDeferInboundRegularNknV4ReceiverStateSendFailureForRecovery(context, dataSession, state, reason, ex))
             {
                 return false;
             }
 
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: InvalidStateErrorCode,
@@ -24807,8 +25089,23 @@ public sealed partial class SessionFileTransferService
                 sendError: true,
                 errorMessage: "Could not send V4 receiver state.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: feedbackOperation).ConfigureAwait(false);
             return false;
+        }
+        finally
+        {
+            if (feedbackOperation is not null)
+            {
+                try
+                {
+                    if (BootstrapFeedbackBeforeFinalizationForTests is { } finalizationBarrier)
+                    {
+                        await finalizationBarrier(context.TransferId).ConfigureAwait(false);
+                    }
+                }
+                finally { _ = RetireInboundBootstrapFeedbackAfterFinalizationAsync(context, feedbackOperation); }
+            }
         }
     }
 
@@ -25099,11 +25396,12 @@ public sealed partial class SessionFileTransferService
            (context.PullPostTunaRecoveryActive || !context.PullTransportRebindRecoveredLogged) &&
            frontierLagChunks > 0;
 
-    private async Task SendInboundV4TerminalReadyStateBestEffortAsync(InboundTransferContext context)
+    private async Task SendInboundV4TerminalReadyStateBestEffortAsync(InboundTransferContext context,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         var transferId = context.TransferId;
         var sessionId = context.SessionId;
-        var sendTask = SendInboundSparseCreditStateAsync(context, "terminal_ready", terminalReady: true);
+        var sendTask = SendInboundSparseCreditStateAsync(context, "terminal_ready", terminalReady: true, requiredWriteSource: requiredWriteSource);
         try
         {
             if (sendTask.IsCompleted)
@@ -25209,11 +25507,17 @@ public sealed partial class SessionFileTransferService
             ? V6ReceiverStateProgressMinCommittedChunks
             : V4StateProgressCreditMinChunks;
 
-    private async Task MaybeSendInboundSparseCreditFrontierStallStateAsync(InboundTransferContext context)
+    private Task MaybeSendInboundSparseCreditFrontierStallStateAsync(InboundTransferContext context)
+        => MaybeSendInboundSparseCreditFrontierStallStateWithWriteBindingAsync(context, null);
+
+    private async Task MaybeSendInboundSparseCreditFrontierStallStateWithWriteBindingAsync(InboundTransferContext context,
+        InboundBootstrapWriteSource? requiredWriteSource)
     {
         var shouldSend = false;
         lock (gate)
         {
+            if (HasBootstrapSourceHoldLocked(context)) { return; }
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             if (ReferenceEquals(inboundTransfer, context) &&
                 !context.IsTerminal &&
                 context.PullManifestReceived &&
@@ -25241,17 +25545,22 @@ public sealed partial class SessionFileTransferService
                 context,
                 "frontier_stall_repair_due",
                 terminalReady: false,
-                requireMissingRange: true).ConfigureAwait(false);
+                requireMissingRange: true,
+                requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
             if (!stateSent &&
                 TrySuppressInboundV4FollowupRepairForTunaActivationBarrier(
                     context,
                     "frontier_stall_repair_due",
-                    ShouldUsePostTunaFallbackV6FeedbackEnvelope(context) ? "frontier_request" : "repair_request"))
+                    ShouldUsePostTunaFallbackV6FeedbackEnvelope(context) ? "frontier_request" : "repair_request", requiredWriteSource))
             {
                 return;
             }
 
-            if (ShouldUsePostTunaFallbackV6FeedbackEnvelope(context))
+            if (requiredWriteSource is not null)
+            {
+                await SendInboundV6RepairRequestAsync(context, "frontier_stall_repair_due", requiredWriteSource).ConfigureAwait(false);
+            }
+            else if (ShouldUsePostTunaFallbackV6FeedbackEnvelope(context))
             {
                 await SendInboundV6FrontierRequestAsync(context, "frontier_stall_repair_due", forceSend: true).ConfigureAwait(false);
             }
@@ -25265,7 +25574,8 @@ public sealed partial class SessionFileTransferService
     private bool TrySuppressInboundV4FollowupRepairForTunaActivationBarrier(
         InboundTransferContext context,
         string reason,
-        string followupKind)
+        string followupKind,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         string? pauseReason;
         int suppressedCount;
@@ -25274,6 +25584,7 @@ public sealed partial class SessionFileTransferService
         long bytesTransferred;
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return true; }
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
                 !context.PullTransportPaused ||
@@ -25402,12 +25713,13 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task FailInboundV4Async(InboundTransferContext context, string errorCode, string statusMessage, string errorMessage)
+    private async Task FailInboundV4Async(InboundTransferContext context, string errorCode, string statusMessage, string errorMessage,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v4_receiver_failed; transfer_id={context.TransferId}; session_id={context.SessionId}; error_code={errorCode}; reason={FormatProtocolLogValue(statusMessage)}");
-        await TransitionInboundToTerminalAsync(
+        await TransitionInboundToTerminalCoreAsync(
             context,
             FileTransferTransferState.Failed,
             errorCode: errorCode,
@@ -25415,7 +25727,9 @@ public sealed partial class SessionFileTransferService
             sendError: true,
             errorMessage: errorMessage,
             cancelReason: null,
-            ct: CancellationToken.None).ConfigureAwait(false);
+            ct: CancellationToken.None,
+            requiredFeedbackOperation: null,
+            requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
     }
 
     private async Task TrySendInboundV4ErrorAsync(InboundTransferContext context, string errorCode, string message)

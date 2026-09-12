@@ -198,9 +198,9 @@ public sealed partial class FileTransferCoordinatorTests
             FileTransferFallbackBootstrapFrameV6 Confirm) CompleteCorrelatedExchange(FileTransferCoordinatorState sender, FileTransferCoordinatorState receiver,
                 Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
         {
-            var solicit = StartCorrelated(sender);
+            var solicit = StartCorrelated(sender, capture: capture);
             capture?.Invoke(solicit.SnapshotEnvelope!);
-            var response = StartCorrelated(receiver, Assert.IsType<FileTransferFallbackBootstrapRequestFrameV6>(solicit.Command!.Frame));
+            var response = StartCorrelated(receiver, Assert.IsType<FileTransferFallbackBootstrapRequestFrameV6>(solicit.Command!.Frame), capture);
             capture?.Invoke(response.SnapshotEnvelope!);
             sender = CompleteCorrelatedPhase(solicit.State, solicit.Command, capture);
             receiver = CompleteCorrelatedPhase(response.State, response.Command!, capture);
@@ -213,6 +213,7 @@ public sealed partial class FileTransferCoordinatorTests
             return (sender, receiver, solicit.Command.Frame, response.Command.Frame, confirm.Command.Frame);
         }
 
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         private static FileTransferCoordinatorState CommitCorrelatedFallback(FileTransferCoordinatorState state,
             Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
         {
@@ -231,6 +232,13 @@ public sealed partial class FileTransferCoordinatorTests
                 FileTransferRoute.PostTunaFallbackV6, 6, FileTransferTransportKind.RegularNkn,
                 FileTransferTransportHandoffKind.TunaToNormalFallback, null, "test_correlated_fallback");
             var committed = CommitEmptyFileTransferRouteTransitionForTest(state, request, null, capture: capture);
+            return AssertCorrelatedFallbackCommitted(committed, exchange);
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static FileTransferCoordinatorState AssertCorrelatedFallbackCommitted(
+            FileTransferCoordinatorDecision committed, FileTransferBootstrapExchange exchange)
+        {
             Assert.Equal(FileTransferRoute.PostTunaFallbackV6, committed.State.RouteSelection.Route);
             Assert.Equal(FileTransferRouteTransitionDispositionApplyStatus.Applied,
                 committed.State.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value.DispositionReceipt!.Value.Status);
@@ -305,6 +313,22 @@ public sealed partial class FileTransferCoordinatorTests
     public void CorrelatedBootstrap_AnnounceWaitsForAllCopies_ThenCompletesBothSides(bool secondaryFails)
     {
         var (sender, receiver) = CreateCorrelatedBootstrapPair();
+        AssertAnnounceWaitsForAllCopiesAndCompletesBothSides(sender, receiver, secondaryFails);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertAnnounceWaitsForAllCopiesAndCompletesBothSides(
+        FileTransferCoordinatorState sender, FileTransferCoordinatorState receiver, bool secondaryFails)
+    {
+        var (currentSender, currentReceiver, announce) = CreateAnnounceRetainedPeerFixture(sender, receiver);
+        AssertAnnounceSettlementsCompleteBothSides(currentSender, currentReceiver, announce, secondaryFails);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState Sender, FileTransferCoordinatorState Receiver,
+        FileTransferBootstrapExchangeDecision Announce) CreateAnnounceRetainedPeerFixture(
+            FileTransferCoordinatorState sender, FileTransferCoordinatorState receiver)
+    {
         var announce = StartCorrelated(receiver);
         receiver = announce.State;
         var solicit = StartCorrelated(sender);
@@ -315,7 +339,14 @@ public sealed partial class FileTransferCoordinatorTests
         var duplicate = ObserveCorrelated(receiver, solicit.Command.Frame);
         Assert.Same(receiver, duplicate.State);
         Assert.Null(duplicate.Command);
+        return (sender, receiver, announce);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertAnnounceSettlementsCompleteBothSides(
+        FileTransferCoordinatorState sender, FileTransferCoordinatorState receiver,
+        FileTransferBootstrapExchangeDecision announce, bool secondaryFails)
+    {
         var delivery = CorrelatedReceipt(announce.Command!, FileTransferBootstrapPhaseReceiptStatus.Delivered, blockedBulk: true);
         var delivered = FileTransferCoordinator.ApplyFallbackBootstrapPhaseReceipt(receiver, delivery);
         Assert.True(delivered.Accepted, delivered.Reason);
@@ -508,14 +539,26 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     private static FileTransferBootstrapExchangeDecision StartCorrelated(FileTransferCoordinatorState state,
-        FileTransferFallbackBootstrapRequestFrameV6? solicit = null)
+        FileTransferFallbackBootstrapRequestFrameV6? solicit = null,
+        Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var leg = state.CurrentLeg!;
         var checkpoint = new FileTransferRouteTransitionDurableCheckpoint(state.CurrentRuntimeOwner!.Value,
             state.CurrentRoutePublicationToken!.Value, state.TerminalGeneration, leg.Generation, leg.TransportEpochId,
             leg.BridgeRecoveryGeneration, state.CurrentDataSessionGeneration, 3, 4, 6, 128, 2);
+        var observation = new FileTransferFallbackV6ProofBootstrapObservation(state.SessionId, state.TransferId, state.Direction,
+            1, 1, "runtime_disabled", "local_runtime_disabled", 10000, checkpoint)
+        {
+            InitiationKind = FileTransferBootstrapInitiationKind.LocalRuntimeDisable,
+            LocalStop = new(BootstrapStopScopeForTests(state), state.CurrentDataSessionIdentity!, state.CurrentDataSessionGeneration),
+        };
+        if (state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold is not { Receipt: not null } currentHold ||
+            !FileTransferCoordinator.IsFallbackBootstrapSourceHoldCurrent(state, currentHold.Command))
+        {
+            state = ApplyEmptyBootstrapSourceHoldForTests(state, observation, solicit, capture);
+        }
         var decision = FileTransferCoordinator.StartFallbackBootstrapExchange(state,
-            new(state.SessionId, state.TransferId, state.Direction, 1, 1, "off", "current_source", 10000, checkpoint),
+            observation,
             new()
             {
                 SessionId = state.SessionId, TransferId = state.TransferId, Epoch = 3,
@@ -525,6 +568,24 @@ public sealed partial class FileTransferCoordinatorTests
             }, solicit);
         Assert.True(decision.Accepted, decision.Reason);
         return decision;
+    }
+
+    private static FileTransferCoordinatorState ApplyEmptyBootstrapSourceHoldForTests(FileTransferCoordinatorState state,
+        FileTransferFallbackV6ProofBootstrapObservation observation, FileTransferFallbackBootstrapFrameV6? peerWake = null,
+        Action<FileTransferCoordinatorTransitionEnvelope>? captureEnvelope = null)
+    {
+        var prepared = FileTransferCoordinator.PrepareFallbackBootstrapSourceHold(state, observation, peerWake);
+        Assert.True(prepared.Accepted, prepared.Reason);
+        captureEnvelope?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(prepared.SnapshotEnvelope));
+        var capture = new FileTransferBootstrapSourceHoldCapture(prepared.Command!, 1, [], [], []);
+        var applied = FileTransferCoordinator.ApplyFallbackBootstrapSourceHoldCapture(prepared.State, capture);
+        Assert.True(applied.Accepted, applied.Reason);
+        captureEnvelope?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(applied.SnapshotEnvelope));
+        var drained = FileTransferCoordinator.ApplyFallbackBootstrapSourceHoldReceipt(applied.State,
+            new(capture, [], [], [], observation.DurableCheckpoint));
+        Assert.True(drained.Accepted, drained.Reason);
+        captureEnvelope?.Invoke(Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(drained.SnapshotEnvelope));
+        return drained.State;
     }
 
     private static FileTransferBootstrapExchangeDecision ObserveCorrelated(FileTransferCoordinatorState state,

@@ -11,10 +11,35 @@ public sealed partial class FileTransferCoordinatorTests
     public void CheckpointContinuity_RealCommittedRouteTransitionRetiresExactOriginOnce()
         => CreateCheckpointRepairContinuityCommittedRetirementFixture();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateCheckpointRepairContinuityCommittedRetirementFixture()
     {
         var fixture = CreateCheckpointRepairContinuityFixture(5, 5);
+        return CompleteCheckpointRepairContinuityCommittedRetirementFixture(fixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CompleteCheckpointRepairContinuityCommittedRetirementFixture(
+            (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
+                IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes) fixture)
+    {
+        var (state, origin, envelopes, priorEvidence, release, admitted, capture) =
+            CreateCheckpointRepairContinuityRetirementAdmission(fixture);
+        return CompleteCheckpointRepairContinuityRetirementTransition(
+            fixture, state, origin, envelopes, priorEvidence, release, admitted, capture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, CheckpointRepairContinuityOrigin Origin,
+        List<FileTransferCoordinatorTransitionEnvelope> Envelopes, string[] PriorEvidence,
+        FileTransferFallbackTailPairedReleaseReceipt Release, FileTransferCoordinatorDecision Admitted,
+        Action<FileTransferCoordinatorTransitionEnvelope> Capture)
+        CreateCheckpointRepairContinuityRetirementAdmission(
+            (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
+                IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes) fixture)
+    {
         var state = fixture.State;
         var origin = Assert.IsType<CheckpointRepairContinuityOrigin>(
             state.PersistentState.CheckpointRepairContinuityOrigin);
@@ -53,6 +78,19 @@ public sealed partial class FileTransferCoordinatorTests
         var release = Assert.IsType<FileTransferFallbackTailPairedReleaseReceipt>(paired.PairedRelease);
         var admitted = RequestRuntimeUnlockAdmission(paired.State, paired.State.CurrentRuntimeOwner);
         Capture(admitted.SnapshotEnvelope!);
+        return (state, origin, envelopes, priorEvidence, release, admitted, Capture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CompleteCheckpointRepairContinuityRetirementTransition(
+            (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
+                IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes) fixture,
+            FileTransferCoordinatorState state, CheckpointRepairContinuityOrigin origin,
+            List<FileTransferCoordinatorTransitionEnvelope> envelopes, string[] priorEvidence,
+            FileTransferFallbackTailPairedReleaseReceipt release, FileTransferCoordinatorDecision admitted,
+            Action<FileTransferCoordinatorTransitionEnvelope> Capture)
+    {
         var admission = Assert.IsType<RuntimeUnlockAdmissionToken>(
             admitted.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken);
         var pendingDecision = RecordPendingPreCommitProbe(admitted.State, admission);

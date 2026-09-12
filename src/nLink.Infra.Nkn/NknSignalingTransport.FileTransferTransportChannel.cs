@@ -7604,6 +7604,8 @@ public sealed partial class NknSignalingTransport
         FileTransferTransportPhase Phase,
         bool CorrelatedBootstrapSelected = false)
     {
+        public string? BootstrapLocalIssuer { get; init; }
+
         public bool IsTerminal =>
             Phase is FileTransferTransportPhase.Completed or
                 FileTransferTransportPhase.Declined or
@@ -7629,7 +7631,7 @@ public sealed partial class NknSignalingTransport
 
     private void RegisterActiveFileTransferDataSession(string transferId)
     {
-        if (client is RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is { } realClient)
         {
             realClient.RegisterActiveFileTransferDataSession(transferId);
         }
@@ -7637,7 +7639,7 @@ public sealed partial class NknSignalingTransport
 
     private void RegisterActiveFileTransferRuntime(string transferId)
     {
-        if (client is RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is { } realClient)
         {
             realClient.RegisterActiveFileTransferRuntime(transferId);
         }
@@ -7645,7 +7647,7 @@ public sealed partial class NknSignalingTransport
 
     private void UnregisterActiveFileTransferRuntime(string transferId)
     {
-        if (client is RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is { } realClient)
         {
             realClient.UnregisterActiveFileTransferRuntime(transferId);
         }
@@ -7653,7 +7655,7 @@ public sealed partial class NknSignalingTransport
 
     private void ClearActiveFileTransferRuntimeTrackingLocked(string reason)
     {
-        if (client is not RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is not { } realClient)
         {
             return;
         }
@@ -7670,7 +7672,7 @@ public sealed partial class NknSignalingTransport
 
     private void UnregisterActiveFileTransferDataSession(string transferId)
     {
-        if (client is RealNknClientAdapter realClient)
+        if (regularV4PressureAdapter is { } realClient)
         {
             realClient.UnregisterActiveFileTransferDataSession(transferId);
         }
@@ -8196,7 +8198,7 @@ public sealed partial class NknSignalingTransport
                                 : "V6 redundant feedback send failed on both lanes.",
                             dataPathSendAuthority: dataPathSendAuthority,
                             ct: sendCt,
-                            physicalSendCompletion: IsCorrelatedBootstrapPhysicalFrame(frame) ? physicalSendCompletion : null)
+                            physicalSendCompletion: physicalSendCompletion)
                         .ConfigureAwait(false);
                     return;
                 }
@@ -8688,6 +8690,7 @@ public sealed partial class NknSignalingTransport
             {
                 if (bootstrapFrameIdentity is null)
                 {
+                    Register(operation);
                     return;
                 }
                 lock (gate)

@@ -137,8 +137,43 @@ Import-TestFunctions (Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1') @(
     'New-TunaGuiFileTransferFailureClassificationResult','Get-TunaGuiExplicitFailureClassification',
     'Get-TunaGuiFileTransferSetupFailureClassification')
 $guiPath = Join-Path $OutputRoot 'gui-evidence.log'
-[IO.File]::WriteAllLines($guiPath, [string[]]($compactLines + $diagnostics))
+# The whole GUI classifier requires the real route-publication prefix as well as the
+# recovery-only history used by the exact closure/mutation controls above.
+$guiEnvelopes = @($fixture.gui)
+$first = $guiEnvelopes[0]
+Import-TestFunctions (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/FileTunaPressureSettlementSnapshotEvidence.ps1') @('New-Effect','New-Lines')
+$byId = @{}
+foreach ($envelope in $guiEnvelopes) { $byId[$envelope.transitionId] = $envelope }
+$guiLines = @(foreach ($line in @(New-Lines $guiEnvelopes)) {
+    $line
+    if ((Get-FileTransferCoordinatorSnapshotEventName $line) -cne 'filetransfer_coordinator_transition_snapshot') { continue }
+    $envelope = $byId[(Get-FileTransferCoordinatorSnapshotLineField $line transition_id)]
+    $kind = switch -Exact ($envelope.decisionKind) {
+        'ObserveReceiveRecoveryExecutionReceipt' { 'execution_receipt_observed' }
+        'ObserveReceiveRecoveryProof' { 'receive_proof_observed' }
+        'ApplyReceiveRecoveryProofStatePublicationReceipt' {
+            if (@($envelope.aggregate.operations | Where-Object {
+                $_.operationRole -ceq 'proof_publication_terminal' -and $_.afterState -ceq 'Delivered'
+            }).Count -eq 1) { 'proof_publication_delivered' }
+        }
+    }
+    if ($kind) {
+        $role = if ($kind -ceq 'proof_publication_delivered') { 'proof_publication_terminal' } else { 'operation_current' }
+        $sequence = [long](Get-FileTransferCoordinatorSnapshotLineField $line log_writer_sequence)
+        New-Effect $envelope (Find-Operation $envelope $role) $kind ($sequence + 1)
+    }
+})
+# Generate diagnostic positions from this complete fixture's final proof snapshot.
+$proofSequence = 20L * $guiEnvelopes.Count
+$diagnosticSequences = @(($proofSequence - 39), ($proofSequence - 18), ($proofSequence + 2), ($proofSequence + 3), ($proofSequence + 4))
+$guiDiagnostics = @(for ($i = 0; $i -lt $diagnostics.Count; $i++) {
+    [regex]::Replace($diagnostics[$i], 'log_writer_sequence=\d+', "log_writer_sequence=$($diagnosticSequences[$i])")
+})
+[IO.File]::WriteAllLines($guiPath, [string[]]($guiLines + $guiDiagnostics))
 $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'diagnostic evidence evaluation' `
     -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($guiPath)
-if ($null -ne $gui) { throw "GUI reopened exact closure: $($gui | ConvertTo-Json -Depth 8 -Compress)" }
+if ($null -ne $gui) {
+    $route = Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation (Get-FileTransferCoordinatorSnapshotEvaluation -Lines $guiLines)
+    throw "GUI reopened exact closure; route findings=$($route.Findings -join ' | '): $($gui | ConvertTo-Json -Depth 8 -Compress)"
+}
 Write-Output 'Held publication exact proof cancellation, malformed controls, full/compact/GUI parity passed.'

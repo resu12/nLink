@@ -9,7 +9,7 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 [Trait("OpsSuite", "CoordinatorSnapshots")]
 [Collection(FakeNknNetworkCollection.Name)]
-public sealed class FileTransferBootstrapCorrelationEvidenceTests : FileTransferOpsScriptsTestBase
+public sealed partial class FileTransferBootstrapCorrelationEvidenceTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
     [InlineData("", true)]
@@ -154,12 +154,16 @@ public sealed class FileTransferBootstrapCorrelationEvidenceTests : FileTransfer
             param([string]$RepoRoot, [string]$InputPath)
             $ErrorActionPreference = 'Stop'
             . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
-            $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion
+            $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion
             $line = @([IO.File]::ReadAllLines($InputPath) | Where-Object {
                 (Get-FileTransferCoordinatorSnapshotEventName $_) -ceq 'filetransfer_coordinator_transition_snapshot'
             })[0]
             $envelope = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField $line 'snapshot_payload')).Value
             foreach ($operation in $envelope.aggregate.operations) {
+                if ((Test-FileTransferCoordinatorBootstrapInitiationMarker $operation) -and
+                    -not (Test-FileTransferCoordinatorBootstrapInitiationOperation $envelope $operation $catalog)) {
+                    throw "successor_initiation_edge:$($operation.operationRole)"
+                }
                 $valid = if (Test-FileTransferCoordinatorBootstrapCorrelationMarker $operation) {
                     Test-FileTransferCoordinatorBootstrapCorrelationOperation $envelope $operation $catalog
                 } else { Test-FileTransferCoordinatorSnapshotFamily1OperationCatalog $envelope $operation $catalog }
@@ -204,9 +208,9 @@ public sealed partial class FileTransferCoordinatorTests
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         var (sender, receiver) = CreateCorrelatedBootstrapPair(capture: Capture);
-        var solicit = StartCorrelated(sender);
+        var solicit = StartCorrelated(sender, capture: Capture);
         Capture(solicit.SnapshotEnvelope!);
-        var response = StartCorrelated(receiver, Assert.IsType<FileTransferFallbackBootstrapRequestFrameV6>(solicit.Command!.Frame));
+        var response = StartCorrelated(receiver, Assert.IsType<FileTransferFallbackBootstrapRequestFrameV6>(solicit.Command!.Frame), Capture);
         Capture(response.SnapshotEnvelope!);
         var issued = outbound ? solicit : response;
         var delivered = FileTransferCoordinator.ApplyFallbackBootstrapPhaseReceipt(issued.State,
@@ -233,7 +237,7 @@ public sealed partial class FileTransferCoordinatorTests
         sender = ReactivateCorrelatedFallback(CommitCorrelatedFallback(first.Sender, Capture), Capture).State;
         receiver = ReactivateCorrelatedFallback(CommitCorrelatedFallback(first.Receiver, Capture), Capture).State;
         var second = CompleteCorrelatedExchange(sender, receiver, Capture);
-        Assert.Equal(2, (outbound ? second.Sender : second.Receiver).PersistentState.FileTransferRouteTransition.BootstrapExchange!.Bootstrap.BootstrapGeneration);
+        AssertSecondBootstrapGeneration(outbound ? second.Sender : second.Receiver);
         return envelopes;
 
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
@@ -242,6 +246,10 @@ public sealed partial class FileTransferCoordinatorTests
             if ((envelope.Direction == "outbound") == outbound) { envelopes.Add(envelope); }
         }
     }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertSecondBootstrapGeneration(FileTransferCoordinatorState state)
+        => Assert.Equal(2, state.PersistentState.FileTransferRouteTransition.BootstrapExchange!.Bootstrap.BootstrapGeneration);
 
     internal static FileTransferCoordinatorTransitionEnvelope CreateBootstrapSuccessorStartSnapshot(bool outbound)
     {
@@ -262,9 +270,9 @@ public sealed partial class FileTransferCoordinatorTests
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         var (sender, receiver) = CreateCorrelatedBootstrapPair(capture: CaptureEnvelope);
-        var solicit = StartCorrelated(sender);
+        var solicit = StartCorrelated(sender, capture: CaptureEnvelope);
         sender = Capture(solicit);
-        var first = StartCorrelated(receiver, announceFirst ? null : Assert.IsType<FileTransferFallbackBootstrapRequestFrameV6>(solicit.Command!.Frame));
+        var first = StartCorrelated(receiver, announceFirst ? null : Assert.IsType<FileTransferFallbackBootstrapRequestFrameV6>(solicit.Command!.Frame), CaptureEnvelope);
         receiver = Capture(first);
         if (announceFirst) { receiver = Capture(ObserveCorrelated(receiver, solicit.Command!.Frame)); }
         receiver = Complete(receiver, first.Command!);

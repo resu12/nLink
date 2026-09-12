@@ -63,7 +63,8 @@ internal sealed record FileTransferBootstrapExchange(
     FileTransferFallbackBootstrapFrameV6? RetainedPeerFrame = null,
     string? LastCompletedPeerId = null,
     bool Completed = false,
-    bool Invalidated = false);
+    bool Invalidated = false,
+    FileTransferBootstrapSourceHoldCommand? SourceHoldCommand = null);
 
 internal sealed record FileTransferBootstrapExchangeDecision(
     FileTransferCoordinatorState State,
@@ -91,6 +92,10 @@ internal static partial class FileTransferCoordinator
         var transition = state.PersistentState.FileTransferRouteTransition;
         var agreement = transition.BootstrapAgreement;
         var prior = transition.BootstrapExchange;
+        if (!IsFallbackBootstrapInitiationCurrent(state, observation))
+        {
+            return new(state, false, "bootstrap_initiation_source_not_current");
+        }
         if (agreement is not { IsEnabled: true } || !IsBootstrapAgreementCurrent(state, agreement) ||
             string.IsNullOrWhiteSpace(state.CurrentDataSessionIdentity))
         {
@@ -99,6 +104,12 @@ internal static partial class FileTransferCoordinator
         if (prior is not null && IsFallbackBootstrapExchangeCurrent(state, prior))
         {
             return new(state, true, "bootstrap_exchange_already_issued");
+        }
+        if (transition.BootstrapSourceHold is not { Receipt: { } holdReceipt } hold ||
+            !IsFallbackBootstrapSourceHoldCurrent(state, hold.Command) || holdReceipt.DurableCheckpoint != observation.DurableCheckpoint ||
+            observation with { DurableCheckpoint = hold.Command.Initiation.DurableCheckpoint } != hold.Command.Initiation)
+        {
+            return new(state, false, "bootstrap_source_hold_receipt_required");
         }
         if (prior is null
             ? !IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(state, out _)
@@ -157,7 +168,7 @@ internal static partial class FileTransferCoordinator
             state.CurrentDataSessionIdentity!, state.CurrentLeg?.CheckpointRequestId, state.CurrentLeg!.CheckpointGeneration, null);
         var exchange = new FileTransferBootstrapExchange(agreement, bootstrap, localId, state.CurrentDataSessionIdentity!,
             state.CurrentLeg?.CheckpointRequestId, state.CurrentLeg!.CheckpointGeneration, new(command), PeerCandidateId: solicit?.SenderRequestId,
-            LastCompletedPeerId: prior?.LastCompletedPeerId);
+            LastCompletedPeerId: prior?.LastCompletedPeerId, SourceHoldCommand: hold.Command);
         return SetBootstrapExchange(issued.State, exchange, "bootstrap_exchange_issued", command);
     }
 
@@ -285,14 +296,26 @@ internal static partial class FileTransferCoordinator
         return AdvanceBootstrapExchange(state, exchange, "bootstrap_receipt_applied");
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static bool IsFallbackBootstrapExchangeCurrent(FileTransferCoordinatorState state, FileTransferBootstrapExchange exchange)
-        => state.PersistentState.FileTransferRouteTransition.BootstrapExchange == exchange &&
-           !exchange.Invalidated && IsBootstrapAgreementCurrent(state, exchange.Agreement) &&
+        => HasCurrentFallbackBootstrapExchangeSourceHold(state, exchange) &&
+           HasCurrentFallbackBootstrapExchangeScope(state, exchange);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool HasCurrentFallbackBootstrapExchangeScope(FileTransferCoordinatorState state, FileTransferBootstrapExchange exchange)
+        => !exchange.Invalidated && IsBootstrapAgreementCurrent(state, exchange.Agreement) &&
            state.PersistentState.FileTransferRouteTransition.BootstrapAgreement == exchange.Agreement &&
            IsFileTransferFallbackV6ProofBootstrapSourceScopeCurrent(state, exchange.Bootstrap) &&
            state.CurrentDataSessionIdentity == exchange.DataSessionIdentity &&
            state.CurrentLeg?.CheckpointGeneration == exchange.LegCheckpointGeneration &&
            state.CurrentLeg?.CheckpointRequestId == exchange.CheckpointRequestId;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool HasCurrentFallbackBootstrapExchangeSourceHold(FileTransferCoordinatorState state, FileTransferBootstrapExchange exchange)
+        => state.PersistentState.FileTransferRouteTransition.BootstrapExchange == exchange &&
+           state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold is { Invalidated: false, Receipt: { } holdReceipt } hold &&
+           hold.Command == exchange.SourceHoldCommand && holdReceipt.Capture.Command == hold.Command &&
+           holdReceipt.DurableCheckpoint == exchange.Bootstrap.Observation.DurableCheckpoint;
 
     internal static bool IsFallbackBootstrapPhaseCommandCurrent(FileTransferCoordinatorState state, FileTransferBootstrapPhaseCommand command)
     {

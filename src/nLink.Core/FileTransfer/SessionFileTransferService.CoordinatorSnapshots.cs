@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "ebbaf19d291129caa47b34e69395de2b38985661560791c7c762c437ed6e679b";
+        "0ad879a93ec4d4639ecffd0fecf1c64d2aa32dc594bd39c680b8ca30c3c492dd";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3438,6 +3438,18 @@ public sealed partial class SessionFileTransferService
                             transition.RetainedFrameFingerprint),
                         BootstrapCorrelation = transition.BootstrapCorrelation is { } correlation
                             ? CreateBootstrapCorrelationEvidence(correlation) : null,
+                        BootstrapInitiation = transition.BootstrapInitiation is { } initiation
+                            ? CreateBootstrapInitiationEvidence(initiation) : null,
+                        BootstrapCallbacks = transition.BootstrapCallbacks is { } callbacks
+                            ? callbacks with
+                            {
+                                CallbackFingerprint = EvidenceToken(callbacks.CallbackFingerprint),
+                                SourceFingerprint = EvidenceToken(callbacks.SourceFingerprint),
+                                AgreementFingerprint = EvidenceToken(callbacks.AgreementFingerprint),
+                                HoldCommandFingerprint = EvidenceToken(callbacks.HoldCommandFingerprint),
+                                CaptureFingerprint = EvidenceToken(callbacks.CaptureFingerprint),
+                                CapturedCallbacks = callbacks.CapturedCallbacks.Select(EvidenceToken).ToImmutableArray(),
+                            } : null,
                         Receipts = transition.Receipts
                             .Select(CreateEvidenceReceipt)
                             .ToImmutableArray(),
@@ -3607,6 +3619,27 @@ public sealed partial class SessionFileTransferService
                 DeliveryCopies = value.DeliveryCopies.Select(CreateBootstrapCopyEvidence).ToImmutableArray(),
                 SettlementCopies = value.SettlementCopies.Select(CreateBootstrapCopyEvidence).ToImmutableArray(),
                 FailureCopies = value.FailureCopies.Select(CreateBootstrapCopyEvidence).ToImmutableArray(),
+            };
+
+        private static FileTransferBootstrapInitiationOperationSnapshot CreateBootstrapInitiationEvidence(
+            FileTransferBootstrapInitiationOperationSnapshot value)
+            => value with
+            {
+                ObservationFingerprint = EvidenceToken(value.ObservationFingerprint),
+                LocalStopFingerprint = EvidenceToken(value.LocalStopFingerprint),
+                PeerWakeFingerprint = EvidenceToken(value.PeerWakeFingerprint),
+                SourceFingerprint = EvidenceToken(value.SourceFingerprint),
+                SourceBoundary = CreateEvidenceBoundary(value.SourceBoundary),
+                AgreementFingerprint = EvidenceToken(value.AgreementFingerprint),
+                HoldIdentity = EvidenceToken(value.HoldIdentity),
+                HoldCommandFingerprint = EvidenceToken(value.HoldCommandFingerprint),
+                CaptureFingerprint = EvidenceToken(value.CaptureFingerprint),
+                CapturedWorkFingerprint = EvidenceToken(value.CapturedWorkFingerprint),
+                DrainReceiptFingerprint = EvidenceToken(value.DrainReceiptFingerprint),
+                SettledWorkFingerprint = EvidenceToken(value.SettledWorkFingerprint),
+                FrozenCheckpointFingerprint = EvidenceToken(value.FrozenCheckpointFingerprint),
+                BaseCommandIdentity = EvidenceToken(value.BaseCommandIdentity),
+                BaseCommandFingerprint = EvidenceToken(value.BaseCommandFingerprint),
             };
 
         private static FileTransferBootstrapPhysicalCopySnapshot CreateBootstrapCopyEvidence(FileTransferBootstrapPhysicalCopySnapshot value)

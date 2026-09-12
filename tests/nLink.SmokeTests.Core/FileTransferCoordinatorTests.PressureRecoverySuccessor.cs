@@ -18,6 +18,7 @@ public sealed partial class FileTransferCoordinatorTests
         => CreateCompletedRecoveryPressureSuccessorSnapshotFixture(
             direction, predecessorProofObserved);
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateCompletedRecoveryPressureSuccessorSnapshotFixture(
             FileTransferDirection direction,
@@ -48,6 +49,40 @@ public sealed partial class FileTransferCoordinatorTests
             direction,
             coordinatorInstanceId: $"completed-pressure-successor-{direction}-{predecessorProofObserved}",
             captureInitial: Capture);
+        var (state, predecessor, predecessorReceipt) = CompletePressureSuccessorPredecessor(
+            fixture, predecessorProofObserved, envelopes, CaptureRecovery);
+        return CompletePressureSuccessorHandoffAndExecution(
+            state, predecessor, predecessorReceipt, predecessorProofObserved,
+            terminalizeUnprovenSuccessor, envelopes, Capture, CaptureRecovery);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CompletePressureSuccessorHandoffAndExecution(
+        FileTransferCoordinatorState state, FileTransferReceiveRecoveryOperation predecessor,
+        FileTransferBridgeRecoveryExecutionReceipt predecessorReceipt, bool predecessorProofObserved,
+        bool terminalizeUnprovenSuccessor, List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+        Action<FileTransferCoordinatorTransitionEnvelope?> Capture,
+        Action<FileTransferReceiveRecoveryDecision> CaptureRecovery)
+    {
+        var predecessorState = state;
+        var (prepared, transition, installedBinding) = PrepareCompletedPressureSuccessorHandoff(
+            state, predecessor, Capture);
+        var (committed, appliedReceipt) = CommitCompletedPressureSuccessorHandoff(
+            prepared, transition, installedBinding, predecessor);
+        var (successor, duplicate) = AssertCompletedPressureSuccessorHandoff(
+            committed, transition, appliedReceipt, predecessor, predecessorProofObserved, envelopes, Capture);
+        return CompletePressureSuccessorExecution(
+            predecessorReceipt, successor, duplicate, terminalizeUnprovenSuccessor,
+            predecessor, predecessorState, envelopes, Capture, CaptureRecovery);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferCoordinatorState State, FileTransferReceiveRecoveryOperation Predecessor,
+        FileTransferBridgeRecoveryExecutionReceipt PredecessorReceipt) CompletePressureSuccessorPredecessor(
+            (FileTransferCoordinatorState State, FileTransferReceiveRecoveryDecision Decision) fixture,
+            bool predecessorProofObserved, List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+            Action<FileTransferReceiveRecoveryDecision> CaptureRecovery)
+    {
         CaptureRecovery(fixture.Decision);
         Assert.Equal(0, envelopes[0].Aggregate.BeforeStateGeneration);
         Assert.Equal(1, envelopes[0].Aggregate.AfterStateGeneration);
@@ -97,8 +132,26 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(predecessorProofObserved
             ? FileTransferReceiveRecoveryClosureState.Adopted
             : FileTransferReceiveRecoveryClosureState.Retained, predecessor.ClosureState);
-        var predecessorState = state;
+        return (state, predecessor, predecessorReceipt);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RegularV4FrontierRepairPressureRecoveryHandoffDecision Prepared,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition Transition,
+        RegularV4FrontierRepairPressureBinding InstalledBinding) PrepareCompletedPressureSuccessorHandoff(
+            FileTransferCoordinatorState state, FileTransferReceiveRecoveryOperation predecessor,
+            Action<FileTransferCoordinatorTransitionEnvelope?> Capture)
+    {
+        var (installed, installedBinding) = InstallCompletedPressureSuccessorBinding(state, predecessor, Capture);
+        return PrepareInstalledPressureSuccessorHandoff(installed, installedBinding, predecessor, Capture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RegularV4FrontierRepairPressureBindingDecision Installed,
+        RegularV4FrontierRepairPressureBinding InstalledBinding) InstallCompletedPressureSuccessorBinding(
+            FileTransferCoordinatorState state, FileTransferReceiveRecoveryOperation predecessor,
+            Action<FileTransferCoordinatorTransitionEnvelope?> Capture)
+    {
         var (repairState, repairDecision) = AuthorizeRegularV4FrontierRepair(state, capture: Capture);
         var staged = FileTransferCoordinator.StageRegularV4FrontierRepairPressureBinding(
             repairState,
@@ -122,7 +175,17 @@ public sealed partial class FileTransferCoordinatorTests
             PressureState(installed.State).InstalledBinding);
         Assert.Equal(predecessor,
             installed.State.PersistentState.FileTransferReceiveRecovery.CurrentOperation);
+        return (installed, installedBinding);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RegularV4FrontierRepairPressureRecoveryHandoffDecision Prepared,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition Transition,
+        RegularV4FrontierRepairPressureBinding InstalledBinding) PrepareInstalledPressureSuccessorHandoff(
+            RegularV4FrontierRepairPressureBindingDecision installed,
+            RegularV4FrontierRepairPressureBinding installedBinding, FileTransferReceiveRecoveryOperation predecessor,
+            Action<FileTransferCoordinatorTransitionEnvelope?> Capture)
+    {
         var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureRecoveryHandoff(
             installed.State,
             CreateReceiveRecoveryHealthEvaluationObservation(
@@ -136,6 +199,33 @@ public sealed partial class FileTransferCoordinatorTests
             transition.ReceiveRecoveryOperation.PredecessorAuthorityId);
         Assert.Equal(predecessor.Authority.OperationGeneration,
             transition.ReceiveRecoveryOperation.PredecessorOperationGeneration);
+        return (prepared, transition, installedBinding);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (RegularV4FrontierRepairPressureRecoveryHandoffDecision Committed,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt AppliedReceipt)
+        CommitCompletedPressureSuccessorHandoff(
+            RegularV4FrontierRepairPressureRecoveryHandoffDecision prepared,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+            RegularV4FrontierRepairPressureBinding installedBinding,
+            FileTransferReceiveRecoveryOperation predecessor)
+    {
+        var rejectedReceipt = AssertRejectedPressureSuccessorHandoff(prepared, transition, installedBinding, predecessor);
+        var appliedReceipt = AssertMismatchedPressureSuccessorHandoff(
+            prepared, transition, installedBinding, predecessor, rejectedReceipt);
+        var committed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
+            prepared.State, transition, appliedReceipt);
+        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed, committed.Status);
+        return (committed, appliedReceipt);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt AssertRejectedPressureSuccessorHandoff(
+        RegularV4FrontierRepairPressureRecoveryHandoffDecision prepared,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+        RegularV4FrontierRepairPressureBinding installedBinding, FileTransferReceiveRecoveryOperation predecessor)
+    {
         // Rejected branches must not enter the clean evidence stream returned below.
         var rejectedReceipt = new FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt(
             transition.SettlementCommand,
@@ -149,7 +239,16 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(installedBinding, PressureState(rejected.State).InstalledBinding);
         Assert.Equal(predecessor, rejected.State.PersistentState.FileTransferReceiveRecovery.CurrentOperation);
         Assert.Null(rejected.State.PersistentState.FileTransferReceiveRecovery.LastTerminalOperation);
+        return rejectedReceipt;
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt AssertMismatchedPressureSuccessorHandoff(
+        RegularV4FrontierRepairPressureRecoveryHandoffDecision prepared,
+        RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+        RegularV4FrontierRepairPressureBinding installedBinding, FileTransferReceiveRecoveryOperation predecessor,
+        FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt rejectedReceipt)
+    {
         var appliedReceipt = rejectedReceipt with
         {
             Status = FileTransferRegularV4FrontierRepairPressureSettlementApplyStatus.Applied,
@@ -169,10 +268,19 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Rejected, mismatched.Status);
         Assert.Equal(installedBinding, PressureState(mismatched.State).InstalledBinding);
         Assert.Equal(predecessor, mismatched.State.PersistentState.FileTransferReceiveRecovery.CurrentOperation);
+        return appliedReceipt;
+    }
 
-        var committed = FileTransferCoordinator.CommitRegularV4FrontierRepairPressureRecoveryHandoff(
-            prepared.State, transition, appliedReceipt);
-        Assert.Equal(RegularV4FrontierRepairPressureRecoveryHandoffStatus.Committed, committed.Status);
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferReceiveRecoveryOperation Successor,
+        RegularV4FrontierRepairPressureRecoveryHandoffDecision Duplicate) AssertCompletedPressureSuccessorHandoff(
+            RegularV4FrontierRepairPressureRecoveryHandoffDecision committed,
+            RegularV4FrontierRepairPressureRecoveryHandoffTransition transition,
+            FileTransferRegularV4FrontierRepairPressureSettlementApplyReceipt appliedReceipt,
+            FileTransferReceiveRecoveryOperation predecessor, bool predecessorProofObserved,
+            List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+            Action<FileTransferCoordinatorTransitionEnvelope?> Capture)
+    {
         Capture(committed.SnapshotEnvelope);
         var handoffEnvelope = envelopes[^1];
         Assert.Equal(handoffEnvelope.Aggregate.BeforeStateGeneration + 1,
@@ -218,8 +326,31 @@ public sealed partial class FileTransferCoordinatorTests
         Capture(duplicate.SnapshotEnvelope);
         Assert.Equal(committed.State.PersistentState.FileTransferReceiveRecovery,
             duplicate.State.PersistentState.FileTransferReceiveRecovery);
+        return (successor, duplicate);
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CompletePressureSuccessorExecution(
+        FileTransferBridgeRecoveryExecutionReceipt predecessorReceipt, FileTransferReceiveRecoveryOperation successor,
+        RegularV4FrontierRepairPressureRecoveryHandoffDecision duplicate, bool terminalizeUnprovenSuccessor,
+        FileTransferReceiveRecoveryOperation predecessor, FileTransferCoordinatorState predecessorState,
+        List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+        Action<FileTransferCoordinatorTransitionEnvelope?> Capture,
+        Action<FileTransferReceiveRecoveryDecision> CaptureRecovery)
+    {
         var successorReceipt = predecessorReceipt with { Command = successor.Authority.ExecutionCommand };
+        var successorCompleted = ExecutePressureSuccessorRecovery(successor, duplicate, successorReceipt, CaptureRecovery);
+        return AssertPressureSuccessorRecoveryCompletion(
+            successor, successorReceipt, successorCompleted, terminalizeUnprovenSuccessor,
+            predecessor, predecessorState, envelopes, Capture, CaptureRecovery);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision ExecutePressureSuccessorRecovery(
+        FileTransferReceiveRecoveryOperation successor, RegularV4FrontierRepairPressureRecoveryHandoffDecision duplicate,
+        FileTransferBridgeRecoveryExecutionReceipt successorReceipt,
+        Action<FileTransferReceiveRecoveryDecision> CaptureRecovery)
+    {
         var successorStarted = FileTransferCoordinator.ObserveReceiveRecoveryExecutionStart(
             duplicate.State,
             new FileTransferBridgeRecoveryExecutionStartResult(
@@ -234,29 +365,60 @@ public sealed partial class FileTransferCoordinatorTests
             successorStarted.State, successorReceipt, observedUtcMs: 104);
         Assert.True(successorCompleted.Accepted, successorCompleted.Reason);
         CaptureRecovery(successorCompleted);
+        return successorCompleted;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> AssertPressureSuccessorRecoveryCompletion(
+        FileTransferReceiveRecoveryOperation successor, FileTransferBridgeRecoveryExecutionReceipt successorReceipt,
+        FileTransferReceiveRecoveryDecision successorCompleted, bool terminalizeUnprovenSuccessor,
+        FileTransferReceiveRecoveryOperation predecessor, FileTransferCoordinatorState predecessorState,
+        List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+        Action<FileTransferCoordinatorTransitionEnvelope?> Capture,
+        Action<FileTransferReceiveRecoveryDecision> CaptureRecovery)
+    {
         if (terminalizeUnprovenSuccessor)
         {
-            var terminalized = FileTransferCoordinator.Apply(
-                CoordinatorEvent(
-                    FileTransferCoordinatorEventKind.Terminalized,
-                    successorCompleted.State.RouteSelection,
-                    reason: "completed"),
-                successorCompleted.State);
-            Assert.Null(terminalized.MutationRejectedReason);
-            Assert.True(terminalized.State.IsTerminal);
-            Capture(terminalized.SnapshotEnvelope);
-            var terminalRecovery = terminalized.State.PersistentState.FileTransferReceiveRecovery;
-            Assert.Null(terminalRecovery.CurrentOperation);
-            var unprovenTerminal = Assert.IsType<FileTransferReceiveRecoveryOperation>(
-                terminalRecovery.LastTerminalOperation);
-            Assert.Equal(successor.Authority, unprovenTerminal.Authority);
-            Assert.Equal(FileTransferReceiveRecoveryExecutionState.Invalidated,
-                unprovenTerminal.ExecutionState);
-            Assert.Equal("terminal_state", unprovenTerminal.InvalidationReason);
-            Assert.Equal(successorReceipt, unprovenTerminal.ExecutionReceipt);
-            Assert.Null(unprovenTerminal.ReceiveProof);
-            return envelopes;
+            return AssertUnprovenPressureSuccessorTerminalized(successor, successorReceipt, successorCompleted, envelopes, Capture);
         }
+
+        return AssertProvenPressureSuccessorCompleted(successor, successorCompleted, predecessor, predecessorState, envelopes, CaptureRecovery);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> AssertUnprovenPressureSuccessorTerminalized(
+        FileTransferReceiveRecoveryOperation successor, FileTransferBridgeRecoveryExecutionReceipt successorReceipt,
+        FileTransferReceiveRecoveryDecision successorCompleted, List<FileTransferCoordinatorTransitionEnvelope> envelopes,
+        Action<FileTransferCoordinatorTransitionEnvelope?> Capture)
+    {
+        var terminalized = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                successorCompleted.State.RouteSelection,
+                reason: "completed"),
+            successorCompleted.State);
+        Assert.Null(terminalized.MutationRejectedReason);
+        Assert.True(terminalized.State.IsTerminal);
+        Capture(terminalized.SnapshotEnvelope);
+        var terminalRecovery = terminalized.State.PersistentState.FileTransferReceiveRecovery;
+        Assert.Null(terminalRecovery.CurrentOperation);
+        var unprovenTerminal = Assert.IsType<FileTransferReceiveRecoveryOperation>(
+            terminalRecovery.LastTerminalOperation);
+        Assert.Equal(successor.Authority, unprovenTerminal.Authority);
+        Assert.Equal(FileTransferReceiveRecoveryExecutionState.Invalidated,
+            unprovenTerminal.ExecutionState);
+        Assert.Equal("terminal_state", unprovenTerminal.InvalidationReason);
+        Assert.Equal(successorReceipt, unprovenTerminal.ExecutionReceipt);
+        Assert.Null(unprovenTerminal.ReceiveProof);
+        return envelopes;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> AssertProvenPressureSuccessorCompleted(
+        FileTransferReceiveRecoveryOperation successor, FileTransferReceiveRecoveryDecision successorCompleted,
+        FileTransferReceiveRecoveryOperation predecessor, FileTransferCoordinatorState predecessorState,
+        List<FileTransferCoordinatorTransitionEnvelope> envelopes, Action<FileTransferReceiveRecoveryDecision> CaptureRecovery)
+    {
         var successorProof = new FileTransferReceiveRecoveryProof(
             successor.Authority, "completed-pressure-successor-proof", "receive_proof_observed", 105);
         var successorProved = FileTransferCoordinator.ObserveReceiveRecoveryProof(

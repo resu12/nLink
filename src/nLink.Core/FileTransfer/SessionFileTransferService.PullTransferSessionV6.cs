@@ -5036,6 +5036,7 @@ public sealed partial class SessionFileTransferService
                     ? new BitArray(manifest.ChunkCount)
                     : null;
                 context.ReceiverSparseChunksPendingWrite.Clear();
+                context.BootstrapPendingWriteOwners.Clear();
                 context.ReceiverSparseBytesWritten = 0;
                 context.PullReceiverSparseWriteBytesRecent = 0;
                 context.PullReceiverSparseWriteBatchCountRecent = 0;

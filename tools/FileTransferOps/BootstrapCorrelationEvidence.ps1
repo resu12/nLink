@@ -127,7 +127,7 @@ function Test-FileTransferCoordinatorBootstrapCorrelationOperation {
     param($Envelope, $Operation, $Catalog)
     try {
         $definition = $script:FileTransferCoordinatorBootstrapCorrelationCatalog
-        if ($Catalog.Version -cne $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion -or
+        if (-not (Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $Catalog.Version) -or
             $Operation.family -cne 'route_transition' -or $Operation.operationRole -cnotin $definition.operationRoles -or
             $Operation.operationKey -cne "route_transition|$($Operation.operationRole)|$($Operation.authorityId)|$($Operation.operationGeneration)|$($Operation.operationKind)" -or
             $Operation.commandIdentity -cne $Operation.authorityId -or $Operation.commandGeneration -ne $Operation.operationGeneration -or
@@ -148,7 +148,11 @@ function Test-FileTransferCoordinatorBootstrapCorrelationOperation {
         }
         $receipts = @($typed.receipts)
         if ($Operation.operationRole -ceq 'fallback_bootstrap_attempt') {
-            return $Envelope.decisionKind -cin $definition.decisionKinds -and $Operation.operationKind -ceq $Envelope.decisionKind -and
+            $decisionKinds=@($definition.decisionKinds)
+            if ($Catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion)) {
+                $decisionKinds+=@($script:FileTransferCoordinatorBootstrapInitiationCatalog.decisionKinds)
+            }
+            return $Envelope.decisionKind -cin $decisionKinds -and $Operation.operationKind -ceq $Envelope.decisionKind -and
                 $Envelope.decisionStatus -ceq 'Rejected' -and -not $Operation.stateApplied -and -not $Operation.receiptValidated -and
                 $Operation.beforeState -ceq 'None' -and $Operation.afterState -ceq 'Rejected' -and $receipts.Count -eq 0 -and
                 $Operation.receiptIdentity -ceq '(none)' -and $Operation.receiptStatus -ceq '(none)' -and $Operation.receiptGeneration -eq 0 -and
@@ -274,7 +278,7 @@ function Test-FileTransferCoordinatorBootstrapCorrelationOperation {
 
 function Test-FileTransferBootstrapCorrelationBaseRecord {
     param($Envelope, $Operation, $Catalog)
-    if ($null -eq $Catalog -or $Catalog.Version -cne $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion -or
+    if ($null -eq $Catalog -or -not (Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $Catalog.Version) -or
         $Operation.family -cne 'route_transition' -or $Operation.operationRole -cne 'fallback_v6_bootstrap' -or
         $Operation.operationKind -cne 'FallbackV6ProofBootstrap' -or -not $Operation.stateApplied -or
         $Envelope.decisionStatus -cne 'Accepted') { return $false }
@@ -311,7 +315,7 @@ function Test-FileTransferBootstrapCorrelationBaseRecord {
 
 function Get-FileTransferBootstrapCorrelationRetirementLink {
     param($Envelope, $Retired, $Catalog)
-    if ($null -eq $Catalog -or $Catalog.Version -cne $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion -or
+    if ($null -eq $Catalog -or -not (Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $Catalog.Version) -or
         $Envelope.decisionKind -cne 'StartFallbackBootstrapExchange' -or $Envelope.decisionStatus -cne 'Accepted' -or
         $Retired.operationRole -cne 'fallback_v6_bootstrap' -or $Retired.operationKind -cne 'FallbackV6ProofBootstrap' -or
         $Retired.beforeState -cne 'Delivered' -or $Retired.afterState -cne 'None' -or -not $Retired.stateApplied -or

@@ -6633,12 +6633,13 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         int remoteGrantedUntilExclusive,
         DateTimeOffset lastGrantReceivedUtc,
         bool seedRuntimeOwner = true,
-        int chunkCount = 512)
+        int chunkCount = 512,
+        FileTransferReadStreamFactory? sourceFactory = null)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType("OutboundTransferContext", BindingFlags.NonPublic)!;
-        FileTransferReadStreamFactory openReadStreamAsync =
-            _ => Task.FromResult<Stream>(new MemoryStream(Array.Empty<byte>(), writable: false));
+        FileTransferReadStreamFactory openReadStreamAsync = sourceFactory ??
+            (_ => Task.FromResult<Stream>(new MemoryStream(Array.Empty<byte>(), writable: false)));
         var descriptor = new FileTransferSendDescriptor($"{transferId}.bin", (long)chunkCount * 21 * 1024, transferId);
         var context = Activator.CreateInstance(
             contextType,

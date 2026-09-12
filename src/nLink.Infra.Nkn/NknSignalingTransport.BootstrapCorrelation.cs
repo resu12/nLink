@@ -24,7 +24,12 @@ public sealed partial class NknSignalingTransport
             if (fileTransferStates.TryGetValue(agreement.Offer.TransferId, out var state) && !state.IsTerminal &&
                 state.InitiatedLocally == (agreement.Direction == FileTransferDirection.Outbound))
             {
-                fileTransferStates[agreement.Offer.TransferId] = state with { CorrelatedBootstrapSelected = true };
+                fileTransferStates[agreement.Offer.TransferId] = state with
+                {
+                    CorrelatedBootstrapSelected = true,
+                    BootstrapLocalIssuer = agreement.Direction == FileTransferDirection.Outbound
+                        ? agreement.Offer.FallbackBootstrapIssuerId : agreement.Accept.FallbackBootstrapIssuerId,
+                };
             }
         }
     }

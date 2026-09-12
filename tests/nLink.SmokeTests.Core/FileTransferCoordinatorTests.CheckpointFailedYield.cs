@@ -243,6 +243,13 @@ public sealed partial class FileTransferCoordinatorTests
         fixture.PreviousCheckpointGeneration = fixture.State.CurrentLeg!.CheckpointGeneration;
         var requested = RequestFallbackCheckpoint(fixture.State, fallback, "checkpoint-failed-successor",
             fixture.State.CurrentLeg!.TransportEpochId);
+        CompleteCheckpointFailedYieldInvalidation(fixture, requested);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void CompleteCheckpointFailedYieldInvalidation(CheckpointFailedYieldFixture fixture,
+        FileTransferCoordinatorDecision requested)
+    {
         Assert.Null(requested.MutationRejectedReason);
         fixture.CheckpointEnvelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(requested.SnapshotEnvelope);
         Assert.Null(requested.State.PersistentState.FallbackTailYield.CurrentOperation);

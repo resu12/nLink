@@ -59,9 +59,18 @@ public sealed partial class SessionFileTransferService
             inbound.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
             inbound.CurrentFallbackV6ProofBootstrapPendingWriteWake = null;
         }
-        if (state.PersistentState.FileTransferRouteTransition.BootstrapExchange is not { Completed: false, Invalidated: false }) { return; }
-        var decision = FileTransferCoordinator.InvalidateFallbackBootstrapExchange(state, reason);
-        AdoptBootstrapCorrelationStateLocked(decision.State, decision.SnapshotEnvelope);
+        if (state.PersistentState.FileTransferRouteTransition.BootstrapExchange is { Completed: false, Invalidated: false })
+        {
+            var exchange = FileTransferCoordinator.InvalidateFallbackBootstrapExchange(state, reason);
+            AdoptBootstrapCorrelationStateLocked(exchange.State, exchange.SnapshotEnvelope);
+            state = exchange.State;
+        }
+        if (state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold is { Invalidated: false })
+        {
+            var hold = FileTransferCoordinator.InvalidateFallbackBootstrapSourceHold(state, reason);
+            AdoptBootstrapCorrelationStateLocked(hold.State, hold.SnapshotEnvelope);
+            state = hold.State;
+        }
     }
 
     private static void LogBootstrapCorrelationRejection(FileTransferDirection direction, string sessionId, string transferId, string reason)
@@ -77,12 +86,16 @@ public sealed partial class SessionFileTransferService
             ReferenceEquals(outbound.DataSession, dataSession) && frame.SessionId == outbound.SessionId && frame.TransferId == outbound.TransferId &&
             TryCreateFallbackV6ProofBootstrapPeerFrameBinding(outbound, frame, direction, out binding))
         {
+            if (outbound.BootstrapSourceHoldExecution is { } hold && HasBootstrapSourceHoldLocked(outbound) &&
+                !IsBootstrapSourceHoldExecutionCurrentLocked(hold)) { return null; }
             return CreateCoordinatorStateLocked(outbound);
         }
         if (direction == FileTransferDirection.Inbound && inboundTransfer is { IsTerminal: false, UserPaused: false } inbound &&
             ReferenceEquals(inbound.DataSession, dataSession) && frame.SessionId == inbound.SessionId && frame.TransferId == inbound.TransferId &&
             TryCreateFallbackV6ProofBootstrapPeerFrameBinding(inbound, frame, direction, out binding))
         {
+            if (inbound.BootstrapSourceHoldExecution is { } hold && HasBootstrapSourceHoldLocked(inbound) &&
+                !IsBootstrapSourceHoldExecutionCurrentLocked(hold)) { return null; }
             return CreateCoordinatorStateLocked(inbound);
         }
         return null;
@@ -208,7 +221,7 @@ public sealed partial class SessionFileTransferService
                 return true;
             }
             if (direction == FileTransferDirection.Inbound && inboundTransfer is { } inbound &&
-                (inbound.ReceiverSparseChunksPendingWrite.Count != 0 || inbound.PendingChunks.Count != 0))
+                (inbound.ReceiverSparseChunksPendingWrite.Count != 0 || inbound.PendingChunks.Count != 0 || HasUnsettledInboundBootstrapWrites(inbound)))
             {
                 if (FileTransferCoordinator.CanRetainFallbackBootstrapPeerFrame(state, frame))
                 {
@@ -232,6 +245,12 @@ public sealed partial class SessionFileTransferService
                 if (direction == FileTransferDirection.Inbound && inboundTransfer is { } current)
                 {
                     if (!TryStageBootstrapCorrelationFrame(current, frame, binding)) { return true; }
+                }
+                else if (direction == FileTransferDirection.Outbound && outboundTransfer is { } sender)
+                {
+                    if (sender.PendingFallbackV6ProofBootstrapPeerFrameBinding is { } prior && prior.FrameIdentity != binding.FrameIdentity) { return true; }
+                    sender.PendingFallbackV6ProofBootstrapPeerFrameEvidence = frame;
+                    sender.PendingFallbackV6ProofBootstrapPeerFrameBinding = binding;
                 }
                 wakeEvaluation = CreateBootstrapCorrelationWakeEvaluation(state, binding);
             }
@@ -262,6 +281,13 @@ public sealed partial class SessionFileTransferService
         FileTransferFallbackBootstrapFrameV6? retained)
     {
         FileTransferBootstrapExchangeDecision decision;
+        if (observation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable)
+        {
+            decision = FileTransferCoordinator.StartFallbackBootstrapExchange(state, observation, localState,
+                retained as FileTransferFallbackBootstrapRequestFrameV6);
+            AdoptBootstrapCorrelationStateLocked(decision.State, decision.SnapshotEnvelope);
+            return decision.Accepted ? decision.Command : null;
+        }
         if (state.PersistentState.FileTransferRouteTransition.BootstrapExchange is { } exchange &&
             FileTransferCoordinator.IsFallbackBootstrapExchangeCurrent(state, exchange))
         {

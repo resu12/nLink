@@ -10,6 +10,14 @@ public sealed partial class FileTransferCoordinatorTests
     public void CheckpointContinuity_RealAcceptanceAndDuplicateValidationRetainExactEvidence()
     {
         var fixture = CreateCheckpointRepairContinuityFixture();
+        AssertCheckpointAcceptanceAndDuplicateEvidence(fixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCheckpointAcceptanceAndDuplicateEvidence(
+        (FileTransferCoordinatorState State, FallbackFrontierRepairAuthority Authority,
+            IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> Envelopes) fixture)
+    {
         var state = fixture.State;
         var origin = state.PersistentState.CheckpointRepairContinuityOrigin!;
         var acceptance = fixture.Envelopes.Single(envelope =>

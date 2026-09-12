@@ -4,20 +4,93 @@ namespace NLink.SmokeTests;
 
 public sealed partial class FileTransferCoordinatorTests
 {
+    internal static FileTransferCoordinatorState CreateRetryConfirmationFingerprintFixture()
+        => CreateRetryConfirmationFixture(false).Commit.State;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferCoordinatorSuite", "RuntimeUnlockRetryLifecycle")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public void RuntimeUnlockRetryConfirmation_ContextUsesFinalizedInstallSnapshot(bool activePredecessor)
+    {
+        var fixture = activePredecessor
+            ? CreateActiveRetryConfirmationFixture()
+            : CreateRetryConfirmationFixture(false);
+        AssertRetryConfirmationContextProvenance(fixture, activePredecessor);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertRetryConfirmationContextProvenance(RetryConfirmationFixture fixture, bool activePredecessor)
+    {
+        var commit = fixture.Commit;
+        var state = commit.State;
+        var context = Assert.IsType<RuntimeUnlockRetryConfirmationCompensationContext>(commit.CompensationContext);
+        var envelope = Assert.IsType<FileTransferCoordinatorTransitionEnvelope>(commit.SnapshotEnvelope);
+        Assert.Equal("CommitRuntimeUnlockRetryDispatchInstall", envelope.DecisionKind);
+        Assert.Equal(envelope.CoordinatorInstanceId, context.CoordinatorInstanceId);
+        Assert.Equal(envelope.Aggregate.AfterStateGeneration, context.CommittedStateGeneration);
+        Assert.Equal(envelope.Aggregate.AfterStateFingerprint, context.CommittedSnapshotFingerprint);
+        Assert.Equal(envelope.Aggregate.AfterBoundary, context.CommittedBoundary);
+        Assert.Equal(FileTransferCoordinator.CalculateSnapshotStateFingerprint(state), context.CommittedStateFingerprint);
+        Assert.Equal(state.PersistentState.SnapshotStateGeneration, context.CommittedStateGeneration);
+        Assert.Equal(state.PersistentState.SnapshotStateFingerprint, context.CommittedSnapshotFingerprint);
+        Assert.Equal(state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt!.Value.InstallReceipt, context.Receipt);
+        if (activePredecessor)
+        {
+            var predecessor = Assert.IsType<RuntimeUnlockRetryLifecycleAttemptSnapshot>(context.PredecessorBeforeInstall);
+            Assert.Equal(fixture.PredecessorContract!.Authority, predecessor.Authority);
+            Assert.Equal(RuntimeUnlockRetryLifecycleAttemptState.AliasBound, predecessor.State);
+            Assert.Null(predecessor.Settlement);
+            var settlement = commit.PredecessorSettlementDecision!.Value;
+            Assert.Equal(predecessor.Authority, settlement.Report.Authority);
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementOutcome.Superseded, settlement.Report.Outcome);
+        }
+        else
+        {
+            Assert.Null(context.PredecessorBeforeInstall);
+            Assert.Null(commit.PredecessorSettlementDecision);
+        }
+    }
+
     [Theory]
     [InlineData(FileTransferDirection.Outbound, false)]
     [InlineData(FileTransferDirection.Inbound, false)]
     [InlineData(FileTransferDirection.Outbound, true)]
     [InlineData(FileTransferDirection.Inbound, true)]
     [Trait("FileTransferCoordinatorSuite", "RuntimeUnlockRetryLifecycle")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void RuntimeUnlockRetryConfirmation_CompensatesCurrentInstallWithoutReusingConsumedRelease(
         FileTransferDirection direction, bool predecessor)
     {
         var fixture = CreateRetryConfirmationFixture(predecessor, direction);
+        AssertCurrentRetryConfirmationCompensation(fixture, predecessor);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCurrentRetryConfirmationCompensation(
+        RetryConfirmationFixture fixture, bool predecessor)
+    {
         var before = fixture.Commit.State;
         var context = Assert.IsType<RuntimeUnlockRetryConfirmationCompensationContext>(fixture.Commit.CompensationContext);
         var installed = before.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt!.Value;
         var result = FileTransferCoordinator.CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(before, context);
+        AssertCurrentRetryConfirmationCompensated(before, context, installed, result);
+        var duplicate = FileTransferCoordinator.CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(result.State, context);
+        AssertCurrentRetryConfirmationDuplicate(before, installed, result, duplicate);
+        if (!predecessor)
+        {
+            AssertConsumedRetryConfirmationReleaseCannotBeReused(result, context);
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCurrentRetryConfirmationCompensated(
+        FileTransferCoordinatorState before,
+        RuntimeUnlockRetryConfirmationCompensationContext context,
+        in RuntimeUnlockRetryLifecycleAttemptSnapshot installed,
+        in RuntimeUnlockRetryLifecycleTransitionDecision result)
+    {
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Accepted, result.Status);
         Assert.Equal(context.PredecessorBeforeInstall, result.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
         Assert.Null(result.State.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
@@ -44,31 +117,50 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(before.PersistentState.SnapshotStateGeneration + 1, envelope.Aggregate.AfterStateGeneration);
         Assert.Equal(before.PersistentState.SnapshotStateFingerprint, envelope.Aggregate.BeforeStateFingerprint);
         Assert.Equal("CompensateRejectedRuntimeUnlockRetryDispatchConfirmation", envelope.DecisionKind);
-        var duplicate = FileTransferCoordinator.CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(result.State, context);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertCurrentRetryConfirmationDuplicate(
+        FileTransferCoordinatorState before,
+        in RuntimeUnlockRetryLifecycleAttemptSnapshot installed,
+        in RuntimeUnlockRetryLifecycleTransitionDecision result,
+        in RuntimeUnlockRetryLifecycleTransitionDecision duplicate)
+    {
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Idempotent, duplicate.Status);
         Assert.Same(result.State, duplicate.State);
         Assert.Equal(result.State.PersistentState, duplicate.State.PersistentState);
         Assert.Equal(installed, before.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
-        if (!predecessor)
-        {
-            var replay = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(result.State,
-                context.Receipt.Request, context.Receipt.Authority.ReleaseKind,
-                context.Receipt.Authority.ReleaseAuthorityId, context.Receipt.Authority.ReleaseGeneration,
-                context.Receipt.Authority.ReleaseOutcome);
-            Assert.False(replay.Granted);
-            Assert.Equal(result.State.PersistentState.RuntimeUnlockRetryLifecycle.LastAuthorityGeneration,
-                replay.State.PersistentState.RuntimeUnlockRetryLifecycle.LastAuthorityGeneration);
-            Assert.Equal(result.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt,
-                replay.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
-            Assert.Null(replay.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
-        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertConsumedRetryConfirmationReleaseCannotBeReused(
+        in RuntimeUnlockRetryLifecycleTransitionDecision result,
+        RuntimeUnlockRetryConfirmationCompensationContext context)
+    {
+        var replay = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(result.State,
+            context.Receipt.Request, context.Receipt.Authority.ReleaseKind,
+            context.Receipt.Authority.ReleaseAuthorityId, context.Receipt.Authority.ReleaseGeneration,
+            context.Receipt.Authority.ReleaseOutcome);
+        Assert.False(replay.Granted);
+        Assert.Equal(result.State.PersistentState.RuntimeUnlockRetryLifecycle.LastAuthorityGeneration,
+            replay.State.PersistentState.RuntimeUnlockRetryLifecycle.LastAuthorityGeneration);
+        Assert.Equal(result.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt,
+            replay.State.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
+        Assert.Null(replay.State.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
     }
 
     [Fact]
     [Trait("FileTransferCoordinatorSuite", "RuntimeUnlockRetryLifecycle")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void RuntimeUnlockRetryConfirmation_RestoresOnlyExactActivePredecessor()
     {
         var fixture = CreateActiveRetryConfirmationFixture();
+        AssertRetryConfirmationRestoresOnlyExactActivePredecessor(fixture);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertRetryConfirmationRestoresOnlyExactActivePredecessor(RetryConfirmationFixture fixture)
+    {
         var commit = fixture.Commit;
         var context = commit.CompensationContext!;
         var original = context.PredecessorBeforeInstall!.Value;
@@ -133,11 +225,29 @@ public sealed partial class FileTransferCoordinatorTests
     [InlineData("alias")]
     [InlineData("dispatch")]
     [Trait("FileTransferCoordinatorSuite", "RuntimeUnlockRetryLifecycle")]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public void RuntimeUnlockRetryConfirmation_RejectsStaleOrAdvancedInstall(string mutation)
     {
         var fixture = CreateRetryConfirmationFixture(false);
+        AssertRetryConfirmationRejectsStaleOrAdvancedInstall(fixture, mutation);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertRetryConfirmationRejectsStaleOrAdvancedInstall(
+        RetryConfirmationFixture fixture, string mutation)
+    {
         var state = fixture.Commit.State;
         var context = fixture.Commit.CompensationContext!;
+        ApplyRetryConfirmationRejectionMutation(ref state, ref context, mutation);
+        AssertRejectedRetryConfirmationStateNeutral(state, context);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ApplyRetryConfirmationRejectionMutation(
+        ref FileTransferCoordinatorState state,
+        ref RuntimeUnlockRetryConfirmationCompensationContext context,
+        string mutation)
+    {
         switch (mutation)
         {
             case "missing_context": context = null!; break;
@@ -193,6 +303,13 @@ public sealed partial class FileTransferCoordinatorTests
                 }
                 break;
         }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertRejectedRetryConfirmationStateNeutral(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryConfirmationCompensationContext context)
+    {
         var result = FileTransferCoordinator.CompensateRejectedRuntimeUnlockRetryDispatchConfirmation(state, context);
         Assert.Equal(RuntimeUnlockRetryLifecycleTransitionStatus.Rejected, result.Status);
         Assert.Same(state, result.State);
@@ -234,10 +351,19 @@ public sealed partial class FileTransferCoordinatorTests
     public void RuntimeUnlockRetryConfirmation_SuccessfulSuccessorSettlementAtomicallyReplacesTerminalPredecessor()
         => CreateSuccessfulActiveRetryConfirmationSnapshotFixture(settleSuccessor: true);
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateSuccessfulActiveRetryConfirmationSnapshotFixture(bool includeLateAttempts = false, bool settleSuccessor = false)
     {
         var fixture = CreateActiveRetryConfirmationFixture();
+        return CompleteSuccessfulActiveRetryConfirmationSnapshotFixture(fixture, includeLateAttempts, settleSuccessor);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CompleteSuccessfulActiveRetryConfirmationSnapshotFixture(
+            RetryConfirmationFixture fixture, bool includeLateAttempts, bool settleSuccessor)
+    {
         var commit = fixture.Commit;
         var before = commit.State.PersistentState.RuntimeUnlockRetryLifecycle;
         var predecessor = before.RetainedPredecessor!.Value;
@@ -417,10 +543,19 @@ public sealed partial class FileTransferCoordinatorTests
 
     // The established RegularV4 source helper is outbound-only. Fallback's
     // canonical paired request does not authorize active listener rearming.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateRejectedActiveRetryConfirmationSnapshotFixture(bool settleRestoredPredecessor = false)
     {
         var fixture = CreateActiveRetryConfirmationFixture();
+        return CompleteRejectedActiveRetryConfirmationSnapshotFixture(fixture, settleRestoredPredecessor);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CompleteRejectedActiveRetryConfirmationSnapshotFixture(
+            RetryConfirmationFixture fixture, bool settleRestoredPredecessor)
+    {
         var commit = fixture.Commit;
         var context = commit.CompensationContext!;
         var predecessor = context.PredecessorBeforeInstall!.Value;

@@ -3956,6 +3956,7 @@ public sealed partial class SessionFileTransferService :
         FileTransferReceiveRecoveryProofStatePublicationCommand?
             heldProofStatePublicationCommand = null;
         IFileTransferRouteTransitionBridge? heldFallbackV6BootstrapBridge = null;
+        FileTransferBootstrapPhaseCommand? heldCorrelatedBootstrapPhase = null;
         FileTransferFallbackV6ProofBootstrapEvaluation?
             heldFallbackV6BootstrapEvaluation = null;
 
@@ -4259,6 +4260,10 @@ public sealed partial class SessionFileTransferService :
                 if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
                     outboundTransfer is { IsTerminal: false } bootstrapOutbound)
                 {
+                    if (bootstrapOutbound.BootstrapSourceHoldExecution is { } sourceHold && IsBootstrapSourceHoldExecutionCurrentLocked(sourceHold))
+                    {
+                        heldCorrelatedBootstrapPhase = FileTransferCoordinator.GetCurrentFallbackBootstrapPhaseCommand(CreateCoordinatorStateLocked(bootstrapOutbound), heldOnly: true);
+                    }
                     heldBootstrap = FileTransferCoordinator
                         .GetCurrentHeldFileTransferFallbackV6ProofBootstrapCommand(
                             CreateCoordinatorStateLocked(bootstrapOutbound));
@@ -4266,6 +4271,10 @@ public sealed partial class SessionFileTransferService :
                 else if (ReferenceEquals(inboundTransfer?.DataSession, dataSession) &&
                          inboundTransfer is { IsTerminal: false } bootstrapInbound)
                 {
+                    if (bootstrapInbound.BootstrapSourceHoldExecution is { } sourceHold && IsBootstrapSourceHoldExecutionCurrentLocked(sourceHold))
+                    {
+                        heldCorrelatedBootstrapPhase = FileTransferCoordinator.GetCurrentFallbackBootstrapPhaseCommand(CreateCoordinatorStateLocked(bootstrapInbound), heldOnly: true);
+                    }
                     heldBootstrap = FileTransferCoordinator
                         .GetCurrentHeldFileTransferFallbackV6ProofBootstrapCommand(
                             CreateCoordinatorStateLocked(bootstrapInbound));
@@ -4286,7 +4295,11 @@ public sealed partial class SessionFileTransferService :
             }
         }
 
-        if (heldFallbackV6BootstrapBridge is not null &&
+        if (heldCorrelatedBootstrapPhase is not null && heldFallbackV6BootstrapBridge is not null)
+        {
+            await ExecuteBootstrapCorrelationPhaseAsync(heldFallbackV6BootstrapBridge, heldCorrelatedBootstrapPhase, dataSession).ConfigureAwait(false);
+        }
+        else if (heldFallbackV6BootstrapBridge is not null &&
             heldFallbackV6BootstrapEvaluation is not null)
         {
             await ProcessFallbackV6ProofBootstrapEvaluationAsync(
@@ -5117,7 +5130,11 @@ public sealed partial class SessionFileTransferService :
            string.Equals(inboundTransfer.SessionId, sessionId, StringComparison.Ordinal);
 
 
-    private async Task FinalizeInboundTransferAsync(InboundTransferContext context, CancellationToken ct)
+    private Task FinalizeInboundTransferAsync(InboundTransferContext context, CancellationToken ct)
+        => FinalizeInboundTransferWithWriteBindingAsync(context, ct, requiredWriteSource: null);
+
+    private async Task FinalizeInboundTransferWithWriteBindingAsync(InboundTransferContext context, CancellationToken ct,
+        InboundBootstrapWriteSource? requiredWriteSource)
     {
         Stream? writeStream;
         IncrementalHash? hash;
@@ -5132,6 +5149,7 @@ public sealed partial class SessionFileTransferService :
 
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
             {
                 return;
@@ -5159,7 +5177,7 @@ public sealed partial class SessionFileTransferService :
 
         if (writeStream is null || hash is null)
         {
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: StreamOpenFailedErrorCode,
@@ -5167,7 +5185,8 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "Destination stream became unavailable.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
             return;
         }
 
@@ -5180,7 +5199,7 @@ public sealed partial class SessionFileTransferService :
                     $"event=filetransfer_v4_finalize_size_mismatch; transfer_id={transferId}; session_id={sessionId}; bytes_transferred={bytesTransferred}; file_size={fileSizeBytes}; delta_bytes={bytesTransferred - fileSizeBytes}");
             }
 
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: FileSizeMismatchErrorCode,
@@ -5188,21 +5207,39 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "Received bytes did not match the declared file size.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
             return;
         }
 
         string computedHash;
         try
         {
-            await writeStream.FlushAsync(ct).ConfigureAwait(false);
-            computedHash = sparseMode
-                ? await ComputeSparseReceiveHashAsync(context, writeStream, ct).ConfigureAwait(false)
-                : Convert.ToBase64String(hash.GetHashAndReset());
+            var writeGateHeld = false;
+            try
+            {
+                if (requiredWriteSource is not null)
+                {
+                    await context.ReceiverSparseWriteGate.WaitAsync(ct).ConfigureAwait(false);
+                    writeGateHeld = true;
+                    Task flushing;
+                    lock (gate)
+                    {
+                        if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
+                        flushing = writeStream.FlushAsync(ct);
+                    }
+                    await flushing.ConfigureAwait(false);
+                }
+                else { await writeStream.FlushAsync(ct).ConfigureAwait(false); }
+                computedHash = sparseMode
+                    ? await ComputeSparseReceiveHashAsync(context, writeStream, ct, requiredWriteSource).ConfigureAwait(false)
+                    : Convert.ToBase64String(hash.GetHashAndReset());
+            }
+            finally { if (writeGateHeld) { context.ReceiverSparseWriteGate.Release(); } }
         }
         catch (Exception ex)
         {
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: StreamWriteFailedErrorCode,
@@ -5210,7 +5247,8 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "Could not finalize the destination stream.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
             return;
         }
 
@@ -5224,7 +5262,7 @@ public sealed partial class SessionFileTransferService :
                 errorCode: HashMismatchErrorCode,
                 fileName: context.FileName,
                 fileSizeBytes: context.FileSizeBytes);
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: HashMismatchErrorCode,
@@ -5232,7 +5270,8 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "File hash verification failed.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
             return;
         }
 
@@ -5248,7 +5287,17 @@ public sealed partial class SessionFileTransferService :
         {
             if (destination is not null)
             {
-                await destination.FinalizeAsync(ct).ConfigureAwait(false);
+                Task finalizing;
+                if (requiredWriteSource is not null)
+                {
+                    lock (gate)
+                    {
+                        if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
+                        finalizing = destination.FinalizeAsync(ct);
+                    }
+                }
+                else { finalizing = destination.FinalizeAsync(ct); }
+                await finalizing.ConfigureAwait(false);
             }
             LogTransferInfo(
                 "temp_finalize_succeeded",
@@ -5271,7 +5320,7 @@ public sealed partial class SessionFileTransferService :
                 fileName: context.FileName,
                 fileSizeBytes: context.FileSizeBytes,
                 savedPath: destination?.FinalPath);
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: FinalizeFailedErrorCode,
@@ -5279,12 +5328,14 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "Could not finalize the received file.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
             return;
         }
 
         lock (gate)
         {
+            if (requiredWriteSource is not null && !IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
             if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
             {
                 context.SavedFilePath = destination?.FinalPath;
@@ -5298,20 +5349,27 @@ public sealed partial class SessionFileTransferService :
             using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
             using var linkedCompletionCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
             var currentTransport = GetTransportOrThrow();
-            await currentTransport.SendFileTransferCompleteAsync(
-                new FileTransferCompleteV1
+            var completion = new FileTransferCompleteV1
+            {
+                SessionId = sessionId, TransferId = transferId,
+                FileSizeBytes = fileSizeBytes, Sha256Base64 = computedHash,
+            };
+            Task sendingCompletion;
+            if (requiredWriteSource is not null)
+            {
+                lock (gate)
                 {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    FileSizeBytes = context.FileSizeBytes,
-                    Sha256Base64 = computedHash,
-                },
-                linkedCompletionCts.Token).ConfigureAwait(false);
+                    if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { return; }
+                    sendingCompletion = currentTransport.SendFileTransferCompleteAsync(completion, linkedCompletionCts.Token);
+                }
+            }
+            else { sendingCompletion = currentTransport.SendFileTransferCompleteAsync(completion, linkedCompletionCts.Token); }
+            await sendingCompletion.ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_sent; kind=complete; transfer_id={transferId}; session_id={sessionId}; path=control; file_size_bytes={context.FileSizeBytes}");
 
-            if (ShouldUseV6SparseCreditEnvelope(context))
+            if (requiredWriteSource is null && ShouldUseV6SparseCreditEnvelope(context))
             {
                 using var dataFrameTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
                 await SendInboundV4CompleteAsync(
@@ -5325,7 +5383,7 @@ public sealed partial class SessionFileTransferService :
                     .ConfigureAwait(false);
             }
 
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Completed,
                 errorCode: null,
@@ -5333,11 +5391,12 @@ public sealed partial class SessionFileTransferService :
                 sendError: false,
                 errorMessage: null,
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await TransitionInboundToTerminalAsync(
+            await TransitionInboundToTerminalCoreAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: InvalidStateErrorCode,
@@ -5345,11 +5404,13 @@ public sealed partial class SessionFileTransferService :
                 sendError: true,
                 errorMessage: "Could not send the completion acknowledgment.",
                 cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
+                ct: CancellationToken.None,
+                requiredFeedbackOperation: null, requiredWriteSource: requiredWriteSource).ConfigureAwait(false);
         }
     }
 
-    private static async Task<string> ComputeSparseReceiveHashAsync(InboundTransferContext context, Stream stream, CancellationToken ct)
+    private async Task<string> ComputeSparseReceiveHashAsync(InboundTransferContext context, Stream stream, CancellationToken ct,
+        InboundBootstrapWriteSource? requiredWriteSource = null)
     {
         if (!stream.CanRead || !stream.CanSeek)
         {
@@ -5373,11 +5434,29 @@ public sealed partial class SessionFileTransferService :
 
         try
         {
-            stream.Seek(0, SeekOrigin.Begin);
+            if (requiredWriteSource is not null)
+            {
+                lock (gate)
+                {
+                    if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { throw new OperationCanceledException("Write source was superseded."); }
+                    stream.Seek(0, SeekOrigin.Begin);
+                }
+            }
+            else { stream.Seek(0, SeekOrigin.Begin); }
             while (remaining > 0)
             {
                 var requested = (int)Math.Min(buffer.Length, remaining);
-                var read = await stream.ReadAsync(buffer.AsMemory(0, requested), ct).ConfigureAwait(false);
+                ValueTask<int> reading;
+                if (requiredWriteSource is not null)
+                {
+                    lock (gate)
+                    {
+                        if (!IsInboundBootstrapWriteSourceCurrentLocked(context, requiredWriteSource)) { throw new OperationCanceledException("Write source was superseded."); }
+                        reading = stream.ReadAsync(buffer.AsMemory(0, requested), ct);
+                    }
+                }
+                else { reading = stream.ReadAsync(buffer.AsMemory(0, requested), ct); }
+                var read = await reading.ConfigureAwait(false);
                 if (read <= 0)
                 {
                     throw new EndOfStreamException("Sparse receive destination ended before the declared file size.");
@@ -11820,6 +11899,7 @@ public sealed partial class SessionFileTransferService :
             out committedHandoff);
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static FileTransferCoordinatorActionDecision
         AuthorizeReceiveRecoveryOperationLocked(
             FileTransferCoordinatorState state,
@@ -11846,6 +11926,14 @@ public sealed partial class SessionFileTransferService :
             observation,
             BridgeRecoveryKind.BridgeReceiveStallRecovery,
             request.CheckpointRequestId);
+        return CreateIssuedReceiveRecoveryActionDecision(issued, actionRequest);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferCoordinatorActionDecision CreateIssuedReceiveRecoveryActionDecision(
+        FileTransferReceiveRecoveryDecision issued,
+        FileTransferCoordinatorActionRequest actionRequest)
+    {
         if (!issued.Accepted || issued.Authority is not { } authority)
         {
             return CreateBridgeRecoveryActionDecision(
@@ -24045,7 +24133,8 @@ public sealed partial class SessionFileTransferService :
         int ChunkCount,
         OutboundPhysicalSendKind SendKind,
         string RepairRequestKey,
-        Task? PhysicalCompletionTask = null);
+        Task? PhysicalCompletionTask = null,
+        OutboundBootstrapSourceCallback? BootstrapCallback = null);
 
     private sealed class OutboundPostTunaFallbackReceiveRecoveryPayloadHold
     {
@@ -24241,6 +24330,7 @@ public sealed partial class SessionFileTransferService :
         public long LastReceiveRecoveryObservationGeneration { get; set; }
 
         public long LastOutboundPhysicalSendLeaseGeneration { get; set; }
+        public BootstrapSourceHoldExecution? BootstrapSourceHoldExecution { get; set; }
 
         public long OutboundPhysicalSendRegisteredCount { get; set; }
 
@@ -24248,6 +24338,9 @@ public sealed partial class SessionFileTransferService :
 
         public Dictionary<long, OutboundPhysicalSendLease>
             ActiveOutboundPhysicalSendLeases { get; } = [];
+
+        public Dictionary<long, OutboundBootstrapSourceCallback> ActiveBootstrapSourceCallbacks { get; } = [];
+        public FileTransferBootstrapLocalStopScope? BootstrapCallbackAwaitingSuccessor { get; set; }
 
         public Dictionary<long, FileTransferReceiveRecoverySubmissionFailureObservation>
             ReceiveRecoverySubmissionFailureObservations { get; } = [];
@@ -25561,6 +25654,17 @@ public sealed partial class SessionFileTransferService :
 
         public HashSet<int> ReceiverSparseChunksPendingWrite { get; } = [];
 
+        public long LastBootstrapWriteOperationGeneration { get; set; }
+
+        public Dictionary<long, InboundBootstrapWriteOperation> ActiveBootstrapWriteOperations { get; } = [];
+
+        public Dictionary<int, InboundBootstrapWriteOperation> BootstrapPendingWriteOwners { get; } = [];
+
+        public long LastBootstrapFeedbackOperationGeneration { get; set; }
+
+        public Dictionary<long, InboundBootstrapFeedbackOperation> ActiveBootstrapFeedbackOperations { get; } = [];
+        public BootstrapSourceHoldExecution? BootstrapSourceHoldExecution { get; set; }
+
         public long ReceiverSparseBytesWritten { get; set; }
 
         public long PullReceiverSparseWriteBytesRecent { get; set; }
@@ -26331,7 +26435,8 @@ public sealed partial class SessionFileTransferService :
         int SendAttemptCount,
         bool ScheduledRegularNknV4FastRuntime,
         long PhysicalSendLeaseGeneration,
-        Task PhysicalSendObservationTask);
+        Task PhysicalSendObservationTask,
+        OutboundBootstrapSourceCallback? BootstrapCallback = null);
 
     private readonly record struct MissingRange(int StartChunkIndex, int EndChunkIndexExclusive);
 }

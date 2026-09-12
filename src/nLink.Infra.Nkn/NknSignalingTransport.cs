@@ -165,6 +165,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
     private readonly INknClient client;
+    private readonly RealNknClientAdapter? regularV4PressureAdapter;
     private readonly IInviteTokenValidator inviteTokenValidator;
     private readonly IInviteValidationThrottle inviteValidationThrottle;
     private readonly ISessionHandshakeReplayCache handshakeReplayCache;
@@ -440,8 +441,21 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         NknIdentity identity,
         NknTunaAccelerationOptions tunaAccelerationOptions,
         INknAccelerationLane? accelerationLane)
+        : this(client, options, identity, tunaAccelerationOptions, accelerationLane, regularV4PressureAdapterForTests: null)
+    {
+    }
+
+    internal NknSignalingTransport(
+        INknClient client,
+        NknTransportOptions options,
+        NknIdentity identity,
+        NknTunaAccelerationOptions tunaAccelerationOptions,
+        INknAccelerationLane? accelerationLane,
+        RealNknClientAdapter? regularV4PressureAdapterForTests)
     {
         this.client = client ?? throw new ArgumentNullException(nameof(client));
+        // Offline joined tests can supply the real pressure backend without replacing byte transport.
+        regularV4PressureAdapter = client as RealNknClientAdapter ?? regularV4PressureAdapterForTests;
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
         this.tunaAccelerationOptions = tunaAccelerationOptions ?? NknTunaAccelerationOptions.Disabled;

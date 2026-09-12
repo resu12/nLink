@@ -19,7 +19,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession,
             beforeActivation: context => PinBootstrapServiceAgreement(context, issuer));
         var processing = ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge,
-            new(dataSession.SessionId, FileTransferDirection.Inbound, 1, 1, "test_command_first", "explicit_fallback", 10000));
+            LocalStopEvaluationForTest(context, dataSession));
         var first = Assert.Single(bridge.Executions);
         Assert.Equal(FileTransferBootstrapPhase.Announce, first.Command.Phase);
         var held = new FileTransferBootstrapPhaseReceipt(first.Command, FileTransferBootstrapPhaseReceiptStatus.Held,
@@ -27,6 +27,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         first.Delivery.TrySetResult(held);
         first.Settlement.TrySetResult(held);
         await processing;
+        await WaitUntilAsync(() => CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange!.First.Held, timeoutMs: 3000);
         Assert.True(CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange!.First.Held);
         Assert.Empty(dataSession.SentFrames);
         if (replaceDataSession)
@@ -183,7 +184,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession,
             beforeActivation: context => PinBootstrapServiceAgreement(context, issuer));
         var firstTask = ProcessInitialPeerFirstBootstrapEvaluationAsync(service, bridge,
-            new(dataSession.SessionId, FileTransferDirection.Inbound, 1, 1, "test_command_first", "explicit_fallback", 10000));
+            LocalStopEvaluationForTest(context, dataSession));
         var announce = Assert.Single(bridge.Executions);
         Assert.Equal(FileTransferBootstrapPhase.Announce, announce.Command.Phase);
         var solicit = new FileTransferFallbackBootstrapRequestFrameV6
@@ -224,39 +225,33 @@ public sealed partial class SessionFileTransferV4SenderTests
     [InlineData(true, true)]
     public async Task BootstrapCorrelation_ServiceResponseWaitsForSettlementAndOwnedWriteDrain(bool pendingWrite, bool pauseBeforeSettlement)
     {
-        const string transferId = "bootstrap_service_response";
-        using var service = new SessionFileTransferService();
-        var dataSession = new InitialBootstrapRecordingDataSession($"session_{transferId}", transferId);
-        using var bridge = new BootstrapPhaseTestBridge(dataSession);
-        var senderIssuer = FileTransferBootstrapCorrelation.CreateIssuer("service-peer", dataSession.SessionId, transferId, FileTransferDirection.Outbound);
-        var context = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(service, bridge, dataSession,
-            beforeActivation: context => PinBootstrapServiceAgreement(context, senderIssuer));
+        using var fixture = await BootstrapWriteFixture.CreateAsync(blockWrite: pendingWrite);
+        var service = fixture.Service;
+        var dataSession = fixture.Session;
+        var bridge = fixture.Bridge;
+        var context = fixture.Context;
+        var transferId = dataSession.TransferId;
+        var senderIssuer = FileTransferBootstrapCorrelation.CreateIssuer("peer", dataSession.SessionId, transferId, FileTransferDirection.Outbound);
         var before = CreateCoordinatorStateForTest(context);
         var solicit = new FileTransferFallbackBootstrapRequestFrameV6
         {
             SessionId = dataSession.SessionId, TransferId = transferId, TransportEpoch = 1,
             SenderRequestId = $"fbc1:{senderIssuer}:371:{new string('b', 64)}",
         };
-        var pending = GetPrivateProperty<HashSet<int>>(context, "ReceiverSparseChunksPendingWrite");
-        if (pendingWrite) { pending.Add(120); }
+        var writing = pendingWrite ? fixture.WriteAsync() : null;
         bool Receive(FileTransferDataFrame frame) => Assert.IsType<bool>(typeof(SessionFileTransferService).GetMethod(
             "TryHandleBootstrapCorrelationFrame", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
             [FileTransferDirection.Inbound, dataSession, new FileTransferReceivedDataFrame(frame, FileTransferTransportKind.RegularNkn, "control", DateTimeOffset.UtcNow)]));
         Assert.True(Receive(solicit));
         Assert.True(Receive(solicit));
-        Task? writeRecheck = null;
         if (pendingWrite)
         {
             Assert.Empty(bridge.Executions);
             Assert.Null(CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange);
-            pending.Clear();
-            object?[] args = [context, null, null, null];
-            var wake = typeof(SessionFileTransferService).GetMethod("TakeInboundFallbackV6ProofBootstrapPendingWriteWakeAfterDrainLocked",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, args);
-            Assert.NotNull(wake);
-            writeRecheck = Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod("ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [wake]));
+            fixture.Stream.CompleteWrite();
+            await writing!.WaitAsync(TimeSpan.FromSeconds(3));
         }
+        await WaitUntilAsync(() => bridge.Executions.Count == 1, timeoutMs: 3000);
         var execution = Assert.Single(bridge.Executions);
         Assert.Equal(FileTransferBootstrapPhase.Response, execution.Command.Phase);
         Assert.Equal(1, execution.Command.Bootstrap.BootstrapGeneration);
@@ -277,7 +272,6 @@ public sealed partial class SessionFileTransferV4SenderTests
         var priorDelivery = CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange!.First.Delivery;
         var settlementLogStart = GetOperationalLogLength();
         execution.Settlement.TrySetResult(ServiceBootstrapReceipt(execution.Command, settled: true));
-        if (writeRecheck is not null) { await writeRecheck.WaitAsync(TimeSpan.FromSeconds(5)); }
         if (pauseBeforeSettlement)
         {
             Assert.True(Receive(solicit with { ReceiverChallengeId = response.ReceiverChallengeId }));

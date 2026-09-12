@@ -77,6 +77,14 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
+            if ((evaluation.InitiationKind != FileTransferBootstrapInitiationKind.PeerEvidence || evaluation.LocalStop is not null || evaluation.ProofKind == "local_runtime_disabled") &&
+                (!ReferenceEquals(transport, bridge) || bridge is not { SupportsFallbackBootstrapCorrelation: true } ||
+                 GetCurrentBootstrapLocalStopStateLocked(evaluation) is null))
+            {
+                LogBootstrapCorrelationRejection(evaluation.Direction, evaluation.SessionId,
+                    evaluation.LocalStop?.Scope?.Publication?.TransferId ?? "(none)", "bootstrap_initiation_source_not_current");
+                return;
+            }
             if (expectedPendingWriteWake is not null)
             {
                 if (inboundTransfer?.CurrentFallbackV6ProofBootstrapPendingWriteWake
@@ -89,6 +97,7 @@ public sealed partial class SessionFileTransferService
 
                 if (inboundTransfer.ReceiverSparseChunksPendingWrite.Count == 0 &&
                     inboundTransfer.PendingChunks.Count == 0 &&
+                    !HasUnsettledInboundBootstrapWrites(inboundTransfer) &&
                     !TryRefreshInboundFallbackV6ProofBootstrapPeerFrameBindingAfterPendingWriteDrainLocked(
                         inboundTransfer,
                         expectedPendingWriteWake.Evaluation,
@@ -104,7 +113,7 @@ public sealed partial class SessionFileTransferService
                          is { } claimedWake &&
                      (claimedWake.RecheckClaimed ||
                       (inboundTransfer.ReceiverSparseChunksPendingWrite.Count == 0 &&
-                       inboundTransfer.PendingChunks.Count == 0)))
+                       inboundTransfer.PendingChunks.Count == 0 && !HasUnsettledInboundBootstrapWrites(inboundTransfer))))
             {
                 return;
             }
@@ -168,6 +177,7 @@ public sealed partial class SessionFileTransferService
             }
         }
 
+        StartBootstrapSourceHoldDrainIfNeeded(evaluation.Direction);
         if (deferredWake is not null)
         {
             LogInboundFallbackV6ProofBootstrapPendingWriteDeferred(
@@ -302,6 +312,11 @@ public sealed partial class SessionFileTransferService
         snapshot = null;
         pendingWriteContext = null;
 
+        if (evaluation.InitiationKind != FileTransferBootstrapInitiationKind.PeerEvidence || evaluation.LocalStop is not null || evaluation.ProofKind == "local_runtime_disabled")
+        {
+            if (GetCurrentBootstrapLocalStopStateLocked(evaluation) is null) { return false; }
+        }
+
         if (evaluation.Direction == FileTransferDirection.Outbound)
         {
             if (outboundTransfer is { IsTerminal: false } currentOutbound &&
@@ -366,6 +381,9 @@ public sealed partial class SessionFileTransferService
             if (UsesBootstrapCorrelation(correlationState))
             {
                 if (context.UserPaused) { return false; }
+                var peerWake = context.PendingFallbackV6ProofBootstrapPeerFrameEvidence as FileTransferFallbackBootstrapFrameV6;
+                if (!TryEnsureBootstrapSourceHoldLocked(context, correlationState, observation, peerWake, evaluation)) { return false; }
+                correlationState = CreateCoordinatorStateLocked(context);
                 var phase = IssueBootstrapCorrelationPhaseLocked(correlationState, observation, null, null);
                 if (phase is null) { return false; }
                 command = phase.Bootstrap;
@@ -472,10 +490,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (inbound.ReceiverSparseChunksPendingWrite.Count != 0 ||
-            inbound.PendingChunks.Count != 0)
+        if (!UsesBootstrapCorrelation(CreateCoordinatorStateLocked(inbound)) &&
+            (inbound.ReceiverSparseChunksPendingWrite.Count != 0 ||
+            inbound.PendingChunks.Count != 0 || HasUnsettledInboundBootstrapWrites(inbound)))
         {
-            if (IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation))
+            if (evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable ||
+                IsPeerFirstFallbackV6ProofBootstrapPhysicalTrigger(evaluation))
             {
                 pendingWriteContext = inbound;
             }
@@ -492,6 +512,13 @@ public sealed partial class SessionFileTransferService
         {
             if (inbound.UserPaused) { return false; }
             var staged = inbound.PendingFallbackV6ProofBootstrapPeerFrameEvidence as FileTransferFallbackBootstrapFrameV6;
+            if (!TryEnsureBootstrapSourceHoldLocked(inbound, inboundCorrelationState, inboundObservation, staged, evaluation))
+            {
+                if (inbound.ReceiverSparseChunksPendingWrite.Count != 0 || inbound.PendingChunks.Count != 0 || HasUnsettledInboundBootstrapWrites(inbound))
+                { pendingWriteContext = inbound; }
+                return false;
+            }
+            inboundCorrelationState = CreateCoordinatorStateLocked(inbound);
             if (staged is not null &&
                 (inbound.PendingFallbackV6ProofBootstrapPeerFrameBinding is not { } stagedBinding ||
                  !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(inbound, staged, FileTransferDirection.Inbound, out var currentBinding) ||
@@ -509,9 +536,9 @@ public sealed partial class SessionFileTransferService
                     BytesCommitted = ResolveInboundV4StateBytesCommittedLocked(inbound), TransferPaused = true,
                     TransferPauseReason = FileTransferBootstrapCorrelation.RecoveryMode,
                 }, staged);
+            if (phase is null) { return false; }
             inbound.PendingFallbackV6ProofBootstrapPeerFrameEvidence = null;
             inbound.PendingFallbackV6ProofBootstrapPeerFrameBinding = null;
-            if (phase is null) { return false; }
             command = phase.Bootstrap;
             epochFrame = phase.EpochFrame!;
             proofFrame = phase.Frame;
@@ -730,9 +757,10 @@ public sealed partial class SessionFileTransferService
             context.PendingFallbackV6ProofBootstrapPeerFrameBinding;
         if ((stagedFrame is null) != (stagedBinding is null) ||
             (stagedFrame is not null &&
-             (!MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+             ((evaluation.InitiationKind != FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
+               !MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
                   stagedBinding!,
-                  evaluation) ||
+                  evaluation)) ||
               !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
                   stagedFrame,
                   out var stagedFrameIdentity) ||
@@ -776,6 +804,7 @@ public sealed partial class SessionFileTransferService
             FileTransferFallbackV6ProofBootstrapEvaluation left,
             FileTransferFallbackV6ProofBootstrapEvaluation right)
         => string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal) &&
+           left.InitiationKind == right.InitiationKind && left.LocalStop == right.LocalStop &&
            left.Direction == FileTransferDirection.Inbound &&
            right.Direction == FileTransferDirection.Inbound &&
            left.FallbackEpoch == right.FallbackEpoch &&
@@ -814,8 +843,9 @@ public sealed partial class SessionFileTransferService
             return null;
         }
 
-        if (context.ReceiverSparseChunksPendingWrite.Count != 0 ||
-            context.PendingChunks.Count != 0)
+        if (context.CoordinatorPersistentState.FileTransferRouteTransition.BootstrapSourceHold is { Invalidated: false, Capture: not null, Receipt: null } ||
+            context.ReceiverSparseChunksPendingWrite.Count != 0 ||
+            context.PendingChunks.Count != 0 || HasUnsettledInboundBootstrapWrites(context))
         {
             status = "Held";
             result = "pending_writes_remain";
@@ -872,9 +902,10 @@ public sealed partial class SessionFileTransferService
 
         if (frame is null ||
             pendingBinding is null ||
-            !MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
+            (evaluation.InitiationKind != FileTransferBootstrapInitiationKind.LocalRuntimeDisable &&
+             !MatchesFallbackV6ProofBootstrapPeerFrameEvaluationTrigger(
                 pendingBinding,
-                evaluation) ||
+                evaluation)) ||
             !TryCreateFallbackV6ProofBootstrapPeerFrameBinding(
                 context,
                 frame,
@@ -958,6 +989,13 @@ public sealed partial class SessionFileTransferService
             owner,
             publication,
             leg);
+        if (evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable)
+        {
+            var current = !context.UserPaused && IsLocalBootstrapStopShapeValid(evaluation) &&
+                FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(CreateCoordinatorStateLocked(context), evaluation.LocalStop!.Scope);
+            reason = current ? "current" : "bootstrap_trigger_scope_changed";
+            return current;
+        }
         if (!MatchesFallbackV6ProofBootstrapPhysicalTrigger(
                 evaluation,
                 checkpoint) ||
@@ -1590,28 +1628,16 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private static FileTransferFallbackV6ProofBootstrapObservation
-        CreateFallbackV6ProofBootstrapObservation(
-            FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
-            string transferId,
-            FileTransferRouteTransitionDurableCheckpoint checkpoint)
-        => new(
-            evaluation.SessionId,
-            transferId,
-            evaluation.Direction,
-            evaluation.ObservationGeneration,
-            evaluation.FallbackEpoch,
-            evaluation.Source,
-            evaluation.ProofKind,
-            evaluation.ObservedUtcMilliseconds,
-            checkpoint);
-
     private static bool MatchesFallbackV6ProofBootstrapTrigger(
         FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
         string transferId,
         IFileTransferDataSession? dataSession,
         long dataSessionGeneration)
     {
+        if (evaluation.InitiationKind == FileTransferBootstrapInitiationKind.LocalRuntimeDisable)
+        {
+            return dataSessionGeneration > 0 && MatchesBootstrapLocalStopDataSession(evaluation, transferId, dataSession);
+        }
         if (string.IsNullOrWhiteSpace(evaluation.TriggerTransferId))
         {
             return evaluation.TriggerTransportEpoch == 0 &&

@@ -546,7 +546,11 @@ internal sealed record FileTransferFallbackV6ProofBootstrapEvaluation(
     long TriggerDataSessionGeneration = 0,
     FileTransferFallbackV6ProofBootstrapTriggerSourceScope?
         TriggerSourceScope = null,
-    long TriggerBootstrapGeneration = 0);
+    long TriggerBootstrapGeneration = 0)
+{
+    public FileTransferBootstrapInitiationKind InitiationKind { get; init; }
+    public FileTransferBootstrapLocalStopSource? LocalStop { get; init; }
+}
 
 internal sealed record FileTransferFallbackV6ProofBootstrapTriggerSourceScope(
     string RouteToken,
@@ -2957,6 +2961,8 @@ internal sealed record FileTransferPhysicalSendSubmission(
 
 internal interface IFileTransferPhysicalSendSubmissionSession
 {
+    // A synchronous throw is permitted only before any physical work starts. Once work starts,
+    // return both tasks: DeliveryTask reports delivery; PhysicalCompletionTask reports actual all-copy settlement.
     FileTransferPhysicalSendSubmission SubmitPhysicalSend(
         FileTransferDataFrame frame,
         FileTransferDataPathSendAuthority? authority,
