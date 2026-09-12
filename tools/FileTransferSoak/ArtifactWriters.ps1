@@ -71777,7 +71777,8 @@ function New-FileTransferInvariantLedgerObject {
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
         failure_variant = $recoveryClassification.FailureVariant
-        fallback_frontier_stall_diagnostic = if ($null -ne $recoveryClassification.PSObject.Properties['FallbackFrontierStallDiagnostic']) {
+        fallback_frontier_stall_diagnostic = if ($null -ne $recoveryClassification.PSObject.Properties['FallbackFrontierStallDiagnostic'] -and
+            $null -ne $recoveryClassification.FallbackFrontierStallDiagnostic) {
             ConvertTo-Json -InputObject $recoveryClassification.FallbackFrontierStallDiagnostic -Depth 4 -Compress
         } else { 'null' }
         runtime_unlock_retry_regular_v4_recovery_settlement_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingRawCount
@@ -73156,7 +73157,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("late_frame_classification={0}" -f $invariantLedger.late_frame_classification),
         ("recovery_failure_class={0}" -f $recoveryClassification.Class),
         ("failure_variant={0}" -f $recoveryClassification.FailureVariant),
-        ("fallback_frontier_stall_diagnostic={0}" -f $(if ($null -ne $recoveryClassification.PSObject.Properties['FallbackFrontierStallDiagnostic']) {
+        ("fallback_frontier_stall_diagnostic={0}" -f $(if ($null -ne $recoveryClassification.PSObject.Properties['FallbackFrontierStallDiagnostic'] -and
+            $null -ne $recoveryClassification.FallbackFrontierStallDiagnostic) {
             ConvertTo-Json -InputObject $recoveryClassification.FallbackFrontierStallDiagnostic -Depth 4 -Compress
         } else { 'null' })),
         ("first_proof_chain_failure_class={0}" -f $recoveryClassification.FirstProofChainFailureClass),

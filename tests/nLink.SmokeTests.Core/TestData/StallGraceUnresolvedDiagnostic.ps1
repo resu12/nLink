@@ -293,18 +293,158 @@ foreach($interval in @('before_settlement','after_settlement')) {
     }
 }
 
-# Guard ordinary report/classification wiring without generating a full report.
-$guiText=[IO.File]::ReadAllText($guiPath)
-$reportText=[IO.File]::ReadAllText((Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1'))
-foreach($required in @('FallbackFrontierStallDiagnostic = $null',
-    '$result.FallbackFrontierStallDiagnostic = $fallbackFrontierStallGraceRecheckFastPath.FirstUnresolvedDiagnostic')) {
-    if(-not $guiText.Contains($required)) { throw "GUI diagnostic propagation missing: $required" }
+# A separate earlier synthetic candidate has no exact wake. Its diagnostic must
+# remain null even when a later candidate has complete source-supersession proof.
+$fixture=SupersessionFixture
+$earlier=@((Fixture) | Where-Object {$_.Stage -cne 'wake'})
+foreach($event in $earlier) { $event.Fields.log_writer_id='earlier-writer' }
+$earlierHold=@($earlier | Where-Object {$_.Stage -ceq 'hold'})[0]
+$earlierHold.Sequence=901; $earlierHold.LineNumber=901
+$earlierHold.Fields.log_writer_sequence='901'
+$earlierHold.Fields.log_writer_attempt_utc_ticks=[string]$start.AddMilliseconds(900).UtcTicks
+$earlierHold.Fields.stall_started_utc=$start.AddMilliseconds(900).ToString('O')
+$earlierHold.Fields.wake_deadline_utc=$start.AddMilliseconds(1650).ToString('O')
+$mixedLines=@(Lines ($earlier+$fixture.Events))
+$names=@(Get-FileTransferFallbackFrontierGraceCorrelationEventNames)
+$mixedCompact=@($mixedLines | Where-Object {
+    $_ -match '(?:^|\] |; )event=([^;]+)' -and $Matches[1] -cin $names
+})
+if($mixedCompact.Count -ge $mixedLines.Count) { throw 'Mixed input was not independently compacted' }
+$reference=$null
+foreach($input in @(@{Name='full';Lines=$mixedLines},@{Name='compact';Lines=$mixedCompact})) {
+    $events=@(Parse $input.Lines ($input.Name+'.log'))
+    $firstHold=@($events | Where-Object {$_.EventName -ceq 'filetransfer_v6_frontier_request_deferred' -and
+        $_.Fields.log_writer_id -ceq 'earlier-writer'})[0]
+    $direct=& $script:FileTransferFallbackFrontierStallGraceLegacyCorrelation -Events $events -SnapshotEvidence $fixture.Snapshot
+    $index=New-FileTransferFallbackFrontierGraceCorrelationIndex -Events $events -SnapshotEvidence $fixture.Snapshot
+    $indexed=Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation -Events $events -Index $index -SnapshotEvidence $fixture.Snapshot
+    foreach($result in @($direct,$indexed)) {
+        $records=@($result.CandidateRecords | Sort-Object {$_.Event.Sequence})
+        if((Quartet $result) -cne '2/2/0/2' -or $records.Count -ne 2 -or
+            $records[0].Event.Sequence -ne $firstHold.Sequence -or $records[0].Event.LineNumber -ne $firstHold.LineNumber -or
+            $null -ne $records[0].UnresolvedDiagnostic -or $records[1].UnresolvedDiagnostic.Kind -cne 'SourceSuperseded') {
+            throw 'Mixed retained candidates borrowed a diagnostic or changed selection/counts'
+        }
+        foreach($record in $records) {
+            if($record.Recovered -or $null -ne $record.RecoveryEvent -or
+                $record.Reason -cne 'post_tuna_fallback_frontier_stall_grace_expired_without_exact_receiver_request_recheck' -or
+                $record.Variant -cne 'settled_frontier_progress_successor_not_rechecked_after_stall_grace') {
+                throw 'Mixed retained candidates changed recovery or taxonomy'
+            }
+        }
+    }
+    $gui=Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $input.Lines -IncludeEpisodeAudit -SnapshotEvidence $fixture.Snapshot
+    $guiFast=Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $input.Lines -SnapshotEvidence $fixture.Snapshot
+    $audits=@($gui.EpisodeAudit | Sort-Object {[long]$_.Event.Fields.gui_evidence_sequence})
+    if(-not $gui.Unresolved -or -not $guiFast.Unresolved -or $audits.Count -ne 2 -or
+        $gui.FirstSequence -ne [long]$audits[0].Event.Fields.gui_evidence_sequence -or
+        $guiFast.FirstSequence -ne $gui.FirstSequence -or $audits[0].Event.Fields.log_writer_id -cne 'earlier-writer' -or
+        $null -ne $gui.FirstUnresolvedDiagnostic -or $null -ne $guiFast.FirstUnresolvedDiagnostic -or
+        $null -ne $audits[0].UnresolvedDiagnostic -or $audits[1].UnresolvedDiagnostic.Kind -cne 'SourceSuperseded' -or
+        @($audits | Where-Object {$_.Recovered -or $_.Excluded}).Count -ne 0) {
+        throw 'Mixed GUI candidates borrowed the later diagnostic or changed first selection'
+    }
+    $json=DiagnosticJson ([ordered]@{Case='mixed_first_unresolved_no_borrowing';Quartet=(Quartet $indexed);
+        FirstWriter=$records[0].Event.Fields.log_writer_id;FirstWriterSequence=$records[0].Event.Fields.log_writer_sequence;
+        FirstDiagnostic=$gui.FirstUnresolvedDiagnostic;LaterDiagnostic=$records[1].UnresolvedDiagnostic})
+    if($null -ne $reference -and $json -cne $reference) { throw 'Mixed full/compact metadata differs' }
+    $reference=$json
 }
-foreach($required in @('FallbackFrontierStallDiagnostic = $fallbackFrontierStallDiagnostic',
-    'fallback_frontier_stall_diagnostic = if ($null -ne $recoveryClassification.PSObject.Properties[''FallbackFrontierStallDiagnostic''])',
-    'fallback_frontier_stall_diagnostic={0}',
-    'ConvertTo-Json -InputObject $recoveryClassification.FallbackFrontierStallDiagnostic -Depth 4 -Compress')) {
-    if(-not $reportText.Contains($required)) { throw "Report diagnostic propagation missing: $required" }
+$outputs.Add(($reference | ConvertFrom-Json))
+'pass mixed_first_unresolved_no_borrowing'
+
+# Execute only the production selection/DTO/formatting fragments. No report,
+# snapshot evaluator, or broader classifier is invoked by this synthetic test.
+function FixtureFunction($Tree,[string]$Name) {
+    $found=@($Tree.FindAll({param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $Name
+    },$true))
+    if($found.Count -ne 1) { throw "Expected one production function: $Name" }
+    return $found[0]
+}
+$reportAst=[Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1'),[ref]$tokens,[ref]$errors)
+if($errors.Count) { throw 'Report source has parse errors' }
+$retained=FixtureFunction $reportAst 'Get-FileTransferRecoveryFailureClassification'
+$selection=@($retained.Body.FindAll({param($node) $node -is [Management.Automation.Language.IfStatementAst]},$true) |
+    ForEach-Object { foreach($clause in $_.Clauses) {
+        if($clause.Item1.Extent.Text.Contains('$firstProofChainFailure.Class') -and
+            $clause.Item1.Extent.Text.Contains("'filetransfer_fallback_frontier_stall_grace_recheck_missing'")) { $clause }
+    } })
+if($selection.Count -ne 1) { throw 'Expected one retained stall classification clause' }
+$selectionBlock=[scriptblock]::Create('if ('+$selection[0].Item1.Extent.Text+') '+$selection[0].Item2.Extent.Text)
+$classificationAssignment=@($retained.Body.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$classification'
+})
+if($classificationAssignment.Count -ne 1) { throw 'Expected one production classification DTO assignment' }
+$classificationTable=$classificationAssignment[0].Right.Find({param($node)
+    $node -is [Management.Automation.Language.HashtableAst]
+},$true)
+$classificationPairs=@($classificationTable.KeyValuePairs | Where-Object {
+    $_.Item1.Extent.Text -cin @('Class','FailureVariant','FallbackFrontierStallDiagnostic')
+})
+if($classificationPairs.Count -ne 3) { throw 'Expected three production classification DTO fields' }
+$classificationBlock=[scriptblock]::Create('[pscustomobject]@{'+
+    (($classificationPairs | ForEach-Object {$_.Item1.Extent.Text+'='+$_.Item2.Extent.Text}) -join "`n")+'}')
+$ledger=FixtureFunction $reportAst 'New-FileTransferInvariantLedgerObject'
+$ledgerPair=@($ledger.Body.FindAll({param($node) $node -is [Management.Automation.Language.HashtableAst]},$true) |
+    ForEach-Object {$_.KeyValuePairs} | Where-Object {$_.Item1.Extent.Text -ceq 'fallback_frontier_stall_diagnostic'})
+$writer=FixtureFunction $reportAst 'Write-FileTransferDiagnosticsArtifacts'
+$textExpression=@($writer.Body.FindAll({param($node)
+    $node -is [Management.Automation.Language.BinaryExpressionAst] -and $node.Operator -eq 'Format' -and
+    $node.Left -is [Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Left.Value -ceq 'fallback_frontier_stall_diagnostic={0}'
+},$true))
+if($ledgerPair.Count -ne 1 -or $textExpression.Count -ne 1) { throw 'Expected exact diagnostic formatting expressions' }
+$ledgerBlock=[scriptblock]::Create($ledgerPair[0].Item2.Extent.Text)
+$textBlock=[scriptblock]::Create($textExpression[0].Extent.Text)
+$guiClassification=FixtureFunction $ast 'Get-TunaGuiFileTransferSetupFailureClassification'
+$guiBranch=@($guiClassification.Body.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses.Count -eq 1 -and
+    $_.Clauses[0].Item1.Extent.Text.Trim() -ceq '$firstEarlyRouteRuntimeKind -eq ''StallGrace'''
+})
+if($guiBranch.Count -ne 1) { throw 'Expected one normal GUI stall classification branch' }
+$guiBlock=[scriptblock]::Create($guiBranch[0].Extent.Text)
+. ([scriptblock]::Create((FixtureFunction $ast 'New-TunaGuiFileTransferFailureClassificationResult').Extent.Text))
+$presentDiagnostic=$records[1].UnresolvedDiagnostic
+foreach($mode in @('absent','null','present')) {
+    $selected=[pscustomobject]@{Event=$records[0].Event;Reason=$records[0].Reason;Variant=$records[0].Variant}
+    if($mode -cne 'absent') {
+        $selected | Add-Member -NotePropertyName UnresolvedDiagnostic -NotePropertyValue $(if($mode -ceq 'present'){$presentDiagnostic}else{$null})
+    }
+    $fileTransferFallbackFrontierStallGraceRecheckProof=[pscustomobject]@{UnresolvedCandidateRecords=@($selected,$records[1])}
+    $firstProofChainFailure=[pscustomobject]@{Class='filetransfer_fallback_frontier_stall_grace_recheck_missing';
+        Sequence=$selected.Event.Sequence;LineNumber=$selected.Event.LineNumber;Reason=$selected.Reason}
+    $class='fixture_class'; $failureVariant='(none)'; $fallbackFrontierStallDiagnostic=$null
+    . $selectionBlock
+    $recoveryClassification=& $classificationBlock
+    $expected=if($mode -ceq 'present'){$presentDiagnostic}else{$null}
+    if($recoveryClassification.Class -cne 'fixture_class' -or $recoveryClassification.FailureVariant -cne $selected.Variant -or
+        -not [object]::ReferenceEquals($recoveryClassification.FallbackFrontierStallDiagnostic,$expected)) {
+        throw "$mode retained classification borrowed metadata or changed existing fields"
+    }
+    # An older/mocked classification can omit the optional field entirely.
+    if($mode -ceq 'absent') { $recoveryClassification.PSObject.Properties.Remove('FallbackFrontierStallDiagnostic') }
+    $ledgerValue=& $ledgerBlock; $textValue=& $textBlock
+    $expectedJson=if($null -eq $expected){'null'}else{DiagnosticJson $expected}
+    if($ledgerValue -cne $expectedJson -or $textValue -cne ('fallback_frontier_stall_diagnostic='+$expectedJson)) {
+        throw "$mode diagnostic formatting changed its optional/flat JSON contract"
+    }
+    $fallbackFrontierStallGraceRecheckFastPath=[pscustomobject]@{FirstUnresolvedDiagnostic=$expected;ParsedRecords=23L}
+    $firstEarlyRouteRuntimeKind='StallGrace'; $TestMetrics=$null; $classificationSource='synthetic_consumer'
+    $RouteMode='post_tuna_fallback_v6'; $earlyEvidenceLineVisitCount=23L
+    $classificationStopwatch=[Diagnostics.Stopwatch]::StartNew()
+    $guiResult=& $guiBlock
+    $classificationStopwatch.Stop()
+    if($guiResult.Phase -cne 'fallback_frontier_repair' -or $guiResult.Reason -cne $selected.Reason -or
+        $guiResult.FailureVariant -cne $selected.Variant -or -not $guiResult.FallbackFrontierStallGraceRecheckMissing -or
+        $guiResult.FallbackFrontierRecentProgressGraceRecheckMissing -or $guiResult.EvidenceParsedRecordCount -ne 23L -or
+        -not [object]::ReferenceEquals($guiResult.FallbackFrontierStallDiagnostic,$expected)) {
+        throw "$mode normal GUI classification changed verdict or selected metadata"
+    }
+    $outputs.Add([pscustomobject][ordered]@{Case='classification_formatting_'+$mode;Diagnostic=$expected;
+        Class=$recoveryClassification.Class;Variant=$recoveryClassification.FailureVariant;LedgerValue=$ledgerValue;TextValue=$textValue})
+    "pass classification_formatting_$mode"
 }
 
 'stall-unresolved-diagnostic-normalized='+(ConvertTo-Json -InputObject $outputs.ToArray() -Depth 16 -Compress)
