@@ -86,7 +86,7 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests : File
         }
     }
 
-    private static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
+    private static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes, bool modeledOwnershipEffects = false)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         var type = typeof(SessionFileTransferService).GetNestedType("CoordinatorSnapshotStreamEmitter", BindingFlags.NonPublic)!;
@@ -98,7 +98,11 @@ public sealed partial class FileTransferBootstrapCorrelationEvidenceTests : File
         Assert.Equal(true, type.GetMethod("Start", flags)!.Invoke(emitter,
             [first.CoordinatorInstanceId, first.SessionId, first.TransferId, direction,
                 first.Aggregate.BeforeStateGeneration, first.Aggregate.BeforeStateFingerprint]));
-        foreach (var envelope in envelopes) { type.GetMethod("Enqueue", flags)!.Invoke(emitter, [envelope]); }
+        foreach (var envelope in envelopes)
+        {
+            type.GetMethod("Enqueue", flags)!.Invoke(emitter, [envelope]);
+            if (modeledOwnershipEffects) { EmitModeledOwnershipEffects(type, emitter, envelope); }
+        }
         type.GetMethod("Complete", flags)!.Invoke(emitter, [first.CoordinatorInstanceId, first.SessionId, first.TransferId, direction]);
         var queue = (ConcurrentQueue<string>)type.GetField("pending", flags)!.GetValue(emitter)!;
         return queue.Select((line, index) => SensitiveDataRedactor.Redact(
@@ -229,7 +233,8 @@ public sealed partial class FileTransferCoordinatorTests
         }
     }
 
-    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateBootstrapSuccessorHistory(bool outbound)
+    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> CreateBootstrapSuccessorHistory(bool outbound,
+        bool commitSuccessor = false, bool invalidateSourceHold = false)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         var (sender, receiver) = CreateCorrelatedBootstrapPair(capture: Capture);
@@ -237,7 +242,19 @@ public sealed partial class FileTransferCoordinatorTests
         sender = ReactivateCorrelatedFallback(CommitCorrelatedFallback(first.Sender, Capture), Capture).State;
         receiver = ReactivateCorrelatedFallback(CommitCorrelatedFallback(first.Receiver, Capture), Capture).State;
         var second = CompleteCorrelatedExchange(sender, receiver, Capture);
-        AssertSecondBootstrapGeneration(outbound ? second.Sender : second.Receiver);
+        var state = outbound ? second.Sender : second.Receiver;
+        AssertSecondBootstrapGeneration(state);
+        if (commitSuccessor) { state = CommitCorrelatedFallback(state, Capture); }
+        if (invalidateSourceHold)
+        {
+            var exchange = state.PersistentState.FileTransferRouteTransition.BootstrapExchange!;
+            if (!commitSuccessor) { Assert.True(FileTransferCoordinator.IsFallbackBootstrapExchangeCurrent(state, exchange)); }
+            var invalidated = FileTransferCoordinator.InvalidateFallbackBootstrapSourceHold(state, "test_source_hold_invalidated");
+            Assert.True(invalidated.Accepted);
+            Assert.False(FileTransferCoordinator.IsFallbackBootstrapExchangeCurrent(invalidated.State, exchange));
+            Assert.True(invalidated.State.PersistentState.FileTransferRouteTransition.BootstrapExchange!.Completed);
+            Capture(invalidated.SnapshotEnvelope!);
+        }
         return envelopes;
 
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)

@@ -11380,7 +11380,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure {
         param(
-            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+            $SnapshotEvaluation = $null
         )
 
         $peerFirstBootstrap = if ($null -ne (Get-Command `
@@ -11415,7 +11416,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $bootstrapDirection = if ($null -ne (Get-Command `
                 Get-FileTransferFallbackV6BootstrapDirectionCorrelation `
                 -ErrorAction SilentlyContinue)) {
-            Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $Lines
+            Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $Lines -SnapshotEvaluation $SnapshotEvaluation
         }
         else {
             $null
@@ -23665,7 +23666,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
 
     $fallbackV6InvalidFrontierFastPath =
-        Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines ([string[]]$evidenceLines)
+        Get-TunaGuiFallbackV6ProofBootstrapInvalidFrontierFailure -Lines ([string[]]$evidenceLines) `
+            -SnapshotEvaluation $coordinatorSnapshotEvaluation
     if ($fallbackV6InvalidFrontierFastPath.Unresolved) {
         if ($null -ne $TestMetrics) {
             $TestMetrics.evidenceLineVisitCount = [long]$fallbackV6InvalidFrontierFastPath.LineVisits

@@ -194,13 +194,213 @@ function Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed {
     return $true
 }
 
+function Test-FileTransferFallbackV6BootstrapSourceHoldConsumed {
+    param($Completed, [object[]]$History)
+
+    $exchange = $Completed.Operation.routeTransition
+    $initiation = $exchange.bootstrapInitiation
+    $holds = @($History | Where-Object {
+        $_.Operation.operationRole -ceq 'fallback_bootstrap_source_hold' -and
+        $_.Operation.authorityId -ceq $initiation.holdIdentity -and
+        $_.Operation.operationGeneration -eq $initiation.holdGeneration -and
+        $_.Boundary.decisionStatus -ceq 'Accepted' -and $_.Operation.stateApplied
+    })
+    $drained = @($holds | Where-Object {
+        [long]$_.Boundary.writerSequence -le [long]$Completed.Boundary.writerSequence -and $_.Operation.afterState -ceq 'Drained'
+    } | Select-Object -Last 1)
+    if ($drained.Count -ne 1) { return $false }
+    $hold = $drained[0].Operation.routeTransition.bootstrapInitiation
+    foreach ($field in @('holdIdentity','holdGeneration','holdCommandFingerprint','sourceFingerprint','frozenCheckpointFingerprint')) {
+        if ([string]$hold.$field -cne [string]$initiation.$field) { return $false }
+    }
+    if ($hold.drainReceiptFingerprint -cnotmatch '^fte1-[a-f0-9]{24}$' -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $hold.sourceBoundary $exchange.sourceBoundary)) { return $false }
+    $lost = @($holds | Where-Object {
+        [long]$_.Boundary.writerSequence -ge [long]$Completed.Boundary.writerSequence -and $_.Operation.afterState -cne 'Drained'
+    } | Select-Object -First 1)
+    if ($lost.Count -eq 0) { return $true }
+
+    # Cleanup cannot reopen an obligation already consumed by this exact
+    # Coordinator fallback. A later commit or an observation is not authority.
+    $cycle = @($History | Where-Object {
+        [long]$_.Boundary.writerSequence -gt [long]$Completed.Boundary.writerSequence -and
+        [long]$_.Boundary.writerSequence -lt [long]$lost[0].Boundary.writerSequence
+    })
+    $commits = @($cycle | Where-Object {
+        $_.Boundary.decisionKind -ceq 'CommitFileTransferRouteTransition' -and $_.Boundary.decisionStatus -ceq 'Committed' -and
+        $_.Operation.operationRole -ceq 'terminal' -and $_.Operation.beforeState -ceq 'None' -and
+        $_.Operation.afterState -ceq 'Committed' -and $_.Operation.stateApplied -and
+        $_.Operation.routeTransition.transitionKind -ceq 'TunaV4ToPostTunaFallbackV6'
+    })
+    if ($commits.Count -ne 1) { return $false }
+    $commit = $commits[0]; $operation = $commit.Operation; $route = $operation.routeTransition
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $exchange.sourceBoundary $route.sourceBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $route.sourceBoundary $commit.Boundary.beforeBoundary) -or
+        $route.durableCheckpointFingerprint -cne $exchange.durableCheckpointFingerprint -or
+        $route.retainedFrameFingerprint -cne $exchange.bootstrapCorrelation.retainedPeerFrameIdentityFingerprint -or
+        $commit.Boundary.afterBoundary.route -cne 'post_tuna_fallback_v6' -or $commit.Boundary.afterBoundary.protocolVersion -ne 6 -or
+        $commit.Boundary.afterBoundary.liveRouteEpoch -ne ([long]$exchange.sourceBoundary.liveRouteEpoch + 1)) { return $false }
+    $prepared = @($cycle | Where-Object {
+        [long]$_.Boundary.writerSequence -lt [long]$commit.Boundary.writerSequence -and
+        $_.Boundary.decisionKind -ceq 'PrepareFileTransferRouteTransition' -and
+        $_.Operation.operationRole -ceq 'current' -and $_.Operation.beforeState -ceq 'None' -and
+        $_.Operation.afterState -ceq 'Prepared' -and $_.Operation.stateApplied -and
+        $_.Operation.authorityId -ceq $operation.authorityId -and $_.Operation.operationGeneration -eq $operation.operationGeneration
+    })
+    $disposed = @($cycle | Where-Object {
+        [long]$_.Boundary.writerSequence -gt [long]$commit.Boundary.writerSequence -and
+        $_.Boundary.decisionKind -ceq 'ApplyFileTransferRouteTransitionDispositionReceipt' -and $_.Boundary.decisionStatus -ceq 'Committed' -and
+        $_.Operation.operationRole -ceq 'terminal' -and $_.Operation.afterState -ceq 'Committed' -and $_.Operation.stateApplied -and
+        $_.Operation.authorityId -ceq $operation.authorityId -and $_.Operation.operationGeneration -eq $operation.operationGeneration
+    })
+    if ($prepared.Count -ne 1 -or $disposed.Count -ne 1) { return $false }
+    foreach ($other in @($prepared[0].Operation, $disposed[0].Operation)) {
+        foreach ($field in @('transitionKind','durableCheckpointFingerprint','proofBoundaryFingerprint','targetRoute','targetProtocolVersion')) {
+            if ([string]$other.routeTransition.$field -cne [string]$route.$field) { return $false }
+        }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual $other.routeTransition.sourceBoundary $route.sourceBoundary)) { return $false }
+    }
+    foreach ($terminal in @($commit, $disposed[0])) {
+        $target = [ordered]@{}
+        foreach ($property in $terminal.Operation.routeTransition.targetBoundary.PSObject.Properties) {
+            $target[$property.Name] = if ($property.Name -cin @('dataSessionIdentity','checkpointRequestId')) {
+                ConvertTo-FileTransferCoordinatorEvidenceToken $property.Value
+            } else { $property.Value }
+        }
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqual ([pscustomobject]$target) $terminal.Boundary.afterBoundary) -or
+            $terminal.Operation.routeTransition.retainedFrameFingerprint -cne $route.retainedFrameFingerprint) { return $false }
+    }
+    foreach ($stage in @('pause_bind','drain','commit')) {
+        $receipt = @($route.receipts | Where-Object stage -CEQ $stage)
+        $preserved = @($disposed[0].Operation.routeTransition.receipts | Where-Object stage -CEQ $stage)
+        if ($receipt.Count -ne 1 -or -not $receipt[0].receiptValidated -or $preserved.Count -ne 1 -or
+            (ConvertTo-Json $receipt[0] -Compress) -cne (ConvertTo-Json $preserved[0] -Compress)) { return $false }
+    }
+    foreach ($stage in @('retained_frame','disposition')) {
+        $receipt = @($disposed[0].Operation.routeTransition.receipts | Where-Object stage -CEQ $stage)
+        if ($receipt.Count -ne 1 -or -not $receipt[0].receiptValidated -or $receipt[0].receiptStatus -cnotin @('Applied','Idempotent')) { return $false }
+    }
+    return $true
+}
+
+# A validated correlated exchange owns its exact legacy diagnostic; this does
+# not recover a route, publish anything, or waive any independent snapshot gate.
+function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
+    param($Episode, [long]$BeforeSequence, $SnapshotEvaluation)
+
+    if ($null -eq $SnapshotEvaluation -or $Episode.ConflictingStart -or
+        $SnapshotEvaluation.Mode -cne 'SnapshotV1Authoritative' -or
+        $SnapshotEvaluation.ArtifactEvidenceVerdict -cne 'pass' -or -not $SnapshotEvaluation.StreamComplete -or
+        $SnapshotEvaluation.AuthoritativeFamilies -cnotcontains 'route_transition' -or
+        $SnapshotEvaluation.ShadowFamilies -ccontains 'route_transition' -or
+        -not (Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $SnapshotEvaluation.CatalogVersion)) { return $false }
+
+    $triggers = @($Episode.TriggerRecords | Where-Object {
+        $_.WriterSequence -gt $Episode.PendingSequence -and $_.WriterSequence -lt $BeforeSequence -and
+        $_.Fields['status'] -ceq 'Ready'
+    } | Sort-Object Line -Unique)
+    if ($triggers.Count -ne 1) { return $false }
+    $trigger = $triggers[0]
+    $fields = $trigger.Fields
+    foreach ($record in $Episode.TriggerRecords.ToArray() + $Episode.Candidates.ToArray()) {
+        foreach ($name in @('transfer_id', 'direction')) {
+            if ($record.Fields.ContainsKey($name) -and $record.Fields[$name] -cne $fields[$name]) { return $false }
+        }
+        $seen = @{}
+        foreach ($match in [regex]::Matches($record.Line, '(?:^|;\s*)([^=;]+)=([^;]*)')) {
+            $name = $match.Groups[1].Value.Trim(); $value = $match.Groups[2].Value.Trim()
+            if ($seen.ContainsKey($name) -and $seen[$name] -cne $value) { return $false }
+            $seen[$name] = $value
+        }
+    }
+    if ($fields['direction'] -cne 'inbound' -or $fields['bulk_seen'] -cne '1' -or
+        $fields['control_seen'] -cne '1' -or $fields['authority_effect'] -cne 'none' -or
+        $fields['pending_generation'] -notmatch '^[1-9][0-9]*$' -or
+        $fields['source_route'] -cne 'file_tuna_v4' -or $fields['source_protocol_version'] -cne '4') { return $false }
+
+    function IdentityMatches([string]$Physical, [string]$Snapshot) {
+        if ([string]::IsNullOrWhiteSpace($Physical) -or $Physical -cin @('none', '(none)')) { return $false }
+        # Redaction cannot identify a stream. Only the unique writer/source join
+        # below can bind these diagnostics to validated Coordinator history.
+        if ($Physical -cin @('[redacted]', 'sess_[redacted]')) { return $true }
+        if ($Physical -cmatch '^fte1-[a-f0-9]{24}$') { return $Physical -ceq $Snapshot }
+        return (ConvertTo-FileTransferCoordinatorEvidenceToken $Physical) -ceq $Snapshot
+    }
+    $sourceFields = @(
+        @('source_route','route'), @('source_protocol_version','protocolVersion'),
+        @('source_live_route_epoch','liveRouteEpoch'), @('source_runtime_generation','runtimeGeneration'),
+        @('source_route_publication_generation','routePublicationGeneration'), @('source_route_commit_generation','routeCommitGeneration'),
+        @('source_terminal_generation','terminalGeneration'), @('source_leg_generation','legGeneration'),
+        @('source_transport_epoch','transportEpoch'), @('source_bridge_recovery_generation','bridgeRecoveryGeneration'),
+        @('source_checkpoint_request_id','checkpointRequestId'), @('source_checkpoint_generation','checkpointGeneration'),
+        @('data_session_generation','dataSessionGeneration'))
+    foreach ($record in $Episode.TriggerRecords) {
+        if ($record.WriterSequence -le $Episode.PendingSequence -or $record.Fields['status'] -cne 'Ready') { continue }
+        foreach ($name in @('session_id','transfer_id','direction','pending_generation') + @($sourceFields | ForEach-Object { $_[0] })) {
+            if ($record.Fields[$name] -cne $fields[$name]) { return $false }
+        }
+    }
+    $history = [Collections.Generic.List[object]]::new()
+    $owners = @{}
+    foreach ($boundary in $SnapshotEvaluation.Boundaries) {
+        if ($boundary.writer -cne $Episode.Writer -or $boundary.direction -cne $fields['direction'] -or
+            [long]$boundary.writerSequence -ge $BeforeSequence -or
+            -not (IdentityMatches $fields['session_id'] $boundary.sessionId) -or
+            -not (IdentityMatches $fields['transfer_id'] $boundary.transferId)) { continue }
+        foreach ($operation in @($boundary.operations | Where-Object {
+            $_.operationRole -cin @('fallback_bootstrap_exchange','fallback_bootstrap_source_hold','current','terminal')
+        })) {
+            $stream = "$($boundary.coordinatorInstanceId)|$($boundary.sessionId)|$($boundary.transferId)|$($boundary.direction)"
+            $key = "$stream|$($operation.operationKey)"
+            $entry = [pscustomobject]@{ Boundary=$boundary; Operation=$operation; Stream=$stream; Key=$key }
+            $history.Add($entry)
+            if ($operation.operationRole -cne 'fallback_bootstrap_exchange') { continue }
+            $matches = $true
+            foreach ($mapping in $sourceFields) {
+                $value = [string]$fields[$mapping[0]]
+                if ([string]::IsNullOrWhiteSpace($value) -or
+                    $value -cne [string]$operation.routeTransition.sourceBoundary.($mapping[1])) { $matches = $false; break }
+            }
+            if ($matches -and $boundary.decisionStatus -ceq 'Accepted') { $owners[$key] = $entry }
+        }
+    }
+    if ($owners.Count -ne 1) { return $false }
+    $owner = @($owners.Values)[0]
+    $streamHistory = @($history | Where-Object Stream -CEQ $owner.Stream | Sort-Object { [long]$_.Boundary.writerSequence })
+    $entries = @($streamHistory | Where-Object { $_.Operation.operationRole -ceq 'fallback_bootstrap_exchange' })
+    $completed = @($entries | Where-Object {
+        $_.Key -ceq $owner.Key -and $_.Boundary.decisionStatus -ceq 'Accepted' -and
+        [long]$_.Boundary.writerSequence -gt $Episode.PendingSequence -and
+        $_.Operation.stateApplied -and $_.Operation.beforeState -ceq 'Pending' -and $_.Operation.afterState -ceq 'Completed'
+    })
+    if ($completed.Count -ne 1) { return $false }
+    if (@($entries | Where-Object {
+        [long]$_.Boundary.writerSequence -gt [long]$completed[0].Boundary.writerSequence -and
+        $_.Boundary.decisionStatus -ceq 'Accepted' -and
+        ($_.Key -cne $owner.Key -or $_.Operation.afterState -cne 'Completed' -or
+            $_.Operation.routeTransition.bootstrapCorrelation.invalidated)
+    }).Count -gt 0) { return $false }
+    $latest = @($entries | Where-Object { $_.Boundary.decisionStatus -ceq 'Accepted' })[-1]
+    $correlation = $latest.Operation.routeTransition.bootstrapCorrelation
+    if ($SnapshotEvaluation.CatalogVersion -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
+            $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion) -and
+        -not (Test-FileTransferFallbackV6BootstrapSourceHoldConsumed $completed[0] $streamHistory)) { return $false }
+    return $latest.Key -ceq $owner.Key -and $latest.Operation.afterState -ceq 'Completed' -and
+        $correlation.agreementEnabled -and $correlation.version -eq 1 -and
+        $correlation.completed -and -not $correlation.invalidated -and
+        $correlation.peerIdFingerprint -cmatch '^fte1-[a-f0-9]{24}$' -and
+        $correlation.peerIdFingerprint -ceq $correlation.completedPeerIdFingerprint -and
+        $correlation.retainedPeerFrameIdentityFingerprint -cmatch '^fte1-[a-f0-9]{24}$'
+}
+
 function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
     param(
         [Parameter(Mandatory = $true)]
         [AllowNull()]
         [AllowEmptyCollection()]
         [AllowEmptyString()]
-        [string[]]$Lines
+        [string[]]$Lines,
+        $SnapshotEvaluation = $null
     )
 
     $relevantEvents = [System.Collections.Generic.HashSet[string]]::new(
@@ -418,6 +618,9 @@ function Get-FileTransferFallbackV6BootstrapDirectionCorrelation {
 
         $expectedDirection = 'inbound'
         $firstWait = $episode.Candidates[0]
+        if (Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed -Episode $episode -BeforeSequence $firstWait.WriterSequence -SnapshotEvaluation $SnapshotEvaluation) {
+            continue
+        }
         if (Test-FileTransferFallbackV6BootstrapPeerFirstEpisodeConsumed -Episode $episode -BeforeSequence $firstWait.WriterSequence) {
             continue
         }
@@ -1964,12 +2167,16 @@ function Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation {
 function Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Events,
-        [Parameter(Mandatory = $true)]$SnapshotProof
+        [Parameter(Mandatory = $true)]$SnapshotProof,
+        $SnapshotEvaluation = $null
     )
 
     [string[]]$lines = @($Events | ForEach-Object { [string]$_.RawLine })
-    $directionCorrelation =
+    $directionCorrelation = if ($null -eq $SnapshotEvaluation) {
         Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $lines
+    } else {
+        Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $lines -SnapshotEvaluation $SnapshotEvaluation
+    }
     $peerFirstCorrelation =
         Get-FileTransferFallbackV6BootstrapPeerFirstCorrelation -Lines $lines
     $eventsByWriterSequence = @{}

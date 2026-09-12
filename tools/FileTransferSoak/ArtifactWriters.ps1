@@ -66006,7 +66006,8 @@ function Get-FileTransferRecoveryFailureClassification {
                     'filetransfer_route_transition_tuna_v4_to_post_tuna_fallback_v6_proof_bootstrap_missing')
             Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof `
                 -Events $allEvents `
-                -SnapshotProof $snapshotBootstrapProof
+                -SnapshotProof $snapshotBootstrapProof `
+                -SnapshotEvaluation $coordinatorSnapshotEvaluation
         }
         else {
             $fallbackBootstrapUnresolvedRecords = @(
