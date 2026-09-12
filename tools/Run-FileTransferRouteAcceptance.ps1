@@ -13889,6 +13889,7 @@ try {
         $resolvedBridgeDir = ''
 
         if (-not $fakeMode) {
+            $null = & (Join-Path $repoRoot 'tools\Test-FileTransferEvidenceCatalog.ps1')
             $effectiveWalletPassword = $WalletPassword
             if ([string]::IsNullOrWhiteSpace($effectiveWalletPassword)) {
                 $effectiveWalletPassword = [string]$env:NLINK_TUNA_TEST_WALLET_PASSWORD

@@ -6,7 +6,8 @@ public sealed partial class NknSignalingTransport
 {
     private FileTransferBootstrapLocalStopSource[] CaptureFallbackBootstrapLocalStopSources(string reason)
     {
-        if (reason != "runtime_disabled" || currentSessionSecurityState.SessionId?.Value is not { } sessionId) { return []; }
+        if (reason is not ("runtime_disabled" or "header_switch_off") ||
+            currentSessionSecurityState.SessionId?.Value is not { } sessionId) { return []; }
         KeyValuePair<string, FileTransferTransportState>[] selected;
         lock (controlSecureStateGate)
         {

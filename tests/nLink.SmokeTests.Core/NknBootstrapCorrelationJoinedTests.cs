@@ -24,7 +24,14 @@ public sealed partial class NknAccelerationTransportTests
     public Task JoinedBootstrapCorrelation_DualStopPublishesFallbackAfterTransportReceipts()
         => RunJoinedBootstrapCorrelationAsync(runExchange: true, stopMode: 2);
 
-    private async Task RunJoinedBootstrapCorrelationAsync(bool runExchange, int stopMode = 0)
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public Task JoinedBootstrapCorrelation_HeaderStopPublishesFallbackAfterTransportReceipts(int stopMode)
+        => RunJoinedBootstrapCorrelationAsync(runExchange: true, stopMode, stopReason: "header_switch_off");
+
+    private async Task RunJoinedBootstrapCorrelationAsync(bool runExchange, int stopMode = 0, string stopReason = "runtime_disabled")
     {
         FakeNknClient.ResetNetwork();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
@@ -92,8 +99,19 @@ public sealed partial class NknAccelerationTransportTests
                 await host.RequestAccelerationNegotiationAsync("runtime_unlock", timeout.Token);
                 await WaitFor("initial Tuna publication", () => Published(sender, outbound, FileTransferRoute.FileTunaV4) &&
                     Published(receiver, inbound, FileTransferRoute.FileTunaV4));
-                if (stopMode != 1) { await host.StopAccelerationAsync("runtime_disabled", timeout.Token); }
-                if (stopMode != 0) { await helper.StopAccelerationAsync("runtime_disabled", timeout.Token); }
+                // Only exact local reasons may capture a current source; remote/unknown observations cannot.
+                foreach (var transport in new[] { host, helper })
+                {
+                    var capture = typeof(NknSignalingTransport)
+                        .GetMethod("CaptureFallbackBootstrapLocalStopSources", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                    foreach (var rejected in new[] { "remote_header_switch_off", "remote_runtime_disabled", "unknown", "HEADER_SWITCH_OFF" })
+                    {
+                        Assert.Empty((Array)capture.Invoke(transport, [rejected])!);
+                    }
+                    Assert.NotEmpty((Array)capture.Invoke(transport, [stopReason])!);
+                }
+                if (stopMode != 1) { await host.StopAccelerationAsync(stopReason, timeout.Token); }
+                if (stopMode != 0) { await helper.StopAccelerationAsync(stopReason, timeout.Token); }
                 // Resume the real source after activation/stop; fallback discovery needs ordinary traffic.
                 releaseReads.TrySetResult();
                 await WaitFor("correlated fallback publication", () => Published(sender, outbound, FileTransferRoute.PostTunaFallbackV6) &&
