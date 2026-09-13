@@ -172,96 +172,111 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.True(retryBridge.LastCommitObservedUnderCoreGate);
                 if (fault == RetryBridgeFault.ConfirmationRejected)
                 {
-                    Assert.True(retryBridge.LastConfirmationObservedUnderCoreGate);
-                    Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, retryBridge.LastDecision!.Value.Status);
-                    Assert.Equal("retry_dispatch_install_confirmation_rejected", retryBridge.LastDecision.Value.Reason);
-                    Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, retryBridge.LastInstallResult!.Value.Status);
-                    Assert.Null(retryBridge.LastCommittedReceipt);
-                    Assert.Null(retryBridge.InfraCurrentContract);
-                    Assert.Equal(0, retryBridge.InstallCount);
-                    Assert.False(retryBridge.DrainQueuedAuthorityRequest());
-                    var compensated = CreateCoordinatorStateForTest(retryContext);
-                    Assert.Null(compensated.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
-                    Assert.Null(compensated.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
-                    Assert.Null(compensated.PersistentState.RuntimeUnlockRetryLifecycle.CurrentInstalledAuthority);
-                    var terminal = Assert.IsType<RuntimeUnlockRetryLifecycleAttemptSnapshot>(
-                        compensated.PersistentState.RuntimeUnlockRetryLifecycle.LastTerminalAttempt);
-                    Assert.Equal(RuntimeUnlockRetryLifecycleAttemptState.Invalidated, terminal.State);
-                    Assert.Equal(retryBridge.LastInstallResult.Value.Receipt, terminal.InstallReceipt);
-                    Assert.Equal(request, terminal.Request);
-                    Assert.Equal(terminal.InstallReceipt, compensated.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
-                    Assert.NotNull(compensated.PersistentState.FallbackTailYield.LastConsumedReservation);
-                    Assert.Null(compensated.PersistentState.FallbackTailYield.CurrentReservation);
-                    Assert.Equal(FileTransferFallbackTailYieldPairingState.ReleaseConsumed,
-                        compensated.PersistentState.FallbackTailYield.CurrentOperation!.Value.PairingState);
-                    Assert.Equal(retryBridge.LastConfirmationCoordinatorGeneration + 1,
-                        compensated.PersistentState.SnapshotStateGeneration);
-                    var emitter = GetPrivatePropertyValue(retryContext, "CoordinatorSnapshotEmitter")!;
-                    Assert.Equal(compensated.PersistentState.SnapshotStateGeneration,
-                        emitterType.GetField("finalGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(emitter));
-                    var storedEvidenceHash = emitterType.GetMethod("EvidenceToken", BindingFlags.Static | BindingFlags.NonPublic)!
-                        .Invoke(null, [compensated.PersistentState.SnapshotStateFingerprint]);
-                    Assert.Equal(storedEvidenceHash,
-                        emitterType.GetField("finalHash", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(emitter));
-                    // The graph fingerprint and chained stream fingerprint are
-                    // different domains after the initial snapshot.
-                    Assert.Equal(FileTransferCoordinator.CalculateSnapshotStateFingerprint(retryBridge.LastDecision.Value.State),
-                        FileTransferCoordinator.CalculateSnapshotStateFingerprint(compensated));
-                    AssertPairAndUnchangedSource(retryService, retryContext, retrySource, localYield, peerYield, retryData);
-                    Assert.True(retryBridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request));
-                    Assert.False(retryBridge.DrainQueuedAuthorityRequest());
-                    Assert.Equal(compensated.PersistentState, CreateCoordinatorStateForTest(retryContext).PersistentState);
+                    AssertRejectedConfirmation();
+
+                    void AssertRejectedConfirmation()
+                    {
+                        Assert.True(retryBridge.LastConfirmationObservedUnderCoreGate);
+                        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, retryBridge.LastDecision!.Value.Status);
+                        Assert.Equal("retry_dispatch_install_confirmation_rejected", retryBridge.LastDecision.Value.Reason);
+                        Assert.Equal(RuntimeUnlockRetryDispatchInstallStatus.Installed, retryBridge.LastInstallResult!.Value.Status);
+                        Assert.Null(retryBridge.LastCommittedReceipt);
+                        Assert.Null(retryBridge.InfraCurrentContract);
+                        Assert.Equal(0, retryBridge.InstallCount);
+                        Assert.False(retryBridge.DrainQueuedAuthorityRequest());
+                        var compensated = CreateCoordinatorStateForTest(retryContext);
+                        Assert.Null(compensated.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
+                        Assert.Null(compensated.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
+                        Assert.Null(compensated.PersistentState.RuntimeUnlockRetryLifecycle.CurrentInstalledAuthority);
+                        var terminal = Assert.IsType<RuntimeUnlockRetryLifecycleAttemptSnapshot>(
+                            compensated.PersistentState.RuntimeUnlockRetryLifecycle.LastTerminalAttempt);
+                        Assert.Equal(RuntimeUnlockRetryLifecycleAttemptState.Invalidated, terminal.State);
+                        Assert.Equal(retryBridge.LastInstallResult.Value.Receipt, terminal.InstallReceipt);
+                        Assert.Equal(request, terminal.Request);
+                        Assert.Equal(terminal.InstallReceipt, compensated.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
+                        Assert.NotNull(compensated.PersistentState.FallbackTailYield.LastConsumedReservation);
+                        Assert.Null(compensated.PersistentState.FallbackTailYield.CurrentReservation);
+                        Assert.Equal(FileTransferFallbackTailYieldPairingState.ReleaseConsumed,
+                            compensated.PersistentState.FallbackTailYield.CurrentOperation!.Value.PairingState);
+                        Assert.Equal(retryBridge.LastConfirmationCoordinatorGeneration + 1,
+                            compensated.PersistentState.SnapshotStateGeneration);
+                        var emitter = GetPrivatePropertyValue(retryContext, "CoordinatorSnapshotEmitter")!;
+                        Assert.Equal(compensated.PersistentState.SnapshotStateGeneration,
+                            emitterType.GetField("finalGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(emitter));
+                        var storedEvidenceHash = emitterType.GetMethod("EvidenceToken", BindingFlags.Static | BindingFlags.NonPublic)!
+                            .Invoke(null, [compensated.PersistentState.SnapshotStateFingerprint]);
+                        Assert.Equal(storedEvidenceHash,
+                            emitterType.GetField("finalHash", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(emitter));
+                        // The graph fingerprint and chained stream fingerprint are
+                        // different domains after the initial snapshot.
+                        Assert.Equal(FileTransferCoordinator.CalculateSnapshotStateFingerprint(retryBridge.LastDecision.Value.State),
+                            FileTransferCoordinator.CalculateSnapshotStateFingerprint(compensated));
+                        AssertPairAndUnchangedSource(retryService, retryContext, retrySource, localYield, peerYield, retryData);
+                        Assert.True(retryBridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request));
+                        Assert.False(retryBridge.DrainQueuedAuthorityRequest());
+                        AssertJoinedPersistentStateUnchangedForTest(compensated, retryContext);
+                    }
                 }
                 else if (fault != RetryBridgeFault.None)
                 {
-                    Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, retryBridge.LastDecision!.Value.Status);
-                    Assert.Equal("retry_dispatch_install_commit_rejected", retryBridge.LastDecision.Value.Reason);
-                    Assert.Null(retryBridge.LastCommittedReceipt);
-                    Assert.Null(retryBridge.InfraCurrentContract);
-                    Assert.Equal(0, retryBridge.InstallCount);
-                    Assert.False(retryBridge.DrainQueuedAuthorityRequest());
-                    var rejected = CreateCoordinatorStateForTest(outbound);
-                    Assert.Null(rejected.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
-                    Assert.Null(rejected.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
-                    Assert.Null(rejected.PersistentState.RuntimeUnlockRetryLifecycle.CurrentInstalledAuthority);
-                    Assert.Null(rejected.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
-                    Assert.Equal(senderSource.CurrentRuntimeOwner, rejected.CurrentRuntimeOwner);
-                    Assert.Equal(senderSource.CurrentRoutePublicationToken, rejected.CurrentRoutePublicationToken);
-                    Assert.Equal(senderSource.CurrentDataSessionIdentity, rejected.CurrentDataSessionIdentity);
-                    Assert.Equal(senderSource.CurrentDataSessionGeneration, rejected.CurrentDataSessionGeneration);
-                    Assert.Equal(FileTransferRoute.PostTunaFallbackV6, rejected.RouteSelection.Route);
-                    Assert.Null(rejected.PersistentState.FileTransferRouteTransition.CurrentOperation);
-                    Assert.Equal(100, rejected.CurrentLeg!.ProvenCommittedChunkIndex);
-                    Assert.Equal(255, rejected.CurrentLeg.ProvenHighestObservedChunkIndex);
-                    AssertPairAndUnchangedSource(receiver, inbound, receiverSource, receiverYield, senderYield, receiverData);
+                    AssertMismatchedInstall();
+
+                    void AssertMismatchedInstall()
+                    {
+                        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, retryBridge.LastDecision!.Value.Status);
+                        Assert.Equal("retry_dispatch_install_commit_rejected", retryBridge.LastDecision.Value.Reason);
+                        Assert.Null(retryBridge.LastCommittedReceipt);
+                        Assert.Null(retryBridge.InfraCurrentContract);
+                        Assert.Equal(0, retryBridge.InstallCount);
+                        Assert.False(retryBridge.DrainQueuedAuthorityRequest());
+                        var rejected = CreateCoordinatorStateForTest(outbound);
+                        Assert.Null(rejected.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
+                        Assert.Null(rejected.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt);
+                        Assert.Null(rejected.PersistentState.RuntimeUnlockRetryLifecycle.CurrentInstalledAuthority);
+                        Assert.Null(rejected.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
+                        Assert.Equal(senderSource.CurrentRuntimeOwner, rejected.CurrentRuntimeOwner);
+                        Assert.Equal(senderSource.CurrentRoutePublicationToken, rejected.CurrentRoutePublicationToken);
+                        Assert.Equal(senderSource.CurrentDataSessionIdentity, rejected.CurrentDataSessionIdentity);
+                        Assert.Equal(senderSource.CurrentDataSessionGeneration, rejected.CurrentDataSessionGeneration);
+                        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, rejected.RouteSelection.Route);
+                        Assert.Null(rejected.PersistentState.FileTransferRouteTransition.CurrentOperation);
+                        Assert.Equal(100, rejected.CurrentLeg!.ProvenCommittedChunkIndex);
+                        Assert.Equal(255, rejected.CurrentLeg.ProvenHighestObservedChunkIndex);
+                        AssertPairAndUnchangedSource(receiver, inbound, receiverSource, receiverYield, senderYield, receiverData);
+                    }
                 }
                 else
                 {
-                    Assert.True(retryBridge.LastConfirmationObservedUnderCoreGate);
-                    Assert.True(retryBridge.LastDecision!.Value.Granted, retryBridge.LastDecision.Value.Reason);
-                    var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(retryBridge.LastCommittedReceipt);
-                    var state = CreateCoordinatorStateForTest(outbound);
-                    var installed = state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt!.Value;
-                    Assert.Equal(request, installed.Request);
-                    Assert.Equal(receipt, installed.InstallReceipt);
-                    Assert.Equal(receipt.Authority, installed.Authority);
-                    Assert.Equal(RuntimeUnlockRetryLifecycleAttemptState.Installed, installed.State);
-                    Assert.Equal(receipt, state.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
-                    Assert.NotNull(state.PersistentState.FallbackTailYield.LastConsumedReservation);
-                    Assert.Null(state.PersistentState.FallbackTailYield.CurrentReservation);
-                    Assert.Null(state.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
-                    Assert.Equal(1, retryBridge.InstallCount);
-                    Assert.Same(retryBridge.LastDecision.Value.Contract, retryBridge.InfraCurrentContract);
-                    Assert.True(retryBridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request));
-                    Assert.False(retryBridge.DrainQueuedAuthorityRequest());
-                    Assert.Equal(receipt, retryBridge.LastCommittedReceipt);
-                    Assert.Equal(1, retryBridge.InstallCount);
-                    Assert.Equal(state.PersistentState, CreateCoordinatorStateForTest(outbound).PersistentState);
-                    Assert.Equal(senderSource.CurrentRuntimeOwner, state.CurrentRuntimeOwner);
-                    Assert.Equal(senderSource.CurrentRoutePublicationToken, state.CurrentRoutePublicationToken);
-                    Assert.Equal(FileTransferRoute.PostTunaFallbackV6, state.RouteSelection.Route);
-                    Assert.Null(state.PersistentState.FileTransferRouteTransition.CurrentOperation);
-                    AssertPairAndUnchangedSource(receiver, inbound, receiverSource, receiverYield, senderYield, receiverData);
+                    AssertInstalledRetry();
+
+                    void AssertInstalledRetry()
+                    {
+                        Assert.True(retryBridge.LastConfirmationObservedUnderCoreGate);
+                        Assert.True(retryBridge.LastDecision!.Value.Granted, retryBridge.LastDecision.Value.Reason);
+                        var receipt = Assert.IsType<RuntimeUnlockRetryDispatchInstallReceipt>(retryBridge.LastCommittedReceipt);
+                        var state = CreateCoordinatorStateForTest(outbound);
+                        var installed = state.PersistentState.RuntimeUnlockRetryLifecycle.InstalledAttempt!.Value;
+                        Assert.Equal(request, installed.Request);
+                        Assert.Equal(receipt, installed.InstallReceipt);
+                        Assert.Equal(receipt.Authority, installed.Authority);
+                        Assert.Equal(RuntimeUnlockRetryLifecycleAttemptState.Installed, installed.State);
+                        Assert.Equal(receipt, state.PersistentState.FallbackTailYield.LastConsumingInstallReceipt);
+                        Assert.NotNull(state.PersistentState.FallbackTailYield.LastConsumedReservation);
+                        Assert.Null(state.PersistentState.FallbackTailYield.CurrentReservation);
+                        Assert.Null(state.PersistentState.RuntimeUnlockRetryLifecycle.PendingAttempt);
+                        Assert.Equal(1, retryBridge.InstallCount);
+                        Assert.Same(retryBridge.LastDecision.Value.Contract, retryBridge.InfraCurrentContract);
+                        Assert.True(retryBridge.QueueRuntimeUnlockRetryDispatchAuthorityRequest(request));
+                        Assert.False(retryBridge.DrainQueuedAuthorityRequest());
+                        Assert.Equal(receipt, retryBridge.LastCommittedReceipt);
+                        Assert.Equal(1, retryBridge.InstallCount);
+                        AssertJoinedPersistentStateUnchangedForTest(state, outbound);
+                        Assert.Equal(senderSource.CurrentRuntimeOwner, state.CurrentRuntimeOwner);
+                        Assert.Equal(senderSource.CurrentRoutePublicationToken, state.CurrentRoutePublicationToken);
+                        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, state.RouteSelection.Route);
+                        Assert.Null(state.PersistentState.FileTransferRouteTransition.CurrentOperation);
+                        AssertPairAndUnchangedSource(receiver, inbound, receiverSource, receiverYield, senderYield, receiverData);
+                    }
                 }
             }
             var log = ReadOperationalLogTail(logStart);
@@ -284,6 +299,11 @@ public sealed partial class SessionFileTransferV4SenderTests
             TryCancelContextLifetime(outbound);
             TryCancelContextLifetime(inbound);
         }
+
+        // Keep whole-state value copies out of the async startup frame. The
+        // equality assertions still execute at their original sequence points.
+        static void AssertJoinedPersistentStateUnchangedForTest(FileTransferCoordinatorState expected, object context)
+            => Assert.Equal(expected.PersistentState, CreateCoordinatorStateForTest(context).PersistentState);
 
         static FallbackTailYieldDecision IssueAndQueueYield(SessionFileTransferService service, object context, string direction)
         {

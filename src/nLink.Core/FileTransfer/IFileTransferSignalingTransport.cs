@@ -706,6 +706,7 @@ public sealed record FileTransferRouteHintNotification(
     int FallbackBridgeRecoveryGeneration = 0)
 {
     internal int FallbackCheckpointGeneration { get; init; }
+    internal FileTransferRoutePublicationEvidence? PublicationEvidence { get; init; }
 }
 
 public interface IFileTransferRouteHintObserver

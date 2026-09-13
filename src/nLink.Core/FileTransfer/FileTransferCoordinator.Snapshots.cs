@@ -267,7 +267,9 @@ internal sealed record FileTransferCoordinatorOperationTransitionSnapshot(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     FileTransferCoordinatorReceiverBarrierOperationSnapshot? ReceiverBarrier = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot? CheckpointRepairContinuity = null);
+    FileTransferCoordinatorCheckpointRepairContinuityOperationSnapshot? CheckpointRepairContinuity = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferCoordinatorRepairOwnerOperationSnapshot? RepairOwner = null);
 
 internal sealed record FileTransferCoordinatorReceiverBarrierOperationSnapshot(
     string Role,

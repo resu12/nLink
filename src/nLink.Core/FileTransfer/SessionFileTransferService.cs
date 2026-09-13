@@ -10481,7 +10481,8 @@ public sealed partial class SessionFileTransferService :
             routeInput,
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             routePublicationToken,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(routePublicationToken));
         if (previousRoutePublicationToken != routePublicationToken)
         {
             EnqueueRoutePublicationAuthorityEffect(context, routePublicationToken);
@@ -10514,7 +10515,8 @@ public sealed partial class SessionFileTransferService :
             routeInput,
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             routePublicationToken,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(routePublicationToken));
         if (previousRoutePublicationToken != routePublicationToken)
         {
             EnqueueRoutePublicationAuthorityEffect(context, routePublicationToken);
@@ -10550,7 +10552,8 @@ public sealed partial class SessionFileTransferService :
             routeInput,
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             token,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         return true;
     }
 
@@ -10582,7 +10585,8 @@ public sealed partial class SessionFileTransferService :
             routeInput,
             context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             token,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         return true;
     }
 
@@ -10619,7 +10623,8 @@ public sealed partial class SessionFileTransferService :
             context.CurrentTransferLeg,
             runtimeUnlockAdmission,
             token,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         return true;
     }
 
@@ -10656,7 +10661,8 @@ public sealed partial class SessionFileTransferService :
             context.CurrentTransferLeg,
             runtimeUnlockAdmission,
             token,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         return true;
     }
 
@@ -10911,7 +10917,8 @@ public sealed partial class SessionFileTransferService :
             context.CurrentLiveRouteEpoch,
             reason,
             token,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         return true;
     }
 
@@ -10941,7 +10948,8 @@ public sealed partial class SessionFileTransferService :
             context.CurrentLiveRouteEpoch,
             reason,
             token,
-            rejectionReason);
+            rejectionReason,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         return true;
     }
 
@@ -23067,11 +23075,12 @@ public sealed partial class SessionFileTransferService :
         RoutePublicationToken? routePublicationToken = null,
         string? coordinatorDecisionReason = null,
         FileTransferAuthorityId? transitionAuthorityId = null,
-        long transitionGeneration = 0)
+        long transitionGeneration = 0,
+        FileTransferRoutePublicationEvidence? publicationEvidence = null)
     {
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_route_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; file_tuna_active={(routeInput.IsFileTunaActive ? 1 : 0)}; post_tuna_fallback_active={(routeInput.IsPostTunaFileFallbackActive ? 1 : 0)}; diagnostic_regular_nkn_v6={(routeInput.IsDiagnosticRegularNknV6RouteEnabled ? 1 : 0)}; transport_profile={FormatFileTransferTransportProfileKind(routeInput.TransportProfileKind)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, liveRouteEpochId)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}{FormatRouteTransitionCompatibilityProjectionSuffix(transitionAuthorityId, transitionGeneration)}");
+            $"event=filetransfer_route_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; file_tuna_active={(routeInput.IsFileTunaActive ? 1 : 0)}; post_tuna_fallback_active={(routeInput.IsPostTunaFileFallbackActive ? 1 : 0)}; diagnostic_regular_nkn_v6={(routeInput.IsDiagnosticRegularNknV6RouteEnabled ? 1 : 0)}; transport_profile={FormatFileTransferTransportProfileKind(routeInput.TransportProfileKind)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, liveRouteEpochId)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}{FormatRouteTransitionCompatibilityProjectionSuffix(transitionAuthorityId, transitionGeneration)}{publicationEvidence?.FormatLogSuffix()}");
     }
 
     private void NotifyFileTransferRouteHintObserver(
@@ -23084,7 +23093,8 @@ public sealed partial class SessionFileTransferService :
         FileTransferLeg? currentLeg = null,
         RuntimeUnlockAdmissionDecision? runtimeUnlockAdmission = null,
         RoutePublicationToken? routePublicationToken = null,
-        string? coordinatorDecisionReason = null)
+        string? coordinatorDecisionReason = null,
+        FileTransferRoutePublicationEvidence? publicationEvidence = null)
     {
         if (transport is not IFileTransferRouteHintObserver observer)
         {
@@ -23116,6 +23126,7 @@ public sealed partial class SessionFileTransferService :
                 {
                     FallbackCheckpointGeneration =
                         currentLeg?.CheckpointGeneration ?? 0,
+                    PublicationEvidence = publicationEvidence,
                 });
         }
         catch (Exception ex)
@@ -23331,7 +23342,8 @@ public sealed partial class SessionFileTransferService :
         string? coordinatorDecisionReason = null,
         FileTransferAuthorityId? transitionAuthorityId = null,
         long transitionGeneration = 0,
-        bool evidenceOnly = false)
+        bool evidenceOnly = false,
+        FileTransferRoutePublicationEvidence? publicationEvidence = null)
     {
         if (epoch is null)
         {
@@ -23344,7 +23356,7 @@ public sealed partial class SessionFileTransferService :
         }
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_live_route_epoch_recovered; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; live_route_epoch={epoch.EpochId}; route={epoch.RouteSelection.TelemetryToken}; protocol_version={epoch.RouteSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(epoch.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(epoch.RouteSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.HandoffKind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}{FormatRouteTransitionCompatibilityProjectionSuffix(transitionAuthorityId, transitionGeneration)}");
+            $"event=filetransfer_live_route_epoch_recovered; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; live_route_epoch={epoch.EpochId}; route={epoch.RouteSelection.TelemetryToken}; protocol_version={epoch.RouteSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(epoch.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(epoch.RouteSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.HandoffKind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}{FormatRouteTransitionCompatibilityProjectionSuffix(transitionAuthorityId, transitionGeneration)}{publicationEvidence?.FormatLogSuffix()}");
     }
 
     private static void LogLiveRouteEpochTerminal(
@@ -25146,6 +25158,8 @@ public sealed partial class SessionFileTransferService :
         public required FallbackFrontierRepairAuthority Authority { get; init; }
 
         public CheckpointRepairContinuityStamp? CheckpointContinuityStamp { get; set; }
+
+        public FileTransferRepairOwnerEvidenceReference? RepairOwnerEvidence { get; set; }
 
         public required FileTransferAuthorityLifecycle<FallbackFrontierRepairSettlementOutcome> Lifecycle { get; init; }
 

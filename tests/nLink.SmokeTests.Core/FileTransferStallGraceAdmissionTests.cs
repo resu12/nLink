@@ -84,6 +84,19 @@ public sealed class FileTransferStallGraceAdmissionTests : FileTransferOpsScript
             $restored.Sequence=201;$restored.Fields.log_writer_sequence='201'
             $aba+=@($changed,$restored)
             if((Get-FileTransferStallGracePublishedSourceAdmission -Index (New-FileTransferStallGracePublishedSourceIndex $aba) -Candidate $aba[1]).Admitted){throw 'ABA source restoration passed'}
+            # Direction or diagnostic owner stamps alone cannot establish that a
+            # same-writer publication belongs to an independently bound peer.
+            foreach($stamped in @($false,$true)){
+                $unbound=@(Fixture)
+                $peer=Event 'filetransfer_route_selected' 100 @{direction='outbound';route='file_tuna_v4';protocol_version='4';route_publication_generation='4'}
+                if($stamped){
+                    $unbound[0].Fields.continuity_coordinator_id='fte1-111111111111111111111111'
+                    $unbound[1].Fields.continuity_coordinator_id='fte1-111111111111111111111111'
+                    $peer.Fields.continuity_coordinator_id='fte1-222222222222222222222222'
+                }
+                $unbound+=@($peer)
+                if((Get-FileTransferStallGracePublishedSourceAdmission -Index (New-FileTransferStallGracePublishedSourceIndex $unbound) -Candidate $unbound[1]).Admitted){throw 'unbound opposite peer bypassed source invalidation'}
+            }
             foreach($mutation in @(@(0,'route_publication_generation','4'),@(0,'coordinator_decision_reason','rejected'),
                     @(0,'target_transport','Tuna'),@(0,'fallback_transport_epoch','2'),@(1,'data_session_generation','0'),
                     @(1,'wake_generation','0'),@(1,'authority_effect','grant'),@(1,'wake_deadline_utc','2026-09-06T04:32:09Z'))){

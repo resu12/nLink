@@ -6605,7 +6605,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
-            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -6680,7 +6681,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
-            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -6834,7 +6836,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var classifierBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiFileTransferSetupFailureClassification", "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
-            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -12763,7 +12766,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             Set-StrictMode -Version Latest
-            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }
@@ -12878,7 +12882,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "Get-TunaGuiFailureClassificationBudgetMilliseconds");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
-            {{File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1"))}}
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferOps", "CoordinatorSnapshotEvidence.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
+            . '{{Path.Combine(FindRepoRoot(), "tools", "FileTransferFrontierGraceHandoff.ps1").Replace("'", "''", StringComparison.Ordinal)}}'
             function New-TunaGuiFileTransferFailureClassificationResult { {{resultBody}} }
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Get-TunaGuiFileTransferSetupFailureClassification { {{classifierBody}} }

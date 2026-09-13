@@ -1,7 +1,8 @@
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'FileTransferPublicationEvidence.ps1')
 
 function New-FileTransferStallGracePublishedSourceIndex {
-    param([object[]]$Events)
+    param([object[]]$Events, $SnapshotEvidence = $null)
     $transfers = New-FileTransferStallGraceCurrentSourceIndex -Events $Events
     $timelines = @{}
     foreach ($key in $transfers.Keys) {
@@ -16,7 +17,8 @@ function New-FileTransferStallGracePublishedSourceIndex {
             [string]$_.Fields['transfer_paused'] -ceq '1'
         })
     }
-    return @{ Timelines = $timelines; Conflicts = $transfers['__conflicts'] }
+    return @{ Timelines = $timelines; Conflicts = $transfers['__conflicts'];
+        PublicationEvidence = (New-FileTransferPublicationEvidenceIndex $SnapshotEvidence) }
 }
 
 # Current-source admission is not a synthetic predecessor repair. Authority scope
@@ -62,12 +64,27 @@ function Get-FileTransferStallGracePublishedSourceAdmission {
         $Index.Conflicts.ContainsKey("$(F $Candidate 'log_writer_id')|$(F $Candidate 'log_writer_sequence')")) { return $result }
     $scope = @('direction', 'route', 'protocol_version', 'live_route_epoch', 'runtime_generation',
         'terminal_generation', 'leg_generation', 'route_publication_generation', 'route_commit_generation')
-    $source = $null
+    $candidateBinding = Resolve-FileTransferPublicationEvidence -Index $Index.PublicationEvidence -Event $Candidate
+    if ($Candidate.Fields.ContainsKey('publication_evidence_version') -and $null -eq $candidateBinding) { return $result }
+    $source = $null; $sourceBinding = $null
     foreach ($entry in $Index.Timelines[$key]) {
         if ([long]$entry.Sequence -ge [long]$Candidate.Sequence) { break }
         $name = F $entry 'event'
+        if ($null -ne $source -and (F $entry 'transfer_paused') -ceq '1') { return $result }
         if ($name -in @('filetransfer_route_hint_authorized_publication_accepted',
                 'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered')) {
+            $binding = Resolve-FileTransferPublicationEvidence -Index $Index.PublicationEvidence -Event $entry
+            if ($Index.Conflicts.ContainsKey("$(F $entry 'log_writer_id')|$(F $entry 'log_writer_sequence')") -or
+                ($entry.Fields.ContainsKey('publication_evidence_version') -and $null -eq $binding)) { return $result }
+            if ($null -ne $binding -and $null -ne $candidateBinding -and (F $entry 'direction') -ceq (F $Candidate 'direction') -and
+                ($binding.CoordinatorId -cne $candidateBinding.CoordinatorId -or $binding.SessionId -cne $candidateBinding.SessionId -or
+                    $binding.TransferId -cne $candidateBinding.TransferId)) { return $result }
+            if ($null -ne $sourceBinding -and $null -ne $candidateBinding -and $null -ne $binding -and
+                (F $entry 'direction') -cne (F $Candidate 'direction') -and
+                $binding.CoordinatorId -cne $candidateBinding.CoordinatorId -and
+                $binding.SessionId -ceq $candidateBinding.SessionId -and $binding.TransferId -ceq $candidateBinding.TransferId) {
+                continue
+            }
             $same = $true
             foreach ($field in $scope) {
                 if ((F $entry $field) -cne (F $Candidate $field)) { $same = $false; break }
@@ -89,6 +106,13 @@ function Get-FileTransferStallGracePublishedSourceAdmission {
                     (F $entry 'fallback_bridge_recovery_generation') -cne (F $Candidate 'bridge_recovery_generation') -or
                     $Index.Conflicts.ContainsKey("$(F $entry 'log_writer_id')|$(F $entry 'log_writer_sequence')")) { return $result }
                 if ($null -eq $source) { $source = $entry }
+                if ($null -ne $candidateBinding -or $null -ne $binding) {
+                    if ($null -eq $candidateBinding -or $null -eq $binding -or
+                        $binding.CoordinatorId -cne $candidateBinding.CoordinatorId -or
+                        $binding.SessionId -cne $candidateBinding.SessionId -or $binding.TransferId -cne $candidateBinding.TransferId -or
+                        $binding.TokenFingerprint -cne $candidateBinding.TokenFingerprint) { return $result }
+                    $sourceBinding = $binding
+                }
             }
         }
         elseif ($null -ne $source) {
@@ -1570,11 +1594,13 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
     # The shared snapshot was evaluated by the caller. Cache only its existing
     # validated Family1 history; never reevaluate or reconstruct an authority.
     if (-not $Index.ContainsKey('__StallGraceDiagnosticRouteIndex')) {
-        $cache = @{ Commits = @{}; Dispositions = @{}; BoundariesByWriter = @{} }
+        $cache = @{ Commits = @{}; Dispositions = @{}; BoundariesByWriter = @{}; Snapshot = $null; PublicationEvidence = $null }
         $Index['__StallGraceDiagnosticRouteIndex'] = $cache
         $snapshot = if ($Index.ContainsKey('__CheckpointRepairContinuitySnapshotEvidence')) { $Index['__CheckpointRepairContinuitySnapshotEvidence'] } else { $null }
         if ((P $snapshot 'Mode') -ceq 'SnapshotV1Authoritative' -and (P $snapshot 'ArtifactEvidenceVerdict') -ceq 'pass' -and
             (P $snapshot 'StreamComplete') -eq $true -and 'route_transition' -cin @(P $snapshot 'AuthoritativeFamilies' @())) {
+            $cache.Snapshot = $snapshot
+            $cache.PublicationEvidence = New-FileTransferPublicationEvidenceIndex $snapshot
             foreach ($boundary in @(P $snapshot 'Boundaries' @())) {
                 if ((P $boundary 'verdict') -cne 'pass') { continue }
                 $writer = [string](P $boundary 'writer' '')
@@ -1596,6 +1622,40 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
         }
     }
     $cache = $Index['__StallGraceDiagnosticRouteIndex']
+    $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -ceq $script:FileTransferCoordinatorRepairOwnerCatalogVersion
+    $sourcePublication = $null
+    function BoundRepair($Event) {
+        $binding = Resolve-FileTransferRepairOwnerEvidence $cache.Snapshot $Event
+        if ($null -eq $binding -or $null -eq $sourcePublication) { return $null }
+        $payload = $binding.Operation.repairOwner; $ownerScope = $payload.scope
+        if ($payload.coordinatorInstanceId -cne $sourcePublication.CoordinatorId -or
+            $payload.sessionId -cne $sourcePublication.SessionId -or $payload.transferId -cne $sourcePublication.TransferId -or
+            $ownerScope.publicationFingerprint -cne $sourcePublication.TokenFingerprint -or
+            $ownerScope.scopeFingerprint -cne (F $Candidate 'continuity_source_fingerprint') -or
+            $ownerScope.retainedLegCheckpointGeneration -ne (N $Candidate 'checkpoint_generation') -or
+            $ownerScope.retainedLegCheckpointRequestId -cne (ConvertTo-FileTransferCoordinatorEvidenceToken (F $Candidate 'checkpoint_request_id')) -or
+            $ownerScope.boundary.dataSessionIdentity -cne (ConvertTo-FileTransferCoordinatorEvidenceToken (F $Candidate 'data_session_identity')) -or
+            $ownerScope.boundary.dataSessionGeneration -ne (N $Candidate 'data_session_generation') -or
+            $binding.Boundary.writer -cne (F $Candidate 'log_writer_id') -or
+            [long]$binding.Boundary.afterStateGeneration -le (N $Candidate 'publication_evidence_observed_state_generation')) { return $null }
+        # The reference was captured before the grant, but its queued snapshot
+        # may be written later. A new repair advances Coordinator state after
+        # the hold; the commit bound below closes that authored interval.
+        return $binding
+    }
+    function SameRepairReceipt($Left, $Right) {
+        return $null -ne $Left -and $null -ne $Right -and
+            $Left.Boundary.boundaryId -ceq $Right.Boundary.boundaryId -and
+            $Left.Operation.operationKey -ceq $Right.Operation.operationKey -and
+            $Left.Operation.receiptIdentity -ceq $Right.Operation.receiptIdentity -and
+            $Left.Operation.receiptFingerprint -ceq $Right.Operation.receiptFingerprint
+    }
+    $grantBinding = $null
+    if ($exactRepairOwner) {
+        $sourcePublication = Resolve-FileTransferPublicationEvidence $cache.PublicationEvidence $Candidate
+        $grantBinding = BoundRepair $grant
+        if (-not (SameRepairReceipt $grantBinding (BoundRepair $settlement))) { return $result }
+    }
     $closures = [Collections.Generic.List[object]]::new()
     $commits = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_route_transition_committed' -and
         [long]$_.Sequence -gt [long]$settlement.Sequence })
@@ -1611,13 +1671,14 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
             (F $commit 'transition_kind') -cne 'PostTunaFallbackV6ToTunaV4' -or
             (F $commit 'target_route') -cne 'file_tuna_v4' -or (F $commit 'target_protocol_version') -cne '4' -or
             (F $commit 'target_transport') -cne 'tuna' -or (F $commit 'source_transport') -cne 'regular_nkn' -or
-            -not (Equal $commit $Candidate @('direction', 'checkpoint_request_id', 'checkpoint_generation', 'data_session_identity')) -or
+            -not (Equal $commit $Candidate @('direction', 'checkpoint_request_id', 'data_session_identity')) -or
+            (-not $exactRepairOwner -and -not (Equal $commit $Candidate @('checkpoint_generation'))) -or
             (N $commit 'source_data_session_generation') -ne (N $Candidate 'data_session_generation') -or
             (N $commit 'checkpoint_contiguous_frontier') -ne (N $Candidate 'frontier_chunk_index') -or
             (N $commit 'checkpoint_durable_highest') -lt (N $Candidate 'highest_received_chunk_index') -or
             (F $Candidate 'continuity_coordinator_id') -cnotmatch '^fte1-[0-9a-f]{24}$' -or
             (F $Candidate 'continuity_coordinator_id') -cne [string]$boundary.coordinatorInstanceId -or
-            (F $grant 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id') -or
+            (-not $exactRepairOwner -and (F $grant 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id')) -or
             $boundary.coordinatorInstanceId -cne $applied.Boundary.coordinatorInstanceId -or
             $boundary.sessionId -cne $applied.Boundary.sessionId -or $boundary.transferId -cne $applied.Boundary.transferId -or
             $boundary.direction -cne 'inbound' -or $boundary.afterStateGeneration -ne ($boundary.beforeStateGeneration + 1) -or
@@ -1626,6 +1687,17 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
             $entry.Operation.receiptStatus -cne 'Committed' -or $applied.Operation.receiptStatus -cne 'Applied' -or
             @($typed.receipts | Where-Object { $_.stage -ceq 'commit' -and $_.receiptStatus -ceq 'Committed' -and $_.receiptValidated }).Count -ne 1 -or
             @($applied.Operation.routeTransition.receipts | Where-Object { $_.stage -ceq 'disposition' -and $_.receiptStatus -ceq 'Applied' -and $_.receiptValidated }).Count -ne 1) { continue }
+        if ($exactRepairOwner) {
+            $ownerScope = $grantBinding.Operation.repairOwner.scope
+            $durableGeneration = N $commit 'checkpoint_generation'
+            if ($durableGeneration -le 0 -or $durableGeneration -ne [long]$typed.sourceBoundary.checkpointGeneration -or
+                $typed.sourceBoundary.checkpointRequestId -cne (ConvertTo-FileTransferCoordinatorEvidenceToken "checkpoint:$durableGeneration") -or
+                $typed.sourceBoundary.checkpointRequestId -cne $applied.Operation.routeTransition.sourceBoundary.checkpointRequestId -or
+                $typed.sourceBoundary.checkpointGeneration -ne $applied.Operation.routeTransition.sourceBoundary.checkpointGeneration -or
+                $typed.durableCheckpointFingerprint -cnotmatch '^fte1-[0-9a-f]{24}$' -or
+                -not (Test-FileTransferCheckpointRepairContinuityAggregateScope $ownerScope $boundary.beforeBoundary) -or
+                $grantBinding.Boundary.afterStateGeneration -gt $boundary.beforeStateGeneration) { continue }
+        }
         $mapping = [ordered]@{ route='route'; protocol_version='protocolVersion'; live_route_epoch='liveRouteEpoch'
             runtime_generation='runtimeGeneration'; terminal_generation='terminalGeneration'; leg_generation='legGeneration'
             route_commit_generation='routeCommitGeneration'; route_publication_generation='routePublicationGeneration'
@@ -1666,8 +1738,8 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
         if ($lastGrants.Count -ne 1 -or -not (Equal $retirement $lastGrants[0] ($repair + @('authority_schema'))) -or
             -not (Equal $retirement $grant @($scope | Where-Object { $_ -cnotin @('checkpoint_generation', 'data_session_identity', 'data_session_generation') })) -or
             (F $retirement 'dispatch_observed') -cne '1' -or (F $retirement 'successor_authority_id') -cne '(none)' -or
-            (F $retirement 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id') -or
-            (F $lastGrants[0] 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id') -or
+            (-not $exactRepairOwner -and (F $retirement 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id')) -or
+            (-not $exactRepairOwner -and (F $lastGrants[0] 'continuity_coordinator_id') -cne (F $Candidate 'continuity_coordinator_id')) -or
             (F $retirement 'frontier_chunk_index') -cne (F $grant 'frontier_chunk_index') -or
             (F $retirement 'protocol_repair_request_id') -cne (F $retirement 'primary_protocol_repair_request_id') -or
             (F $retirement 'request_correlation_id') -cne (F $retirement 'primary_request_correlation_id') -or
@@ -1677,6 +1749,13 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
                 (F $_ 'authority_id') -ceq (F $retirement 'authority_id') }).Count -ne 1 -or
             @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_fallback_frontier_repair_authority_granted' -and
                 [long]$_.Sequence -gt [long]$lastGrants[0].Sequence -and [long]$_.Sequence -lt [long]$retirement.Sequence }).Count -ne 0) { continue }
+        if ($exactRepairOwner) {
+            $lastBinding = BoundRepair $lastGrants[0]
+            if (-not (SameRepairReceipt $lastBinding (BoundRepair $retirement)) -or
+                $lastBinding.Operation.repairOwner.scope.scopeFingerprint -cne $grantBinding.Operation.repairOwner.scope.scopeFingerprint -or
+                $lastBinding.Boundary.afterStateGeneration -le $grantBinding.Boundary.afterStateGeneration -or
+                $lastBinding.Boundary.afterStateGeneration -gt $boundary.beforeStateGeneration) { continue }
+        }
         $dispositions = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_route_transition_disposition_applied' -and
             (F $_ 'authority_schema') -ceq '2' -and (F $_ 'authority_id') -ceq (F $commit 'authority_id') })
         $publications = @($events | Where-Object { (F $_ 'event') -ceq 'filetransfer_live_route_epoch_recovered' -and
@@ -1705,12 +1784,22 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
         }
         if (-not $matches -or (Poisoned $publication $commit)) { continue }
         foreach ($prior in $cache.BoundariesByWriter[[string]$boundary.writer]) {
-            if ($prior.coordinatorInstanceId -cne $boundary.coordinatorInstanceId -or
-                [long]$prior.writerSequence -le (N $Candidate 'log_writer_sequence') -or [long]$prior.writerSequence -ge [long]$boundary.writerSequence) { continue }
+            if ($prior.coordinatorInstanceId -cne $boundary.coordinatorInstanceId) { continue }
+            if ($exactRepairOwner) {
+                if ([long]$prior.afterStateGeneration -le (N $Candidate 'publication_evidence_observed_state_generation') -or
+                    [long]$prior.afterStateGeneration -gt [long]$boundary.beforeStateGeneration) { continue }
+            } elseif ([long]$prior.writerSequence -le (N $Candidate 'log_writer_sequence') -or
+                [long]$prior.writerSequence -ge [long]$boundary.writerSequence) { continue }
             foreach ($name in @('route', 'protocolVersion', 'liveRouteEpoch', 'runtimeGeneration', 'terminalGeneration',
                     'legGeneration', 'routeCommitGeneration', 'routePublicationGeneration', 'dataSessionIdentity', 'dataSessionGeneration')) {
                 if ([string]$prior.beforeBoundary.$name -cne [string]$boundary.beforeBoundary.$name -or
                     [string]$prior.afterBoundary.$name -cne [string]$boundary.beforeBoundary.$name) { $matches = $false; break }
+            }
+            if ($exactRepairOwner) {
+                foreach ($name in @('checkpointGeneration', 'checkpointRequestId')) {
+                    if ([string]$prior.beforeBoundary.$name -cne [string]$boundary.beforeBoundary.$name -or
+                        [string]$prior.afterBoundary.$name -cne [string]$boundary.beforeBoundary.$name) { $matches = $false; break }
+                }
             }
             foreach ($operation in $prior.operations) {
                 if (-not $operation.stateApplied -or $operation.beforeState -ceq $operation.afterState) { continue }

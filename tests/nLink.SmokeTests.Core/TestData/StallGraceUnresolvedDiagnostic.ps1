@@ -237,6 +237,12 @@ Check 'conflicting_duplicate' ($events+@($conflict)) $null $null
 
 $fixture=SupersessionFixture
 Check 'source_superseded' $fixture.Events $fixture.Snapshot 'SourceSuperseded' $true
+. (Join-Path $PSScriptRoot 'RepairOwnerSupersession.ps1')
+foreach($stage in @('grant','later_grant','retirement')) {
+    $unbound=SupersessionFixture
+    @($unbound.Events | Where-Object Stage -CEQ $stage)[0].Fields.Remove('continuity_coordinator_id')
+    Check ('unbound_owner_'+$stage) $unbound.Events $unbound.Snapshot 'DispatchedStalled'
+}
 Check 'raw_route_without_validated_snapshot' $fixture.Events $null 'DispatchedStalled'
 foreach($stage in @('later_grant','retirement','commit','disposition','target_publication')) {
     $fixture=SupersessionFixture

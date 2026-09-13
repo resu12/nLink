@@ -14115,9 +14115,12 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound, false, "none")]
+    [InlineData(FileTransferDirection.Outbound, true, "fallback_paired_tail_yield_install_receipt_missing")]
     [Trait("Category", "Smoke")]
-    public async Task RouteHintObserver_FallbackQuiescentGrantSupersedesOlderDeniedFallbackOwner()
+    public async Task RouteHintObserver_NewerFallbackAdmissionEvidenceDoesNotGrantRetryAuthority(
+        FileTransferDirection direction, bool expectedHold, string expectedReason)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -14163,7 +14166,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 fallbackLegState: "active",
                 fallbackLegCanSendData: true,
                 fallbackLegGeneration: 1,
-                direction: FileTransferDirection.Inbound));
+                direction: direction));
+            AssertAdmissionEvidence(1, false);
             routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
                 sessionId,
                 transferId,
@@ -14179,16 +14183,29 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 fallbackLegState: "active",
                 fallbackLegCanSendData: true,
                 fallbackLegGeneration: 2,
-                direction: FileTransferDirection.Inbound));
+                direction: direction));
+            AssertAdmissionEvidence(2, true);
 
-            var args = new object?[] { sessionId, null };
-            var shouldHold = Assert.IsType<bool>(InvokePrivateMethod(
-                host,
-                "ShouldKeepPostTunaFallbackDataSessionsAvailableDuringTunaActivation",
-                args));
+            void AssertAdmissionEvidence(int generation, bool granted)
+            {
+                var hints = Assert.IsAssignableFrom<System.Collections.IEnumerable>(
+                    GetPrivateField(host, "fileTransferRouteHints"));
+                var entry = Assert.Single(hints.Cast<object>());
+                var hint = entry.GetType().GetProperty("Value")!.GetValue(entry);
+                Assert.NotNull(hint);
+                Assert.Equal(generation, GetPrivatePropertyValue<int>(hint, "RoutePublicationGeneration"));
+                Assert.Equal(granted, GetPrivatePropertyValue<bool>(hint, "RuntimeUnlockAdmissionGranted"));
+                Assert.Equal(direction, GetPrivatePropertyValue<FileTransferDirection>(hint, "Direction"));
+                Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    GetFileTransferRouteHintTokenForTests(host, transferId, sessionId, direction));
 
-            Assert.False(shouldHold);
-            Assert.Equal("post_tuna_fallback_tail_quiescent", Assert.IsType<string>(args[1]));
+                // Route-hint admission is evidence, not a committed retry receipt.
+                var args = new object?[] { sessionId, null };
+                var shouldHold = Assert.IsType<bool>(InvokePrivateMethod(
+                    host, "ShouldKeepPostTunaFallbackDataSessionsAvailableDuringTunaActivation", args));
+                Assert.Equal(expectedHold, shouldHold);
+                Assert.Equal(expectedReason, Assert.IsType<string>(args[1]));
+            }
         }
         finally
         {

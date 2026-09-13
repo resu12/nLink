@@ -11,9 +11,13 @@ $definition = @($ast.FindAll({param($node) $node -is [Management.Automation.Lang
     $node.Name -ceq 'Get-TunaGuiFallbackFrontierStallGraceRecheckFailure'}, $true))
 if ($definition.Count -ne 1) { throw 'Expected actual GUI consumer' }
 Invoke-Expression $definition[0].Extent.Text
-$profile = $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion
-$catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profile
 $captured = [IO.File]::ReadAllLines($InputPath)
+$profiles = @($captured | Where-Object {
+    (Get-FileTransferCoordinatorSnapshotEventName $_) -ceq 'filetransfer_coordinator_snapshot_stream_started'
+} | ForEach-Object { Get-FileTransferCoordinatorSnapshotLineField $_ 'snapshot_catalog_version' } | Select-Object -Unique)
+if ($profiles.Count -ne 1) { throw 'Expected one captured producer catalog profile' }
+$profile = $profiles[0]
+$catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profile
 function Name([string]$Line) { Get-FileTransferCoordinatorSnapshotEventName $Line }
 function Field([string]$Line, [string]$Name) { Get-FileTransferCoordinatorSnapshotLineField $Line $Name }
 function Set-Field([string]$Line, [string]$Name, [string]$Value) {

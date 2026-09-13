@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "0ad879a93ec4d4639ecffd0fecf1c64d2aa32dc594bd39c680b8ca30c3c492dd";
+        "02ecc01ad2fae32da2da0688930b6720a55d5a4833f59e986aeee90e521039d7";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3094,6 +3094,33 @@ public sealed partial class SessionFileTransferService
             ScheduleDrain();
         }
 
+        internal FileTransferRoutePublicationEvidence? GetRoutePublicationEvidence(RoutePublicationToken? publication)
+        {
+            lock (stateGate)
+            {
+                if (!started || completed || publication is not { IsDefault: false } token ||
+                    token.SessionId != sessionId || token.TransferId != transferId ||
+                    token.Direction.ToString().ToLowerInvariant() != direction)
+                {
+                    return null;
+                }
+
+                var fingerprint = FileTransferCoordinator.CalculateSnapshotFingerprint(token);
+                var identity = $"publication:{token.PublicationGeneration}";
+                if (!authorityEffectBindings.TryGetValue(CreateAuthorityEffectBindingKey(
+                        "route_runtime", identity, token.PublicationGeneration, identity,
+                        token.PublicationGeneration, "Accepted", fingerprint), out var binding))
+                {
+                    return null;
+                }
+
+                // The index supplies a reference only. Consumers must validate
+                // the exact authored boundary/receipt; lookup grants no authority.
+                return new(EvidenceToken(coordinatorInstanceId), EvidenceToken(sessionId), EvidenceToken(transferId),
+                    binding.TransitionId, binding.StateGeneration, finalGeneration, binding.OperationKey, EvidenceToken(fingerprint));
+            }
+        }
+
         internal void EnqueueAuthorityEffect(
             string coordinatorInstanceId,
             string sessionId,
@@ -3234,7 +3261,9 @@ public sealed partial class SessionFileTransferService
                 var operation = envelope.Aggregate.Operations[operationIndex];
                 // Continuity receipts attest evidence only, never physical authority.
                 if (operation.CheckpointRepairContinuity is not null ||
-                    operation.OperationKind == "FallbackCheckpointRepairScopeContinuity")
+                    operation.OperationKind == "FallbackCheckpointRepairScopeContinuity" ||
+                    operation.RepairOwner is not null ||
+                    operation.OperationKind == "FallbackFrontierRepairOwnerEvidence")
                 {
                     continue;
                 }
@@ -3586,6 +3615,25 @@ public sealed partial class SessionFileTransferService
                 CheckpointRepairContinuity = operation.CheckpointRepairContinuity is { } continuity
                     ? CreateCheckpointContinuityEvidence(continuity)
                     : null,
+                RepairOwner = operation.RepairOwner is { } owner ? owner with
+                {
+                    CoordinatorInstanceId = EvidenceToken(owner.CoordinatorInstanceId),
+                    SessionId = EvidenceToken(owner.SessionId),
+                    TransferId = EvidenceToken(owner.TransferId),
+                    Scope = CreateCheckpointContinuityScopeEvidence(owner.Scope),
+                    Repair = owner.Repair with
+                    {
+                        AuthorityId = EvidenceToken(owner.Repair.AuthorityId),
+                        PredecessorAuthorityId = EvidenceToken(owner.Repair.PredecessorAuthorityId),
+                        CanonicalRepairKey = EvidenceToken(owner.Repair.CanonicalRepairKey),
+                        RangeFingerprint = EvidenceToken(owner.Repair.RangeFingerprint),
+                        ProtocolRepairRequestId = EvidenceToken(owner.Repair.ProtocolRepairRequestId),
+                        RequestCorrelationId = EvidenceToken(owner.Repair.RequestCorrelationId),
+                        CheckpointRequestId = EvidenceToken(owner.Repair.CheckpointRequestId),
+                        RepairFingerprint = EvidenceToken(owner.Repair.RepairFingerprint),
+                    },
+                    Receipts = owner.Receipts.Select(CreateEvidenceReceipt).ToImmutableArray(),
+                } : null,
             };
         }
 

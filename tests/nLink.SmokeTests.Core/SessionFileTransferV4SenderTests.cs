@@ -26038,7 +26038,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             "RuntimeUnlockAdmissionToken");
         void AssertPersistentStateUnchanged(
-            FileTransferCoordinatorPersistentState expected)
+            in FileTransferCoordinatorPersistentState expected)
         {
             var current = CreateCoordinatorStateForTest(context);
             var expectedState = current with { PersistentState = expected };
@@ -26185,7 +26185,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 GetPrivatePropertyValue(
                     context,
                     "RuntimeUnlockAdmissionToken"));
-            AssertPersistentStateUnchanged(preMutationPersistent);
+            AssertPersistentStateUnchanged(in preMutationPersistent);
             Assert.Equal(
                 preMutationAdmissionGeneration,
                 GetPrivateProperty<int>(
@@ -26294,7 +26294,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                 GetPrivatePropertyValue(
                     context,
                     "RuntimeUnlockAdmissionToken"));
-            AssertPersistentStateUnchanged(preMutationPersistent);
+            AssertPersistentStateUnchanged(in preMutationPersistent);
             Assert.Equal(
                 preMutationAdmissionGeneration,
                 GetPrivateProperty<int>(
@@ -26356,7 +26356,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             GetPrivatePropertyValue(
                 context,
                 "RuntimeUnlockAdmissionToken"));
-        AssertPersistentStateUnchanged(missingPairPersistent);
+        AssertPersistentStateUnchanged(in missingPairPersistent);
         Assert.Equal(
             preMutationAdmissionGeneration,
             GetPrivateProperty<int>(
@@ -26542,12 +26542,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "event=filetransfer_route_transition_prepared;",
             unavailableLog,
             StringComparison.Ordinal);
-        Assert.Null(
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                    context,
-                    "CoordinatorPersistentState")
-                .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
-                .CurrentAuthority);
+        AssertNoHandoffAuthority();
 
         dataSession.IsAvailable = false;
 
@@ -26630,18 +26625,10 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "event=filetransfer_route_transition_prepared;",
             immediateLog,
             StringComparison.Ordinal);
-        var heldPersistent =
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                context,
-                "CoordinatorPersistentState");
-        Assert.Equal(
-            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held,
-            heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
-                .LastStatus);
-        Assert.NotNull(
-            heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
-                .CurrentAuthority);
-
+        // Retain the reflection-boxed value at this exact capture point; unbox
+        // only in assertion helpers so the async frame does not copy the graph.
+        var heldPersistent = GetPrivatePropertyValue(context, "CoordinatorPersistentState")!;
+        AssertHeldState(heldPersistent);
         Assert.False(dataSession.IsAvailable);
         var heldPendingBeforeStaleUnavailable = GetPrivatePropertyValue(
             context,
@@ -26672,11 +26659,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             "decision_reason=data_session_availability_stale",
             staleUnavailableLog,
             StringComparison.Ordinal);
-        Assert.Equal(
-            heldPersistent,
-            GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-                context,
-                "CoordinatorPersistentState"));
+        AssertHeldPersistentUnchanged(heldPersistent);
         Assert.Equal(
             heldPendingBeforeStaleUnavailable,
             GetPrivatePropertyValue(
@@ -26721,14 +26704,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             context,
             "RuntimeUnlockPendingPreCommitProbe");
         Assert.Equal(retainedAdmission, heldPending.AdmissionToken);
-        var heldAuthority = Assert.IsType<
-            RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority>(
-            heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
-                .CurrentAuthority);
-        var heldRelease = Assert.IsType<
-            FileTransferFallbackTailPairedReleaseReceipt>(
-            heldPersistent.FallbackTailYield.CurrentOperation!.Value
-                .PairedRelease);
+        var (heldAuthority, heldRelease) = ReadHeldProof(heldPersistent);
         var heldBoundary = new FileTransferTunaActivationTransitionProofBoundary(
             heldAdmission,
             heldPending,
@@ -26795,27 +26771,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
                       "CoordinatorPersistentState")
                   .FileTransferRouteTransition.CurrentOperation is null,
             timeoutMs: 5000);
-        var persistent = GetPrivateProperty<FileTransferCoordinatorPersistentState>(
-            context,
-            "CoordinatorPersistentState");
-        Assert.Null(persistent.FallbackTailYield.CurrentReservation);
-        Assert.Null(persistent.FallbackTailYield.LastConsumedReservation);
-        Assert.Null(persistent.FallbackTailYield.LastConsumingInstallReceipt);
-        Assert.Null(persistent.RuntimeUnlockRetryLifecycle.PendingAttempt);
-        Assert.Null(persistent.RuntimeUnlockRetryLifecycle.InstalledAttempt);
-        Assert.Null(persistent.RuntimeUnlockRetryLifecycle.LastTerminalAttempt);
-        var operation =
-            persistent.FileTransferRouteTransition.CurrentOperation ??
-            persistent.FileTransferRouteTransition.LastTerminalOperation;
-        if (operation is { } retainedOperation)
-        {
-            var activation = Assert.IsType<
-                FileTransferTunaActivationTransitionProofBoundary>(
-                retainedOperation.Authority.ProofBoundary);
-            Assert.Null(activation.EffectiveRetryInstallReceipt);
-            Assert.NotNull(activation.FallbackTailPairedReleaseReceipt);
-            Assert.NotNull(activation.ResponderPeerProbeHandoffAuthority);
-        }
+        var persistent = GetPrivatePropertyValue(context, "CoordinatorPersistentState")!;
+        AssertFinalState(persistent);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains(
@@ -26891,7 +26848,79 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             StringComparison.Ordinal);
         if (repairLineage is not null)
         {
-            AssertStalledInboundRepairLineageRetiredByHandoff(context, repairLineage, persistent, log);
+            AssertRetiredLineage(persistent, repairLineage, log);
+        }
+
+        // This whole-state equality must not reserve argument copies in the
+        // async frame while fixture construction and Coordinator work run.
+        void AssertHeldPersistentUnchanged(object expected)
+            => Assert.Equal(Assert.IsType<FileTransferCoordinatorPersistentState>(expected),
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(context, "CoordinatorPersistentState"));
+
+        void AssertNoHandoffAuthority()
+        {
+            Assert.Null(
+                GetPrivateProperty<FileTransferCoordinatorPersistentState>(
+                        context,
+                        "CoordinatorPersistentState")
+                    .RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                    .CurrentAuthority);
+        }
+
+        static void AssertHeldState(object captured)
+        {
+            var heldPersistent = Assert.IsType<FileTransferCoordinatorPersistentState>(captured);
+            Assert.Equal(
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffStatus.Held,
+                heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                    .LastStatus);
+            Assert.NotNull(
+                heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                    .CurrentAuthority);
+        }
+
+        static (RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority Authority,
+            FileTransferFallbackTailPairedReleaseReceipt Release) ReadHeldProof(object captured)
+        {
+            var heldPersistent = Assert.IsType<FileTransferCoordinatorPersistentState>(captured);
+            var heldAuthority = Assert.IsType<
+                RuntimeUnlockResponderPeerProbeRouteTransitionHandoffAuthority>(
+                heldPersistent.RuntimeUnlockResponderPeerProbeRouteTransitionHandoff
+                    .CurrentAuthority);
+            var heldRelease = Assert.IsType<
+                FileTransferFallbackTailPairedReleaseReceipt>(
+                heldPersistent.FallbackTailYield.CurrentOperation!.Value
+                    .PairedRelease);
+            return (heldAuthority, heldRelease);
+        }
+
+        static void AssertFinalState(object captured)
+        {
+            var persistent = Assert.IsType<FileTransferCoordinatorPersistentState>(captured);
+            Assert.Null(persistent.FallbackTailYield.CurrentReservation);
+            Assert.Null(persistent.FallbackTailYield.LastConsumedReservation);
+            Assert.Null(persistent.FallbackTailYield.LastConsumingInstallReceipt);
+            Assert.Null(persistent.RuntimeUnlockRetryLifecycle.PendingAttempt);
+            Assert.Null(persistent.RuntimeUnlockRetryLifecycle.InstalledAttempt);
+            Assert.Null(persistent.RuntimeUnlockRetryLifecycle.LastTerminalAttempt);
+            var operation =
+                persistent.FileTransferRouteTransition.CurrentOperation ??
+                persistent.FileTransferRouteTransition.LastTerminalOperation;
+            if (operation is { } retainedOperation)
+            {
+                var activation = Assert.IsType<
+                    FileTransferTunaActivationTransitionProofBoundary>(
+                    retainedOperation.Authority.ProofBoundary);
+                Assert.Null(activation.EffectiveRetryInstallReceipt);
+                Assert.NotNull(activation.FallbackTailPairedReleaseReceipt);
+                Assert.NotNull(activation.ResponderPeerProbeHandoffAuthority);
+            }
+        }
+
+        void AssertRetiredLineage(object captured, object[] lineage, string log)
+        {
+            var persistent = Assert.IsType<FileTransferCoordinatorPersistentState>(captured);
+            AssertStalledInboundRepairLineageRetiredByHandoff(context, lineage, in persistent, log);
         }
     }
 

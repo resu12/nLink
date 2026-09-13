@@ -58628,7 +58628,7 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             } | Sort-Object Sequence, LineNumber | Select-Object -Last 1)
         if ($predecessorProgress.Count -ne 1) {
             if ($null -eq (Get-Variable -Name publishedSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
-                $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered
+                $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered -SnapshotEvidence $SnapshotEvidence
             }
             $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex -Candidate $deferred
             if ($null -ne $admission) {
@@ -58837,7 +58837,7 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
         $sequence = [int64]$deferred.Sequence
         if ($admittedDeferralSequences.Contains($sequence) -or $null -eq $deferred.TimestampUtc) { continue }
         if ($null -eq (Get-Variable -Name publishedSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
-            $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered
+            $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered -SnapshotEvidence $SnapshotEvidence
         }
         $admission = Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex -Candidate $deferred
         if ($null -ne $admission) {
@@ -58929,7 +58929,7 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
             })
         if ($alreadyAdmitted.Count -gt 0 -or $null -eq $deferred.TimestampUtc) { continue }
         if ($null -eq (Get-Variable -Name publishedSourceIndex -Scope Local -ErrorAction SilentlyContinue)) {
-            $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered
+            $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $ordered -SnapshotEvidence $SnapshotEvidence
         }
         if ($null -ne (Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedSourceIndex -Candidate $deferred)) { continue }
         $writer = Get-FileTransferEventField -Event $deferred -Name 'log_writer_id' -Default ''

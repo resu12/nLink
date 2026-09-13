@@ -15223,7 +15223,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         foreach ($candidate in $candidates.Values) {
             foreach ($raw in $candidate.RawEvents) { [void]$admittedSequences.Add((Get-GuiStallSequence $raw)) }
         }
-        $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $handoffEvents
+        $publishedSourceIndex = New-FileTransferStallGracePublishedSourceIndex -Events $handoffEvents -SnapshotEvidence $SnapshotEvidence
         foreach ($deferred in $deferrals) {
             $sequence = Get-GuiStallSequence $deferred
             if ($admittedSequences.Contains($sequence)) { continue }

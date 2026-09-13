@@ -149,7 +149,7 @@ function Test-FileTransferCoordinatorBootstrapCorrelationOperation {
         $receipts = @($typed.receipts)
         if ($Operation.operationRole -ceq 'fallback_bootstrap_attempt') {
             $decisionKinds=@($definition.decisionKinds)
-            if ($Catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion)) {
+            if ($Catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion)) {
                 $decisionKinds+=@($script:FileTransferCoordinatorBootstrapInitiationCatalog.decisionKinds)
             }
             return $Envelope.decisionKind -cin $decisionKinds -and $Operation.operationKind -ceq $Envelope.decisionKind -and

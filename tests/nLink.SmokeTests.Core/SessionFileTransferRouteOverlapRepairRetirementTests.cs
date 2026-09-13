@@ -12,12 +12,15 @@ public sealed partial class SessionFileTransferV4SenderTests
         => await RunInboundResponderHandoffWithFallbackRepairAsync(stalledSuccessor: true);
 
     private static async Task<object[]> CreateStalledInboundRepairSuccessorForHandoffAsync(
-        SessionFileTransferService service, object context)
+        SessionFileTransferService service, object context, bool configureDestination = true)
     {
         var serviceType = typeof(SessionFileTransferService);
         var logStart = GetOperationalLogLength();
-        SetPrivateProperty(context, "V6DestinationMode", Enum.Parse(
-            serviceType.GetNestedType("V6ReceiveDestinationMode", BindingFlags.NonPublic)!, "SparseSeekable"));
+        if (configureDestination)
+        {
+            SetPrivateProperty(context, "V6DestinationMode", Enum.Parse(
+                serviceType.GetNestedType("V6ReceiveDestinationMode", BindingFlags.NonPublic)!, "SparseSeekable"));
+        }
         var source = CreateCoordinatorStateForTest(context);
         var dataSession = GetPrivatePropertyValue(context, "DataSession");
         // Invoke the real scheduler and let its unchanged grace wake dispatch A.
@@ -81,7 +84,7 @@ public sealed partial class SessionFileTransferV4SenderTests
     }
 
     private static void AssertStalledInboundRepairLineageRetiredByHandoff(object context, object[] lineage,
-        FileTransferCoordinatorPersistentState persistent, string log)
+        in FileTransferCoordinatorPersistentState persistent, string log)
     {
         var first = lineage[0];
         var successor = lineage[1];

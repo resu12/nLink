@@ -4286,7 +4286,8 @@ public sealed partial class SessionFileTransferService
                 token,
                 routeDecision.Reason,
                 authority.AuthorityId,
-                authority.TransitionGeneration);
+                authority.TransitionGeneration,
+                publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         }
 
         if (TryReserveFileTransferRouteTransitionCompatibilityProjection(
@@ -4365,7 +4366,8 @@ public sealed partial class SessionFileTransferService
                 token,
                 routeDecision.Reason,
                 authority.AuthorityId,
-                authority.TransitionGeneration);
+                authority.TransitionGeneration,
+                publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(token));
         }
 
         if (TryReserveFileTransferRouteTransitionCompatibilityProjection(
@@ -4495,6 +4497,7 @@ public sealed partial class SessionFileTransferService
             disposition.Reason,
             authority.AuthorityId,
             authority.TransitionGeneration,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(disposition.RoutePublicationToken),
             evidenceOnly: true);
     }
 
@@ -4529,6 +4532,7 @@ public sealed partial class SessionFileTransferService
             disposition.Reason,
             authority.AuthorityId,
             authority.TransitionGeneration,
+            publicationEvidence: context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(disposition.RoutePublicationToken),
             evidenceOnly: true);
     }
 
