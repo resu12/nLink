@@ -4454,7 +4454,7 @@ function Write-FileTransferGuiLogLedgerEvidence {
         writers = @($finalWriters)
     }
     $coordinatorEvidenceCatalog = Get-FileTransferCoordinatorEvidenceCatalog `
-        -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1'
+        -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1'
     $evidence = [ordered]@{
         schemaVersion = 1
         event = 'filetransfer_gui_log_ledger'
@@ -15040,11 +15040,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             if ($value -match '^[1-9][0-9]*$') { return [long]$value }
             return [long]::MaxValue
         }
+        # Lookup buckets do not preserve ledger order. Restore it before the
+        # shared source index chooses the first copy of each writer record.
         $handoffEvents = @($byEvent.Values | ForEach-Object {
             foreach ($record in $_) {
                 [pscustomobject]@{ Fields = $record.Fields; Sequence = (Get-GuiStallSequence $record) }
             }
-        })
+        } | Sort-Object Sequence)
         function Get-GuiStallField([object]$Line, [string[]]$Names) {
             foreach ($name in $Names) {
                 $value = ([string]$Line.Fields[$name])
@@ -15754,14 +15756,25 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $episodeResult.Recovered = $recovered
             $episodeResult.RecoveryEvent = if ($null -ne $stallHandoffClosure) { $stallHandoffClosure } else { $recoveryEvent }
         }
+        $supersededCandidates = [System.Collections.Generic.HashSet[object]]::new()
         foreach ($episodeResult in $audit) {
+            $episodeResult | Add-Member -NotePropertyName ObligationDisposition -NotePropertyValue $(
+                if ($episodeResult.Excluded) { 'Excluded' } elseif ($episodeResult.Recovered) { 'Recovered' } else { 'Unresolved' })
             if (-not $episodeResult.Recovered -and -not $episodeResult.Excluded) {
-                $episodeResult.UnresolvedDiagnostic = Get-FileTransferStallGraceUnresolvedDiagnostic `
-                    -Index $currentSourceIndex `
-                    -Candidate ([pscustomobject]@{ Fields = $episodeResult.Event.Fields; Sequence = (Get-GuiStallSequence $episodeResult.Event) })
+                $candidate = [pscustomobject]@{ Fields = $episodeResult.Event.Fields; Sequence = (Get-GuiStallSequence $episodeResult.Event) }
+                $supersession = Get-FileTransferStallGraceSupersessionClosure -Index $currentSourceIndex -Candidate $candidate
+                if ($null -ne $supersession) {
+                    $episodeResult.ObligationDisposition = 'Superseded'
+                    $episodeResult.RecoveryEvent = $null
+                    $episodeResult | Add-Member -NotePropertyName SupersessionEvidence -NotePropertyValue $supersession
+                    [void]$supersededCandidates.Add($episodeResult.Event)
+                }
+                else {
+                    $episodeResult.UnresolvedDiagnostic = Get-FileTransferStallGraceUnresolvedDiagnostic -Index $currentSourceIndex -Candidate $candidate
+                }
             }
         }
-        [object[]]$first = @($unresolved | Sort-Object Sequence | Select-Object -First 1)
+        [object[]]$first = @($unresolved | Where-Object { -not $supersededCandidates.Contains($_.Line) } | Sort-Object Sequence | Select-Object -First 1)
         $firstUnresolvedDiagnostic = $null
         if ($first.Count -eq 1) {
             foreach ($episodeResult in $audit) {
@@ -15776,6 +15789,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             FirstSequence = if ($first.Count -eq 1) { [long]$first[0].Sequence } else { [long]::MaxValue }
             FirstUnresolvedDiagnostic = $firstUnresolvedDiagnostic
             ParsedRecords = $visits
+            AccountingVersion = 2
+            SupersededCount = $supersededCandidates.Count
         }
         if ($IncludeEpisodeAudit) { $result | Add-Member -NotePropertyName EpisodeAudit -NotePropertyValue $audit.ToArray() }
         return $result

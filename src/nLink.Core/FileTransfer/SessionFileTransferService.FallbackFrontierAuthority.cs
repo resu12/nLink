@@ -1150,7 +1150,8 @@ public sealed partial class SessionFileTransferService
                         controlPlaneRequest,
                         context.LifetimeCts.Token,
                         GetCheckpointRepairContinuityStamp(contract,
-                            request.RepairRequestId, request.RequestCorrelationId))
+                            request.RepairRequestId, request.RequestCorrelationId),
+                        frontierRepairContract: contract)
                     .ConfigureAwait(false);
                 if (!delivery.Sent)
                 {
@@ -1161,46 +1162,16 @@ public sealed partial class SessionFileTransferService
             else
             {
                 await dataSession.SendAsync(request, context.LifetimeCts.Token).ConfigureAwait(false);
-            }
-
-            lock (gate)
-            {
-                if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+                lock (gate)
                 {
-                    TrySettleFallbackFrontierRepairContract(
-                        contract,
-                        FallbackFrontierRepairSettlementOutcome.TerminalRejected,
-                        context.IsTerminal ? "request_send_completed_after_terminal" : "request_send_completed_for_stale_context");
-                    return false;
-                }
-
-                var rejectionReason = "fallback_frontier_contract_replaced";
-                if (!ReferenceEquals(context.CurrentFallbackFrontierRepairContract, contract) ||
-                    !IsFallbackFrontierRepairContractCurrent(context, contract, out rejectionReason))
-                {
-                    TrySettleFallbackFrontierRepairContract(
-                        contract,
-                        FallbackFrontierRepairSettlementOutcome.StaleRejected,
-                        rejectionReason);
-                    return false;
-                }
-
-                if (TryMarkFallbackFrontierRepairDispatched(contract))
-                {
-                    LogFallbackFrontierRepairDispatched(
-                        contract,
-                        request.RepairRequestId ?? contract.Authority.ProtocolRepairRequestId,
-                        "receiver_request_send",
-                        request.MissingRanges.Sum(static range => range.ChunkCount),
-                        context.NextChunkIndex,
-                        context.PullHighestReceivedChunkIndex + 1);
+                    if (!TryCompleteInboundFallbackFrontierDispatchLocked(context, dataSession, contract, request, reason))
+                    {
+                        return false;
+                    }
                 }
             }
 
             var totalRequestedChunks = request.MissingRanges.Sum(static range => range.ChunkCount);
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_v6_frontier_request_sent; {FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(contract, request.RepairRequestId, request.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; protocol_repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; start_chunk_index={request.MissingRanges[0].StartChunkIndex}; request_alias_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; post_tuna_fallback_survival=1; reason={FormatProtocolLogValue(reason)}");
 
             if (reusedContract)
             {
@@ -1244,6 +1215,58 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v6_frontier_request_failed; {FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.Message)}");
             return false;
         }
+    }
+
+    private bool TryCompleteInboundFallbackFrontierDispatchLocked(
+        InboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        FallbackFrontierRepairContract contract,
+        FileTransferFrontierRequestFrameV6 request,
+        string reason)
+    {
+        if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+        {
+            TrySettleFallbackFrontierRepairContract(
+                contract,
+                FallbackFrontierRepairSettlementOutcome.TerminalRejected,
+                context.IsTerminal ? "request_send_completed_after_terminal" : "request_send_completed_for_stale_context");
+            return false;
+        }
+
+        var rejectionReason = "fallback_frontier_contract_replaced";
+        if (!ReferenceEquals(context.CurrentFallbackFrontierRepairContract, contract) ||
+            !ReferenceEquals(context.DataSession, dataSession) ||
+            contract.Lifecycle.IsSettled ||
+            !IsFallbackFrontierRepairContractCurrent(context, contract, out rejectionReason))
+        {
+            TrySettleFallbackFrontierRepairContract(contract, FallbackFrontierRepairSettlementOutcome.StaleRejected, rejectionReason);
+            return false;
+        }
+
+        var alias = FindFallbackFrontierRepairCorrelationAlias(contract, request.RequestCorrelationId);
+        if (alias is null ||
+            !string.Equals(alias.ProtocolRepairRequestId, request.RepairRequestId, StringComparison.Ordinal) ||
+            request.TransportEpoch != contract.Authority.TransportEpoch)
+        {
+            return false;
+        }
+
+        var totalRequestedChunks = request.MissingRanges.Sum(static range => range.ChunkCount);
+        if (TryMarkFallbackFrontierRepairDispatched(contract))
+        {
+            LogFallbackFrontierRepairDispatched(
+                contract,
+                request.RepairRequestId ?? contract.Authority.ProtocolRepairRequestId,
+                "receiver_request_send",
+                totalRequestedChunks,
+                context.NextChunkIndex,
+                context.PullHighestReceivedChunkIndex + 1);
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_frontier_request_sent; {FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(contract, request.RepairRequestId, request.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(contract.Authority)}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; protocol_repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId)}; start_chunk_index={request.MissingRanges[0].StartChunkIndex}; request_alias_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; post_tuna_fallback_survival=1; reason={FormatProtocolLogValue(reason)}");
+        return true;
     }
 
     private bool SettleFailedInboundFallbackFrontierDispatch(

@@ -20349,7 +20349,8 @@ public sealed partial class SessionFileTransferService :
         IFileTransferDataSession dataSession,
         FileTransferControlPlaneDeliveryRequest request,
         CancellationToken ct,
-        CheckpointRepairContinuityStamp? checkpointContinuityStamp = null)
+        CheckpointRepairContinuityStamp? checkpointContinuityStamp = null,
+        FallbackFrontierRepairContract? frontierRepairContract = null)
     {
         FallbackControlPlaneDeliveryContract? deliveryContract = null;
         Task? dataSessionFallbackSendTask = null;
@@ -20403,10 +20404,28 @@ public sealed partial class SessionFileTransferService :
                             diagnosticOnly: IsDiagnosticOnlyRejectedFallbackControlPlaneContract(deliveryContract));
                         return (false, null);
                     }
+
+                    if (frontierRepairContract is not null)
+                    {
+                        // The accepted control completion and its exact repair
+                        // dispatch must precede any intervening route retirement.
+                        LogFileTransferControlPlaneDeliveryResult(request, result,
+                            checkpointContinuityStamp: checkpointContinuityStamp);
+                        if (!result.AcceptedAny ||
+                            request.Frame is not FileTransferFrontierRequestFrameV6 frontierRequest ||
+                            !TryCompleteInboundFallbackFrontierDispatchLocked(
+                                context, dataSession, frontierRepairContract, frontierRequest, request.Reason))
+                        {
+                            return (false, result);
+                        }
+                    }
                 }
 
-                LogFileTransferControlPlaneDeliveryResult(request, result,
-                    checkpointContinuityStamp: checkpointContinuityStamp);
+                if (frontierRepairContract is null)
+                {
+                    LogFileTransferControlPlaneDeliveryResult(request, result,
+                        checkpointContinuityStamp: checkpointContinuityStamp);
+                }
                 if (!result.AcceptedAny)
                 {
                     return (false, result);
@@ -20417,6 +20436,18 @@ public sealed partial class SessionFileTransferService :
                 deliveryContract?.Lifecycle.TrySettle(
                     FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
                     "data_session_fallback_completed");
+                if (frontierRepairContract is not null)
+                {
+                    lock (gate)
+                    {
+                        if (request.Frame is not FileTransferFrontierRequestFrameV6 frontierRequest ||
+                            !TryCompleteInboundFallbackFrontierDispatchLocked(
+                                context, dataSession, frontierRepairContract, frontierRequest, request.Reason))
+                        {
+                            return (false, null);
+                        }
+                    }
+                }
             }
 
             MaybeObserveInboundPostTunaFallbackControlPlanePressure(context, request);

@@ -574,6 +574,28 @@ foreach ($case in $cases) {
     $compact = Retained $compactLines 'regenerated-compact.log' $compactSnapshots
     $guiFull = Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $fullLines -IncludeEpisodeAudit -SnapshotEvidence $fullSnapshots
     $guiCompact = Get-TunaGuiFallbackFrontierStallGraceRecheckFailure -Lines $compactLines -IncludeEpisodeAudit -SnapshotEvidence $compactSnapshots
+    if ($DelayedDisposition -and $case -ceq 'disposition_typed_receipt') {
+        # Typed current-publication admission requires a valid full snapshot.
+        # A forged receipt fails that gate, not an admitted recovery episode.
+        foreach ($snapshot in @($fullSnapshots,$compactSnapshots)) {
+            if ($snapshot.ArtifactEvidenceVerdict -cne 'fail' -or
+                $snapshot.ArtifactEvidenceFailureReason -cnotlike 'snapshot_operation_catalog_mismatch:*') {
+                throw 'Forged disposition receipt did not fail the authoritative snapshot gate'
+            }
+        }
+        foreach ($result in @($full,$compact)) {
+            if ((Quartet $result) -cne '0/0/0/0' -or @($result.CandidateRecords).Count -ne 0) {
+                throw 'Forged disposition receipt admitted a retained candidate'
+            }
+        }
+        foreach ($result in @($guiFull,$guiCompact)) {
+            if (@($result.EpisodeAudit).Count -ne 0) { throw 'Forged disposition receipt admitted a GUI episode' }
+        }
+        $delayedOutputs.Add([ordered]@{ Case=$case; SnapshotVerdict=$fullSnapshots.ArtifactEvidenceVerdict;
+            SnapshotBoundaryHash=$fullSnapshots.BoundaryHash; Admission='RejectedInvalidSnapshot'; Quartet=(Quartet $full) })
+        "pass $case"
+        continue
+    }
     $recovered = $case -cin @('exact','exact_duplicate','unstamped_alias','disposition_duplicate','missing_disposition_effect')
     $expected = if ($recovered) { '1/1/1/0' } else { '1/1/0/1' }
     foreach ($result in @($full,$compact)) {

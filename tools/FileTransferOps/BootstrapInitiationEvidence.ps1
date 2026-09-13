@@ -53,7 +53,7 @@ function Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability {
     param([string]$Version)
     $Version -cin @($script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
         $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-        $script:FileTransferCoordinatorRepairOwnerCatalogVersion)
+        $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)
 }
 
 function Test-FileTransferCoordinatorBootstrapInitiationMarker {
@@ -69,7 +69,7 @@ function Test-FileTransferCoordinatorBootstrapInitiationOperation {
     param($Envelope, $Operation, $Catalog)
     try {
         $definition=$script:FileTransferCoordinatorBootstrapInitiationCatalog
-        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion) -or
+        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -or
             $Operation.family -cne 'route_transition' -or $Operation.operationRole -cnotin @(
                 'fallback_bootstrap_source_hold','fallback_bootstrap_exchange','fallback_bootstrap_phase') -or
             $Operation.stateApplied -isnot [bool] -or $Operation.receiptValidated -isnot [bool] -or -not $Operation.stateApplied) { return $false }

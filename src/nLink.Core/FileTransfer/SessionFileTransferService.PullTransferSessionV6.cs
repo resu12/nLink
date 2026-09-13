@@ -5291,6 +5291,7 @@ public sealed partial class SessionFileTransferService
         int nextChunkIndexAfterCommit;
         int highestReceivedChunkIndexAfterCommit;
         int previousCommittedChunkIndex;
+        bool frontierStallGraceWakeRefreshed;
         var postTunaFallbackRepairProgressObserved = false;
         string? postTunaFallbackRepairProgressKey = null;
         int postTunaFallbackRepairProgressBefore = 0;
@@ -5410,6 +5411,7 @@ public sealed partial class SessionFileTransferService
             }
 
             ArmOrClearInboundV6FrontierRecentProgressGraceWakeLocked(context, progressUtc);
+            frontierStallGraceWakeRefreshed = RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked(context);
 
             snapshot = CreateSnapshotLocked();
         }
@@ -5429,6 +5431,10 @@ public sealed partial class SessionFileTransferService
         }
 
         SchedulePendingInboundV6FrontierRecentProgressGraceWake(context);
+        if (frontierStallGraceWakeRefreshed)
+        {
+            SchedulePendingInboundV6FrontierStallGraceWake(context);
+        }
 
         LocalOperationalLog.Info(
             "FileTransferService",
@@ -7656,6 +7662,30 @@ public sealed partial class SessionFileTransferService
         };
     }
 
+    private bool RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked(InboundTransferContext context)
+    {
+        var current = context.CurrentV6FrontierStallGraceWake;
+        if (current is null ||
+            context.PullHighestReceivedChunkIndex <= current.HighestReceivedChunkIndex ||
+            context.LastV6FrontierStallGraceWakeGeneration == long.MaxValue ||
+            !IsInboundV6FrontierStallGraceWakeScopeCurrentLocked(context, current, true, out _))
+        {
+            return false;
+        }
+
+        // Accepted sparse writes may advance the tail without closing the gap.
+        // Keep the exact owner and deadline; a stale timer cannot create this successor.
+        var successor = current with
+        {
+            WakeGeneration = ++context.LastV6FrontierStallGraceWakeGeneration,
+            HighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex,
+        };
+        context.CurrentV6FrontierStallGraceWake = successor;
+        context.V6FrontierStallGraceWakeScheduledGeneration = 0;
+        LogInboundV6FrontierStallGraceRecheckDecision(successor, "rearmed", "highest_received_advanced");
+        return true;
+    }
+
     private void SchedulePendingInboundV6FrontierStallGraceWake(InboundTransferContext context)
     {
         InboundV6FrontierStallGraceWake? wake;
@@ -7786,9 +7816,17 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         InboundV6FrontierStallGraceWake wake,
         out string reason)
+        => IsInboundV6FrontierStallGraceWakeScopeCurrentLocked(context, wake, false, out reason);
+
+    private bool IsInboundV6FrontierStallGraceWakeScopeCurrentLocked(
+        InboundTransferContext context,
+        InboundV6FrontierStallGraceWake wake,
+        bool acceptedSparseWrite,
+        out string reason)
     {
         if (!ReferenceEquals(context.CurrentV6FrontierStallGraceWake, wake) ||
-            context.V6FrontierStallGraceWakeScheduledGeneration != wake.WakeGeneration)
+            (context.V6FrontierStallGraceWakeScheduledGeneration != wake.WakeGeneration &&
+                (!acceptedSparseWrite || context.V6FrontierStallGraceWakeScheduledGeneration != 0)))
         {
             reason = "wake_generation_replaced";
             return false;
@@ -7813,7 +7851,9 @@ public sealed partial class SessionFileTransferService
         if (!string.Equals(context.SessionId, wake.SessionId, StringComparison.Ordinal) ||
             !string.Equals(context.TransferId, wake.TransferId, StringComparison.Ordinal) ||
             context.NextChunkIndex != wake.FrontierChunkIndex ||
-            context.PullHighestReceivedChunkIndex != wake.HighestReceivedChunkIndex ||
+            (acceptedSparseWrite
+                ? context.PullHighestReceivedChunkIndex < wake.HighestReceivedChunkIndex
+                : context.PullHighestReceivedChunkIndex != wake.HighestReceivedChunkIndex) ||
             context.V6FrontierStallStartedUtc != wake.StallStartedUtc ||
             context.V6FrontierStallChunkIndex != wake.FrontierChunkIndex ||
             !IsInboundV6FrontierStalledLocked(context, DateTimeOffset.UtcNow))

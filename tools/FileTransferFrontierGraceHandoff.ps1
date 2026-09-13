@@ -1,5 +1,38 @@
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'FileTransferPublicationEvidence.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferSupersessionAccounting.ps1')
+
+# Shared by retained indexing and full-log GUI closure checks.
+function Get-FileTransferFallbackFrontierGraceCorrelationEventNames {
+    return @(
+        'filetransfer_v6_frontier_request_deferred',
+        'filetransfer_v6_frontier_stall_grace_recheck_decided',
+        'filetransfer_v6_frontier_recent_progress_grace_deferred',
+        'filetransfer_v6_frontier_recent_progress_grace_recheck_decided',
+        'filetransfer_v6_receiver_state_deferred',
+        'filetransfer_fallback_frontier_repair_authority_granted',
+        'filetransfer_fallback_frontier_repair_contract_settled',
+        'filetransfer_fallback_frontier_repair_progress_observed',
+        'filetransfer_v6_fallback_frontier_repair_progress_state_forced',
+        'filetransfer_v6_receiver_state_sent',
+        'filetransfer_v6_sparse_write_committed',
+        'filetransfer_fallback_frontier_repair_dispatched',
+        'filetransfer_v6_frontier_request_sent',
+        'filetransfer_control_plane_delivery_observed',
+        'filetransfer_fallback_tail_terminal_proof_consumed',
+        'integrity_verify_passed',
+        'temp_finalize_succeeded',
+        'file_transfer_inbound_terminal',
+        'filetransfer_live_route_epoch_terminal',
+        'filetransfer_terminalized_by_session_end',
+        'filetransfer_route_selected',
+        'filetransfer_live_route_epoch_recovered',
+        'filetransfer_route_transition_committed',
+        'filetransfer_route_transition_disposition_applied',
+        'filetransfer_route_hint_authorized_publication_accepted',
+        'filetransfer_data_session_recreated',
+        'filetransfer_data_session_removed')
+}
 
 function New-FileTransferStallGracePublishedSourceIndex {
     param([object[]]$Events, $SnapshotEvidence = $null)
@@ -1375,6 +1408,8 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         'terminal_generation', 'leg_generation', 'transport_epoch', 'bridge_recovery_generation',
         'bridge_decision_generation', 'checkpoint_request_id', 'route_publication_generation', 'route_commit_generation')
     $wakeScope = $scope + @('checkpoint_generation', 'data_session_identity', 'data_session_generation', 'frontier_chunk_index')
+    $scopeEvents = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in Get-FileTransferFallbackFrontierGraceCorrelationEventNames) { [void]$scopeEvents.Add($name) }
     $buckets = @{}
     $seen = @{}
     $scoped = [Collections.Generic.List[object]]::new()
@@ -1433,12 +1468,7 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
     $stall = $stalls[0]
     $deadline = Ticks $stall 'wake_deadline_utc'
     $writes = @(Named 'filetransfer_v6_sparse_write_committed' | Where-Object {
-        [long]$_.Sequence -gt [Math]::Max([long]$stall.Sequence, [long]$recheck.Sequence) -and
-        (Number $_ 'log_writer_attempt_utc_ticks') -gt (Number $recheck 'log_writer_attempt_utc_ticks') -and
-        (Number $_ 'log_writer_attempt_utc_ticks') -lt $deadline -and
-        (Number $_ 'contiguous_chunks_committed') -gt 0 -and (Number $_ 'next_chunk_index') -gt $Episode.Frontier -and
-        (Number $_ 'next_chunk_index') -eq ($Episode.Frontier + (Number $_ 'contiguous_chunks_committed')) -and
-        (Number $_ 'highest_received_chunk_index') -ge (Number $stall 'highest_received_chunk_index')
+        [long]$_.Sequence -gt [Math]::Max([long]$stall.Sequence, [long]$recheck.Sequence)
     })
     $initialStates = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
         [long]$_.Sequence -lt [long]$Episode.Event.Sequence -and
@@ -1446,7 +1476,23 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
         (Field $_ 'transport_epoch') -ceq (Field $stall 'transport_epoch') -and (Number $_ 'epoch') -gt 0
     })
     if ($initialStates.Count -eq 0) { return $null }
+    $frontier = [long]$Episode.Frontier
+    $highest = Number $stall 'highest_received_chunk_index'
+    $writeTicks = Number $recheck 'log_writer_attempt_utc_ticks'
     foreach ($write in $writes) {
+        $next = Number $write 'next_chunk_index'
+        $count = Number $write 'contiguous_chunks_committed'
+        $nextHighest = Number $write 'highest_received_chunk_index'
+        $nextTicks = Number $write 'log_writer_attempt_utc_ticks'
+        # Receiver publication may coalesce several writes. Each link must
+        # account for the entire advance within the same bounded wake interval.
+        if ($count -lt 0 -or $next -lt $frontier -or ($next - $frontier) -ne $count -or
+            $nextHighest -lt $highest -or $nextTicks -lt $writeTicks -or
+            $nextTicks -le (Number $recheck 'log_writer_attempt_utc_ticks') -or $nextTicks -ge $deadline) { return $null }
+        $frontier = $next
+        $highest = $nextHighest
+        $writeTicks = $nextTicks
+        if ($frontier -le $Episode.Frontier) { continue }
         $states = @(Named 'filetransfer_v6_receiver_state_sent' | Where-Object {
             [long]$_.Sequence -gt [long]$write.Sequence -and
             (Number $_ 'log_writer_attempt_utc_ticks') -ge (Number $write 'log_writer_attempt_utc_ticks') -and
@@ -1465,6 +1511,9 @@ function Get-FileTransferRecentProgressGraceStallProgressClosure {
             if ((Field $event 'event') -in @('file_transfer_inbound_terminal', 'filetransfer_live_route_epoch_terminal',
                     'filetransfer_terminalized_by_session_end', 'filetransfer_data_session_recreated', 'filetransfer_data_session_removed') -or
                 (Field $event 'transfer_paused') -ceq '1') { $poisoned = $true; break }
+            # Only contract evidence carries owner scope. Transport diagnostics
+            # can expose frame transport_epoch, not the fallback owner's epoch.
+            if (-not $scopeEvents.Contains((Field $event 'event'))) { continue }
             # Sparse/state records are scope-poor. They inherit only this one
             # fully bound wake interval; every present scope field must agree.
             foreach ($name in $wakeScope | Where-Object { $_ -ne 'frontier_chunk_index' }) {
@@ -1622,7 +1671,7 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
         }
     }
     $cache = $Index['__StallGraceDiagnosticRouteIndex']
-    $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -ceq $script:FileTransferCoordinatorRepairOwnerCatalogVersion
+    $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -cin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)
     $sourcePublication = $null
     function BoundRepair($Event) {
         $binding = Resolve-FileTransferRepairOwnerEvidence $cache.Snapshot $Event

@@ -41,37 +41,6 @@ function Reset-FileTransferFallbackFrontierGraceCorrelationCache {
     $script:FileTransferFallbackFrontierGraceCachedResults = @{}
 }
 
-function Get-FileTransferFallbackFrontierGraceCorrelationEventNames {
-    return @(
-        'filetransfer_v6_frontier_request_deferred',
-        'filetransfer_v6_frontier_stall_grace_recheck_decided',
-        'filetransfer_v6_frontier_recent_progress_grace_deferred',
-        'filetransfer_v6_frontier_recent_progress_grace_recheck_decided',
-        'filetransfer_v6_receiver_state_deferred',
-        'filetransfer_fallback_frontier_repair_authority_granted',
-        'filetransfer_fallback_frontier_repair_contract_settled',
-        'filetransfer_fallback_frontier_repair_progress_observed',
-        'filetransfer_v6_fallback_frontier_repair_progress_state_forced',
-        'filetransfer_v6_receiver_state_sent',
-        'filetransfer_v6_sparse_write_committed',
-        'filetransfer_fallback_frontier_repair_dispatched',
-        'filetransfer_v6_frontier_request_sent',
-        'filetransfer_control_plane_delivery_observed',
-        'filetransfer_fallback_tail_terminal_proof_consumed',
-        'integrity_verify_passed',
-        'temp_finalize_succeeded',
-        'file_transfer_inbound_terminal',
-        'filetransfer_live_route_epoch_terminal',
-        'filetransfer_terminalized_by_session_end',
-        'filetransfer_route_selected',
-        'filetransfer_live_route_epoch_recovered',
-        'filetransfer_route_transition_committed',
-        'filetransfer_route_transition_disposition_applied',
-        'filetransfer_route_hint_authorized_publication_accepted',
-        'filetransfer_data_session_recreated',
-        'filetransfer_data_session_removed')
-}
-
 function Get-FileTransferFallbackFrontierGraceTransferKey {
     param([Parameter(Mandatory = $true)]$Event)
 
@@ -626,31 +595,32 @@ function Get-FileTransferFallbackFrontierGracePartitionSlice {
                     (Get-FileTransferEventInt64Field -Event $event -Name 'durable_received_highest_chunk_index' -Default -1) -eq $highest
                 }
             & $addEvents @($publishedProgress | Where-Object { $null -ne $_ })
-            if ($null -ne $publishedProgress) {
-                # Preserve competing publication evidence within the handed-off
-                # grace, not just the first matching publication.
-                $deadlineTicks = 0L
-                foreach ($stall in $graceCandidates) {
-                    if ($stall.EventName -ne 'filetransfer_v6_frontier_request_deferred' -or
-                        [long]$stall.Sequence -le $candidateSequence -or
-                        [long]$stall.Sequence -ge [long]$sparseProgress.Sequence -or
-                        (Get-FileTransferEventInt64Field -Event $stall -Name 'frontier_chunk_index' -Default -1) -ne $candidateFrontier) { continue }
-                    $deadline = [DateTimeOffset]::MinValue
-                    if ([DateTimeOffset]::TryParse((Get-FileTransferEventField -Event $stall -Name 'wake_deadline_utc' -Default ''), [ref]$deadline)) {
-                        $deadlineTicks = [Math]::Max($deadlineTicks, $deadline.UtcTicks)
+            # Retain the complete write/publication interval: the receiver can
+            # publish a coalesced frontier absent from this partition's keys.
+            $deadlineTicks = 0L
+            foreach ($stall in $graceCandidates) {
+                if ($stall.EventName -ne 'filetransfer_v6_frontier_request_deferred' -or
+                    [long]$stall.Sequence -le $candidateSequence -or
+                    [long]$stall.Sequence -ge [long]$sparseProgress.Sequence -or
+                    (Get-FileTransferEventInt64Field -Event $stall -Name 'frontier_chunk_index' -Default -1) -ne $candidateFrontier) { continue }
+                $deadline = [DateTimeOffset]::MinValue
+                if ([DateTimeOffset]::TryParse((Get-FileTransferEventField -Event $stall -Name 'wake_deadline_utc' -Default ''), [ref]$deadline)) {
+                    $deadlineTicks = [Math]::Max($deadlineTicks, $deadline.UtcTicks)
+                }
+            }
+            if ($deadlineTicks -gt 0) {
+                $through = 0L
+                foreach ($publication in Get-FileTransferFallbackFrontierGraceSequenceRange `
+                        -Index $Index -Events $receiverStatePool -AfterSequence ([long]$sparseProgress.Sequence) -ThroughSequence ([long]::MaxValue)) {
+                    $ticks = Get-FileTransferEventInt64Field -Event $publication -Name 'log_writer_attempt_utc_ticks' -Default 0
+                    if ($ticks -gt 0 -and $ticks -lt $deadlineTicks -and
+                        (Get-FileTransferEventInt64Field -Event $publication -Name 'contiguous_committed_chunk_index' -Default -1) -gt $candidateFrontier) {
+                        $through = [long]$publication.Sequence
                     }
                 }
-                $publicationKey = "$TransferKey|$nextFrontier"
-                $Index.BoundedLookupVisitCount++
-                if ($deadlineTicks -gt 0 -and $Index.EventsByTransferAndFrontier.ContainsKey($publicationKey)) {
-                    foreach ($publication in $Index.EventsByTransferAndFrontier[$publicationKey]) {
-                        $Index.BoundedLookupVisitCount++
-                        if ($publication.EventName -eq 'filetransfer_v6_receiver_state_sent' -and
-                            [long]$publication.Sequence -gt [long]$sparseProgress.Sequence -and
-                            (Get-FileTransferEventInt64Field -Event $publication -Name 'log_writer_attempt_utc_ticks' -Default 0) -lt $deadlineTicks) {
-                            & $addEvents @($publication)
-                        }
-                    }
+                if ($through -gt 0) {
+                    & $addEvents @(Get-FileTransferFallbackFrontierGraceSequenceRange `
+                        -Index $Index -Events $transferEvents -AfterSequence $candidateSequence -ThroughSequence $through) -IncludeWriterCopies
                 }
             }
         }
@@ -678,12 +648,17 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Results,
         [Parameter(Mandatory = $true)]$Index,
-        [Parameter(Mandatory = $true)][long]$LookupStart)
+        [Parameter(Mandatory = $true)][long]$LookupStart,
+        [ValidateSet('stall','recent_progress')][string]$Kind = 'recent_progress')
 
     $recordsByKey = [ordered]@{}
     $rawCount = 0
     foreach ($result in @($Results)) {
         if ($null -eq $result) { continue }
+        if ($Kind -ceq 'stall' -and ($result.AccountingVersion -ne 2 -or
+            [long]$result.DistinctCount -ne ([long]$result.RecoveredCount + [long]$result.SupersededCount + [long]$result.UnresolvedCount))) {
+            throw 'stall_grace_partition_accounting_invalid'
+        }
         # Partitions admit disjoint candidate sets. Include raw-only obligations
         # cancelled before their deadline, even when they produce no record.
         $rawCount += [int]$result.RawCount
@@ -703,11 +678,13 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
         }, {
             [int64]$_.Event.LineNumber
         })
-    [object[]]$unresolved = @($records | Where-Object { -not [bool]$_.Recovered })
-    return [pscustomobject]@{
+    [object[]]$superseded = @($records | Where-Object { $Kind -ceq 'stall' -and
+        $null -ne $_.PSObject.Properties['ObligationDisposition'] -and $_.ObligationDisposition -ceq 'Superseded' -and -not $_.Recovered })
+    [object[]]$unresolved = @($records | Where-Object { -not [bool]$_.Recovered -and $_ -notin $superseded })
+    $result = [pscustomobject]@{
         RawCount = $rawCount
         DistinctCount = $records.Count
-        RecoveredCount = $records.Count - $unresolved.Count
+        RecoveredCount = @($records | Where-Object Recovered).Count
         UnresolvedCount = $unresolved.Count
         Verdict = if ($unresolved.Count -gt 0) { 'fail' } else { 'pass' }
         CandidateRecords = $records
@@ -715,6 +692,11 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
         IndexBuildVisitCount = [int64]$Index.IndexBuildVisitCount
         BoundedLookupVisitCount = [int64]$Index.BoundedLookupVisitCount - $LookupStart
     }
+    if ($Kind -ceq 'stall') {
+        $result | Add-Member -NotePropertyName AccountingVersion -NotePropertyValue 2
+        $result | Add-Member -NotePropertyName SupersededCount -NotePropertyValue $superseded.Count
+    }
+    return $result
 }
 
 function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
@@ -764,7 +746,7 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
 
     if ($partitionKeys.Count -eq 0) {
         $emptyResult = Merge-FileTransferFallbackFrontierGraceCorrelationResults `
-            -Results @() -Index $Index -LookupStart $lookupStart
+            -Results @() -Index $Index -LookupStart $lookupStart -Kind $Kind
         if ($useScopeCache) {
             $script:FileTransferFallbackFrontierGraceCachedResults[$Kind] = $emptyResult
         }
@@ -819,7 +801,7 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
                     elseif ($Index.PSObject.Properties.Name -contains '__CheckpointRepairContinuitySnapshotEvidence') {
                         $Index.__CheckpointRepairContinuitySnapshotEvidence
                     } else { $null }
-                $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates -SnapshotEvidence $snapshotInput)) | Out-Null
+                $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates -SnapshotEvidence $snapshotInput -SupersessionEvents $Index.RelevantEvents)) | Out-Null
             }
             else {
                 $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates)) | Out-Null
@@ -827,7 +809,7 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
         }
     }
     $mergedResult = Merge-FileTransferFallbackFrontierGraceCorrelationResults `
-        -Results @($results.ToArray()) -Index $Index -LookupStart $lookupStart
+        -Results @($results.ToArray()) -Index $Index -LookupStart $lookupStart -Kind $Kind
     if ($useScopeCache) {
         $script:FileTransferFallbackFrontierGraceCachedResults[$Kind] = $mergedResult
     }

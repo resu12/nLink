@@ -2005,11 +2005,14 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
     [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
     public async Task V6SparseReceiver_PostTunaFallbackStallGraceWake_ContinuousRejectedFramesCannotStarveExactReceiverRequest(
-        bool adoptValueEquivalentCoordinatorState)
+        bool adoptValueEquivalentCoordinatorState,
+        bool advanceHighestReceived)
     {
         const string transferId = "transfer_v6_post_fallback_stall_grace_wake";
         const string sessionId = "session_v6_post_fallback_stall_grace_wake";
@@ -2017,7 +2020,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var previousStallGrace = SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests;
         var previousProgressGrace = SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests;
         SessionFileTransferService.V6PostTunaFallbackFrontierRequestStallGraceOverrideForTests =
-            TimeSpan.FromMilliseconds(adoptValueEquivalentCoordinatorState ? 1000 : 250);
+            TimeSpan.FromMilliseconds(adoptValueEquivalentCoordinatorState || advanceHighestReceived ? 1000 : 250);
         SessionFileTransferService.V6RegularNknFrontierRequestProgressGraceOverrideForTests =
             TimeSpan.FromMilliseconds(50);
         var logStart = GetOperationalLogLength();
@@ -2108,6 +2111,58 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             if (adoptValueEquivalentCoordinatorState)
             {
                 AssertInboundGraceWakeSurvivesCoordinatorAdoption(receiver, recentProgress: false);
+            }
+
+            if (advanceHighestReceived)
+            {
+                static object? Property(object target, string name)
+                    => target.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+                        .GetValue(target);
+                foreach (var highest in new[] { 14, 15 })
+                {
+                    var oldWake = Property(inboundContext, "CurrentV6FrontierStallGraceWake")!;
+                    if (adoptValueEquivalentCoordinatorState && highest == 15)
+                    {
+                        // A current replacement may still be waiting for its
+                        // outside-lock scheduler when another write completes.
+                        lock (GetPrivateField(receiver, "gate")!)
+                        {
+                            SetPrivateProperty(inboundContext, "V6FrontierStallGraceWakeScheduledGeneration", 0L);
+                        }
+                    }
+                    await senderSession.SendAsync(
+                        new FileTransferChunkBatchFrameV6
+                        {
+                            SessionId = sessionId,
+                            TransferId = transferId,
+                            StartChunkIndex = highest,
+                            ChunkCount = 1,
+                            DataSegments = [payload.Skip(highest * chunkSize).Take(chunkSize).ToArray()],
+                        },
+                        CancellationToken.None);
+                    await WaitUntilAsync(() =>
+                    {
+                        lock (GetPrivateField(receiver, "gate")!)
+                        {
+                            return Assert.IsType<System.Collections.BitArray>(Property(inboundContext, "ReceiverSparseChunksWritten"))[highest];
+                        }
+                    });
+                    var newWake = Property(inboundContext, "CurrentV6FrontierStallGraceWake")!;
+                    Assert.NotSame(oldWake, newWake);
+                    Assert.Equal(Property(oldWake, "DueUtc"), Property(newWake, "DueUtc"));
+                    Assert.Equal(Property(oldWake, "StallStartedUtc"), Property(newWake, "StallStartedUtc"));
+                    Assert.Equal(Property(oldWake, "FrontierChunkIndex"), Property(newWake, "FrontierChunkIndex"));
+                    Assert.Equal(Property(oldWake, "RoutePublication"), Property(newWake, "RoutePublication"));
+                    Assert.Equal(Property(oldWake, "RuntimeOwner"), Property(newWake, "RuntimeOwner"));
+                    Assert.Equal(Assert.IsType<long>(Property(oldWake, "WakeGeneration")) + 1,
+                        Assert.IsType<long>(Property(newWake, "WakeGeneration")));
+                    Assert.Equal(highest, Assert.IsType<int>(Property(newWake, "HighestReceivedChunkIndex")));
+                    object?[] currentArguments = [inboundContext, oldWake, null];
+                    var current = typeof(SessionFileTransferService).GetMethod(
+                        "IsInboundV6FrontierStallGraceWakeCurrentLocked", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                    Assert.False(Assert.IsType<bool>(current.Invoke(receiver, currentArguments)));
+                    Assert.Equal("wake_generation_replaced", currentArguments[2]);
+                }
             }
 
             var requestCountAfterProgress = receiverTransport.SentDataFrames
@@ -4779,6 +4834,13 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             RejectChange(context, "State", FileTransferTransferState.Completed);
             RejectChange(context, "UserPaused", true);
             RejectChange(context, "PeerPaused", true);
+            if (!recentProgress)
+            {
+                RejectChange(context, "NextChunkIndex", Assert.IsType<int>(Property(context, "NextChunkIndex")) + 1);
+                RejectChange(context, "V6FrontierStallChunkIndex", -1);
+                RejectChange(context, "V6FrontierStallStartedUtc", null);
+                RejectChange(context, "PullManifestReceived", false);
+            }
             RejectChange(context, scheduledGenerationProperty, Assert.IsType<long>(Property(context, scheduledGenerationProperty)) + 1);
             RejectChange(context, wakeProperty, null);
             AssertCurrent(true);
@@ -4790,6 +4852,23 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 {
                     SetPrivateProperty(target, name, value);
                     AssertCurrent(false);
+                    if (!recentProgress)
+                    {
+                        var highest = Property(context, "PullHighestReceivedChunkIndex");
+                        var currentWake = Property(context, wakeProperty);
+                        var generation = Property(context, "LastV6FrontierStallGraceWakeGeneration");
+                        try
+                        {
+                            SetPrivateProperty(context, "PullHighestReceivedChunkIndex", Assert.IsType<int>(highest) + 1);
+                            InvokePrivateMethod(receiver, "RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked", context);
+                            Assert.Same(currentWake, Property(context, wakeProperty));
+                            Assert.Equal(generation, Property(context, "LastV6FrontierStallGraceWakeGeneration"));
+                        }
+                        finally
+                        {
+                            SetPrivateProperty(context, "PullHighestReceivedChunkIndex", highest);
+                        }
+                    }
                 }
                 finally
                 {

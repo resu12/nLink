@@ -25,7 +25,9 @@ public sealed partial class SessionFileTransferV4SenderTests
 
     private static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(bool delayedDisposition)
     {
-        var transferId = "transfer_checkpoint_continuity_" + Guid.NewGuid().ToString("N");
+        // Keep synthetic identities below secret-token redaction thresholds so
+        // persisted diagnostics retain the exact data-session projection.
+        var transferId = "continuity_" + Guid.NewGuid().ToString("N")[..16];
         var sessionId = "session_" + transferId;
         var serviceType = typeof(SessionFileTransferService);
         using var delivery = new PeerVisibleControlPlaneLoopbackTransport(sessionId, deliverFrames: false);
@@ -118,11 +120,19 @@ public sealed partial class SessionFileTransferV4SenderTests
         using var publicationObserver = new NknSignalingTransport(new FakeNknClient("checkpoint.continuity.fixture"),
             NknTransportOptions.Load(), new NknIdentity("checkpoint-continuity", "checkpoint.continuity.fixture"));
         var initial = CreateCoordinatorStateForTest(context);
+        var emitter = GetPrivatePropertyValue(context, "CoordinatorSnapshotEmitter")!;
+        var publicationEvidence = (FileTransferRoutePublicationEvidence?)emitterType
+            .GetMethod("GetRoutePublicationEvidence", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(emitter, [initial.CurrentRoutePublicationToken]);
+        if (delayedDisposition) { Assert.NotNull(publicationEvidence); }
         publicationObserver.ObserveFileTransferRouteHint(new(sessionId, transferId, route.TelemetryToken,
             route.ProtocolVersion, "coordinator_route_publication_successor", FallbackLegState: "active",
             FallbackLegCanSendData: true, FallbackLegGeneration: leg.Generation,
             PublicationAuthority: FileTransferCoordinator.CreateRoutePublicationAuthority(initial.CurrentRoutePublicationToken, "accepted"),
-            FallbackTransportEpoch: leg.TransportEpochId, FallbackBridgeRecoveryGeneration: leg.BridgeRecoveryGeneration));
+            FallbackTransportEpoch: leg.TransportEpochId, FallbackBridgeRecoveryGeneration: leg.BridgeRecoveryGeneration)
+        {
+            PublicationEvidence = publicationEvidence,
+        });
 
         var wake = ApplyContinuityEvidenceCheckpointCycle(service, context, serviceType, delayedDisposition,
             delayedCommand, delayedAuthority, sessionId, transferId, ApplyCheckpoint);
@@ -185,6 +195,9 @@ public sealed partial class SessionFileTransferV4SenderTests
             $"Fixture requires persisted operational log capture, not the unstamped recent ring: {LocalOperationalLog.LogFilePath}"));
         var holdLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_request_deferred;", StringComparison.Ordinal) &&
             (!delayedDisposition || GetDelimitedLogField(line, "frontier_chunk_index") == "100"));
+        Assert.Equal(sessionId, GetDelimitedLogField(holdLine, "session_id"));
+        Assert.Equal(transferId, GetDelimitedLogField(holdLine, "transfer_id"));
+        Assert.Equal(transferId + ":1", GetDelimitedLogField(holdLine, "data_session_identity"));
         var staleLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal));
         Assert.Contains("authority_effect=none;", staleLine, StringComparison.Ordinal);
         Assert.Contains("decision_status=stale;", staleLine, StringComparison.Ordinal);

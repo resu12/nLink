@@ -8,20 +8,23 @@ public sealed class SensitiveDataRedactorRepairOwnerTests
     private const string Secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     [Theory]
-    [InlineData("filetransfer_fallback_frontier_repair_authority_granted")]
-    [InlineData("filetransfer_fallback_frontier_repair_contract_settled")]
-    public void RepairOwnerRedaction_PreservesExactProfileAndProjectedReferenceOnly(string eventName)
+    [InlineData("filetransfer_fallback_frontier_repair_authority_granted", "")]
+    [InlineData("filetransfer_fallback_frontier_repair_contract_settled", "")]
+    [InlineData("filetransfer_fallback_frontier_repair_authority_granted", "-activation-retry-v1")]
+    [InlineData("filetransfer_fallback_frontier_repair_contract_settled", "-activation-retry-v1")]
+    public void RepairOwnerRedaction_PreservesExactProfileAndProjectedReferenceOnly(string eventName, string suffix)
     {
         const string token = "fte1-0123456789abcdef01234567";
-        var line = $"event={eventName}; repair_owner_profile={Profile}; repair_owner_coordinator_id={token}; " +
+        var profile = Profile + suffix;
+        var line = $"event={eventName}; repair_owner_profile={profile}; repair_owner_coordinator_id={token}; " +
             $"repair_owner_operation_key=route_runtime|fallback_frontier_repair_owner|{token}|1|FallbackFrontierRepairOwnerEvidence; " +
             $"repair_owner_receipt_id={token}; repair_owner_receipt_fingerprint={token}; secret={Secret}";
         var redacted = SensitiveDataRedactor.Redact(line);
-        Assert.Contains($"repair_owner_profile={Profile};", redacted, StringComparison.Ordinal);
+        Assert.Contains($"repair_owner_profile={profile};", redacted, StringComparison.Ordinal);
         Assert.Contains($"repair_owner_receipt_id={token}", redacted, StringComparison.Ordinal);
         Assert.Contains($"|{token}|1|FallbackFrontierRepairOwnerEvidence", redacted, StringComparison.Ordinal);
         Assert.DoesNotContain(Secret, redacted, StringComparison.Ordinal);
-        var snapshot = $"event=filetransfer_coordinator_snapshot_stream_started; snapshot_catalog_version={Profile}";
+        var snapshot = $"event=filetransfer_coordinator_snapshot_stream_started; snapshot_catalog_version={profile}";
         Assert.Equal(snapshot, SensitiveDataRedactor.Redact(snapshot));
     }
 

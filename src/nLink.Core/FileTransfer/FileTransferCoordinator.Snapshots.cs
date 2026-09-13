@@ -86,7 +86,9 @@ internal sealed record FileTransferCoordinatorRouteTransitionOperationSnapshot(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     FileTransferBootstrapInitiationOperationSnapshot? BootstrapInitiation = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    FileTransferBootstrapCallbackSnapshot? BootstrapCallbacks = null);
+    FileTransferBootstrapCallbackSnapshot? BootstrapCallbacks = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferActivationRetryBindingSnapshot? ActivationRetryBinding = null);
 
 internal sealed record FileTransferCoordinatorRuntimeUnlockRetryOperationSnapshot(
     string Role,
@@ -2784,7 +2786,8 @@ internal static partial class FileTransferCoordinator
                         ? ImmutableArray<
                             FileTransferCoordinatorReceiptTransitionSnapshot>
                             .Empty
-                        : ImmutableArray.Create(attemptedReceiptSnapshot)));
+                        : ImmutableArray.Create(attemptedReceiptSnapshot),
+                    ActivationRetryBinding: CreateActivationRetryBindingSnapshot(authority?.Kind, authority?.ProofBoundary)));
         return attemptedOperation;
     }
 
@@ -6018,7 +6021,8 @@ internal static partial class FileTransferCoordinator
                     "(none)",
                 CalculateSnapshotFingerprint(
                     operation.RetainedFrameApplyCommand?.FrameIdentity),
-                receipts));
+                receipts,
+                ActivationRetryBinding: CreateActivationRetryBindingSnapshot(authority.Kind, authority.ProofBoundary)));
     }
 
     private static CoordinatorOperationDescriptor
@@ -6087,7 +6091,8 @@ internal static partial class FileTransferCoordinator
                 "Superseded",
                 "(none)",
                 "(none)",
-                receipts));
+                receipts,
+                ActivationRetryBinding: CreateActivationRetryBindingSnapshot(authority.Kind, authority.ProofBoundary)));
     }
 
     private static CoordinatorOperationDescriptor

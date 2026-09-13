@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'BootstrapInitiationEvidence.ps1')
 . (Join-Path $PSScriptRoot 'BootstrapCallbackEvidence.ps1')
 . (Join-Path $PSScriptRoot 'RepairOwnerEvidence.ps1')
+. (Join-Path $PSScriptRoot 'ActivationRetryEvidence.ps1')
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
@@ -534,6 +535,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorActivationRetryCatalogVersion) {
+        return Get-FileTransferCoordinatorActivationRetryCatalog
+    }
     if ($ProfileVersion -ceq $script:FileTransferCoordinatorRepairOwnerCatalogVersion) {
         return Get-FileTransferCoordinatorRepairOwnerCatalog
     }
@@ -10230,7 +10234,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion)) {
+                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -10553,6 +10557,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         $errors.Add("snapshot_operation_identity_incomplete:$($record.LineIndex)")
                         break
                     }
+                    if (-not (Test-FileTransferActivationRetryOperation $operation $catalog)) {
+                        $errors.Add("snapshot_activation_retry_operation_invalid:$($record.LineIndex)")
+                        break
+                    }
                     if (Test-FileTransferCoordinatorRepairOwnerMarker $operation) {
                         if (-not (Test-FileTransferCoordinatorRepairOwnerOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_repair_owner_operation_invalid:$($record.LineIndex)")
@@ -10561,7 +10569,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         continue
                     }
                     if ((Test-FileTransferCoordinatorBootstrapCallbackMarker $operation) -or
-                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
+                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
                         if (-not (Test-FileTransferCoordinatorBootstrapCallbackOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_bootstrap_callback_operation_invalid:$($record.LineIndex)")
                             break
@@ -11076,10 +11084,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     if ((Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $catalog.Version) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapInitiationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCallbackHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
 
@@ -14391,6 +14399,9 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     $repairOwnerEvidence = Get-FileTransferRepairOwnerEvidence `
         -Boundaries @($aggregateEntries | ForEach-Object { $_.Boundary }) -Catalog $catalog
     foreach ($failure in @($repairOwnerEvidence.Errors)) { $errors.Add([string]$failure) }
+    $activationRetryEvidence = Get-FileTransferActivationRetryEvidence `
+        -Boundaries @($aggregateEntries | ForEach-Object { $_.Boundary }) -Catalog $catalog
+    foreach ($failure in @($activationRetryEvidence.Errors)) { $errors.Add([string]$failure) }
     $validationFailures = @(
         ConvertTo-FileTransferCoordinatorSnapshotValidationFailures `
             -Errors @($errors) `
@@ -14604,6 +14615,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
         # Internal correlation evidence; excluded from normalized boundary JSON/hash.
         __CheckpointRepairContinuityEvidence = if ($artifactVerdict -ceq 'pass') { $checkpointRepairContinuityEvidence } else { $null }
         __RepairOwnerEvidence = if ($artifactVerdict -ceq 'pass') { $repairOwnerEvidence } else { $null }
+        __ActivationRetryEvidence = if ($artifactVerdict -ceq 'pass') { $activationRetryEvidence } else { $null }
         __HeldPublicationProofClosures = @($heldPublicationProofClosures.ToArray() | Where-Object { $artifactVerdict -ceq 'pass' })
         __FallbackTailPeerProofBindings =
             @($orderedFallbackTailPeerProofBindings)

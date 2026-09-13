@@ -9,10 +9,10 @@ namespace NLink.Core.FileTransfer;
 public sealed partial class SessionFileTransferService
 {
     private const string CoordinatorSnapshotCatalogVersion =
-        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1";
+        "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1";
 
     private const string CoordinatorSnapshotCatalogHash =
-        "02ecc01ad2fae32da2da0688930b6720a55d5a4833f59e986aeee90e521039d7";
+        "6f8667e92dae781e679bbe6f59fbd4f3d6284cd893ad2f643a9e47a21d451b00";
 
     private const string CoordinatorSnapshotEmittedFamilyCoverage =
         "route_runtime,route_transition,runtime_unlock_retry_lifecycle,receive_recovery,fallback_tail_yield,regular_v4_frontier_repair_pressure,responder_probe_handoff";
@@ -3463,6 +3463,14 @@ public sealed partial class SessionFileTransferService
                             transition.ProofBoundaryFingerprint),
                         DurableCheckpointFingerprint = EvidenceToken(
                             transition.DurableCheckpointFingerprint),
+                        ActivationRetryBinding = transition.ActivationRetryBinding is { } retryBinding
+                            ? retryBinding with
+                            {
+                                RetryAuthorityId = EvidenceToken(retryBinding.RetryAuthorityId),
+                                InstallReceiptFingerprint = EvidenceToken(retryBinding.InstallReceiptFingerprint),
+                                PairedReleaseAuthorityId = EvidenceToken(retryBinding.PairedReleaseAuthorityId),
+                            }
+                            : null,
                         RetainedFrameFingerprint = EvidenceToken(
                             transition.RetainedFrameFingerprint),
                         BootstrapCorrelation = transition.BootstrapCorrelation is { } correlation

@@ -14596,11 +14596,12 @@ internal static partial class FileTransferCoordinator
                               .DispatchObserved,
                   } terminal
                     ? terminal
-                    : fallbackTail.LastConsumingInstallReceipt is
-                          { IsDefault: false } consumedInstall
+                    : lifecycle.LastScopeInvalidationReceipt?.Command
+                          .InstalledAttempt?.InstallReceipt is
+                          { IsDefault: false } invalidatedInstall
                         ? TryGetExactlyInvalidatedRuntimeUnlockRetryAttempt(
                             lifecycle,
-                            consumedInstall)
+                            invalidatedInstall)
                         : null;
         return effective is
                {

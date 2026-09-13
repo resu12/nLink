@@ -137,6 +137,14 @@ public sealed partial class FileTransferCoordinatorTests
         bool identicalPayload)
     {
         var history = CreateOutboundBootstrapSuccessorHistory();
+        AssertOutboundBootstrapSuccessorReplay(history, identicalPayload);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertOutboundBootstrapSuccessorReplay(
+        (FileTransferCoordinatorState State, FileTransferFallbackV6ProofBootstrapCommand PriorCommand,
+            FileTransferReceiverStateFrameV6 OldReceiverState) history, bool identicalPayload)
+    {
         var state = history.State;
         var prior = history.PriorCommand;
         Assert.True(FileTransferCoordinator.IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(
@@ -190,10 +198,15 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Same(delivered.State, staleReceipt.State);
         Assert.Equal(delivered.Receipt, staleReceipt.State.PersistentState.FileTransferRouteTransition
             .LastFallbackV6ProofBootstrapReceipt);
-        Assert.Equal(before, delivered.State.PersistentState);
+        AssertOutboundBootstrapPersistentStateUnchanged(in before, delivered.State);
         Assert.Equal(FileTransferRoute.FileTunaV4, delivered.State.RouteSelection.Route);
         Assert.Equal(3, delivered.State.CurrentLiveRouteEpoch!.EpochId);
     }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertOutboundBootstrapPersistentStateUnchanged(
+        in FileTransferCoordinatorPersistentState expected, FileTransferCoordinatorState actual)
+        => Assert.Equal(expected, actual.PersistentState);
 
     internal static (FileTransferCoordinatorState State,
         FileTransferFallbackV6ProofBootstrapCommand PriorCommand,

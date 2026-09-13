@@ -6700,6 +6700,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RawCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.DistinctCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.AccountingVersion),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.SupersededCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RawCount),
@@ -7224,6 +7226,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RawCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.DistinctCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.AccountingVersion),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.SupersededCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RawCount),
@@ -7694,6 +7698,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RawCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.DistinctCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.AccountingVersion),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.SupersededCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RawCount),
@@ -8146,6 +8152,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RawCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.DistinctCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.AccountingVersion),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.SupersededCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RawCount),
@@ -8672,6 +8680,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         filetransfer_fallback_frontier_stall_grace_recheck_missing_raw_count = $fileTransferFallbackFrontierStallGraceRecheckProof.RawCount
         filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count = $fileTransferFallbackFrontierStallGraceRecheckProof.DistinctCount
         filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count = $fileTransferFallbackFrontierStallGraceRecheckProof.RecoveredCount
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version = $fileTransferFallbackFrontierStallGraceRecheckProof.AccountingVersion
+        filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count = $fileTransferFallbackFrontierStallGraceRecheckProof.SupersededCount
         filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count = $fileTransferFallbackFrontierStallGraceRecheckProof.UnresolvedCount
         filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict = $fileTransferFallbackFrontierStallGraceRecheckProof.Verdict
         filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RawCount

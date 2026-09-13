@@ -45,7 +45,7 @@ function Test-FileTransferCoordinatorRepairOwnerOperation {
     param($Envelope,$Operation,$Catalog)
     try {
         $definition=$script:FileTransferCoordinatorRepairOwnerCatalog
-        if ($Catalog.Version -cne $script:FileTransferCoordinatorRepairOwnerCatalogVersion -or
+        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -or
             $Operation.family -cne $definition.family -or $Operation.operationKind -cne $definition.operationKind -or
             $Operation.operationRole -cne $definition.operationRole -or
             $Envelope.decisionKind -cne $definition.decisionKind -or $Envelope.decisionStatus -cne 'Idempotent' -or
@@ -129,11 +129,11 @@ function Resolve-FileTransferRepairOwnerEvidence {
         (Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence 'ArtifactEvidenceVerdict') -cne 'pass' -or
         (Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence 'StreamComplete') -ne $true -or
         'route_runtime' -cnotin @(Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence 'AuthoritativeFamilies' @()) -or
-        (F 'repair_owner_profile') -cne $script:FileTransferCoordinatorRepairOwnerCatalogVersion) { return $null }
+        (F 'repair_owner_profile') -cnotin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)) { return $null }
     $index=Get-FileTransferCoordinatorSnapshotObjectProperty $SnapshotEvidence '__RepairOwnerEvidence'
     if ($null -eq $index -or $index.CatalogVersion -cne (F 'repair_owner_profile') -or
         @($index.Errors).Count -gt 0 -or
-        $index.CatalogHash -cne $script:FileTransferCoordinatorRepairOwnerCatalogHash) { return $null }
+        $index.CatalogHash -cne (Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion (F 'repair_owner_profile')).Hash) { return $null }
     foreach ($name in @('repair_owner_coordinator_id','repair_owner_transition_id','repair_owner_receipt_id','repair_owner_receipt_fingerprint')) {
         if ((F $name) -cnotmatch '^fte1-[0-9a-f]{24}$') { return $null }
     }

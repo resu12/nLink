@@ -2,17 +2,29 @@
 
 ## Status and scope
 
-This is a bounded disposition proposal and test contract, not an acceptance-policy
-change. Existing classifications, raw/distinct/recovered/unresolved counts, and
-completed-proof gates remain unchanged. In particular, historical helper 11350
-remains unresolved with `SourceSuperseded` diagnostic metadata and quartet
+This document retains the original bounded proposal and its history. Separately
+approved version-2 neutral accounting is now implemented in the working tree;
+see the linked accounting contract for current verification. Completed-proof
+gates and archived results remain unchanged. Historical helper 11350 remains
+unresolved with `SourceSuperseded` diagnostic metadata and quartet
 `1/1/0/1`. That archived result is not a claim about the later bootstrap-ownership
 report and has not been replayed for this review.
 
-Updated against `63df93b28cb9a8ba4924df97c4fa72698fd4fe4a` plus the uncommitted
-joined-test changes on 2026-09-12.
-The implementation status below supersedes the earlier first-install-only gap
-description; it does not approve the proposed classification/count policy.
+Current status reviewed against committed
+`dad138284a470342245dc2249c19ca32076c6f12` on 2026-09-13.
+The historical implementation entries below precede the separate accounting
+approval. The current follow-on closes the initiating retry evidence link and
+introduces neutral supersession without recovering stalled repair A.
+
+The [superseded-source accounting review](file-transfer-superseded-source-accounting-contract.md)
+specifies the implemented third disposition, exact peer/target/checkpoint proof,
+versioned count rules and unchanged completion gates. The first implementation
+gate on 2026-09-13 found a missing initiating retry-to-route proof reference.
+The separately approved evidence extension and version-2 accounting are now
+implemented and verified. A local diagnostic alone still cannot establish
+cross-peer eligibility, and archived results have not been reclassified. References below to
+uncommitted changes describe the historical 2026-09-12 review state; those changes
+are now included in the commit above.
 
 Latest bounded implementation: versioned Coordinator repair-owner evidence now
 binds the actual A/B grants and settlements. The rebuilt capture
