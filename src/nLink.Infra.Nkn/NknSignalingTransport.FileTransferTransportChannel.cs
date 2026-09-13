@@ -971,7 +971,8 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload, useBulkIdentity: useBulkLane);
+        var securePayload = CreateSecureFileTransferPayloadWithEvidence(
+            messageType, normalizedTransferId, plaintextPayload, useBulkLane, out var securityEvidence);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         var transportPayload = EnvelopeCodec.Serialize(envelope);
         using var deliveryTraceScope = messageType == MsgType.FileTransferDataFrame
@@ -1146,7 +1147,7 @@ public sealed partial class NknSignalingTransport
                 FormatFileTransferDataPathFrameIdentitySuffix(dataFrame) +
                 (dataPathSendAuthority is null ? string.Empty : FormatFileTransferDataPathAuthoritySuffix(dataPathSendAuthority)) +
                 FormatFileTransferDataPathEnvelopeEvidenceSuffix(CreateFileTransferDataPathEnvelopeEvidence(
-                    envelope.MessageId, dataFrame?.SessionId, normalizedTransferId)));
+                    envelope.MessageId, dataFrame?.SessionId, normalizedTransferId) with { SecurityEvidence = securityEvidence }));
             LogRuntimeUnlockPreCommitProbeDeliveryOnce(
                 sentViaAcceleration ? FileTransferTransportKind.Tuna : FileTransferTransportKind.RegularNkn,
                 "sent",
@@ -1168,7 +1169,7 @@ public sealed partial class NknSignalingTransport
                 CreateFileTransferDataPathEnvelopeEvidence(
                     envelope.MessageId,
                     dataFrame?.SessionId ?? dataPathSendAuthority?.SessionId,
-                    dataFrame?.TransferId ?? normalizedTransferId));
+                    dataFrame?.TransferId ?? normalizedTransferId) with { SecurityEvidence = securityEvidence });
         }
 
         if (messageType == MsgType.FileTransferDataFrame && !sentViaAcceleration)
@@ -2807,7 +2808,10 @@ public sealed partial class NknSignalingTransport
         string EnvelopeFingerprint,
         string SessionId,
         string TransferId,
-        NknTunaDeliveryTrace.Frame? DeliveryTrace);
+        NknTunaDeliveryTrace.Frame? DeliveryTrace)
+    {
+        public FileTransferSecurityEvidence? SecurityEvidence { get; init; }
+    }
 
     private static FileTransferDataPathEnvelopeEvidence CreateFileTransferDataPathEnvelopeEvidence(
         string? messageId,
@@ -2831,7 +2835,8 @@ public sealed partial class NknSignalingTransport
 
     private static string FormatFileTransferDataPathEnvelopeEvidenceSuffix(
         FileTransferDataPathEnvelopeEvidence evidence)
-        => $"; data_path_envelope_fingerprint={evidence.EnvelopeFingerprint}; data_path_session_id={evidence.SessionId}; data_path_transfer_id={evidence.TransferId}";
+        => $"; data_path_envelope_fingerprint={evidence.EnvelopeFingerprint}; data_path_session_id={evidence.SessionId}; data_path_transfer_id={evidence.TransferId}" +
+           FormatFileTransferSecurityEvidenceSuffix(evidence.SecurityEvidence);
 
     private static string FormatFileTransferDataPathFrameIdentitySuffix(FileTransferDataFrame? frame)
     {
@@ -4338,7 +4343,8 @@ public sealed partial class NknSignalingTransport
     private bool TryPrepareFileTransferDataFrameDispatch(string source, NknBridgeChannel channel, Envelope env, out InboundFileTransferDispatchWork work)
     {
         work = default;
-        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferDataFrame, out var securePayload, channel))
+        if (!TryDecryptFileTransferPayloadWithEvidence(source, env, MsgType.FileTransferDataFrame,
+                out var securePayload, out var securityEvidence, channel))
         {
             return false;
         }
@@ -4374,7 +4380,7 @@ public sealed partial class NknSignalingTransport
 
         var receivedTransportKind = ResolveInboundFileTransferDataFrameTransportKind(channel);
         var envelopeEvidence = CreateFileTransferDataPathEnvelopeEvidence(
-            env.MessageId, frame.SessionId, frame.TransferId);
+            env.MessageId, frame.SessionId, frame.TransferId) with { SecurityEvidence = securityEvidence };
         if (ShouldRejectFileTunaV4PayloadReceive(frame, channel, receivedTransportKind, envelopeEvidence))
         {
             return false;
@@ -5622,7 +5628,18 @@ public sealed partial class NknSignalingTransport
         string transferId,
         byte[] plaintextPayload,
         bool useBulkIdentity = false)
+        => CreateSecureFileTransferPayloadWithEvidence(messageType, transferId, plaintextPayload,
+            useBulkIdentity, out _, captureEvidence: false);
+
+    private byte[] CreateSecureFileTransferPayloadWithEvidence(
+        MsgType messageType,
+        string transferId,
+        byte[] plaintextPayload,
+        bool useBulkIdentity,
+        out FileTransferSecurityEvidence? evidence,
+        bool captureEvidence = true)
     {
+        evidence = null;
         ArgumentNullException.ThrowIfNull(plaintextPayload);
 
         var sessionId = currentSessionSecurityState.SessionId
@@ -5630,7 +5647,7 @@ public sealed partial class NknSignalingTransport
         var senderIdentity = useBulkIdentity || messageType == MsgType.FileTransferChunk
             ? ResolveLocalBulkPeerAddressForSecureEnvelope()
             : ResolveLocalPeerAddressForSecureEnvelope();
-        var key = GetFileTransferSessionSharedKeyOrThrow();
+        var key = GetFileTransferKeyWithSecurityEvidence(out var securityContext);
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
         var metadata = new SessionSecureEnvelopeMetadata(
             Family: SessionSecureMessageFamily.FileTransfer,
@@ -5639,7 +5656,12 @@ public sealed partial class NknSignalingTransport
             SenderIdentity: senderIdentity,
             Sequence: Interlocked.Increment(ref nextOutboundFileTransferSecureSequence),
             RequestId: normalizedTransferId);
-        return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+        var encryptedPayload = SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+        if (captureEvidence && messageType == MsgType.FileTransferDataFrame)
+        {
+            evidence = CaptureFileTransferSecurityEvidence(securityContext, metadata, encryptedPayload);
+        }
+        return encryptedPayload;
     }
 
     private byte[] CreateSecureFileTransferPayloadForBudgetEstimate(
@@ -5871,7 +5893,19 @@ public sealed partial class NknSignalingTransport
         MsgType messageType,
         out SessionSecureEnvelopePayload securePayload,
         NknBridgeChannel? channel = null)
+        => TryDecryptFileTransferPayloadWithEvidence(source, env, messageType,
+            out securePayload, out _, channel, captureEvidence: false);
+
+    private bool TryDecryptFileTransferPayloadWithEvidence(
+        string? source,
+        Envelope env,
+        MsgType messageType,
+        out SessionSecureEnvelopePayload securePayload,
+        out FileTransferSecurityEvidence? evidence,
+        NknBridgeChannel? channel = null,
+        bool captureEvidence = true)
     {
+        evidence = null;
         securePayload = null!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
@@ -5892,9 +5926,10 @@ public sealed partial class NknSignalingTransport
         }
 
         byte[] key;
+        FileTransferSecurityContext? securityContext;
         try
         {
-            key = GetFileTransferSessionSharedKeyOrThrow();
+            key = GetFileTransferKeyWithSecurityEvidence(out securityContext);
         }
         catch (InvalidOperationException)
         {
@@ -5948,6 +5983,11 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_message_rejected; message_type={MapSecureFileTransferMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
             Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
             return false;
+        }
+
+        if (captureEvidence && messageType == MsgType.FileTransferDataFrame)
+        {
+            evidence = CaptureFileTransferSecurityEvidence(securityContext, securePayload.Metadata, env.Payload);
         }
 
         RaiseSessionLivenessProof(
@@ -6189,11 +6229,15 @@ public sealed partial class NknSignalingTransport
     }
 
     private void SetControlSessionSharedKey(byte[] sharedKey)
+        => InstallControlSessionSharedKey(sharedKey, null, null);
+
+    private void InstallControlSessionSharedKey(byte[] sharedKey, string? sessionId, byte[]? approvalBytes)
     {
         ArgumentNullException.ThrowIfNull(sharedKey);
 
         lock (controlSecureStateGate)
         {
+            RetireFileTransferSecurityContextLocked();
             if (controlSessionSharedKey is not null)
             {
                 CryptographicOperations.ZeroMemory(controlSessionSharedKey);
@@ -6220,6 +6264,7 @@ public sealed partial class NknSignalingTransport
             fileTransferStates.Clear();
             fileTransferTerminalTombstones.Clear();
             fileTransferCompleteEchoLastSent.Clear();
+            InstallFileTransferSecurityContextLocked(sessionId, approvalBytes);
         }
 
         ClearFileTransferDataSessionRemoteOpenSuppressed();
@@ -6230,6 +6275,7 @@ public sealed partial class NknSignalingTransport
     {
         lock (controlSecureStateGate)
         {
+            RetireFileTransferSecurityContextLocked();
             if (controlSessionSharedKey is not null)
             {
                 CryptographicOperations.ZeroMemory(controlSessionSharedKey);

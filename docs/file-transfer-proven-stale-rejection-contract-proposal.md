@@ -1,6 +1,9 @@
 # Proposal: proven stale rejection is not delivery recovery
 
-Status: parked proposal; final classifier no-go, 2026-09-10. Baseline `d408e58c`.
+Status: design review reopened on 2026-09-13; classifier remains disabled.
+See the [current review](file-transfer-security-provenance-contract-review.md).
+The 2026-09-10 classifier no-go below remains historical and is not overturned.
+Historical baseline: `d408e58c`.
 This document proposes a contract; it does not authorize implementation,
 an acceptance-rule cutover, historical reclassification, or another live run.
 
@@ -16,7 +19,7 @@ production writer-ownership and cross-writer projection/handoff proof. The user
 approved scoped local closeout, not further implementation. The proposal below
 is retained as design history; its former approval gates are not a current plan.
 
-## Current decision
+## 2026-09-10 closeout decision
 
 Park the stronger classifier and preserve current acceptance. Retain the
 test-only candidate and the final no-go report; do not expand this contract as

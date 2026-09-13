@@ -131,7 +131,16 @@ public sealed partial class NknFileTransferTransportTests
                 Assert.Contains("data_path_session_id=" + DataPathScopeFingerprint(sessionId), line, StringComparison.Ordinal);
                 Assert.Contains("data_path_transfer_id=" + DataPathScopeFingerprint(transferId), line, StringComparison.Ordinal);
                 Assert.DoesNotContain(oldEnvelope.MessageId, line, StringComparison.Ordinal);
+                Assert.Equal("captured", SecurityEvidenceValue(line, "security_context_status"));
+                Assert.Equal(SecurityFingerprint("payload", "ftpay1-", oldEnvelope.Payload),
+                    SecurityEvidenceValue(line, "security_payload_fingerprint"));
+                Assert.Equal(SecurityProperty(GetPrivateField(sender, "fileTransferSecurityContext")!, "EstablishmentFingerprint"),
+                    SecurityEvidenceValue(line, "security_establishment_fingerprint"));
             });
+            var oldSendRow = Assert.Single(oldRows, line => line.Contains("event=filetransfer_data_path_send_result;", StringComparison.Ordinal));
+            var oldReceiveRow = Assert.Single(oldRows, line => line.Contains("event=filetransfer_data_path_receive_result;", StringComparison.Ordinal));
+            Assert.Equal(SecurityEvidenceValue(oldSendRow, "security_sequence"), SecurityEvidenceValue(oldReceiveRow, "security_sequence"));
+            Assert.NotEqual(SecurityEvidenceValue(oldSendRow, "security_installation_id"), SecurityEvidenceValue(oldReceiveRow, "security_installation_id"));
             Assert.All(oldRows.Where(line => line.Contains("receive_disposition=", StringComparison.Ordinal)), line =>
             {
                 Assert.Contains("authority_effect=none", line, StringComparison.Ordinal);
@@ -156,6 +165,8 @@ public sealed partial class NknFileTransferTransportTests
             Assert.DoesNotContain(freshRows, line => line.Contains("event=filetransfer_data_path_send_result;", StringComparison.Ordinal));
             Assert.All(freshRows, line =>
             {
+                Assert.Equal(SecurityFingerprint("payload", "ftpay1-", freshEnvelope.Payload),
+                    SecurityEvidenceValue(line, "security_payload_fingerprint"));
                 AssertDataPathFrame(line);
                 Assert.Contains("receive_disposition=rejected_before_dispatch", line, StringComparison.Ordinal);
                 Assert.Contains("authority_effect=none", line, StringComparison.Ordinal);

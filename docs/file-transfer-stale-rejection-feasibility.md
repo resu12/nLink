@@ -1,5 +1,10 @@
 # Stale-rejection feasibility: closed with classifier no-go
 
+The bounded design review was reopened on 2026-09-13; see
+[the current evidence-contract review](file-transfer-security-provenance-contract-review.md).
+This historical no-go and its unproved production boundaries remain unchanged;
+no classifier or acceptance cutover has been enabled.
+
 Date: 2026-09-10. Baseline: `d408e58c4c7e97cfdec451b663b55995e83ace37`.
 Scope: initial 30-active-minute feasibility slice, separately approved test-only
 follow-up and read-only binding review, then scoped local closeout; one agent.

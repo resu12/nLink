@@ -1359,9 +1359,10 @@ public sealed partial class NknSignalingTransport
             }
 
             SessionSecureEnvelopePayload securePayload;
+            byte[] secureEnvelopeBytes;
             try
             {
-                var secureEnvelopeBytes = Convert.FromBase64String(approve.secureEnvelopeBase64!);
+                secureEnvelopeBytes = Convert.FromBase64String(approve.secureEnvelopeBase64!);
                 if (!TryDecryptLifecyclePayload(
                         source,
                         env.MessageId,
@@ -1461,7 +1462,7 @@ public sealed partial class NknSignalingTransport
                 }
             }
 
-            SetControlSessionSharedKey(sharedKey);
+            InstallControlSessionSharedKey(sharedKey, decision.SessionId.Value, secureEnvelopeBytes);
             // Approve can arrive before SessionHandshakeResult on a real network. A valid secure
             // approval envelope proves the same shared-key handshake, so finalize verification here too.
             UpdateSessionSecurityState(
@@ -2236,7 +2237,7 @@ public sealed partial class NknSignalingTransport
             var envelope = CreateEnvelope(pendingState.EnvelopeCode, MsgType.Approve, payloadBytes, joinRequestMessageId);
             await SendEnvelopeAsync(pendingState.RemoteEndpoint, envelope, ct);
 
-            SetControlSessionSharedKey(sharedKey);
+            InstallControlSessionSharedKey(sharedKey, decision.SessionId.Value, securePayload);
             UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
             LocalOperationalLog.Info(
                 "SessionSecurity",
