@@ -4,12 +4,12 @@ Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')
 
 function Get-SecondTunaProofProjection {
-    param($Proof)
+    param($Proof, [switch]$ExcludeRawLine)
     $records = @(foreach ($kind in @('CandidateRecords', 'EffectiveCandidateRecords')) {
         foreach ($record in @($Proof.$kind | Sort-Object { $_.Event.Sequence })) {
             [pscustomobject]@{
                 Kind=$kind; Event=$record.Event.EventName; File=$record.Event.FilePath;
-                Line=$record.Event.LineNumber; Sequence=$record.Event.Sequence; RawLine=$record.Event.RawLine;
+                Line=$record.Event.LineNumber; Sequence=$record.Event.Sequence; RawLine=$(if (-not $ExcludeRawLine) { $record.Event.RawLine });
                 Key=(Get-FileTransferFileTunaV4DataPathMismatchCandidateKey -Event $record.Event);
                 Recovered=$record.Recovered; Variant=$record.Variant; Diagnostic=$record.RejectionDiagnostic
             }
@@ -83,6 +83,18 @@ if (-not [string]::IsNullOrWhiteSpace($GeneratedLogPath)) {
     if (@($provenance | Where-Object { $_.EventName -ceq 'filetransfer_data_path_receive_result' }).Count -ne 2 -or
         $generatedProof.RecoveredCount -ne 0 -or $generatedProof.EffectiveCount -ne 4) {
         throw 'Generated old/fresh rejected ingress must remain unresolved.'
+    }
+    # Test-only field-ablation control, freshly parsed from this generated fixture.
+    # Do not modify the producer log or treat publication capture as authority.
+    $withoutUse = @(foreach ($event in $generatedEvents) {
+        $line = $event.RawLine -replace '; publication_evidence_[a-z_]+=[^;\r\n]*', '' -replace '; publication_use_kind=[^;\r\n]*', ''
+        ConvertFrom-FileTransferLogLine -Line $line -FilePath $event.FilePath -LineNumber $event.LineNumber -Sequence $event.Sequence
+    })
+    $withoutUseIndex = New-FileTransferFileTunaV4DataPathCorrelationIndex -Events $withoutUse
+    $withoutUseProof = Get-FileTransferFileTunaV4DataPathMismatchProof -Events $withoutUse -DataPathIndex $withoutUseIndex
+    if ((Get-SecondTunaProofProjection $generatedProof -ExcludeRawLine) -cne
+        (Get-SecondTunaProofProjection $withoutUseProof -ExcludeRawLine)) {
+        throw 'Publication-use diagnostic fields changed the existing proof result.'
     }
     Write-Output ('second-tuna-generated-parity=' + (Get-SecondTunaProofProjection $generatedProof))
     return

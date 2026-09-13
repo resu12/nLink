@@ -1483,7 +1483,8 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     public async Task AnalyzeRetained_GeneratedRejectedIngressPreservesFreshCompactProofParity()
     {
         if (!OperatingSystem.IsWindows()) { return; }
-        var log = await NknFileTransferTransportTests.CreateRejectedDataPathEnvelopeProvenanceFixture(true);
+        var log = await NknFileTransferTransportTests.CreateRejectedDataPathEnvelopeProvenanceFixture(true, capturePublicationUse: true);
+        Assert.Equal(7, log.Split('\n').Count(line => line.Contains("publication_use_kind=", StringComparison.Ordinal)));
         var path = Path.Combine(Path.GetTempPath(), $"nlink-rejected-ingress-{Guid.NewGuid():N}.log");
         try
         {

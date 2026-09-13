@@ -308,8 +308,10 @@ public sealed partial class NknFileTransferTransportTests
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             var options = NknTransportOptions.Load();
-            var receiverClient = new FakeNknClient("receiver.security-capture.address");
-            var senderClient = new FakeNknClient("sender.security-capture.address");
+            // Independent cases must not share the process-wide invite throttle key.
+            var caseId = Guid.NewGuid().ToString("N");
+            var receiverClient = new FakeNknClient($"receiver.security-capture-{caseId}.address");
+            var senderClient = new FakeNknClient($"sender.security-capture-{caseId}.address");
             byte[]? approvalBytes = null;
             receiverClient.BeforeSendAsync = (_, bytes, _) =>
             {

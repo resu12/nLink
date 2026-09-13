@@ -10678,6 +10678,12 @@ public sealed partial class SessionFileTransferService
                     sendAuthority = CreateDataPathSendAuthority(
                         requiredInstall.RoutePublication,
                         requiredInstall.RoutePublication.Reason);
+                    if (dataSession is IFileTransferDataPathAuthoritySession)
+                    {
+                        FileTransferPublicationUseEvidence.CaptureSend(sendAuthority,
+                            context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(requiredInstall.RoutePublication),
+                            FileTransferPublicationUseKind.V4PrePumpRequest);
+                    }
                 }
 
                 if (sendAuthority is not null &&
@@ -18511,6 +18517,7 @@ public sealed partial class SessionFileTransferService
                         }
                         else
                         {
+                            var sendPublication = context.CurrentRoutePublicationToken;
                             sendAuthority = CreateV4DataPathSendAuthorityLocked(context, "v4_transport_send");
                             if (context.RouteSelection.Route == FileTransferRoute.FileTunaV4 &&
                                 sendAuthority is null)
@@ -18544,6 +18551,12 @@ public sealed partial class SessionFileTransferService
                             if (sendException is null &&
                                 physicalSendLease is not null)
                             {
+                                if (dataSession is IFileTransferPhysicalSendSubmissionSession || authoritySession is not null)
+                                {
+                                    FileTransferPublicationUseEvidence.CaptureSend(sendAuthority,
+                                        context.CoordinatorSnapshotEmitter.GetRoutePublicationEvidence(sendPublication),
+                                        FileTransferPublicationUseKind.V4PhysicalSubmission);
+                                }
                                 if (dataSession is
                                     IFileTransferPhysicalSendSubmissionSession
                                     physicalSubmissionSession)

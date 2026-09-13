@@ -5,6 +5,12 @@ See the [pinned capture contract](file-transfer-security-capture-contract.md).
 The review below is the pre-implementation record; its classifier no-go,
 publication-link requirements and unchanged acceptance decision still apply.
 
+After the finalized capture-only live validation, the next bounded slice is
+[publication-use capture](file-transfer-publication-use-capture-contract.md).
+Its contract now includes the approved offline implementation follow-up. It
+records the current first failure and verified redacted-scope and persisted-
+handoff limitations; the older capture findings below are historical.
+
 Date: 2026-09-13. Reviewed source: `7e61c7603b75218a4243d29c64179a765d43de97`.
 The user approved reopening the bounded design review and continuation of
 justified offline work, stopping before a new live 256 MiB test. This review

@@ -24524,21 +24524,23 @@ public sealed partial class FileTransferCoordinatorTests
     private static FileTransferCoordinatorDecision ActivateTuna(
         FileTransferCoordinatorState state,
         FileTransferRouteSelection tuna,
-        int committedChunk)
+        int committedChunk,
+        Action<FileTransferCoordinatorTransitionEnvelope>? capture = null)
     {
         var setup = state.RouteSelection.Route switch
         {
             FileTransferRoute.RegularNknV4Fast =>
-                CreateRegularV4ToTunaRouteTransitionSetup(state),
+                CreateRegularV4ToTunaRouteTransitionSetup(state, capture),
             FileTransferRoute.PostTunaFallbackV6 =>
-                CreateFallbackV6ToTunaRouteTransitionSetup(state),
+                CreateFallbackV6ToTunaRouteTransitionSetup(state, capture),
             _ => throw new InvalidOperationException(
                 $"Cannot activate Tuna from {state.RouteSelection.Route}."),
         };
         return CommitEmptyFileTransferRouteTransitionForTest(
             setup.State,
             setup.Request,
-            setup.FinalProof);
+            setup.FinalProof,
+            capture: capture);
     }
 
     private static FileTransferCoordinatorDecision FallBack(

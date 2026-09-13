@@ -973,6 +973,7 @@ public sealed partial class NknSignalingTransport
 
         var securePayload = CreateSecureFileTransferPayloadWithEvidence(
             messageType, normalizedTransferId, plaintextPayload, useBulkLane, out var securityEvidence);
+        var publicationUse = FileTransferPublicationUseEvidence.GetSend(dataPathSendAuthority);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         var transportPayload = EnvelopeCodec.Serialize(envelope);
         using var deliveryTraceScope = messageType == MsgType.FileTransferDataFrame
@@ -1147,7 +1148,7 @@ public sealed partial class NknSignalingTransport
                 FormatFileTransferDataPathFrameIdentitySuffix(dataFrame) +
                 (dataPathSendAuthority is null ? string.Empty : FormatFileTransferDataPathAuthoritySuffix(dataPathSendAuthority)) +
                 FormatFileTransferDataPathEnvelopeEvidenceSuffix(CreateFileTransferDataPathEnvelopeEvidence(
-                    envelope.MessageId, dataFrame?.SessionId, normalizedTransferId) with { SecurityEvidence = securityEvidence }));
+                    envelope.MessageId, dataFrame?.SessionId, normalizedTransferId) with { SecurityEvidence = securityEvidence, PublicationUse = publicationUse }));
             LogRuntimeUnlockPreCommitProbeDeliveryOnce(
                 sentViaAcceleration ? FileTransferTransportKind.Tuna : FileTransferTransportKind.RegularNkn,
                 "sent",
@@ -1169,7 +1170,7 @@ public sealed partial class NknSignalingTransport
                 CreateFileTransferDataPathEnvelopeEvidence(
                     envelope.MessageId,
                     dataFrame?.SessionId ?? dataPathSendAuthority?.SessionId,
-                    dataFrame?.TransferId ?? normalizedTransferId) with { SecurityEvidence = securityEvidence });
+                    dataFrame?.TransferId ?? normalizedTransferId) with { SecurityEvidence = securityEvidence, PublicationUse = publicationUse });
         }
 
         if (messageType == MsgType.FileTransferDataFrame && !sentViaAcceleration)
@@ -2635,6 +2636,7 @@ public sealed partial class NknSignalingTransport
         {
             fileTransferRouteHints.Remove(key);
             fileTransferRoutePublicationAuthorities.Remove(key);
+            fileTransferPublicationCaptures.Remove(key);
         }
     }
 
@@ -2705,6 +2707,15 @@ public sealed partial class NknSignalingTransport
                     SanitizeLogToken(authority.CoordinatorDecisionReason),
                     DateTimeOffset.UtcNow);
                 fileTransferRoutePublicationAuthorities[routeHintKey] = authority;
+                if (notification.PublicationEvidence is { } publicationEvidence)
+                {
+                    fileTransferPublicationCaptures[routeHintKey] = new(
+                        authority, fileTransferRouteHints[routeHintKey], publicationEvidence);
+                }
+                else
+                {
+                    fileTransferPublicationCaptures.Remove(routeHintKey);
+                }
                 fileTransferRuntimeUnlockAuthorityRequirements[normalizedSessionId] =
                     new FileTransferRuntimeUnlockAuthorityRequirement(
                         authority.TransferId,
@@ -2811,6 +2822,7 @@ public sealed partial class NknSignalingTransport
         NknTunaDeliveryTrace.Frame? DeliveryTrace)
     {
         public FileTransferSecurityEvidence? SecurityEvidence { get; init; }
+        public FileTransferPublicationUseEvidence? PublicationUse { get; init; }
     }
 
     private static FileTransferDataPathEnvelopeEvidence CreateFileTransferDataPathEnvelopeEvidence(
@@ -2836,7 +2848,8 @@ public sealed partial class NknSignalingTransport
     private static string FormatFileTransferDataPathEnvelopeEvidenceSuffix(
         FileTransferDataPathEnvelopeEvidence evidence)
         => $"; data_path_envelope_fingerprint={evidence.EnvelopeFingerprint}; data_path_session_id={evidence.SessionId}; data_path_transfer_id={evidence.TransferId}" +
-           FormatFileTransferSecurityEvidenceSuffix(evidence.SecurityEvidence);
+           FormatFileTransferSecurityEvidenceSuffix(evidence.SecurityEvidence) +
+           FormatFileTransferPublicationUseEvidenceSuffix(evidence);
 
     private static string FormatFileTransferDataPathFrameIdentitySuffix(FileTransferDataFrame? frame)
     {
@@ -3018,7 +3031,8 @@ public sealed partial class NknSignalingTransport
         FileTransferDataPathEnvelopeEvidence envelopeEvidence)
     {
         if (actualTransport == FileTransferTransportKind.Tuna ||
-            !TryGetFileTransferDataPathRouteAuthority(frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint) ||
+            !TryGetFileTransferDataPathRouteAuthorityWithEvidence(frame.SessionId, frame.TransferId, FileTransferDirection.Inbound,
+                out var routeHint, out var publication) ||
             routeHint.Route != FileTransferRoute.FileTunaV4 ||
             routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             routeHint.TargetTransport != FileTransferTransportKind.Tuna)
@@ -3041,6 +3055,10 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        envelopeEvidence = envelopeEvidence with
+        {
+            PublicationUse = publication is null ? null : new(publication, FileTransferPublicationUseKind.ReceiveGuard),
+        };
         LogFileTransferDataPathReceiveResult(
             frame, channel, actualTransport, envelopeEvidence,
             "rejected_before_dispatch", hasAuthority: true, routeHint);
@@ -4492,10 +4510,14 @@ public sealed partial class NknSignalingTransport
                         frame.SessionId);
                 }
 
-                var hasRouteAuthority = TryGetFileTransferDataPathRouteAuthority(
-                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint);
+                var hasRouteAuthority = TryGetFileTransferDataPathRouteAuthorityWithEvidence(
+                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint, out var publication);
+                var dispatchEvidence = envelopeEvidence with
+                {
+                    PublicationUse = publication is null ? null : new(publication, FileTransferPublicationUseKind.ReceiveDispatch),
+                };
                 LogFileTransferDataPathReceiveResult(
-                    frame, channel, receivedTransportKind, envelopeEvidence,
+                    frame, channel, receivedTransportKind, dispatchEvidence,
                     "dispatch_entered", hasRouteAuthority, routeHint);
                 DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source);
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);

@@ -8,6 +8,11 @@ Implementation: private capture and focused producer/privacy regressions added.
 Final offline results are recorded in
 `artifacts/security-capture-implementation-20260913/RESULTS.md`.
 
+Live follow-up: the user subsequently approved one targeted live validation,
+now finalized. Security-capture integrity and the route cycle passed; acceptance
+remained FAIL. See `artifacts/security-capture-live-20260913/LIVE-256-RESULTS.md`
+and the [publication-use contract and implementation](file-transfer-publication-use-capture-contract.md).
+
 ## Producer contract
 
 - Every transport has a random, opaque `ftst1-` + 32 lowercase hexadecimal
@@ -92,7 +97,7 @@ cross-writer causal link. Those remain separate prerequisites from the review.
 No positive stale classifier or acceptance cutover is authorized. Stop before
 a new live 256 MiB test; do not rewrite historical artifacts with new evidence.
 
-## Next live evidence-validation gate (not run)
+## Live evidence-validation gate (original plan; now completed)
 
 The offline producer uses two transport instances in one fake-network process.
 A fresh targeted `regular-v4-live-activation-off-on-off-256mb` run is needed to
