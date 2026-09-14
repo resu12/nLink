@@ -3375,10 +3375,32 @@ function Write-FileTransferGuiLogLedgerEvidence {
         [Parameter(Mandatory = $true)][int]$Bookmark,
         [Parameter(Mandatory = $true)]$InitialSnapshot,
         [AllowNull()][scriptblock]$ProcessOutputDrainAction = $null,
-        [AllowNull()]$TestMetrics = $null
+        [AllowNull()]$TestMetrics = $null,
+        [AllowNull()]$LocalNativeWriterCapture = $null
     )
 
     $finalizationErrors = New-Object System.Collections.Generic.List[string]
+    $captureNativeWriterInputs = $LocalNativeWriterCapture -is [ref] -and $null -eq $LocalNativeWriterCapture.Value
+    # This issuer stays private to the actual finalizer, never in formatter
+    # inputs or the provisional native capture. Child scopes cannot inherit it.
+    $private:localWriterIssuer = $null
+    try {
+    if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_GUI_WRITER_REQUEST)) {
+        try {
+            if ($null -eq ('NLink.Tools.LocalGuiWriterRequest' -as [type])) {
+                . (Join-Path $PSScriptRoot 'FileTransferOps/LocalGuiWriterRequest.ps1')
+            }
+            $requestId = [guid]::Empty
+            if ([guid]::TryParseExact([string]$env:NLINK_GUI_WRITER_REQUEST_ID, 'D', [ref]$requestId)) {
+                $localWriterIssuer = [NLink.Tools.LocalGuiWriterRequest]::TryAttach(
+                    [string]$env:NLINK_GUI_WRITER_REQUEST, $requestId,
+                    [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,
+                    [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, [IO.Path]::GetFullPath($ArtifactDir))
+            }
+        }
+        catch { } # Omit ownership, not the original finalization.
+    }
+    $captureNativeWriterInputs = $captureNativeWriterInputs -or $null -ne $localWriterIssuer
     $retainedSlice = $null
     $analyzerInput = $null
     $capturePersisted = $false
@@ -3644,8 +3666,13 @@ function Write-FileTransferGuiLogLedgerEvidence {
         $writerEvidenceByteCount = 0L
         $frozenWriterEvidenceEnd = [int]$finalSnapshot.lineCount
         if ($rebuildWriterEvidenceFromFrozenSource) {
+            $nativeWriterMethod = 'Process'
+            if ($captureNativeWriterInputs -and $null -ne
+                [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor].GetMethod('ProcessWithNativeCapture')) {
+                $nativeWriterMethod = 'ProcessWithNativeCapture'
+            }
             $nativeStreamingResult =
-                [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::Process(
+                [NLink.Tools.GuiSmokeLogLedgerStreamingProcessor]::$nativeWriterMethod(
                     [string]$script:GuiSmokeAppLogLedger.AppendOnlyPath,
                     [long]$frozenWriterEvidenceEnd,
                     [long]$Bookmark,
@@ -4566,6 +4593,37 @@ function Write-FileTransferGuiLogLedgerEvidence {
                 -CaptureSha256 ([string]$retainedSlice.Sha256) `
                 -CaptureLineCount ([long]$retainedSlice.LineCount)
         }
+        if ($captureNativeWriterInputs -and $integrityReasons.Count -eq 0 -and
+            $writerIntegrityReasons.Count -eq 0 -and $null -ne $nativeStreamingResult) {
+            try {
+                if ($nativeStreamingResult.OwnsNativeCapture($nativeStreamingResult.NativeCapture)) {
+                    $nativeCapture = $nativeStreamingResult.NativeCapture
+                    if ($null -ne $localWriterIssuer -and $null -ne $nativeCapture.Semantic -and $capturePersisted -and
+                        $nativeCapture.AcceptanceRunId -ceq $expectedAcceptanceRunId -and
+                        $nativeCapture.ScenarioRunId -ceq $expectedScenarioRunId -and
+                        $nativeCapture.Semantic.Sha256 -ceq $analyzerInput.Sha256 -and
+                        $nativeCapture.Semantic.ByteCount -eq $analyzerInput.ByteCount -and
+                        $nativeCapture.Semantic.LineCount -eq $analyzerInput.LineCount) {
+                        # Bounded original native facts and original verified copy.
+                        # No new file scan, hash, or authority evaluation.
+                        $outputs = @($nativeCapture.Retained, $nativeCapture.Writer, $nativeCapture.Semantic)
+                        [void]$localWriterIssuer.Complete(
+                            [string]$script:GuiSmokeAppLogLedger.LedgerId, $nativeCapture.SourcePath,
+                            $nativeCapture.FrozenLineCount, $nativeCapture.Bookmark,
+                            [string[]]@($outputs | ForEach-Object { $_.Sha256 }),
+                            [string[]]@($outputs | ForEach-Object { $_.FileIdentity }),
+                            [long[]]@($outputs | ForEach-Object { $_.ByteCount }),
+                            [long[]]@($outputs | ForEach-Object { $_.LineCount }),
+                            [string[]]@($nativeCapture.Writers | ForEach-Object { $_.WriterId }),
+                            [long[]]@($nativeCapture.Writers | ForEach-Object { $_.LastSequence }))
+                    }
+                    if ($LocalNativeWriterCapture -is [ref] -and $null -eq $LocalNativeWriterCapture.Value) {
+                        $LocalNativeWriterCapture.Value = $nativeCapture
+                    }
+                }
+            }
+            catch { } # The public capture remains provisional, never the issuer.
+        }
     }
     finally {
         if ($stream) {
@@ -4575,6 +4633,10 @@ function Write-FileTransferGuiLogLedgerEvidence {
             (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
             Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
+    }
+    }
+    finally {
+        if ($null -ne $localWriterIssuer) { $localWriterIssuer.Dispose() }
     }
 }
 

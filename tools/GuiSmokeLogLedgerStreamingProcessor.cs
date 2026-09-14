@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace NLink.Tools
 {
@@ -70,6 +74,120 @@ namespace NLink.Tools
         public GuiSmokeLedgerWriterResult[] Writers { get; set; }
         public GuiSmokeLedgerBatchResult[] DeferredBatches { get; set; }
         public GuiSmokeLedgerDrainResult[] Drains { get; set; }
+        private GuiSmokeLedgerNativeCapture nativeCapture;
+        private object nativeCaptureIdentity;
+        public GuiSmokeLedgerNativeCapture NativeCapture { get { return nativeCapture; } }
+        public bool OwnsNativeCapture(GuiSmokeLedgerNativeCapture capture)
+        { return capture != null && Object.ReferenceEquals(nativeCapture, capture) && capture.IsOwnedBy(nativeCaptureIdentity); }
+        internal void CaptureNativeOutputs(string sourcePath, string run, string scenario, long frozenLines, long bookmark,
+            GuiSmokeLedgerCapturedOutput retained, GuiSmokeLedgerCapturedOutput writer, GuiSmokeLedgerCapturedOutput semantic,
+            Stopwatch captureClock)
+        {
+            var identity = new object();
+            nativeCapture = GuiSmokeLedgerNativeCapture.TryCreate(identity, this, sourcePath, run, scenario, frozenLines, bookmark,
+                retained, writer, semantic, captureClock);
+            if (nativeCapture != null) nativeCaptureIdentity = identity;
+        }
+    }
+
+    // Provenance of this processor's writes, not a finalizer validation receipt,
+    // current-file hash verification, retained-worker binding or authority token.
+    public sealed class GuiSmokeLedgerNativeCapture
+    {
+        public const int MaximumWriters = 64;
+        public const int MaximumMetadataCodeUnits = 16384;
+        public const int MaximumCaptureMilliseconds = 250;
+        private readonly object ownerIdentity;
+        public string SourcePath { get; private set; }
+        public string AcceptanceRunId { get; private set; }
+        public string ScenarioRunId { get; private set; }
+        public long FrozenLineCount { get; private set; }
+        public long Bookmark { get; private set; }
+        public GuiSmokeLedgerCapturedOutput Retained { get; private set; }
+        public GuiSmokeLedgerCapturedOutput Writer { get; private set; }
+        public GuiSmokeLedgerCapturedOutput Semantic { get; private set; }
+        public ReadOnlyCollection<GuiSmokeLedgerCapturedWriter> Writers { get; private set; }
+        public int MetadataCodeUnits { get; private set; }
+        private GuiSmokeLedgerNativeCapture(object identity) { ownerIdentity = identity; }
+        internal bool IsOwnedBy(object identity) { return Object.ReferenceEquals(ownerIdentity, identity); }
+        internal static bool ValidText(string value, int maximum)
+        { return !String.IsNullOrWhiteSpace(value) && value != "(none)" && value.Length <= maximum && value.IndexOf('\0') < 0; }
+        internal static GuiSmokeLedgerNativeCapture TryCreate(object identity, GuiSmokeLedgerStreamingResult result, string sourcePath,
+            string run, string scenario, long frozenLines, long bookmark, GuiSmokeLedgerCapturedOutput retained,
+            GuiSmokeLedgerCapturedOutput writer, GuiSmokeLedgerCapturedOutput semantic, Stopwatch clock)
+        {
+            if (clock == null || clock.ElapsedMilliseconds > MaximumCaptureMilliseconds || retained == null || writer == null ||
+                !ValidText(sourcePath, 4096) || !ValidText(run, 1024) || !ValidText(scenario, 1024) ||
+                frozenLines < 1 || bookmark < 0 || bookmark > frozenLines ||
+                result.SourceLineVisitCount != frozenLines || result.WriterGapCount != 0 || result.WriterDuplicateCount != 0 ||
+                result.WriterIdentityMismatchCount != 0 || result.ChronologyBatchInvalid || result.ChronologyInversionCount != 0 ||
+                result.ChronologyCollisionCount != 0 || result.Writers.Length < 1 || result.Writers.Length > MaximumWriters) return null;
+            sourcePath = Path.GetFullPath(sourcePath);
+            if (sourcePath.Length > 4096) return null;
+            int units = sourcePath.Length + run.Length + scenario.Length + retained.MetadataCodeUnits + writer.MetadataCodeUnits +
+                (semantic == null ? 0 : semantic.MetadataCodeUnits);
+            var writers = new List<GuiSmokeLedgerCapturedWriter>();
+            foreach (var entry in result.Writers)
+            {
+                if (entry == null || !ValidText(entry.WriterId, 1024) || entry.AcceptanceRunId != run || entry.ScenarioRunId != scenario ||
+                    entry.FirstSequence != 1 || entry.LastSequence < 1 || entry.ObservedCount != entry.LastSequence ||
+                    clock.ElapsedMilliseconds > MaximumCaptureMilliseconds) return null;
+                units += entry.WriterId.Length;
+                if (units > MaximumMetadataCodeUnits) return null;
+                writers.Add(new GuiSmokeLedgerCapturedWriter(entry));
+            }
+            if (clock.ElapsedMilliseconds > MaximumCaptureMilliseconds) return null;
+            return new GuiSmokeLedgerNativeCapture(identity)
+            {
+                SourcePath = sourcePath, AcceptanceRunId = run, ScenarioRunId = scenario, FrozenLineCount = frozenLines,
+                Bookmark = bookmark, Retained = retained, Writer = writer, Semantic = semantic,
+                Writers = writers.AsReadOnly(), MetadataCodeUnits = units
+            };
+        }
+    }
+
+    public sealed class GuiSmokeLedgerCapturedWriter
+    {
+        public string WriterId { get; private set; }
+        public long FirstSequence { get; private set; }
+        public long LastSequence { get; private set; }
+        public long ObservedCount { get; private set; }
+        internal GuiSmokeLedgerCapturedWriter(GuiSmokeLedgerWriterResult writer)
+        { WriterId = writer.WriterId; FirstSequence = writer.FirstSequence; LastSequence = writer.LastSequence; ObservedCount = writer.ObservedCount; }
+    }
+
+    public sealed class GuiSmokeLedgerCapturedOutput
+    {
+        public string CreationPath { get; private set; }
+        public string Sha256 { get; private set; }
+        public string FileIdentity { get; private set; }
+        public long ByteCount { get; private set; }
+        public long LineCount { get; private set; }
+        internal int MetadataCodeUnits { get { return CreationPath.Length + Sha256.Length + FileIdentity.Length; } }
+        private GuiSmokeLedgerCapturedOutput() { }
+        internal static GuiSmokeLedgerCapturedOutput Capture(FileStream stream, string path, string hash, long lines, long bytes)
+        {
+            if (!GuiSmokeLedgerNativeCapture.ValidText(path, 4096) || lines < 0 || bytes < 0 ||
+                stream.Length != bytes) return null;
+            path = Path.GetFullPath(path);
+            if (path.Length > 4096) return null;
+            FileInformation info;
+            if (!GetFileInformationByHandle(stream.SafeFileHandle, out info)) return null;
+            return new GuiSmokeLedgerCapturedOutput
+            {
+                CreationPath = path, Sha256 = hash, ByteCount = bytes, LineCount = lines,
+                FileIdentity = info.Volume.ToString("x8") + ":" + info.IndexHigh.ToString("x8") + info.IndexLow.ToString("x8")
+            };
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileInformation
+        {
+            public uint Attributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation info);
     }
 
     public sealed class GuiSmokeLedgerFilteredLine
@@ -182,6 +300,24 @@ namespace NLink.Tools
         }
 
         public static GuiSmokeLedgerStreamingResult Process(
+            string sourcePath, long frozenLineCount, long bookmark, string retainedTempPath, string writerTempPath,
+            string expectedAcceptanceRunId, string expectedScenarioRunId, string[] deferredBatchKeys,
+            string semanticTempPath = null, string[] semanticEventNames = null)
+        {
+            return ProcessCore(sourcePath, frozenLineCount, bookmark, retainedTempPath, writerTempPath,
+                expectedAcceptanceRunId, expectedScenarioRunId, deferredBatchKeys, semanticTempPath, semanticEventNames, false);
+        }
+
+        public static GuiSmokeLedgerStreamingResult ProcessWithNativeCapture(
+            string sourcePath, long frozenLineCount, long bookmark, string retainedTempPath, string writerTempPath,
+            string expectedAcceptanceRunId, string expectedScenarioRunId, string[] deferredBatchKeys,
+            string semanticTempPath = null, string[] semanticEventNames = null)
+        {
+            return ProcessCore(sourcePath, frozenLineCount, bookmark, retainedTempPath, writerTempPath,
+                expectedAcceptanceRunId, expectedScenarioRunId, deferredBatchKeys, semanticTempPath, semanticEventNames, true);
+        }
+
+        private static GuiSmokeLedgerStreamingResult ProcessCore(
             string sourcePath,
             long frozenLineCount,
             long bookmark,
@@ -190,8 +326,9 @@ namespace NLink.Tools
             string expectedAcceptanceRunId,
             string expectedScenarioRunId,
             string[] deferredBatchKeys,
-            string semanticTempPath = null,
-            string[] semanticEventNames = null)
+            string semanticTempPath,
+            string[] semanticEventNames,
+            bool captureNativeOutputs)
         {
             if (frozenLineCount < 0 || bookmark < 0 || bookmark > frozenLineCount)
                 throw new InvalidDataException("writer_evidence_invalid_frozen_range");
@@ -217,6 +354,8 @@ namespace NLink.Tools
             long semanticByteCount = 0;
             var utf8 = new UTF8Encoding(false, true);
             var separator = utf8.GetBytes(Environment.NewLine);
+            GuiSmokeLedgerCapturedOutput retainedCapture = null, writerCapture = null, semanticCapture = null;
+            Stopwatch captureClock = null;
 
             using (var retained = NewOutput(retainedTempPath))
             using (var writer = NewOutput(writerTempPath))
@@ -399,6 +538,20 @@ namespace NLink.Tools
                 result.SemanticSha256 = writeSemantic ? Hex(semanticHash.Hash) : "";
                 result.SemanticLineCount = semanticLineCount;
                 result.SemanticByteCount = semanticByteCount;
+                if (captureNativeOutputs)
+                {
+                    try
+                    {
+                        captureClock = Stopwatch.StartNew();
+                        retainedCapture = GuiSmokeLedgerCapturedOutput.Capture(retained, retainedTempPath,
+                            result.RetainedSha256, retainedLineCount, retainedByteCount);
+                        writerCapture = GuiSmokeLedgerCapturedOutput.Capture(writer, writerTempPath,
+                            result.WriterSha256, writerLineCount, writerByteCount);
+                        if (writeSemantic) semanticCapture = GuiSmokeLedgerCapturedOutput.Capture((FileStream)semantic, semanticTempPath,
+                            result.SemanticSha256, semanticLineCount, semanticByteCount);
+                    }
+                    catch { captureClock = null; } // Optional provenance cannot change primary writes.
+                }
             }
 
             var writerResults = new List<GuiSmokeLedgerWriterResult>(writers.Values);
@@ -426,6 +579,12 @@ namespace NLink.Tools
             foreach (var pair in drains)
                 drainResults.Add(new GuiSmokeLedgerDrainResult { WriterId = pair.Key, Sequences = pair.Value.ToArray() });
             result.Drains = drainResults.ToArray();
+            if (captureNativeOutputs && (!writeSemantic || semanticCapture != null))
+            {
+                try { result.CaptureNativeOutputs(sourcePath, expectedAcceptanceRunId, expectedScenarioRunId, frozenLineCount, bookmark,
+                    retainedCapture, writerCapture, semanticCapture, captureClock); }
+                catch { } // No partial capture or substitute expected digest.
+            }
             return result;
         }
 

@@ -94,10 +94,31 @@ function Write-FileTransferEvidenceAtomicJson {
 }
 
 function Get-FileTransferEvidenceSha256 {
-    param([AllowEmptyString()][string]$Path)
+    param([AllowEmptyString()][string]$Path, $ReadLease = $null)
+
+    if ($null -ne $ReadLease -and ($ReadLease -isnot [ref] -or $null -ne $ReadLease.Value)) {
+        throw 'input_read_lease_requires_empty_reference'
+    }
 
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return ''
+    }
+
+    if ($null -ne $ReadLease) {
+        $loaded = $false
+        try {
+            . (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferOps/LocalInputReadLease.ps1')
+            $loaded = $true
+        }
+        catch { } # Optional module loading must not prevent the normal hash.
+        if ($loaded) {
+            $captured = [NLink.Tools.LocalInputReadLease]::HashAndHold($Path)
+            try { $ReadLease.Value = $captured.Lease }
+            catch {
+                if ($null -ne $captured.Lease) { $captured.Lease.Dispose() }
+            }
+            return $captured.Sha256
+        }
     }
 
     $stream = [System.IO.File]::OpenRead($Path)
@@ -227,10 +248,18 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         [Parameter(Mandatory = $true)][bool]$TimedOut,
         [Parameter(Mandatory = $true)][bool]$ExitCodeAvailable,
         [Parameter(Mandatory = $true)][int]$ExitCode,
-        [Parameter(Mandatory = $true)][bool]$CompletedProofArtifacts
+        [Parameter(Mandatory = $true)][bool]$CompletedProofArtifacts,
+        [AllowNull()]$LocalPublicationCustody = $null
     )
 
     $receiptPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-attempt-receipt.json'
+    Set-Variable -Name LocalPublicationCustody -Option Private -Value $LocalPublicationCustody
+    if ($null -ne $LocalPublicationCustody) {
+        $private:localCustodyType = 'NLink.Tools.LocalRetainedSourceRequest+ParentAdoptionCustody' -as [type]
+        if ($null -eq $private:localCustodyType -or -not $private:localCustodyType.IsInstanceOfType($LocalPublicationCustody)) {
+            $LocalPublicationCustody = $null
+        }
+    }
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
         throw "retained_analysis_attempt_receipt_already_terminal:$receiptPath"
     }
@@ -326,8 +355,27 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         operatorVerdict = & $artifact 'filetransfer-operator-verdict.txt'
         stabilitySummary = & $artifact 'stability-gates-summary.txt'
     }
-    Write-FileTransferEvidenceAtomicJson -Path $receiptPath -Value $receipt
-    return [pscustomobject]$receipt
+    $private:localReceiptPrepared = $false
+    $private:localReceiptRecorded = $false
+    $private:localReceiptReturn = $null
+    if ($null -ne $LocalPublicationCustody) {
+        try { $private:localReceiptPrepared = $LocalPublicationCustody.PrepareReceipt($receipt, $receiptPath) }
+        catch { } # Optional custody cannot replace the primary receipt write.
+    }
+    try {
+        Write-FileTransferEvidenceAtomicJson -Path $receiptPath -Value $receipt
+        $private:localReceiptReturn = [pscustomobject]$receipt
+        if ($private:localReceiptPrepared) {
+            try { $private:localReceiptRecorded = $LocalPublicationCustody.RecordWrittenReceipt($receipt, $private:localReceiptReturn) }
+            catch { }
+        }
+        return $private:localReceiptReturn
+    }
+    finally {
+        if ($null -ne $LocalPublicationCustody -and -not $private:localReceiptRecorded) {
+            try { $LocalPublicationCustody.Dispose() } catch { }
+        }
+    }
 }
 
 function Test-FileTransferRetainedAnalysisAttemptReceipt {

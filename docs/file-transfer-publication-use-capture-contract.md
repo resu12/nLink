@@ -7,7 +7,73 @@ live attempt. The user subsequently approved the private capture implementation.
 
 ## Implementation follow-up
 
-Private publication-use capture is now implemented in the working tree at the
+Private publication-use capture was checkpointed at `ef78e9d7` and validated in
+one subsequent live 256 MiB attempt. Capture integrity, SHA and both Tuna
+activations passed; strict acceptance remains FAIL with 10 unresolved ingress
+cases. See `artifacts/publication-use-live-20260913/LIVE-256-RESULTS.md` and the
+[current consumer review](file-transfer-publication-consumer-contract.md).
+The older findings and stop point below are the pre-live review history.
+
+The subsequent A/B1 offline consumers and C0 local carrier are implemented.
+See the [local carrier contract](file-transfer-local-evidence-carrier-contract.md)
+and `artifacts/publication-carrier-implementation-20260913/RESULTS.md` for the
+current codec/provenance verification. Production handoff, peer causation and
+acceptance recovery remain unproved; C0 has no production caller.
+
+The [C1a prepared-payload slot](file-transfer-local-evidence-slot-contract.md)
+is now implemented and tested offline through both retained parents. It does
+not yet export real completed views. Its results and remaining producer/request
+binding gaps are recorded in
+`artifacts/publication-slot-implementation-20260913/RESULTS.md`.
+
+The [C1b producer/request review](file-transfer-local-producer-request-contract.md)
+adds executable native-input/offset/augmentation checks and pins the separate
+completion-record requirement. Production preparation and completion issuance
+are still pending; no acceptance result is changed by this contract review.
+
+[C1c bounded native-input capture](file-transfer-local-native-input-capture-contract.md)
+implements the input fingerprint prerequisite. Exact original-input/selected-row
+binding and primary-issued completion remain pending; production wiring is off.
+
+Later C1d-C1o follow-ups now implement bounded input/view ownership, private
+primary-issued completion, a parent-bound channel and
+[post-terminal-receipt adoption](file-transfer-publication-adoption-contract.md).
+These are opt-in offline seams; the upstream GUI-owner relay, live export and
+peer-causation proof remain open. Current verification is recorded in
+`artifacts/publication-adoption-20260914/RESULTS.md`; no historical live verdict
+is changed by these implementations.
+
+[C1p's accepted GUI-owner relay](file-transfer-local-gui-writer-relay-contract.md)
+now connects the normal RouteAcceptance workflow's optional ownership path.
+Ten xUnit tests and focused protocol checks pass. Current recovery notes are in
+`artifacts/publication-gui-relay-20260914/RESULTS.md`; the next check is a combined
+offline integration through real primary reports, not another live 256 MiB run.
+
+[C1q's real-report integration](file-transfer-real-report-integration-rca.md)
+fixes two analyzer blockers and verifies omission when the actual primary has
+no selected failure. [C1r's positive integration](file-transfer-positive-publication-integration.md)
+now verifies the complete Wrapper main, real primary-selected failure, original
+terminal receipt and typed adoption on both PowerShell hosts. The failed
+acceptance verdict is preserved. Top-level opt-in persistence is the next
+bounded step recorded by C1r.
+
+[C1s's diagnostic persistence](file-transfer-publication-persistence-contract.md)
+now implements that opt-in for the normal Phase 5 live activation-cycle attempt.
+It saves only a current, typed adopted result under fixed bounds and never
+changes acceptance. The switch is default-off; no new live run has been performed.
+
+[C1t's pre-checkpoint review](file-transfer-publication-live-capacity-rca.md)
+found that the latest live input exceeds the source, writer and input-work
+admission bounds. The small offline positive path does not establish live-scale
+capacity. Checkpoint/build/live readiness remains blocked pending a reviewed
+input/work contract revision and a live-shaped offline positive gate.
+
+[C1u's measured live-input contract](file-transfer-publication-live-input-contract.md)
+now defines the finite revision and verifies artifact-only hashing/membership
+prototypes on both hosts. Production implementation and the genuine large-input
+ownership/primary/persistence gate remain pending; no live-readiness claim.
+
+Private publication-use capture is implemented at the
 four specified producer boundaries. The source association uses weak-key object
 identity outside authority equality/serialization. The receiver companion is
 copied under the existing gate and supplies diagnostics only; replacement,

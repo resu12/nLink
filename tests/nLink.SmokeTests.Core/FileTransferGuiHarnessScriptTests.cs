@@ -2727,9 +2727,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     $ledger.cursorIntegrityVerdict -ne 'pass') {
                     throw "artifact-scale writer evidence failed: $($ledger | ConvertTo-Json -Compress -Depth 4)"
                 }
-                if ($ledger.retainedSlice.sha256 -ne $ledger.analyzerInput.captureSha256 -or
+                # This writer-scale fixture has no semantic events. The native
+                # finalizer uses that empty semantic slice as analyzer input,
+                # while retaining all 200000 lines in the full/writer captures.
+                if ($ledger.semanticEvidenceSlice.sha256 -ne $ledger.analyzerInput.captureSha256 -or
                     $ledger.retainedSlice.lineCount -ne 200000 -or
-                    $ledger.analyzerInput.captureLineCount -ne 200000) {
+                    $ledger.semanticEvidenceSlice.lineCount -ne 0 -or
+                    $ledger.semanticEvidenceSlice.byteCount -ne 0 -or
+                    $ledger.analyzerInput.captureLineCount -ne 0) {
                     throw 'artifact-scale immutable capture evidence diverged'
                 }
                 if ($ledger.writerEvidenceSlice.sha256 -ne $ledger.retainedSlice.sha256 -or

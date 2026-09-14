@@ -379,9 +379,17 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][string]$ExePath,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [AllowNull()]$LocalWriterCompletion = $null,
+        [AllowNull()]$LocalWriterRelay = $null
     )
 
+    Set-Variable -Name LocalWriterCompletion -Option Private -Value $LocalWriterCompletion
+    Set-Variable -Name LocalWriterRelay -Option Private -Value $LocalWriterRelay
+    if ($null -ne $LocalWriterRelay) {
+        $private:relayType = 'NLink.Tools.LocalGuiWriterRequest+Relay' -as [type]
+        if ($null -eq $private:relayType -or -not $private:relayType.IsInstanceOfType($LocalWriterRelay)) { $LocalWriterRelay = $null }
+    }
     $finalizationGraceSeconds = Get-TunaGuiFinalizationGraceSeconds
     $hardDeadlineSeconds = [long]$TimeoutSeconds + [long]$finalizationGraceSeconds
     $maximumHardDeadlineSeconds = (2L * [long]$TimeoutSeconds) + [long]$finalizationGraceSeconds
@@ -409,6 +417,8 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
     $process = $null
     $stdoutTask = $null
     $stderrTask = $null
+    $localWriterRequest = $null
+    Set-Variable -Name localWriterRequest -Option Private -Value $localWriterRequest
     try {
         Remove-Item -LiteralPath $terminalPhaseDeadlinePath -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $terminalPhaseDeadlinePath -PathType Leaf) {
@@ -453,11 +463,30 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.CreateNoWindow = $true
+        # Only explicit completion/relay custody opts in; never inherit requests.
+        $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_REQUEST')
+        $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_REQUEST_ID')
+        $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_RELAY')
+        $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_RELAY_ID')
+        if (($LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value) -or $null -ne $LocalWriterRelay) {
+            try {
+                . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
+                $localWriterRequest = [NLink.Tools.LocalGuiWriterRequest]::TryCreate(
+                    [guid]::NewGuid(), [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,
+                    [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, [IO.Path]::GetFullPath($ArtifactDir))
+                if ($null -ne $localWriterRequest) {
+                    $startInfo.EnvironmentVariables['NLINK_GUI_WRITER_REQUEST'] = $localWriterRequest.Name
+                    $startInfo.EnvironmentVariables['NLINK_GUI_WRITER_REQUEST_ID'] = $localWriterRequest.RequestId.ToString('D')
+                }
+            }
+            catch { } # Optional control channel never replaces primary startup.
+        }
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
         if (-not $process.Start()) {
             throw 'Failed to start the Tuna GUI smoke child process.'
         }
+        if ($null -ne $localWriterRequest) { [void]$localWriterRequest.BindWorker($process) }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
 
@@ -765,6 +794,14 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             updatedUtc = $endedUtc.ToString('O')
         }
         Write-TunaGuiAtomicJson -Path $statePath -Value $state
+        if ($null -ne $localWriterRequest -and $exitCodeAvailable -and $exitCode -eq 0 -and $outputCapture.Completed) {
+            try {
+                $private:acceptedWriter = $localWriterRequest.TakeAfterExit()
+                if ($LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value) { $LocalWriterCompletion.Value = $private:acceptedWriter }
+                if ($null -ne $LocalWriterRelay) { [void]$LocalWriterRelay.Forward($private:acceptedWriter) }
+            }
+            catch { } # Diagnostic JSON is not a completion issuer.
+        }
         return [pscustomobject]@{
             ExitCode = $exitCode
             ExitCodeAvailable = $exitCodeAvailable
@@ -794,6 +831,7 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         if ($process -is [System.IDisposable]) {
             $process.Dispose()
         }
+        if ($null -ne $localWriterRequest) { $localWriterRequest.Dispose() }
     }
 }
 
@@ -1152,7 +1190,10 @@ function Invoke-TunaGuiRetainedAnalysis {
         [Parameter(Mandatory = $true)][string]$AnalysisDir,
         [Parameter(Mandatory = $true)][string]$LogPath,
         [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
-        [string]$LiveRouteProofMode = 'None'
+        [string]$LiveRouteProofMode = 'None',
+        [switch]$CaptureLocalSourceOwnership,
+        [AllowNull()]$LocalWriterContext = $null,
+        [AllowNull()]$LocalPublication = $null
     )
 
     if ([string]::IsNullOrWhiteSpace($LogPath) -or -not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
@@ -1161,54 +1202,80 @@ function Invoke-TunaGuiRetainedAnalysis {
 
     New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
 
-    $attemptId = [guid]::NewGuid().ToString('N')
-    $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $LogPath
-    $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $LogPath
-
-    $stdoutPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stdout.txt'
-    $stderrPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stderr.txt'
-    $diagnosticsPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis-diagnostics.json'
-    # Offline evidence analysis budget; GUI and transfer deadlines are independent.
-    $analysisTimeoutSeconds = 1800
-    $startedUtc = [DateTimeOffset]::UtcNow
-    $arguments = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1'),
-        '-Mode', 'AnalyzeRetained',
-        '-LogPath', $LogPath,
-        '-ArtifactDir', $AnalysisDir,
-        '-TailMinutes', '0',
-        '-LiveRouteProofMode', $LiveRouteProofMode)
-
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = 'powershell'
-    $startInfo.Arguments = ($arguments | ForEach-Object {
-            $argument = [string]$_
-            if ($argument.Length -eq 0) {
-                '""'
-            }
-            elseif ($argument.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
-                $argument
-            }
-            else {
-                '"' + ($argument -replace '"', '\"') + '"'
-            }
-        }) -join ' '
-    $startInfo.WorkingDirectory = $RepoRoot
-    $startInfo.UseShellExecute = $false
-    $compactRequested = $LiveRouteProofMode -ne 'None' -or $RouteMode -like 'live-*'
-    if ($compactRequested) {
-        $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
-    }
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
+    $sourceReadLease = $null
+    $sourceRequest = $null
+    Set-Variable -Name sourceRequest -Option Private -Value $sourceRequest
+    Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
+    Set-Variable -Name LocalWriterContext -Option Private -Value $LocalWriterContext
+    $private:localAdoption = $null
+    $private:localTerminalReceipt = $null
+    $private:publicationRequested = $CaptureLocalSourceOwnership -and $LocalPublication -is [ref] -and $null -eq $LocalPublication.Value
+    $process = $null
     try {
+        $attemptId = [guid]::NewGuid().ToString('N')
+        $sourceLeaseReference = if ($CaptureLocalSourceOwnership) { [ref]$sourceReadLease } else { $null }
+        $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $LogPath -ReadLease $sourceLeaseReference
+        $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $LogPath
+
+        $stdoutPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stdout.txt'
+        $stderrPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stderr.txt'
+        $diagnosticsPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis-diagnostics.json'
+        # Offline evidence analysis budget; GUI and transfer deadlines are independent.
+        $analysisTimeoutSeconds = 1800
+        $startedUtc = [DateTimeOffset]::UtcNow
+        $arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1'),
+            '-Mode', 'AnalyzeRetained',
+            '-LogPath', $LogPath,
+            '-ArtifactDir', $AnalysisDir,
+            '-TailMinutes', '0',
+            '-LiveRouteProofMode', $LiveRouteProofMode)
+
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = 'powershell'
+        $startInfo.Arguments = ($arguments | ForEach-Object {
+                $argument = [string]$_
+                if ($argument.Length -eq 0) {
+                    '""'
+                }
+                elseif ($argument.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
+                    $argument
+                }
+                else {
+                    '"' + ($argument -replace '"', '\"') + '"'
+                }
+            }) -join ' '
+        $startInfo.WorkingDirectory = $RepoRoot
+        $startInfo.UseShellExecute = $false
+        $compactRequested = $LiveRouteProofMode -ne 'None' -or $RouteMode -like 'live-*'
+        if ($compactRequested) {
+            $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
+        }
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if ($CaptureLocalSourceOwnership -and $null -ne $sourceReadLease) {
+            try {
+                . (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1')
+                $sourceRequest = New-FileTransferRetainedSourceRequest -ReadLease $sourceReadLease -AttemptId $attemptId -Owner 'Wrapper' -LineCount $inputLineCountBefore -WriterContext $LocalWriterContext -PublicationRequested $private:publicationRequested
+                if ($null -ne $sourceRequest) {
+                    if ($private:publicationRequested) { $private:localAdoption = $sourceRequest.TryBeginAdoption($AnalysisDir, $LiveRouteProofMode, $compactRequested, $startedUtc.ToString('O')) }
+                    $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUEST'] = $sourceRequest.Name
+                    $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUEST_ID'] = $sourceRequest.RequestId.ToString('D')
+                }
+            }
+            catch { } # Source ownership is optional; preserve the primary launch.
+        }
         if (-not $process.Start()) {
             throw "Failed to start retained analysis. Artifacts: $AnalysisDir"
+        }
+
+        if ($null -ne $sourceRequest) {
+            if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
         }
 
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -1283,7 +1350,7 @@ function Invoke-TunaGuiRetainedAnalysis {
             -AnalysisDir $AnalysisDir `
             -LogPath $LogPath `
             -LiveRouteProofMode $LiveRouteProofMode
-        Write-FileTransferRetainedAnalysisAttemptReceipt `
+        $private:localTerminalReceipt = Write-FileTransferRetainedAnalysisAttemptReceipt `
             -ArtifactDir $AnalysisDir `
             -Owner 'Wrapper' `
             -AttemptId $attemptId `
@@ -1300,7 +1367,16 @@ function Invoke-TunaGuiRetainedAnalysis {
             -TimedOut $false `
             -ExitCodeAvailable $true `
             -ExitCode $process.ExitCode `
-            -CompletedProofArtifacts $completedProofArtifacts | Out-Null
+            -CompletedProofArtifacts $completedProofArtifacts `
+            -LocalPublicationCustody $private:localAdoption
+
+        if ($null -ne $private:localAdoption) {
+            try {
+                $private:localAdopted = $private:localAdoption.Take($private:localTerminalReceipt)
+                if ($null -ne $private:localAdopted -and $LocalPublication -is [ref] -and $null -eq $LocalPublication.Value) { $LocalPublication.Value = $private:localAdopted }
+            }
+            catch { } # Optional adoption does not change the primary outcome.
+        }
 
         if ($process.ExitCode -ne 0) {
             throw "Retained analysis failed with exit code $($process.ExitCode). Artifacts: $AnalysisDir"
@@ -1313,6 +1389,9 @@ function Invoke-TunaGuiRetainedAnalysis {
         if ($process -is [System.IDisposable]) {
             $process.Dispose()
         }
+        if ($null -ne $sourceRequest) { $sourceRequest.Dispose() }
+        if ($null -ne $private:localAdoption) { $private:localAdoption.Dispose() }
+        if ($null -ne $sourceReadLease) { $sourceReadLease.Dispose() }
     }
 }
 
@@ -2251,6 +2330,7 @@ $resolvedArtifactDir = ''
 $resolvedExe = ''
 $guiSmokeExitCode = -1
 $guiSmokeExitCodeAvailable = $false
+$private:localGuiWriterRelay = $null
 Push-Location $repoRoot
 try {
     if ([string]::IsNullOrWhiteSpace($WalletPassword)) {
@@ -2368,11 +2448,22 @@ try {
     Write-Host "[Tuna GUI] Artifacts: $resolvedArtifactDir" -ForegroundColor DarkGray
     Write-Host "[Tuna GUI] Direction=$Direction Payer=$PayerMode Fault=$Fault RouteMode=$RouteMode Payload=$PayloadSize Mixed=$($Mixed.IsPresent)" -ForegroundColor DarkGray
 
+    if ($RetainedAnalysisOwner -eq 'RouteAcceptance' -and -not [string]::IsNullOrWhiteSpace([string]$env:NLINK_GUI_WRITER_RELAY)) {
+        try {
+            . (Join-Path $repoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
+            $private:localGuiWriterRelay = [NLink.Tools.LocalGuiWriterRequest]::TryAttachRelay(
+                [string]$env:NLINK_GUI_WRITER_RELAY, [guid]$env:NLINK_GUI_WRITER_RELAY_ID,
+                [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+                $resolvedArtifactDir)
+        }
+        catch { } # Only a live, exact parent request can enable the optional relay.
+    }
     $guiSmokeResult = Invoke-TunaGuiSmokeWithHardDeadline `
         -RepoRoot $repoRoot `
         -ArtifactDir $resolvedArtifactDir `
         -ExePath $resolvedExe `
-        -TimeoutSeconds $TimeoutSeconds
+        -TimeoutSeconds $TimeoutSeconds `
+        -LocalWriterRelay $private:localGuiWriterRelay
     $guiSmokeExitCodeAvailable = $null -ne $guiSmokeResult -and
         $guiSmokeResult.PSObject.Properties.Name -contains 'ExitCodeAvailable' -and
         [bool]$guiSmokeResult.ExitCodeAvailable
@@ -2468,6 +2559,7 @@ try {
     }
 }
 finally {
+    if ($null -ne $private:localGuiWriterRelay) { try { $private:localGuiWriterRelay.Dispose() } catch { } }
     if (-not [string]::IsNullOrWhiteSpace($resolvedArtifactDir)) {
         try {
             Write-TunaGuiDirectEvidenceManifest `

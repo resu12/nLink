@@ -301,12 +301,13 @@ public sealed partial class NknFileTransferTransportTests
     }
 
     private static async Task WithSecurityCaptureSession(
-        Func<NknSignalingTransport, NknSignalingTransport, FakeNknClient, byte[], CancellationToken, Task> check)
+        Func<NknSignalingTransport, NknSignalingTransport, FakeNknClient, byte[], CancellationToken, Task> check,
+        TimeSpan? timeout = null)
     {
         FakeNknClient.ResetNetwork();
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(15));
             var options = NknTransportOptions.Load();
             // Independent cases must not share the process-wide invite throttle key.
             var caseId = Guid.NewGuid().ToString("N");

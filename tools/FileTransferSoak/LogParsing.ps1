@@ -141,7 +141,8 @@ function ConvertFrom-FileTransferLogLine {
 function Read-FileTransferLogEvents {
     param(
         [string[]]$LogFiles = @(),
-        [int]$TailMinutes = 0
+        [int]$TailMinutes = 0,
+        $OwnedSource = $null
     )
 
     $events = New-Object System.Collections.Generic.List[object]
@@ -157,7 +158,15 @@ function Read-FileTransferLogEvents {
         }
 
         $lineNumber = 0
-        foreach ($line in [System.IO.File]::ReadLines($file)) {
+        if ($null -ne $OwnedSource -and
+            $OwnedSource.GetType().FullName -ceq 'NLink.Tools.LocalRetainedSourceRequest+SourceReader' -and
+            $LogFiles.Count -eq 1 -and $TailMinutes -eq 0 -and $OwnedSource.SourcePath -ceq $file) {
+            $sourceLines = $OwnedSource.ReadLines()
+        }
+        else {
+            $sourceLines = [System.IO.File]::ReadLines($file)
+        }
+        foreach ($line in $sourceLines) {
             $lineNumber++
             $sequence++
             if ([string]::IsNullOrWhiteSpace($line)) {

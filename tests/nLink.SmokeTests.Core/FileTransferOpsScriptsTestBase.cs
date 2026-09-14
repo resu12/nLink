@@ -1574,8 +1574,10 @@ public abstract class FileTransferOpsScriptsTestBase
     protected static async Task<ScriptResult> RunPowerShellScriptTextAsync(
         string scriptText,
         IReadOnlyList<string> arguments,
-        string powerShellHost = "powershell")
+        string powerShellHost = "powershell",
+        TimeSpan? timeout = null)
     {
+        var processTimeout = timeout ?? ScriptProcessTimeout;
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-ops-harness", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
 
@@ -1610,7 +1612,7 @@ public abstract class FileTransferOpsScriptsTestBase
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             var exitTask = process.WaitForExitAsync();
-            if (await Task.WhenAny(exitTask, Task.Delay(ScriptProcessTimeout)) != exitTask)
+            if (await Task.WhenAny(exitTask, Task.Delay(processTimeout)) != exitTask)
             {
                 try
                 {
@@ -1623,7 +1625,7 @@ public abstract class FileTransferOpsScriptsTestBase
 
                 var stdout = await WaitForScriptOutputAsync(stdoutTask);
                 var stderr = await WaitForScriptOutputAsync(stderrTask);
-                var timeoutMessage = $"PowerShell harness timed out after {ScriptProcessTimeout.TotalSeconds:F0}s: {scriptPath}";
+                var timeoutMessage = $"PowerShell harness timed out after {processTimeout.TotalSeconds:F0}s: {scriptPath}";
                 return new ScriptResult(
                     -1,
                     stdout,

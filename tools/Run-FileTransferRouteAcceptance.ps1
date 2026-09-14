@@ -18,7 +18,8 @@ param(
     [bool]$AllowExternalTransportWarnings = $true,
     [string[]]$ScenarioName = @(),
     [switch]$EvidenceDryRun,
-    [string]$EvidenceDryRunFixtureRoot = ''
+    [string]$EvidenceDryRunFixtureRoot = '',
+    [switch]$CaptureLocalPublicationDiagnostics
 )
 
 Set-StrictMode -Version Latest
@@ -6829,7 +6830,10 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [ValidateSet("None", "SwitchOff", "MultiToggle", "RegularActivationCycle")]
-        [string]$LiveRouteProofMode = "None"
+        [string]$LiveRouteProofMode = "None",
+        [switch]$CaptureLocalSourceOwnership,
+        [AllowNull()]$LocalWriterContext = $null,
+        [AllowNull()]$LocalPublication = $null
     )
 
     $logPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
@@ -6842,53 +6846,79 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         throw "retained_analysis_attempt_receipt_already_terminal:$receiptPath"
     }
 
-    $attemptId = [guid]::NewGuid().ToString('N')
-    $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $logPath
-    $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $logPath
-    $analysisStdoutPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stdout.txt'
-    $analysisStderrPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stderr.txt'
-    $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
-    # Offline evidence analysis budget; GUI and transfer deadlines are independent.
-    $analysisTimeoutSeconds = 1800
-    $startedUtc = [DateTimeOffset]::UtcNow
-
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = 'powershell'
-    $analysisArguments = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', '.\tools\FileTransfer-Ops.ps1',
-        '-Mode', 'AnalyzeRetained',
-        '-LogPath', $logPath,
-        '-ArtifactDir', $ArtifactDir,
-        '-TailMinutes', '0',
-        '-LiveRouteProofMode', $LiveRouteProofMode)
-    $startInfo.Arguments = ($analysisArguments | ForEach-Object {
-            $argument = [string]$_
-            if ($argument.Length -eq 0) {
-                '""'
-            }
-            elseif ($argument.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
-                $argument
-            }
-            else {
-                '"' + ($argument -replace '"', '\"') + '"'
-            }
-        }) -join ' '
-    $startInfo.WorkingDirectory = (Get-Location).Path
-    $startInfo.UseShellExecute = $false
-    $compactRequested = $true
-    $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    $stdoutTask = $null
-    $stderrTask = $null
+    $sourceReadLease = $null
+    $sourceRequest = $null
+    Set-Variable -Name sourceRequest -Option Private -Value $sourceRequest
+    Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
+    Set-Variable -Name LocalWriterContext -Option Private -Value $LocalWriterContext
+    $private:localAdoption = $null
+    $private:localTerminalReceipt = $null
+    $private:publicationRequested = $CaptureLocalSourceOwnership -and $LocalPublication -is [ref] -and $null -eq $LocalPublication.Value
+    $process = $null
     try {
+        $attemptId = [guid]::NewGuid().ToString('N')
+        $sourceLeaseReference = if ($CaptureLocalSourceOwnership) { [ref]$sourceReadLease } else { $null }
+        $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $logPath -ReadLease $sourceLeaseReference
+        $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $logPath
+        $analysisStdoutPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stdout.txt'
+        $analysisStderrPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stderr.txt'
+        $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
+        # Offline evidence analysis budget; GUI and transfer deadlines are independent.
+        $analysisTimeoutSeconds = 1800
+        $startedUtc = [DateTimeOffset]::UtcNow
+
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = 'powershell'
+        $analysisArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', '.\tools\FileTransfer-Ops.ps1',
+            '-Mode', 'AnalyzeRetained',
+            '-LogPath', $logPath,
+            '-ArtifactDir', $ArtifactDir,
+            '-TailMinutes', '0',
+            '-LiveRouteProofMode', $LiveRouteProofMode)
+        $startInfo.Arguments = ($analysisArguments | ForEach-Object {
+                $argument = [string]$_
+                if ($argument.Length -eq 0) {
+                    '""'
+                }
+                elseif ($argument.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
+                    $argument
+                }
+                else {
+                    '"' + ($argument -replace '"', '\"') + '"'
+                }
+            }) -join ' '
+        $startInfo.WorkingDirectory = (Get-Location).Path
+        $startInfo.UseShellExecute = $false
+        $compactRequested = $true
+        $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        $stdoutTask = $null
+        $stderrTask = $null
+        if ($CaptureLocalSourceOwnership -and $null -ne $sourceReadLease) {
+            try {
+                . (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1')
+                $sourceRequest = New-FileTransferRetainedSourceRequest -ReadLease $sourceReadLease -AttemptId $attemptId -Owner 'RouteAcceptance' -LineCount $inputLineCountBefore -WriterContext $LocalWriterContext -PublicationRequested $private:publicationRequested
+                if ($null -ne $sourceRequest) {
+                    if ($private:publicationRequested) { $private:localAdoption = $sourceRequest.TryBeginAdoption($ArtifactDir, $LiveRouteProofMode, $compactRequested, $startedUtc.ToString('O')) }
+                    $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUEST'] = $sourceRequest.Name
+                    $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUEST_ID'] = $sourceRequest.RequestId.ToString('D')
+                }
+            }
+            catch { } # Source ownership is optional; preserve the primary launch.
+        }
         if (-not $process.Start()) {
             throw "Failed to start FileTransfer-Ops retained analysis for $ArtifactDir"
+        }
+
+        if ($null -ne $sourceRequest) {
+            if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
         }
 
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -6961,7 +6991,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         $completedProofArtifacts = Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts `
             -ArtifactDir $ArtifactDir `
             -LiveRouteProofMode $LiveRouteProofMode
-        Write-FileTransferRetainedAnalysisAttemptReceipt `
+        $private:localTerminalReceipt = Write-FileTransferRetainedAnalysisAttemptReceipt `
             -ArtifactDir $ArtifactDir `
             -Owner 'RouteAcceptance' `
             -AttemptId $attemptId `
@@ -6978,7 +7008,15 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             -TimedOut $false `
             -ExitCodeAvailable $true `
             -ExitCode $process.ExitCode `
-            -CompletedProofArtifacts $completedProofArtifacts | Out-Null
+            -CompletedProofArtifacts $completedProofArtifacts `
+            -LocalPublicationCustody $private:localAdoption
+        if ($null -ne $private:localAdoption) {
+            try {
+                $private:localAdopted = $private:localAdoption.Take($private:localTerminalReceipt)
+                if ($null -ne $private:localAdopted -and $LocalPublication -is [ref] -and $null -eq $LocalPublication.Value) { $LocalPublication.Value = $private:localAdopted }
+            }
+            catch { } # Optional adoption does not change the primary outcome.
+        }
         if ($process.ExitCode -ne 0) {
             throw "FileTransfer-Ops retained analysis failed for $ArtifactDir with exit code $($process.ExitCode)"
         }
@@ -6990,6 +7028,9 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         if ($process -is [System.IDisposable]) {
             $process.Dispose()
         }
+        if ($null -ne $sourceRequest) { $sourceRequest.Dispose() }
+        if ($null -ne $private:localAdoption) { $private:localAdoption.Dispose() }
+        if ($null -ne $sourceReadLease) { $sourceReadLease.Dispose() }
     }
 }
 
@@ -7538,9 +7579,15 @@ function Invoke-RouteAcceptanceChildScript {
 function Invoke-RouteAcceptanceChildScriptNoThrow {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [AllowNull()]$LocalWriterRelay = $null,
+        [string]$LocalWriterArtifactDir = ''
     )
 
+    Set-Variable -Name LocalWriterRelay -Option Private -Value $LocalWriterRelay
+    $private:relayRequest = $null
+    $private:relayProcess = $null
+    $private:relayOutputCaptured = $false
     $previousErrorActionPreference = $ErrorActionPreference
     $oldRetainedAnalysisCompact = $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT
     try {
@@ -7549,8 +7596,47 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         }
 
         $ErrorActionPreference = 'Continue'
-        $childOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
-        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        if ($LocalWriterRelay -is [ref] -and $null -eq $LocalWriterRelay.Value -and -not [string]::IsNullOrWhiteSpace($LocalWriterArtifactDir)) {
+            try {
+                . (Join-Path $PSScriptRoot 'FileTransferOps/LocalGuiWriterRequest.ps1')
+                $private:relayRequest = [NLink.Tools.LocalGuiWriterRequest]::TryCreateRelay(
+                    [guid]::NewGuid(), [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,
+                    [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, [IO.Path]::GetFullPath($LocalWriterArtifactDir))
+            }
+            catch { } # Missing optional ownership preserves the original launch.
+        }
+        if ($null -eq $private:relayRequest) {
+            $childOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
+            $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        }
+        else {
+            $private:relayStartInfo = [Diagnostics.ProcessStartInfo]::new()
+            $private:relayStartInfo.FileName = 'powershell'
+            $private:relayStartInfo.Arguments = (@('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScriptPath) + $Arguments | ForEach-Object {
+                '"' + ([string]$_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+            }) -join ' '
+            $private:relayStartInfo.WorkingDirectory = (Get-Location).Path
+            $private:relayStartInfo.UseShellExecute = $false
+            $private:relayStartInfo.CreateNoWindow = $true
+            $private:relayStartInfo.RedirectStandardOutput = $true
+            $private:relayStartInfo.RedirectStandardError = $true
+            $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY'] = $private:relayRequest.Name
+            $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY_ID'] = $private:relayRequest.RequestId.ToString('D')
+            $private:relayProcess = [Diagnostics.Process]::new()
+            $private:relayProcess.StartInfo = $private:relayStartInfo
+            if (-not $private:relayProcess.Start()) { throw 'Failed to start the owned Tuna GUI wrapper.' }
+            [void]$private:relayRequest.BindWorker($private:relayProcess)
+            $private:relayStdout = $private:relayProcess.StandardOutput.ReadToEndAsync()
+            $private:relayStderr = $private:relayProcess.StandardError.ReadToEndAsync()
+            # Same synchronous child lifetime as the original native invocation;
+            # the Wrapper still owns all existing GUI deadlines and cleanup.
+            $private:relayProcess.WaitForExit()
+            $childOutput = @(foreach ($text in @($private:relayStdout.GetAwaiter().GetResult(), $private:relayStderr.GetAwaiter().GetResult())) {
+                if ($text.Length -gt 0) { ($text -replace '\r?\n$', '') -split '\r?\n' }
+            })
+            $exitCode = $private:relayProcess.ExitCode
+            $private:relayOutputCaptured = $true
+        }
     }
     catch {
         $childOutput = @($_)
@@ -7566,11 +7652,23 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         }
     }
 
-    foreach ($line in $childOutput) {
-        Write-Host $line
+    try {
+        foreach ($line in $childOutput) {
+            Write-Host $line
+        }
+        if ($null -ne $private:relayRequest -and $private:relayOutputCaptured -and $exitCode -eq 0) {
+            try {
+                $private:relayedWriter = $private:relayRequest.TakeRelayAfterExit()
+                if ($LocalWriterRelay -is [ref] -and $null -eq $LocalWriterRelay.Value) { $LocalWriterRelay.Value = $private:relayedWriter }
+            }
+            catch { } # Optional relay cannot reclassify the original child exit.
+        }
+        return $exitCode
     }
-
-    return $exitCode
+    finally {
+        if ($null -ne $private:relayProcess) { $private:relayProcess.Dispose() }
+        if ($null -ne $private:relayRequest) { $private:relayRequest.Dispose() }
+    }
 }
 
 function Get-Phase5BridgeReadinessPreflightFailureClass {
@@ -8808,9 +8906,14 @@ function Invoke-TunaRouteAcceptanceRun {
         [string]$PayerMode = 'helpee',
         [string]$PayloadSize = '128MiB',
         [string]$LiveToggleSequence = '',
-        [string]$LiveProofMode = 'None'
+        [string]$LiveProofMode = 'None',
+        [AllowNull()]$LocalPublication = $null,
+        [switch]$CaptureLocalPublicationDiagnostics
     )
 
+    Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
+    $private:localRelayedWriter = $null
+    $private:localRelayArguments = @{}
     $scriptPath = Join-Path $RepoRoot 'tools\Run-FileTransferTunaGuiSmoke.ps1'
     $retainedAnalysisOwner = 'RouteAcceptance'
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
@@ -8901,6 +9004,16 @@ function Invoke-TunaRouteAcceptanceRun {
         }
     }
 
+    $private:localPersistentPublication = $null
+    $private:persistenceStarted = 0L
+    $private:persistenceRun = ''; $private:persistenceScenario = ''
+    if ($CaptureLocalPublicationDiagnostics -and $null -eq $LocalPublication -and $RouteMode -eq 'live-regular-activation-cycle') {
+        $private:persistenceStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+        $private:persistenceRun = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+        $private:persistenceScenario = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+        $LocalPublication = [ref]$private:localPersistentPublication
+    }
+    try {
     $arguments = @(
         '-ExePath', $ResolvedExePath,
         '-WalletPath', $ResolvedWalletPath,
@@ -8920,9 +9033,12 @@ function Invoke-TunaRouteAcceptanceRun {
         $arguments += @('-LiveToggleSequence', $LiveToggleSequence)
     }
 
+    if ($LocalPublication -is [ref] -and $null -eq $LocalPublication.Value) {
+        $private:localRelayArguments = @{LocalWriterRelay=[ref]$private:localRelayedWriter;LocalWriterArtifactDir=$ArtifactDir}
+    }
     $childExitCode = Invoke-RouteAcceptanceChildScriptNoThrow `
         -ScriptPath $scriptPath `
-        -Arguments $arguments
+        -Arguments $arguments @localRelayArguments
 
     if ($childExitCode -ne 0) {
         throw ("Tuna GUI wrapper {0} failed with exit code {1}; retained analysis was not started." -f $RouteMode, $childExitCode)
@@ -8933,7 +9049,11 @@ function Invoke-TunaRouteAcceptanceRun {
     }
 
     if ($retainedAnalysisOwner -eq 'RouteAcceptance') {
-        Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode
+        $private:localAnalysisArguments = @{}
+        if ($null -ne $private:localRelayedWriter) {
+            $private:localAnalysisArguments = @{CaptureLocalSourceOwnership=$true;LocalWriterContext=$private:localRelayedWriter.WriterContext;LocalPublication=$LocalPublication}
+        }
+        Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode @localAnalysisArguments
         $reconciliation = Update-FileTransferTunaDirectEvidenceManifestFromReceipt `
             -RepoRoot $RepoRoot `
             -ArtifactDir $ArtifactDir `
@@ -8951,6 +9071,20 @@ function Invoke-TunaRouteAcceptanceRun {
         if (-not [bool]$reconciliation.CurrentRuntimeProof) {
             throw "Retained analysis completed but the exact Tuna direct manifest did not prove the current runtime. Artifact: $ArtifactDir"
         }
+    }
+    }
+    finally {
+        # Never replace the original exit/error, even if optional persistence fails.
+        try {
+            $private:adoptedType = 'NLink.Tools.LocalRetainedSourceRequest+AdoptedPublication' -as [type]
+            if ($private:persistenceStarted -gt 0 -and $null -ne $private:adoptedType -and
+                $private:adoptedType.IsInstanceOfType($private:localPersistentPublication)) {
+                $null = $private:localPersistentPublication.TryPersistForAttempt($ArtifactDir,
+                    $private:persistenceRun, $private:persistenceScenario, $private:persistenceStarted)
+            }
+        }
+        catch { }
+        $private:localPersistentPublication = $null
     }
 }
 
@@ -10217,7 +10351,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
         [string]$ResolvedExePath = '',
         [string]$ResolvedWalletPath = '',
         [string]$ResolvedSidecarPath = '',
-        [string]$EffectiveWalletPassword = ''
+        [string]$EffectiveWalletPassword = '',
+        [switch]$CaptureLocalPublicationDiagnostics
     )
 
     $artifactDir = Join-Path $RunRoot ([string]$Scenario.Name)
@@ -10291,7 +10426,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
                         -PayerMode ([string]$Scenario.PayerMode) `
                         -PayloadSize $payloadSize `
                         -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
-                        -LiveProofMode ([string]$Scenario.LiveProofMode)
+                        -LiveProofMode ([string]$Scenario.LiveProofMode) `
+                        -CaptureLocalPublicationDiagnostics:($CaptureLocalPublicationDiagnostics -and $AcceptancePhase -eq 'phase5')
                 }
             }
         }
@@ -10470,7 +10606,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
                                 -PayerMode ([string]$Scenario.PayerMode) `
                                 -PayloadSize $payloadSize `
                                 -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
-                                -LiveProofMode ([string]$Scenario.LiveProofMode)
+                                -LiveProofMode ([string]$Scenario.LiveProofMode) `
+                                -CaptureLocalPublicationDiagnostics:($CaptureLocalPublicationDiagnostics -and $AcceptancePhase -eq 'phase5')
                         }
                     }
                 }
@@ -14019,7 +14156,8 @@ try {
                 -ResolvedExePath $resolvedExePath `
                 -ResolvedWalletPath $resolvedWalletPath `
                 -ResolvedSidecarPath $resolvedSidecarPath `
-                -EffectiveWalletPassword $effectiveWalletPassword
+                -EffectiveWalletPassword $effectiveWalletPassword `
+                -CaptureLocalPublicationDiagnostics:($CaptureLocalPublicationDiagnostics -and $acceptancePhase -eq 'phase5' -and -not $fakeMode)
         }
 
         Complete-RouteAcceptanceRunEvidence `

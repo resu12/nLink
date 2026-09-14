@@ -919,14 +919,14 @@ function Get-FileTransferFallbackTailSnapshotLocalYieldMissingCorrelation {
                 }
             }
         })
-    [object[]]$bindings = if (
+    [object[]]$bindings = @(if (
         $null -ne $SnapshotEvaluation.PSObject.Properties[
             '__FallbackTailPeerProofBindings']) {
         @($SnapshotEvaluation.__FallbackTailPeerProofBindings)
     }
     else {
         @()
-    }
+    })
     [object[]]$starts = @($bindings | Where-Object {
             [string]$_.BindingKind -ceq 'pending_peer_proof' -and
             [string]$_.OperationRole -ceq 'peer_proof_pending_initial' -and
@@ -1679,8 +1679,8 @@ function Write-FileTransferRetainedAnalysisStageJson {
     )
 
     $json = $Diagnostics | ConvertTo-Json -Depth 4
-    $isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-    if ($isWindows -and $null -eq ('NLink.FileTransferStageDiagnosticsNative' -as [type])) {
+    $isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    if ($isWindowsPlatform -and $null -eq ('NLink.FileTransferStageDiagnosticsNative' -as [type])) {
         # Match the existing evidence publisher's atomic Windows rename. File.Replace
         # can expose a transient missing destination to concurrent readers.
         Add-Type -TypeDefinition @'
@@ -1713,7 +1713,7 @@ namespace NLink
 
         for ($attempt = 0; $attempt -lt 40; $attempt++) {
             try {
-                if ($isWindows) {
+                if ($isWindowsPlatform) {
                     if (-not [NLink.FileTransferStageDiagnosticsNative]::MoveFileEx($temporaryPath, $Path, 0x9)) {
                         $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                         throw [System.IO.IOException]::new(
@@ -1734,7 +1734,7 @@ namespace NLink
                 $nativeError = $_.Exception.GetBaseException().HResult -band 0xffff
                 # MoveFileEx reports ERROR_ACCESS_DENIED for an open destination
                 # without delete sharing, as well as sharing/lock violations.
-                $retryable = $nativeError -in @(32, 33) -or ($isWindows -and $nativeError -eq 5)
+                $retryable = $nativeError -in @(32, 33) -or ($isWindowsPlatform -and $nativeError -eq 5)
                 if (-not $retryable -or $attempt -eq 39) {
                     throw
                 }
@@ -2754,20 +2754,80 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         [Parameter(Mandatory = $true)]$Index,
         [System.Collections.IDictionary]$StageDiagnostics = $null,
         [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
-        [string]$LiveRouteProofMode = 'None'
+        [string]$LiveRouteProofMode = 'None',
+        $LocalFailureWitness = $null,
+        $LocalSourceOwner = $null,
+        $LocalSourceReader = $null
     )
 
+    $localFailureWitnessOutputEnabled = $LocalFailureWitness -is [ref] -and $null -eq $LocalFailureWitness.Value
+    $localFailureWitnessEnabled = $localFailureWitnessOutputEnabled -or
+        ($null -ne $LocalSourceOwner -and $null -ne $LocalSourceReader)
+    $preparedLocalFailureWitness = $null
+    if ($localFailureWitnessEnabled) {
+        try { . (Join-Path $PSScriptRoot 'LocalPublicationFailureWitness.ps1') }
+        catch { $localFailureWitnessEnabled = $false }
+    }
+    $private:localPrimaryInputs = $null
+    $private:localPrimaryCustody = $null
+    $private:localCompletedEvaluations = $null
+    $private:localPublicationCompletion = $null
+    $private:localPublicationWitness = $null
+    try {
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
     $snapshotCatalog = Get-FileTransferCoordinatorEvidenceCatalog
-    $fullSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+    [string[]]$primaryFullSnapshotLines = @(
         $Index.AllEvents | ForEach-Object { [string]$_.RawLine })
-    $compactSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines @(
+    [string[]]$primaryCompactSnapshotLines = @(
         $Index.AllEvents |
             Where-Object {
                 $snapshotCatalog.SnapshotAuthorityV1 -contains $_.EventName -or
                 $snapshotCatalog.GenerationStampedEffects -contains $_.EventName
             } |
             ForEach-Object { [string]$_.RawLine })
+    if ($null -ne $LocalSourceOwner -and $null -ne $LocalSourceReader) {
+        try {
+            . (Join-Path $PSScriptRoot 'LocalPrimaryEvaluationInputs.ps1')
+            . (Join-Path $PSScriptRoot 'LocalPrimaryPublicationWitness.ps1')
+            . (Join-Path $PSScriptRoot 'LocalPrimaryPublicationCompletion.ps1')
+            $private:localPrimaryInputs = New-FileTransferPrimaryEvaluationInputs `
+                -SourceOwner $LocalSourceOwner -SourceReader $LocalSourceReader -Index $Index -Catalog $snapshotCatalog `
+                -FullLines $primaryFullSnapshotLines -CompactLines $primaryCompactSnapshotLines
+            if ($null -ne $private:localPrimaryInputs) {
+                $private:localPrimaryCustody = $LocalSourceOwner.TryBeginPrimary($LocalSourceReader,
+                    $private:localPrimaryInputs, $primaryFullSnapshotLines, $primaryCompactSnapshotLines)
+                if ($null -ne $private:localPrimaryCustody) {
+                    $null = $private:localPrimaryCustody.BindNativeInputs($private:localPrimaryInputs.NativeOwner,$private:localPrimaryInputs.NativeInputs)
+                }
+            }
+        }
+        catch { } # Optional preparation must not replace either primary evaluation.
+    }
+    $fullSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $primaryFullSnapshotLines
+    if ($null -ne $private:localPrimaryCustody) {
+        try { $null = $private:localPrimaryCustody.RecordFullEvaluation($primaryFullSnapshotLines, $fullSnapshotEvaluation) }
+        catch { $private:localPrimaryCustody.Dispose() }
+    }
+    $compactSnapshotEvaluation = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $primaryCompactSnapshotLines
+    if ($null -ne $private:localPrimaryCustody) {
+        try { $null = $private:localPrimaryCustody.RecordCompactEvaluation($primaryCompactSnapshotLines, $compactSnapshotEvaluation) }
+        catch { $private:localPrimaryCustody.Dispose() }
+    }
+    if ($null -ne $private:localPrimaryInputs) {
+        try {
+            $null = Complete-FileTransferPrimaryEvaluationInputs -Context $private:localPrimaryInputs `
+                -FullLines $primaryFullSnapshotLines -CompactLines $primaryCompactSnapshotLines `
+                -FullView $fullSnapshotEvaluation -CompactView $compactSnapshotEvaluation
+            if ($private:localPrimaryInputs.Associated -and $null -ne $private:localPrimaryCustody) {
+                $private:localCompletedEvaluations = $private:localPrimaryCustody.Take($private:localPrimaryInputs,
+                    $primaryFullSnapshotLines, $primaryCompactSnapshotLines, $fullSnapshotEvaluation, $compactSnapshotEvaluation)
+            }
+        }
+        catch { }
+    }
+    # Only an admitted bounded private context retains these array references.
+    $primaryFullSnapshotLines = $null
+    $primaryCompactSnapshotLines = $null
     $snapshotParity = Compare-FileTransferCoordinatorSnapshotEvaluations `
         -Full $fullSnapshotEvaluation `
         -Compact $compactSnapshotEvaluation
@@ -6312,6 +6372,31 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     else {
         0L
     }
+    if ($localFailureWitnessEnabled) {
+        try {
+            $preparedLocalFailureWitness = Resolve-FileTransferPrimaryFailureWitness `
+                -Index $Index -Failure $firstCompactProofChainFailure
+            if ($null -ne $private:localPrimaryInputs -and $private:localPrimaryInputs.Associated -and
+                $null -ne $preparedLocalFailureWitness -and $null -ne $private:localPrimaryCustody -and
+                $private:localPrimaryCustody.Owns($private:localCompletedEvaluations, $private:localPrimaryInputs,
+                    $private:localPrimaryInputs.FullLines, $private:localPrimaryInputs.CompactLines,
+                    $private:localPrimaryInputs.FullView, $private:localPrimaryInputs.CompactView)) {
+                $private:localPublicationWitness = Resolve-FileTransferPrimaryPublicationWitness `
+                    -Context $private:localPrimaryInputs -Index $Index -Failure $firstCompactProofChainFailure -Witness $preparedLocalFailureWitness
+                if (-not $private:localPrimaryCustody.Owns($private:localCompletedEvaluations, $private:localPrimaryInputs,
+                    $private:localPrimaryInputs.FullLines, $private:localPrimaryInputs.CompactLines,
+                    $private:localPrimaryInputs.FullView, $private:localPrimaryInputs.CompactView)) {
+                    $private:localPublicationWitness = $null
+                }
+                if ($null -ne $private:localPublicationWitness) {
+                    $private:localPublicationCompletion = New-FileTransferPrimaryPublicationCompletion `
+                        -Custody $private:localPrimaryCustody -Evaluations $private:localCompletedEvaluations `
+                        -Context $private:localPrimaryInputs -Prepared $private:localPublicationWitness
+                }
+            }
+        }
+        catch { $private:localPublicationCompletion = $null; $private:localPublicationWitness = $null; $preparedLocalFailureWitness = $null }
+    }
     $semanticFailureDomain = if ($firstProofChainFailureClass -in @(
             'filetransfer_gui_live_fallback_fault_window_missed',
             'filetransfer_gui_live_reactivation_action_window_missed')) {
@@ -8980,6 +9065,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $fullSnapshotEvaluation | Select-Object * -ExcludeProperty __HeldPublicationProofClosures, __FallbackTailPeerProofBindings, __RoutePublicationEffects, __CheckpointRepairContinuityEvidence | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-full-summary.json') -Encoding UTF8
     $snapshotParity | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-coordinator-snapshot-parity-summary.json') -Encoding UTF8
 
+    if ($localFailureWitnessOutputEnabled) {
+        try { $LocalFailureWitness.Value = $preparedLocalFailureWitness } catch { }
+    }
     return [pscustomobject]@{
         Verdict = $verdict
         GateStatus = $gateStatus
@@ -8995,6 +9083,18 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.IndexBuildVisitCount
         BridgeRecoverySubmissionBarrierDrainBoundedLookupVisitCount =
             [int64]$bridgeRecoveryExecutionSubmissionBarrierDrainProof.BoundedLookupVisitCount
+    }
+    }
+    finally {
+        $private:localPublicationWitness = $null
+        $private:localCompletedEvaluations = $null
+        $private:localPublicationCompletion = $null
+        if ($null -ne $private:localPrimaryCustody) {
+            try { $private:localPrimaryCustody.Dispose() } catch { }
+        }
+        if ($null -ne $private:localPrimaryInputs) {
+            try { Remove-FileTransferPrimaryEvaluationInputs $private:localPrimaryInputs } catch { }
+        }
     }
 }
 
@@ -12149,7 +12249,8 @@ function Invoke-FileTransferRetainedAnalysis {
         [switch]$IncludeRawSlices,
         [switch]$AllTransfers,
         [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
-        [string]$LiveRouteProofMode = 'None'
+        [string]$LiveRouteProofMode = 'None',
+        $LocalFailureWitness = $null
     )
 
     $resolvedArtifactDir = $ArtifactDir
@@ -12195,13 +12296,30 @@ function Invoke-FileTransferRetainedAnalysis {
         artifact_dir = $resolvedArtifactDir
     }
 
+    $retainedSourceOwner = $null
+    $retainedSourceReader = $null
     Reset-FileTransferRetainedEventIndex
     try {
         $logFiles = @(Resolve-FileTransferLogFiles -LogPath $LogPath -LogDir $LogDir)
         $stageDiagnostics['log_file_count'] = $logFiles.Count
 
+        if ($TailMinutes -eq 0 -and $logFiles.Count -eq 1 -and
+            -not [string]::IsNullOrWhiteSpace($env:NLINK_RETAINED_SOURCE_REQUEST)) {
+            try {
+                . (Join-Path $PSScriptRoot 'LocalRetainedSourceRequest.ps1')
+                $requestIdText = [string]$env:NLINK_RETAINED_SOURCE_REQUEST_ID
+                if ($requestIdText -cmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z') {
+                    $retainedSourceOwner = [NLink.Tools.LocalRetainedSourceRequest]::TryAttach(
+                        $env:NLINK_RETAINED_SOURCE_REQUEST, [guid]$requestIdText, [string]$logFiles[0],
+                        [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID)
+                    if ($null -ne $retainedSourceOwner) { $retainedSourceReader = $retainedSourceOwner.TryOpenSource() }
+                }
+            }
+            catch { } # Missing/stale optional ownership preserves ordinary parsing.
+        }
+
         $parseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $events = @(Read-FileTransferLogEvents -LogFiles $logFiles -TailMinutes $TailMinutes)
+        $events = @(Read-FileTransferLogEvents -LogFiles $logFiles -TailMinutes $TailMinutes -OwnedSource $retainedSourceReader)
         $sourceEventCount = $events.Count
         $events = @(Add-FileTransferLiveHarnessEvidence -Events $events -LogFiles $logFiles -ArtifactDir $resolvedArtifactDir -TransferId $TransferId -AllTransfers:$AllTransfers)
         [object[]]$eventsForArtifacts = @($events)
@@ -12273,6 +12391,22 @@ function Invoke-FileTransferRetainedAnalysis {
                 StageDiagnostics = $stageDiagnostics
                 LiveRouteProofMode = $LiveRouteProofMode
             }
+            $compactLocalFailureWitness = $null
+            try {
+                if ($TailMinutes -eq 0 -and $logFiles.Count -eq 1 -and
+                    $eventsForArtifacts.Count -eq $sourceEventCount -and $null -ne $retainedSourceOwner -and
+                    $retainedSourceOwner.OwnsCompletedSource($retainedSourceReader) -and $null -ne $retainedSourceOwner.WriterContext) {
+                    $compactArtifactArgs['LocalSourceOwner'] = $retainedSourceOwner
+                    $compactArtifactArgs['LocalSourceReader'] = $retainedSourceReader
+                }
+            }
+            catch { } # Incompatible/stale optional owners preserve normal analysis.
+            $localFailureWitnessEnabled = $LocalFailureWitness -is [ref] -and
+                $null -eq $LocalFailureWitness.Value -and $TailMinutes -eq 0 -and
+                $logFiles.Count -eq 1 -and $eventsForArtifacts.Count -eq $sourceEventCount
+            if ($localFailureWitnessEnabled) {
+                $compactArtifactArgs['LocalFailureWitness'] = [ref]$compactLocalFailureWitness
+            }
             $compactResult = Write-FileTransferCompactRetainedAnalysisArtifacts @compactArtifactArgs
             $stageDiagnostics['data_path_correlation_index_ms'] =
                 $compactResult.DataPathCorrelationIndexMilliseconds
@@ -12295,6 +12429,9 @@ function Invoke-FileTransferRetainedAnalysis {
             $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
             Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
+            if ($localFailureWitnessEnabled) {
+                try { $LocalFailureWitness.Value = $compactLocalFailureWitness } catch { }
+            }
             return [pscustomobject]@{
                 ArtifactDir = $resolvedArtifactDir
                 Summary = $null
@@ -12462,5 +12599,7 @@ function Invoke-FileTransferRetainedAnalysis {
     finally {
         Reset-FileTransferFallbackFrontierGraceCorrelationCache
         Reset-FileTransferRetainedEventIndex
+        if ($null -ne $retainedSourceReader) { $retainedSourceReader.Dispose() }
+        if ($null -ne $retainedSourceOwner) { $retainedSourceOwner.Dispose() }
     }
 }
