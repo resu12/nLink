@@ -1,5 +1,6 @@
-param([string]$RepoRoot,[string]$Directory,[string[]]$CaseSelection=@())
+param([string]$RepoRoot,[string]$Directory,[string[]]$CaseSelection=@(),[switch]$RequireHashCmdlet)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
+$parentModulePath=$env:PSModulePath
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
 $t=$null;$e=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/Run-FileTransferRouteAcceptance.ps1'),[ref]$t,[ref]$e)
@@ -67,6 +68,7 @@ foreach($script:mode in $modes) {
     $probe='space "quoted" tail\ unicode-'+[char]0x17e
     if($mode -cin @('baseline','prefilled')) { $probe='space tail\ unicode-'+[char]0x17e }
     $arguments=@('-RepoRoot',$RepoRoot,'-Directory',$case,'-Mode',$mode,'-Probe',$probe)
+    if($RequireHashCmdlet) { $arguments+='-RequireHashCmdlet' }
     $parameters=@{ScriptPath=(Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/Support/LocalGuiWriterRelayWorker.ps1');Arguments=$arguments}
     if($mode -cne 'baseline') { $parameters.LocalWriterRelay=[ref]$value; $parameters.LocalWriterArtifactDir=$root }
     $script:output=[Collections.Generic.List[string]]::new(); $failure=''; $code=-999
@@ -78,6 +80,13 @@ foreach($script:mode in $modes) {
     elseif($failure -or $code -ne $(if($mode -ceq 'wrapper-nonzero'){9}elseif($mode -ceq 'output-fails'){1}else{0})) { throw "Original Wrapper outcome drift $mode : $code : $failure : $($script:output -join ' | ')" }
     $worker=Get-Content -LiteralPath (Join-Path $case 'worker.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if($worker.Probe -cne $probe) { throw "Argument quoting drift: $mode" }
+    if($RequireHashCmdlet) {
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try { $expectedHash=[BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes((Join-Path $RepoRoot 'VERSION')))).Replace('-','') }
+        finally { $sha.Dispose() }
+        if($worker.HashProbe.Version -notlike '5.1.*' -or $worker.HashProbe.Module -cne 'Microsoft.PowerShell.Utility' -or
+            $worker.HashProbe.Hash -cne $expectedHash -or $env:PSModulePath -cne $parentModulePath) { throw "Legacy hash/environment drift: $mode" }
+    }
     if($expected) {
         if($value.WrapperProcessId -ne $worker.WrapperPid -or $value.WriterContext.GuiProcessId -ne $worker.GuiPid -or
             $value.WrapperProcessId -eq $value.WriterContext.GuiProcessId -or $value.WrapperProcessCreationFileTime -le 0 -or

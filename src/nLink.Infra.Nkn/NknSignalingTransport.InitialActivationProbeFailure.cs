@@ -20,7 +20,10 @@ public sealed partial class NknSignalingTransport
         out RuntimeUnlockInitialActivationPreCommitProbeFailureObservation? observation)
     {
         observation = null;
-        if (!IsRuntimeUnlockListenerRearmSidecarDropReason(sidecarReason))
+        // The listener can report this terminal event before the stream's close.
+        // Capture its exact Started probe before the callback fails it.
+        if (!IsRuntimeUnlockListenerRearmSidecarDropReason(sidecarReason) &&
+            !string.Equals(sidecarReason, "listener_terminal_tuna_stream_eof", StringComparison.Ordinal))
         {
             return false;
         }

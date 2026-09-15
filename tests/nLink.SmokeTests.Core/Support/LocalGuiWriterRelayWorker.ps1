@@ -1,4 +1,4 @@
-param([string]$RepoRoot,[string]$Directory,[string]$Mode,[string]$Probe='')
+param([string]$RepoRoot,[string]$Directory,[string]$Mode,[string]$Probe='',[switch]$RequireHashCmdlet)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
 $private:relay=$null; $private:completion=$null
@@ -37,8 +37,13 @@ try {
         } finally { $writer.Dispose(); $bytes.Dispose() }
     }
     if($null -ne $private:relay -and $Mode -ceq 'repeat-forward' -and $private:relay.Forward($private:completion)) { throw 'Repeated forwarding accepted' }
+    $hashProbe=$null
+    if($RequireHashCmdlet) {
+        $hashProbe=@{Version=$PSVersionTable.PSVersion.ToString();Module=(Get-Command Get-FileHash -ErrorAction Stop).Source
+            Hash=(Get-FileHash -LiteralPath (Join-Path $RepoRoot 'VERSION') -Algorithm SHA256).Hash}
+    }
     [IO.File]::WriteAllText((Join-Path $Directory 'worker.json'),(@{WrapperPid=$PID;GuiPid=$(if($null -ne $private:completion){$private:completion.GuiProcessId}else{0})
-        Probe=$Probe;Attached=$null -ne $private:relay;GuiCompletion=$null -ne $private:completion} | ConvertTo-Json -Compress))
+        Probe=$Probe;Attached=$null -ne $private:relay;GuiCompletion=$null -ne $private:completion;HashProbe=$hashProbe} | ConvertTo-Json -Compress))
     [Console]::Out.WriteLine('relay-stdout-1'); [Console]::Out.WriteLine('relay-stdout-2')
     [Console]::Error.WriteLine('relay-stderr-1'); [Console]::Error.WriteLine('relay-stderr-2')
     if($Mode -ceq 'wrapper-nonzero') { exit 9 }

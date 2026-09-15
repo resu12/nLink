@@ -15,6 +15,14 @@ public sealed partial class NknAccelerationTransportTests
         => RunInitialActivationSidecarFailureAsync(checkMalformedObservations);
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "InitialActivationFailureHandoff")]
+    public Task InitialActivationSidecarFailure_ListenerTerminalEofBeforeRemoteClosedRollsBackOnce(bool checkMalformedObservations)
+        => RunInitialActivationSidecarFailureAsync(checkMalformedObservations,
+            sidecarReason: "listener_terminal_tuna_stream_eof");
+
+    [Theory]
     [InlineData("data_session_disposed")]
     [InlineData("service_disposed")]
     [InlineData("data_session_replaced")]
@@ -27,11 +35,27 @@ public sealed partial class NknAccelerationTransportTests
     public Task InitialActivationSidecarFailure_RealLifecycleChangesRejectOldFailure(string lifecycleChange)
         => RunInitialActivationSidecarFailureAsync(false, lifecycleChange);
 
-    private async Task RunInitialActivationSidecarFailureAsync(bool checkMalformedObservations, string? lifecycleChange = null)
+    [Theory]
+    [InlineData("data_session_disposed")]
+    [InlineData("service_disposed")]
+    [InlineData("data_session_replaced")]
+    [InlineData("data_session_generation_aba")]
+    [InlineData("probe_acked")]
+    [InlineData("raw_transfer_conflict")]
+    [InlineData("raw_lease_transfer_conflict")]
+    [InlineData("installed_retry_mode")]
+    [Trait("FileTransferInfraSuite", "InitialActivationFailureHandoff")]
+    public Task InitialActivationSidecarFailure_ListenerTerminalEofRejectsChangedLifecycle(string lifecycleChange)
+        => RunInitialActivationSidecarFailureAsync(false, lifecycleChange, "listener_terminal_tuna_stream_eof");
+
+    private async Task RunInitialActivationSidecarFailureAsync(bool checkMalformedObservations,
+        string? lifecycleChange = null, string sidecarReason = "sidecar_tuna_stream_eof")
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var client = new FakeNknClient("host.initial-activation-failure.address");
-        var peerClient = new FakeNknClient("peer.initial-activation-failure.address");
+        // Independent cases must not share the invite-validation throttle key.
+        var identity = Guid.NewGuid().ToString("N");
+        var client = new FakeNknClient($"host.initial-activation-failure.{identity}.address");
+        var peerClient = new FakeNknClient($"peer.initial-activation-failure.{identity}.address");
         var lane = new FakeNknAccelerationLane();
         using var transport = new NknSignalingTransport(client, NknTransportOptions.Load(),
             new NknIdentity("host-initial-activation-failure", client.Address), NknTunaAccelerationOptions.Disabled, lane);
@@ -201,7 +225,7 @@ public sealed partial class NknAccelerationTransportTests
                 proof.GetType().GetProperty("AuthorityMode")!.SetValue(proof, GetRuntimeUnlockOfferAuthorityModeForTests("InstalledRetry"));
             }
             var sourceBeforeEof = SessionFileTransferV4SenderTests.CaptureInitialActivationNknSenderForTest(context);
-            lane.SetAvailable(false, "sidecar_tuna_stream_eof");
+            lane.SetAvailable(false, sidecarReason);
             Assert.Empty(observations);
             if (lifecycleChange != "probe_acked")
             {
@@ -213,8 +237,15 @@ public sealed partial class NknAccelerationTransportTests
 
         // This is the real subscribed sidecar-down callback, not the downstream
         // service logging helper. The probe is already Started before the EOF.
-        lane.SetAvailable(false, "sidecar_tuna_stream_eof");
+        lane.SetAvailable(false, sidecarReason);
+        if (sidecarReason == "listener_terminal_tuna_stream_eof")
+        {
+            // Reproduce terminal EOF followed by remote_closed; the later
+            // callback must not recover or duplicate the original observation.
+            lane.SetAvailable(false, "remote_closed");
+        }
         Assert.Single(observations);
+        Assert.Equal(NknSignalingTransport.NormalizeAccelerationSidecarResetReason(sidecarReason), observations[0].SidecarReason);
         if (beforeOriginalDelivery is not null)
         {
             Assert.NotNull(delivered);
@@ -255,7 +286,7 @@ public sealed partial class NknAccelerationTransportTests
         Assert.Equal(original.CurrentDataSessionGeneration, afterFailure.CurrentDataSessionGeneration);
         Assert.Equal(original.CurrentDataSessionIdentity, afterFailure.CurrentDataSessionIdentity);
         Assert.False(FileTransferCoordinator.TryGetCurrentRuntimeUnlockRetryDispatchInstallReceipt(afterFailure, out _));
-        lane.SetAvailable(false, "sidecar_tuna_stream_eof");
+        lane.SetAvailable(false, sidecarReason);
         Assert.Single(observations);
         var duplicate = SessionFileTransferV4SenderTests.CaptureInitialActivationNknSenderForTest(context);
         Assert.Equal(SnapshotIdentity(afterFailure), SnapshotIdentity(duplicate));

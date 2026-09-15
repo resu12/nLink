@@ -1575,7 +1575,8 @@ public abstract class FileTransferOpsScriptsTestBase
         string scriptText,
         IReadOnlyList<string> arguments,
         string powerShellHost = "powershell",
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        bool initializeHostModulePath = false)
     {
         var processTimeout = timeout ?? ScriptProcessTimeout;
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-ops-harness", Guid.NewGuid().ToString("N"));
@@ -1608,6 +1609,12 @@ public abstract class FileTransferOpsScriptsTestBase
                 process.StartInfo.ArgumentList.Add(argument);
             }
 
+            if (initializeHostModulePath)
+            {
+                // Initialize this test parent independently of the dotnet shell;
+                // production child launch behavior remains under test inside it.
+                process.StartInfo.Environment.Remove("PSModulePath");
+            }
             process.Start();
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
