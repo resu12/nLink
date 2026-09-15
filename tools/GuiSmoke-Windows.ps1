@@ -5479,6 +5479,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         [object]$CoordinatorUnresolvedCount = 0,
         [string]$CoordinatorWriter = '(none)',
         [object]$CoordinatorWriterSequence = 0L,
+        [object]$CoordinatorSnapshotEvidenceDiagnostic = $null,
         [object]$CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = 1L,
         [object]$CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = 1L,
         [object]$CoordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = 1L
@@ -5497,6 +5498,7 @@ function New-TunaGuiFileTransferFailureClassificationResult {
         CoordinatorUnresolvedCount = $CoordinatorUnresolvedCount
         CoordinatorWriter = $CoordinatorWriter
         CoordinatorWriterSequence = $CoordinatorWriterSequence
+        CoordinatorSnapshotEvidenceDiagnostic = $CoordinatorSnapshotEvidenceDiagnostic
         CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount =
             $CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount
         CoordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount =
@@ -6943,6 +6945,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $invalidBoundaryUnresolvedCount = 0
         $invalidBoundaryWriter = '(none)'
         $invalidBoundaryWriterSequence = 0L
+        $invalidBoundaryDiagnostic = $null
         if ($null -ne $invalidBoundary) {
             $invalidBoundaryId = [string]$invalidBoundary.boundaryId
             $invalidBoundaryHash = [string]$invalidBoundary.boundaryHash
@@ -6958,6 +6961,37 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $invalidBoundaryWriter = [string]$invalidBoundary.writer
             $invalidBoundaryWriterSequence =
                 [long]$invalidBoundary.writerSequence
+            # Preserve only bounded detail from the original selected failure.
+            # Missing diagnostic fields must not replace the primary rejection.
+            try {
+                $detailReason = $invalidBoundary.decisionReason
+                $detailEvent = $invalidBoundary.eventName
+                $detailIndex = $invalidBoundary.evidenceLineIndex
+                if ($detailReason -is [string] -and $detailReason.Length -le 256 -and
+                    $detailReason -cmatch '\A[a-z0-9_]+\z' -and
+                    $detailEvent -is [string] -and $detailEvent.Length -le 128 -and
+                    ($detailEvent -ceq '(artifact)' -or $detailEvent -cmatch '\A[a-z0-9_]+\z') -and
+                    $invalidBoundaryId.Length -le 128 -and $invalidBoundaryId -cmatch '\A[A-Za-z0-9_-]+\z' -and
+                    $invalidBoundaryHash.Length -le 128 -and $invalidBoundaryHash -cmatch '\A[A-Za-z0-9_-]+\z' -and
+                    ($detailIndex -is [int] -or $detailIndex -is [long]) -and
+                    $detailIndex -ge -1 -and $detailIndex -lt $evidenceLines.Count) {
+                    $invalidBoundaryDiagnostic = [pscustomobject][ordered]@{
+                        schemaVersion = 1
+                        authorityEffect = 'none'
+                        boundaryId = $invalidBoundaryId
+                        boundaryHash = $invalidBoundaryHash
+                        decisionReason = $detailReason
+                        eventName = $detailEvent
+                        evidenceLineIndex = [long]$detailIndex
+                        evidenceLineIndexDomain = if ($ImmutableEvidencePaths.Count -gt 0) {
+                            'immutable_sorted_unique_paths_concatenated_zero_based'
+                        } else {
+                            'app_log_then_process_output_zero_based'
+                        }
+                    }
+                }
+            }
+            catch {} # Diagnostic omission never changes authority or classification.
         }
         if ($null -ne $TestMetrics) {
             $TestMetrics.evidenceLineVisitCount =
@@ -6986,6 +7020,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -CoordinatorUnresolvedCount $invalidBoundaryUnresolvedCount `
             -CoordinatorWriter $invalidBoundaryWriter `
             -CoordinatorWriterSequence $invalidBoundaryWriterSequence `
+            -CoordinatorSnapshotEvidenceDiagnostic $invalidBoundaryDiagnostic `
             -CoordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount `
                 ([long](Get-FileTransferCoordinatorSnapshotObjectProperty `
                     -InputObject $coordinatorSnapshotEvaluation `
@@ -37899,7 +37934,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             [Parameter(Mandatory = $true)]$EnrichmentReceipt
         )
 
-        return [ordered]@{
+        $summary = [ordered]@{
             event = 'filetransfer_tuna_gui_handoff_fallback_failure'
             direction = $direction
             payerMode = $payerMode
@@ -37952,6 +37987,12 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             error = [string]$scenarioFailure.Exception.Message
             failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         }
+        if ($Classification.PSObject.Properties.Name -contains 'CoordinatorSnapshotEvidenceDiagnostic' -and
+            $null -ne $Classification.CoordinatorSnapshotEvidenceDiagnostic) {
+            $summary['nonAuthoritySnapshotEvidenceDiagnostic'] =
+                $Classification.CoordinatorSnapshotEvidenceDiagnostic
+        }
+        return $summary
     }
     try {
         $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
@@ -38057,7 +38098,17 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             -InitialSnapshot $initialLogLedgerSnapshot `
             -ProcessOutputDrainAction {
                 $processesToDrain = @($Context.Processes.ToArray())
-                Cleanup-ProcessesWithOperationalLogDrain -Processes $processesToDrain -ExePath $Context.ExePath
+                $cleanupDiagnostic = $null
+                Cleanup-ProcessesWithOperationalLogDrain -Processes $processesToDrain -ExePath $Context.ExePath `
+                    -CleanupDiagnostic ([ref]$cleanupDiagnostic)
+                if ($null -ne $cleanupDiagnostic) {
+                    try {
+                        Write-GuiSmokeAtomicJson `
+                            -Path (Join-Path $artifactDir 'filetransfer-gui-process-cleanup-diagnostic.json') `
+                            -Value $cleanupDiagnostic
+                    }
+                    catch {} # Optional cleanup detail cannot block immutable evidence capture.
+                }
                 return $processesToDrain
             }
         if ($null -eq $previousInboundRoot) {
@@ -38198,40 +38249,91 @@ function Cleanup-ProcessesWithOperationalLogDrain {
     param(
         [array]$Processes,
         [string]$ExePath = '',
-        [int]$TimeoutMs = 7000
+        [int]$TimeoutMs = 7000,
+        [AllowNull()]$CleanupDiagnostic = $null
     )
 
     if ($null -eq $Processes -or $Processes.Count -eq 0) { return }
     $targets = @($Processes | Where-Object { $null -ne $_ })
-    foreach ($process in $targets) {
+    $captureCleanupDiagnostic = $CleanupDiagnostic -is [ref] -and
+        $null -eq $CleanupDiagnostic.Value -and $targets.Count -ge 1 -and $targets.Count -le 2
+    $cleanupRows = @()
+    if ($captureCleanupDiagnostic) {
+        $cleanupRows = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+            [pscustomobject][ordered]@{
+                targetOrdinal = $i
+                processId = $null
+                closeOutcome = 'not_observed'
+                waitOutcome = 'not_observed'
+                waitBudgetMilliseconds = 0
+                stopOutcome = 'not_observed'
+            }
+        })
+    }
+    for ($i = 0; $i -lt $targets.Count; $i++) {
+        $process = $targets[$i]
         try {
             if (-not $process.HasExited) {
-                [void]$process.CloseMainWindow()
+                $closeAccepted = $process.CloseMainWindow()
+                if ($captureCleanupDiagnostic) {
+                    $cleanupRows[$i].closeOutcome = if ($closeAccepted) { 'accepted' } else { 'not_accepted' }
+                }
+            }
+            elseif ($captureCleanupDiagnostic) {
+                $cleanupRows[$i].closeOutcome = 'already_exited'
             }
         }
-        catch {}
+        catch { if ($captureCleanupDiagnostic) { $cleanupRows[$i].closeOutcome = 'exception' } }
     }
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    foreach ($process in $targets) {
+    for ($i = 0; $i -lt $targets.Count; $i++) {
+        $process = $targets[$i]
         try {
-            if ($process.HasExited) { continue }
+            if ($process.HasExited) {
+                if ($captureCleanupDiagnostic) { $cleanupRows[$i].waitOutcome = 'already_exited' }
+                continue
+            }
             $remainingMs = [Math]::Max(1, $TimeoutMs - [int]$stopwatch.ElapsedMilliseconds)
-            [void]$process.WaitForExit($remainingMs)
-        }
-        catch {}
-    }
-
-    foreach ($process in $targets) {
-        try {
-            if (-not $process.HasExited) {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            if ($captureCleanupDiagnostic) { $cleanupRows[$i].waitBudgetMilliseconds = $remainingMs }
+            $waitExited = $process.WaitForExit($remainingMs)
+            if ($captureCleanupDiagnostic) {
+                $cleanupRows[$i].waitOutcome = if ($waitExited) { 'exited' } else { 'elapsed' }
             }
         }
-        catch {}
+        catch { if ($captureCleanupDiagnostic) { $cleanupRows[$i].waitOutcome = 'exception' } }
+    }
+
+    for ($i = 0; $i -lt $targets.Count; $i++) {
+        $process = $targets[$i]
+        try {
+            if (-not $process.HasExited) {
+                if ($captureCleanupDiagnostic) { $cleanupRows[$i].stopOutcome = 'requested' }
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            elseif ($captureCleanupDiagnostic) {
+                $cleanupRows[$i].stopOutcome = 'already_exited'
+            }
+        }
+        catch { if ($captureCleanupDiagnostic) { $cleanupRows[$i].stopOutcome = 'exception' } }
     }
 
     Stop-BridgeNodeProcessesForExePath -ExePath $ExePath
+    if ($captureCleanupDiagnostic) {
+        try {
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                try { $cleanupRows[$i].processId = [int]$targets[$i].Id } catch {}
+            }
+            $CleanupDiagnostic.Value = [pscustomobject][ordered]@{
+                schemaVersion = 1
+                event = 'filetransfer_gui_process_cleanup_diagnostic'
+                authorityEffect = 'none'
+                sharedWaitBudgetMilliseconds = $TimeoutMs
+                processes = $cleanupRows
+            }
+        }
+        catch {} # Diagnostics do not certify shutdown or writer drain.
+    }
 }
 
 function Get-BridgeNodeProcessesForExePath {

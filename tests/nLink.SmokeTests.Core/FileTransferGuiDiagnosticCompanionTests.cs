@@ -10,6 +10,25 @@ public sealed class FileTransferGuiDiagnosticCompanionTests : FileTransferOpsScr
     [Theory]
     [InlineData("powershell")]
     [InlineData("pwsh")]
+    public async Task GuiSnapshotFailureDetail_PreservesOriginalClassificationAndBoundedReason(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var root = Path.Combine(Path.GetTempPath(), $"nlink-snapshot-detail-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var script = await File.ReadAllTextAsync(Path.Combine(FindRepoRoot(), "tests", "nLink.SmokeTests.Core",
+                "Support", "GuiSnapshotFailureDetail.ps1"));
+            var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), root], host);
+            Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
+            Assert.Contains("gui-snapshot-failure-detail-ok cases=16", result.Stdout, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
     public async Task GuiDiagnosticCompanion_IsolatesPrimaryAndValidatesImmutableEvidence(string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }
