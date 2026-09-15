@@ -94,6 +94,11 @@ function Resolve-FileTransferPrimaryPublicationWitness {
         if ($membership.SelectedIndex -ne $selected -or
             (Get-FileTransferLocalCarrierHash $Context.FullLines[$selected]) -cne $Witness.ContentSha256) { throw 'primary_witness_selection_changed' }
 
+        $selectedFields = Fields $Context.FullLines[$selected]
+        $selectedKeys = @{
+            Boundaries="$($selectedFields.publication_evidence_coordinator_id)|$($selectedFields.publication_evidence_boundary_id)"
+            States="$($selectedFields.publication_evidence_coordinator_id)|$($selectedFields.publication_evidence_observed_state_generation)"
+        }
         $indexes = Dictionary
         foreach ($prefix in @('full','compact')) {
             $view = $fullView; $snapshot = $Context.FullLines
@@ -113,6 +118,10 @@ function Resolve-FileTransferPrimaryPublicationWitness {
                 foreach ($entry in @(@('Boundaries',"$($boundary.coordinatorInstanceId)|$($boundary.boundaryId)"),
                     @('States',"$($boundary.coordinatorInstanceId)|$($boundary.afterStateGeneration)"))) {
                     $map = $publications[$entry[0]]; $key = $entry[1]
+                    # Validate every original boundary above, but retain only
+                    # the selected use's keys. Keep all selected alternatives;
+                    # unrelated idempotent history cannot exhaust their cap.
+                    if ($key -cne $selectedKeys[$entry[0]]) { continue }
                     if (-not $map.ContainsKey($key)) { $map[$key] = @() }
                     if ($map[$key].Count -ge 64) { throw 'primary_witness_observation_budget' }
                     $map[$key] += @($boundary)

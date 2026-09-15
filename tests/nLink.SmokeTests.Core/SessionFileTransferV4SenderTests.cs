@@ -7025,7 +7025,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         int chunkCount = 4096,
         int nextChunkIndex = 78,
         int durableHighestChunkIndex = 77,
-        int creditUntilChunkIndexExclusive = 3234)
+        int creditUntilChunkIndexExclusive = 3234,
+        string? sessionId = null)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType("InboundTransferContext", BindingFlags.NonPublic)!;
@@ -7033,7 +7034,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var routeSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var offer = new FileTransferOfferV2
         {
-            SessionId = $"session_{transferId}",
+            SessionId = sessionId ?? $"session_{transferId}",
             TransferId = transferId,
             FileName = $"{transferId}.bin",
             FileSizeBytes = (long)chunkCount * chunkSize,

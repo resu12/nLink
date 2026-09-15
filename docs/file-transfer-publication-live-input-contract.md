@@ -41,7 +41,7 @@ diagnostic; the primary reads/evaluations/reports continue unchanged.
 | Original failure's event-name bucket | 16,384 | 9,180 |
 | Combined full/compact boundary/effect rows | 8,192, unchanged | 6,740 |
 | Combined full/compact operation rows | 8,192 | 4,114 |
-| Operations per boundary / alternatives per key | 64 each, unchanged | at most 18 operations |
+| Operations per boundary / alternatives per selected key | 64 each; C2b scopes retained lookup keys without skipping global validation | at most 18 operations |
 | Individual line / structured segments | 262,144 UTF-16 units / 256, unchanged | longest line 72,513 units |
 | Writer identities / selected witnesses | 64 each, unchanged | 2 writers; 1 selected failure |
 | Final companion, including receipt metadata | 262,144 bytes, unchanged | small-fixture result only so far |

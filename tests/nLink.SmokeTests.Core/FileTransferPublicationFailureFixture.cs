@@ -9,7 +9,7 @@ namespace NLink.SmokeTests;
 public sealed partial class FileTransferCoordinatorTests
 {
     internal static void ProducePublicationFailureFixture(string sessionId, string transferId,
-        Func<FileTransferPublicationUseEvidence, string> formatEnvelopeEvidence)
+        Func<FileTransferPublicationUseEvidence, string> formatEnvelopeEvidence, string observationBudgetFixture = "none")
     {
         // An explicitly seeded offline data-path mismatch. Coordinator states,
         // publication receipt, snapshot serialization and logger are genuine;
@@ -28,6 +28,22 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.True(started.InitialTunaRouteSelectionDecision?.Accepted, started.InitialTunaRouteSelectionDecision?.Reason);
         Assert.NotNull(started.State.CurrentRuntimeOwner);
         var state = started.State;
+        var observations = new List<FileTransferCoordinatorTransitionEnvelope>();
+        void ObserveUnchangedState()
+        {
+            for (var i = 0; i < 65; i++)
+            {
+                var rejected = FileTransferCoordinator.AuthorizeAction(state,
+                    new FileTransferCoordinatorActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
+                        Source: "offline_observation_budget_fixture", Reason: "missing_runtime_owner"));
+                Assert.False(rejected.Accepted);
+                Assert.Equal(rejected.SnapshotEnvelope!.Aggregate.BeforeStateGeneration,
+                    rejected.SnapshotEnvelope.Aggregate.AfterStateGeneration);
+                observations.Add(rejected.SnapshotEnvelope);
+                state = rejected.State;
+            }
+        }
+        if (observationBudgetFixture == "prior") { ObserveUnchangedState(); }
         var owner = state.CurrentRuntimeOwner!.Value;
         var leg = state.CurrentLeg!;
         var published = FileTransferCoordinator.AuthorizeAction(state,
@@ -39,6 +55,11 @@ public sealed partial class FileTransferCoordinatorTests
         var token = published.State.CurrentRoutePublicationToken!.Value;
         var envelope = published.SnapshotEnvelope!;
         var publication = Assert.Single(envelope.Aggregate.Operations, operation => operation.OperationRole == "route_publication");
+        if (observationBudgetFixture == "selected")
+        {
+            state = published.State;
+            ObserveUnchangedState();
+        }
 
         var type = typeof(SessionFileTransferService).GetNestedType("CoordinatorSnapshotStreamEmitter", BindingFlags.NonPublic)!;
         var emitter = Activator.CreateInstance(type, nonPublic: true)!;
@@ -49,7 +70,15 @@ public sealed partial class FileTransferCoordinatorTests
         var queue = (ConcurrentQueue<string>)type.GetField("pending", flags)!.GetValue(emitter)!;
         void Drain() { while (queue.TryDequeue(out var line)) { LocalOperationalLog.Info("SessionFileTransfer", line); } }
         type.GetMethod("Enqueue", flags)!.Invoke(emitter, [started.SnapshotEnvelope!]);
+        if (observationBudgetFixture == "prior")
+        {
+            foreach (var observation in observations) { type.GetMethod("Enqueue", flags)!.Invoke(emitter, [observation]); }
+        }
         type.GetMethod("Enqueue", flags)!.Invoke(emitter, [envelope]);
+        if (observationBudgetFixture == "selected")
+        {
+            foreach (var observation in observations) { type.GetMethod("Enqueue", flags)!.Invoke(emitter, [observation]); }
+        }
         type.GetMethod("EnqueueAuthorityEffect", flags)!.Invoke(emitter,
             [envelope.CoordinatorInstanceId, envelope.SessionId, envelope.TransferId, FileTransferDirection.Outbound,
                 envelope.Aggregate.AfterStateGeneration, publication.Family, publication.AuthorityId,
@@ -76,7 +105,7 @@ public sealed partial class FileTransferCoordinatorTests
 
 public sealed partial class NknFileTransferTransportTests
 {
-    internal static async Task ProducePublicationFailureFixture()
+    internal static async Task ProducePublicationFailureFixture(string observationBudgetFixture = "none")
         => await WithSecurityCaptureSession((sender, _, _, _, _) =>
         {
             // Real approval/installation and payload capture on FakeNknClient.
@@ -94,7 +123,7 @@ public sealed partial class NknFileTransferTransportTests
                 evidence.GetType().GetProperty("SecurityEvidence")!.SetValue(evidence, payload.Evidence);
                 evidence.GetType().GetProperty("PublicationUse")!.SetValue(evidence, use);
                 return (string)SecurityMethod("FormatFileTransferDataPathEnvelopeEvidenceSuffix").Invoke(null, [evidence])!;
-            });
+            }, observationBudgetFixture);
             return Task.CompletedTask;
         });
 }

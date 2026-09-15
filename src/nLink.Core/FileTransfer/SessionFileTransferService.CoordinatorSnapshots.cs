@@ -2904,6 +2904,8 @@ public sealed partial class SessionFileTransferService
         private readonly Dictionary<string, AuthorityEffectBinding>
             authorityEffectBindingsByOperationKey =
                 new(StringComparer.Ordinal);
+        private readonly Dictionary<string, AuthorityEffectBinding>
+            fallbackTailYieldIssuanceBindings = new(StringComparer.Ordinal);
         private readonly HashSet<string> authorityEffectMessages =
             new(StringComparer.Ordinal);
         private readonly HashSet<string>
@@ -3150,14 +3152,15 @@ public sealed partial class SessionFileTransferService
                 var resolvedEffectGeneration = effectGeneration > 0
                     ? effectGeneration
                     : receiptGeneration;
-                if (string.Equals(
+                var isYieldRetirement = string.Equals(
                         family,
                         "fallback_tail_yield",
                         StringComparison.Ordinal) &&
                     string.Equals(
                         effectKind,
                         "recovery_owner_retired_after_yield",
-                        StringComparison.Ordinal) &&
+                        StringComparison.Ordinal);
+                if (isYieldRetirement &&
                     !fallbackTailRecoveryOwnerRetirementEffectIdentities.Add(
                         string.Join(
                             "|",
@@ -3181,8 +3184,11 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinatorStateBoundarySnapshot? scope;
                 long boundStateGeneration;
                 AuthorityEffectBinding? binding;
+                var operationBindings = isYieldRetirement
+                    ? fallbackTailYieldIssuanceBindings
+                    : authorityEffectBindingsByOperationKey;
                 var hasBinding = !string.IsNullOrWhiteSpace(expectedOperationKey)
-                    ? authorityEffectBindingsByOperationKey.TryGetValue(
+                    ? operationBindings.TryGetValue(
                         CreateAuthorityEffectBindingByOperationKey(
                             expectedOperationKey,
                             receiptIdentity,
@@ -3318,6 +3324,22 @@ public sealed partial class SessionFileTransferService
                         scope,
                         evidenceEnvelope.TransitionId,
                         evidenceOperation.OperationKey);
+                }
+            }
+
+            // A copied yield receipt in a later local-proof/commit observation
+            // must not move the one-shot retirement effect off its issuance.
+            var yield = CreateFallbackTailYieldAuthorityEffectBinding(
+                envelope, "yield", "recovery_owner_retired_after_yield");
+            if (yield is not null)
+            {
+                var key = CreateAuthorityEffectBindingByOperationKey(
+                    yield.OperationKey, yield.ReceiptIdentity,
+                    yield.ReceiptGeneration, yield.ReceiptStatus,
+                    yield.ReceiptFingerprint);
+                if (authorityEffectBindingsByOperationKey.TryGetValue(key, out var binding))
+                {
+                    fallbackTailYieldIssuanceBindings.TryAdd(key, binding);
                 }
             }
         }

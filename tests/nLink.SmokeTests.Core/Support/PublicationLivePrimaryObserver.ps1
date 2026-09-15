@@ -17,6 +17,26 @@ $observation=@'
 $facts=[ordered]@{Evaluations=$script:livePrimaryEvaluations;EvaluationCallers=$script:livePrimaryEvaluationCallers.ToArray();Prepared=$null -ne $private:localPrimaryInputs
     Witness=$null -ne $private:localPublicationWitness;Completion=$null -ne $private:localPublicationCompletion}
 if($null -ne $preparedLocalFailureWitness) { $facts.FailureBucketRecords=$Index.EventsByName[$preparedLocalFailureWitness.EventName].Count }
+if($env:NLINK_PUBLICATION_TUNA_PAYLOAD_OBSERVER -ceq '1') {
+    # Copy original results, including recovered candidates which cannot own a failure witness.
+    $facts.IngressCandidates=@($fileTunaV4DataPathMismatchProof.CandidateRecords | Where-Object {
+        $_.Event.EventName -ceq 'filetransfer_data_path_receive_result'
+    } | ForEach-Object { [ordered]@{Reason=[string]$_.RejectionDiagnostic.Reason
+        ChainMatched=[bool]$_.RejectionDiagnostic.RejectionChainMatched;Recovered=[bool]$_.Recovered
+        SourceLine=[int]$_.Event.LineNumber} })
+}
+if($null -ne $firstCompactProofChainFailure -and $firstCompactProofChainFailure.Class -ceq 'file_tuna_data_path_mismatch') {
+    # Observe the original selected candidate only; do not run recovery again.
+    $selectedRecords=@($fileTunaV4DataPathMismatchProof.EffectiveCandidateRecords | Where-Object {
+        [object]::ReferenceEquals($_.Event,$firstCompactProofChainFailure.Event)
+    })
+    if($selectedRecords.Count -eq 1 -and $null -ne $selectedRecords[0].RejectionDiagnostic) {
+        $diagnostic=$selectedRecords[0].RejectionDiagnostic
+        $facts.SelectedRejectionReason=[string]$diagnostic.Reason
+        $facts.SelectedRejectionChainMatched=[bool]$diagnostic.RejectionChainMatched
+        $facts.SelectedRejectionRecovered=[bool]$diagnostic.Recovered
+    }
+}
 if($null -ne $private:localPrimaryInputs) {
     $facts.FullRecords=$private:localPrimaryInputs.FullLines.Length
     $facts.CompactRecords=$private:localPrimaryInputs.CompactLines.Length

@@ -55,8 +55,22 @@ function New-Lines([object[]]$records) {
     $lines.Add("event=filetransfer_coordinator_snapshot_stream_completed; $prefix; final_state_generation=$($last.aggregate.afterStateGeneration); final_state_hash=$($last.aggregate.afterStateFingerprint); transition_count=$($records.Count); $coverage; authority_effect=none")
     $lines.ToArray()
 }
+$script:parityCase = 0
 function Assert-Parity([string[]]$lines, [bool]$expectFailure) {
+    $script:parityCase++
+    [IO.File]::WriteAllLines((Join-Path $OutputRoot "primary-input-$script:parityCase.log"), @('event=unrelated_diagnostic')+$lines)
     $full=Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated_diagnostic')+$lines)
+    [IO.File]::WriteAllText((Join-Path $OutputRoot "primary-result-$script:parityCase.json"), (ConvertTo-Json -InputObject $full -Depth 64))
+    if ($script:parityCase -eq 1) {
+        $missingSource = $full | ConvertTo-Json -Depth 64 | ConvertFrom-Json
+        $missingSource.Boundaries = @($missingSource.Boundaries | Where-Object {
+            @($_.operations | Where-Object { $_.operationRole -ceq 'route_publication' -and
+                $_.beforeState -ceq 'None' -and $_.operationGeneration -eq 1 }).Count -eq 0
+        })
+        if ((Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $missingSource).Verdict -cne 'fail') {
+            throw 'A missing initial publication was accepted as complete route history.'
+        }
+    }
     $compactLines=@($lines | Where-Object {
         $name=Get-FileTransferCoordinatorSnapshotEventName -Line $_
         $catalog.SnapshotAuthorityV1 -contains $name -or $catalog.GenerationStampedEffects -contains $name
@@ -70,6 +84,7 @@ function Assert-Parity([string[]]$lines, [bool]$expectFailure) {
     $path=Join-Path $OutputRoot 'gui-input.log'
     [IO.File]::WriteAllLines($path,$compactLines)
     $gui=Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
+    [IO.File]::WriteAllText((Join-Path $OutputRoot "gui-result-$script:parityCase.json"), (ConvertTo-Json -InputObject $gui -Depth 32))
     if ($expectFailure) {
         $boundary=$full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or
@@ -88,5 +103,7 @@ $lines=@(New-Lines $envelopes)
 Assert-Parity $lines $false
 # Identical physical copies coalesce; a missing exact acceptance remains open.
 Assert-Parity (@($lines[0]) + $lines[1..($lines.Count-2)] + $lines[1..($lines.Count-2)] + @($lines[-1])) $false
-Assert-Parity (New-Lines @($envelopes[0],$envelopes[1],$envelopes[3],$envelopes[4],$envelopes[5])) $true
+Assert-Parity (New-Lines @($envelopes | Where-Object {
+    $_.decisionKind -cne 'ObserveRuntimeUnlockResponderPeerProbeHandoff' -or $_.decisionStatus -cne 'Idempotent'
+})) $true
 'Preparation-first Coordinator/evidence/full/compact/GUI contract passed.'

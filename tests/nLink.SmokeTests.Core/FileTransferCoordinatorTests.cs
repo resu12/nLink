@@ -21261,16 +21261,29 @@ public sealed partial class FileTransferCoordinatorTests
     {
         var regular = FileTransferRouteResolver.Resolve(
             FileTransferRoute.RegularNknV4Fast);
-        var inbound = StartRegular(
-            regular,
-            FileTransferDirection.Inbound).State with
+        var initial = EmptyState(regular, FileTransferDirection.Inbound) with
         {
             CurrentDataSessionIdentity =
                 "initial-responder-coordinator-data-session",
             CurrentDataSessionGeneration = 17,
+            PersistentState = new FileTransferCoordinatorPersistentState
+            {
+                CoordinatorInstanceId = "preparation-first-responder-fixture",
+            },
         };
-        var setup = CreateRegularV4ToTunaRouteTransitionSetup(inbound);
-        return CompletePreparationFirstResponderSnapshotFixture(setup);
+        var started = FileTransferCoordinator.Apply(CoordinatorEvent(
+            FileTransferCoordinatorEventKind.StartTransfer, regular,
+            state: FileTransferLegState.Active, canSendData: true), initial);
+        var prefix = System.Collections.Immutable.ImmutableArray.CreateBuilder<FileTransferCoordinatorTransitionEnvelope>();
+        prefix.Add(started.SnapshotEnvelope!);
+        var setup = CreateRegularV4ToTunaRouteTransitionSetup(started.State, prefix.Add);
+        prefix.AddRange(CompletePreparationFirstResponderSnapshotFixture(setup));
+        for (var i = 1; i < prefix.Count; i++)
+        {
+            Assert.Equal(prefix[i - 1].Aggregate.AfterStateGeneration, prefix[i].Aggregate.BeforeStateGeneration);
+            Assert.Equal(prefix[i - 1].Aggregate.AfterStateFingerprint, prefix[i].Aggregate.BeforeStateFingerprint);
+        }
+        return prefix.ToImmutable();
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
@@ -25831,7 +25844,7 @@ public sealed partial class FileTransferCoordinatorTests
             }
             envelopes.Add(envelope);
         }
-        var state = CreateRetainedHandoffReceiptInitialState(direction);
+        var state = CreateRetainedHandoffReceiptInitialState(direction, Capture);
 
         void Install(string key)
         {
@@ -25961,30 +25974,35 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static FileTransferCoordinatorState CreateRetainedHandoffReceiptInitialState(FileTransferDirection direction)
+    private static FileTransferCoordinatorState CreateRetainedHandoffReceiptInitialState(
+        FileTransferDirection direction, Action<FileTransferCoordinatorTransitionEnvelope> capture)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
-        var state = StartRegular(regular, direction).State with
+        var state = EmptyState(regular, direction);
+        state = state with
         {
             CurrentDataSessionIdentity = "initial-responder-fallback-fixture-data-session",
             CurrentDataSessionGeneration = 17,
+            LastRepairReplayGeneration = 2,
+            PersistentState = state.PersistentState with
+            {
+                CoordinatorInstanceId = $"retained-handoff-receipt-{direction}",
+                RegularV4FrontierRepairPressure = PressureState(state) with { LastInstallGeneration = 2 },
+            },
         };
+        var started = FileTransferCoordinator.Apply(CoordinatorEvent(
+            FileTransferCoordinatorEventKind.StartTransfer, regular,
+            state: FileTransferLegState.Active, canSendData: true), state);
+        capture(started.SnapshotEnvelope!);
+        state = started.State;
         var publication = FileTransferCoordinator.AuthorizeAction(state,
             RecoveryActionRequest(FileTransferCoordinatorActionKind.RoutePublication,
                 state.CurrentRuntimeOwner!.Value, state.CurrentLeg!,
                 targetRoute: regular.Route, targetProtocolVersion: 4,
                 targetTransport: FileTransferTransportKind.RegularNkn));
         Assert.True(publication.Accepted);
-        state = publication.State with
-        {
-            LastRepairReplayGeneration = 2,
-            PersistentState = publication.State.PersistentState with
-            {
-                CoordinatorInstanceId = $"retained-handoff-receipt-{direction}",
-                RegularV4FrontierRepairPressure = PressureState(publication.State) with { LastInstallGeneration = 2 },
-            },
-        };
-        return state;
+        capture(publication.SnapshotEnvelope!);
+        return publication.State;
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

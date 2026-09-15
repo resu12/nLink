@@ -1,5 +1,5 @@
 param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,
-    [ValidateSet('off','write','existing','write-error','guards')][string]$PersistenceMode='off',[switch]$LiveScaleFixture)
+    [ValidateSet('off','write','existing','write-error','guards')][string]$PersistenceMode='off',[switch]$LiveScaleFixture,[switch]$ObservePrimary,[switch]$ReceiveFixture,[switch]$TwoWriterFixture,[switch]$RecoveredIngressFixture)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/RetainedAnalysisEvidence.ps1')
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1')
@@ -21,14 +21,14 @@ foreach($name in @('ConvertTo-RouteAcceptanceInt','Read-RouteAcceptanceKeyValueA
         if($text -notmatch '\$analysisTimeoutSeconds = 1800') { throw 'Production watchdog changed' }
         $text=$text.Replace('$startInfo.FileName = ''powershell''','$startInfo.FileName = (Get-Process -Id $PID).Path')
         $text=$text.Replace('$startInfo.UseShellExecute = $false','$startInfo.UseShellExecute = $false; $startInfo.CreateNoWindow = $true')
-        if($LiveScaleFixture) {
+        if($LiveScaleFixture -or $ObservePrimary) {
             $needle="'-File', '.\tools\FileTransfer-Ops.ps1'"
             if($text.Split([string[]]@($needle),[StringSplitOptions]::None).Length -ne 2) {throw 'Original primary CLI launch changed'}
             $text=$text.Replace($needle,"'-File', '.\tests\nLink.SmokeTests.Core\Support\PublicationLivePrimaryWorker.ps1'")
         }
         $needle='$private:localAdopted = $private:localAdoption.Take($private:localTerminalReceipt)'
         if($text.Split([string[]]@($needle),[StringSplitOptions]::None).Length -ne 2) { throw 'Original adoption seam changed' }
-        $text=$text.Replace($needle,$needle+'; $script:adoptionAttempted=$true; $script:omissionReason=$private:localAdoption.OmissionReason; $script:adoptedObservation=$private:localAdopted')
+        $text=$text.Replace($needle,$needle+'; $script:adoptionAttempted=$true; $script:omissionReason=$private:localAdoption.OmissionReason; $script:adoptionMilliseconds=$private:localAdoption.ActiveMilliseconds; $script:adoptedObservation=$private:localAdopted')
     }
     if($name -ceq 'Invoke-TunaRouteAcceptanceRun') {
         $needle='Join-Path $RepoRoot ''tools\Run-FileTransferTunaGuiSmoke.ps1'''
@@ -51,13 +51,15 @@ foreach($name in @('unused-app.txt','unused-wallet.txt','unused-sidecar.txt','tu
     [IO.File]::WriteAllText((Join-Path $setup $name),'offline-inert-fixture-do-not-execute')
 }
 $settings=Join-Path $output 'offline-settings.json'
-[IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot;Directory=$output;Output=$output;Mode='valid';GeneratedSource=(Join-Path $Directory 'nlink.log');LiveScaleFixture=$LiveScaleFixture.IsPresent} | ConvertTo-Json))
+$generatedName=if($TwoWriterFixture) { 'two-writer-source.log' } else { 'nlink.log' }
+[IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot;Directory=$output;Output=$output;Mode='valid';GeneratedSource=(Join-Path $Directory $generatedName);LiveScaleFixture=$LiveScaleFixture.IsPresent} | ConvertTo-Json))
 $env:NLINK_PUBLICATION_INTEGRATION_SETTINGS=$settings
 $script:atomic=(Get-Command Write-FileTransferEvidenceAtomicJson).ScriptBlock
 $script:hash=(Get-Command Get-FileTransferEvidenceSha256).ScriptBlock
 $script:lines=(Get-Command Get-FileTransferEvidenceLineCount).ScriptBlock
 $script:receiptWrites=0; $script:sourceHashes=0; $script:sourceCounts=0; $script:adoptionAttempted=$false
 $script:omissionReason=''; $script:relayObserved=$false; $script:wrapperPid=0; $script:guiPid=0
+$script:adoptionMilliseconds=0
 $script:adoptedObservation=$null
 $script:sourcePath=Join-Path $output 'filetransfer-retained-log-slice.log'
 $companionPath=Join-Path $output 'filetransfer-local-publication-diagnostic.json'
@@ -93,8 +95,25 @@ try {
     try { Invoke-TunaRouteAcceptanceRun @runArgs } catch { $failure=$_.Exception.Message }
 } finally { Set-Location -LiteralPath $originalLocation.Path }
 if($PersistenceMode -cin @('write','existing','write-error')) { $publication=$script:adoptedObservation }
+if($RecoveredIngressFixture) {
+    # Retain original Wrapper/GUI/primary execution, without requiring a recovered candidate to own a failure witness.
+    $receipt=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-retained-analysis-attempt-receipt.json')) | ConvertFrom-Json
+    $manifest=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-tuna-gui-evidence-manifest.json')) | ConvertFrom-Json
+    if(-not $script:relayObserved -or -not $script:adoptionAttempted -or $receipt.status -cne 'completed' -or
+        $receipt.exitCode -ne 0 -or $receipt.owner -cne 'RouteAcceptance' -or $script:receiptWrites -ne 1 -or
+        $script:retainedSourceHashes -ne 2 -or $script:retainedSourceCounts -ne 2 -or
+        $manifest.currentRuntimeProof -or -not $manifest.retainedAnalysisReceiptValid -or
+        $failure -notlike 'Retained analysis completed but the exact Tuna direct manifest did not prove the current runtime. Artifact: *') {
+        throw "Recovered ingress changed the original parent/terminal contract: $failure"
+    }
+    if($null -ne $publication) {
+        $payload=[Text.Encoding]::UTF8.GetString($publication.CopyPayload()) | ConvertFrom-Json
+        if($payload.selection.witness.reportClass -ceq 'file_tuna_data_path_mismatch') { throw 'Recovered ingress still owned a failure witness' }
+    }
+    return
+}
 if(-not $script:relayObserved -or -not $script:adoptionAttempted -or $null -eq $publication) {
-    throw "Positive publication missing: relay=$script:relayObserved adoption=$script:adoptionAttempted omission=$script:omissionReason failure=$failure"
+    throw "Positive publication missing: relay=$script:relayObserved adoption=$script:adoptionAttempted omission=$script:omissionReason adoptionMilliseconds=$script:adoptionMilliseconds failure=$failure"
 }
 if($failure -notlike 'Retained analysis completed but the exact Tuna direct manifest did not prove the current runtime. Artifact: *') { throw "Original runtime-proof rejection changed: $failure" }
 $receiptPath=Join-Path $output 'filetransfer-retained-analysis-attempt-receipt.json'
@@ -107,8 +126,10 @@ $wrapper=[IO.File]::ReadAllText((Join-Path $output 'whole-wrapper-returned.json'
 $gui=[IO.File]::ReadAllText((Join-Path $output 'controlled-gui.json')) | ConvertFrom-Json
 if($script:wrapperPid -ne $wrapper.WrapperPid -or $script:guiPid -ne $gui.GuiPid -or $script:wrapperPid -eq $script:guiPid) { throw 'Whole Wrapper/GUI identity lost' }
 $report=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-operator-verdict.txt'))
+$expectedEvent='filetransfer_data_path_send_result'
+if($ReceiveFixture) { $expectedEvent='filetransfer_data_path_receive_result' }
 if($report -notmatch '(?m)^first_proof_chain_failure_class=file_tuna_data_path_mismatch\r?$' -or
-    $report -notmatch '(?m)^first_proof_chain_failure_event=filetransfer_data_path_send_result\r?$') { throw 'Primary selected failure changed' }
+    $report -notmatch ('(?m)^first_proof_chain_failure_event='+$expectedEvent+'\r?$')) { throw 'Primary selected failure changed' }
 $stages=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-retained-analysis-stage-diagnostics.json')) | ConvertFrom-Json
 if($stages.synthetic_event_count -ne 0 -or $stages.compact_mode -ne 1 -or $script:receiptWrites -ne 1 -or $script:retainedSourceHashes -ne 2 -or $script:retainedSourceCounts -ne 2) {
     throw 'Original input/receipt traversal changed'
@@ -145,9 +166,12 @@ $sha=[Security.Cryptography.SHA256]::Create()
 try { $selectedHash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($selectedLine))).Replace('-','').ToLowerInvariant() }
 finally { $sha.Dispose() }
 if($selected.contentSha256 -cne $selectedHash -or $row.useContentSha256 -cne $selectedHash -or
-    -not $selectedLine.Contains('offline_fixture_fault=wrong_physical_transport') -or
+    (-not $ReceiveFixture -and -not $selectedLine.Contains('offline_fixture_fault=wrong_physical_transport')) -or
     -not $sourceLines[$data.selection.provenance.publicationSourceLine-1].Contains('event=filetransfer_coordinator_transition_snapshot;') -or
     -not $sourceLines[$data.selection.provenance.effectSourceLine-1].Contains('effect_kind=route_publication_forwarded;')) { throw 'Exact source provenance changed' }
+if($ReceiveFixture -and ($row.useKind -cne 'receive_guard' -or $row.direction -cne 'inbound' -or $row.routeState.liveRouteEpoch -ne 3 -or
+    -not $selectedLine.Contains('receive_disposition=rejected_before_dispatch;') -or -not $selectedLine.Contains('authority_effect=none;') -or
+    $selectedLine.Contains('offline_fixture_fault='))) { throw 'Primary selected a seeded observation instead of the genuine receive guard' }
 $manifest=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-tuna-gui-evidence-manifest.json')) | ConvertFrom-Json
 if($manifest.currentRuntimeProof -or -not $manifest.retainedAnalysisReceiptValid -or $manifest.retainedAnalysisStatus -cne 'completed' -or
     $reportValues.verdict -cne 'FAIL_PROTOCOL_OR_INTEGRITY' -or $reportValues.gate_status -cne 'fail') { throw 'Diagnostic adoption changed primary failure or live proof' }
@@ -179,7 +203,7 @@ elseif(Test-Path -LiteralPath $companionPath) { throw 'Disabled persistence wrot
 if($PersistenceMode -cne 'off' -and $publication.TryPersistForAttempt($output,$RunId,$ScenarioId,$attemptStarted)) { throw 'Persistence attempt replayed' }
 if([IO.Directory]::GetFiles($output,'filetransfer-local-publication-diagnostic.json.*.tmp').Length -ne 0) { throw 'Owned staging file leaked' }
 [IO.File]::WriteAllText((Join-Path $output 'adopted-offline-publication.json'),$payload)
-$result=[ordered]@{WholeWrapperMain=$true;PrimarySelectedSeededFailure=$true;RealReports=$true;Adopted=$true;Status=$receipt.status
+$result=[ordered]@{WholeWrapperMain=$true;PrimarySelectedSeededFailure=(-not $ReceiveFixture);RealReports=$true;Adopted=$true;Status=$receipt.status
     Persistence=$PersistenceMode;OriginalRuntimeProofRejection=$true;ReceiptWrites=1;SourceHashes=2;SourceCounts=2;SyntheticEvents=0;ProductionWatchdogSeconds=1800;Live=$false}
 [IO.File]::WriteAllText((Join-Path $output 'positive-integration-result.json'),($result | ConvertTo-Json))
 'positive-integration='+($result | ConvertTo-Json -Compress)

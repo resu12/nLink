@@ -34,7 +34,8 @@ public sealed partial class NknFileTransferTransportTests
     public async Task NknTransport_QueuedRegularEnvelopeRejectedOnTuna_PreservesExactProvenance(bool secondCycle)
         => await CreateRejectedDataPathEnvelopeProvenanceFixture(secondCycle);
 
-    internal static async Task<string> CreateRejectedDataPathEnvelopeProvenanceFixture(bool secondCycle, bool capturePublicationUse = false)
+    internal static async Task<string> CreateRejectedDataPathEnvelopeProvenanceFixture(bool secondCycle, bool capturePublicationUse = false,
+        bool captureSnapshots = false)
     {
         FakeNknClient.ResetNetwork();
         try
@@ -77,16 +78,21 @@ public sealed partial class NknFileTransferTransportTests
             using var inbound = await receiver.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             using var outbound = await sender.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
 
-            var sourcePublications = capturePublicationUse
+            using var sourceHistory = captureSnapshots
+                ? new FileTransferPublicationIngressHistory(sessionId, transferId, FileTransferDirection.Outbound) : null;
+            using var receiverHistory = captureSnapshots
+                ? new FileTransferPublicationIngressHistory(sessionId, transferId, FileTransferDirection.Inbound) : null;
+            var sourcePublications = capturePublicationUse && !captureSnapshots
                 ? FileTransferPublicationUseCaptureTests.CreateCycle(sessionId, transferId, FileTransferDirection.Outbound) : null;
-            var receiverPublications = capturePublicationUse
+            var receiverPublications = capturePublicationUse && !captureSnapshots
                 ? FileTransferPublicationUseCaptureTests.CreateCycle(sessionId, transferId, FileTransferDirection.Inbound) : null;
-            var outgoing = sourcePublications?.Select(item => item.Token).ToArray() ?? FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(
+            var outgoing = sourceHistory?.Tokens ?? sourcePublications?.Select(item => item.Token).ToArray() ?? FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(
                 sessionId, transferId, FileTransferDirection.Outbound);
-            var incoming = receiverPublications?.Select(item => item.Token).ToArray() ?? FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(
+            var incoming = receiverHistory?.Tokens ?? receiverPublications?.Select(item => item.Token).ToArray() ?? FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(
                 sessionId, transferId, FileTransferDirection.Inbound);
-            PublishDataPathFixtureAuthority(sender, outgoing[0], sourcePublications?[0].Evidence);
-            PublishDataPathFixtureAuthority(receiver, incoming[0], receiverPublications?[0].Evidence);
+            var sourceEvidence = sourceHistory?.Publish(0) ?? sourcePublications?[0].Evidence;
+            PublishDataPathFixtureAuthority(sender, outgoing[0], sourceEvidence);
+            PublishDataPathFixtureAuthority(receiver, incoming[0], receiverHistory?.Publish(0) ?? receiverPublications?[0].Evidence);
             var logStart = GetOperationalLogLength();
             var held = new List<Envelope>();
             senderClient.ShouldDeliverSendAsync = (_, payload, _) =>
@@ -107,7 +113,7 @@ public sealed partial class NknFileTransferTransportTests
             var sendAuthority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
                 .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
                 .Invoke(null, [outgoing[0], "data_path_provenance_fixture"]));
-            FileTransferPublicationUseEvidence.CaptureSend(sendAuthority, sourcePublications?[0].Evidence,
+            FileTransferPublicationUseEvidence.CaptureSend(sendAuthority, sourceEvidence,
                 FileTransferPublicationUseKind.V4PhysicalSubmission);
             await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(outbound)
                 .SendAsync(frame, sendAuthority, cts.Token);
@@ -115,8 +121,8 @@ public sealed partial class NknFileTransferTransportTests
 
             for (var index = 1; index <= (secondCycle ? 3 : 1); index++)
             {
-                PublishDataPathFixtureAuthority(sender, outgoing[index], sourcePublications?[index].Evidence);
-                PublishDataPathFixtureAuthority(receiver, incoming[index], receiverPublications?[index].Evidence);
+                PublishDataPathFixtureAuthority(sender, outgoing[index], sourceHistory?.Publish(index) ?? sourcePublications?[index].Evidence);
+                PublishDataPathFixtureAuthority(receiver, incoming[index], receiverHistory?.Publish(index) ?? receiverPublications?[index].Evidence);
             }
             var rejectionStart = GetOperationalLogLength();
             var receiverStates = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(receiver, "fileTransferStates"));

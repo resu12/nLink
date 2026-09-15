@@ -656,14 +656,16 @@ public sealed partial class SessionFileTransferV4SenderTests
         LoopbackFileTransferTransport bridge,
         InitialBootstrapRecordingDataSession dataSession,
         bool receiverBarrier = false,
-        Action<object>? beforeActivation = null)
+        Action<object>? beforeActivation = null,
+        Action<object, object>? afterPreparation = null)
     {
         await Task.Yield();
         const string reason = "test_initial_peer_first_bootstrap";
         service.AttachTransport(bridge);
         var context = CreateRegularNknV4InboundContext(dataSession.TransferId,
             chunkCount: 256, nextChunkIndex: 100,
-            durableHighestChunkIndex: 99, creditUntilChunkIndexExclusive: 128);
+            durableHighestChunkIndex: 99, creditUntilChunkIndexExclusive: 128,
+            sessionId: dataSession.SessionId);
         beforeActivation?.Invoke(context);
         if (!receiverBarrier)
         {
@@ -698,6 +700,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(staged.Accepted, staged.Reason);
         var execution = GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution");
         Assert.NotNull(execution);
+        afterPreparation?.Invoke(context, execution!);
         await Assert.IsAssignableFrom<Task>(typeof(SessionFileTransferService).GetMethod(
                 "RecheckInboundFileTransferRouteTransitionDrainAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, execution]));

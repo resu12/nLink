@@ -17476,6 +17476,7 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
+        var yieldSnapshot = context.LastFallbackTailYieldSnapshotEnvelope;
         if (!RecordInboundFallbackTailLocalYieldLocked(
                 context,
                 currentLeg,
@@ -17487,10 +17488,11 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        ClearInboundFallbackTailRecoveryOwnershipAfterYieldLocked(
+        ClearInboundFallbackTailRecoveryOwnershipAfterYieldWithSnapshotLocked(
             context,
             currentLeg,
-            "fallback_tail_quiescent");
+            "fallback_tail_quiescent",
+            yieldSnapshot);
         ClearPostTunaFallbackControlPlanePressure(context.TransferId, "fallback_tail_quiescent");
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Inbound,
@@ -18229,6 +18231,14 @@ public sealed partial class SessionFileTransferService :
         InboundTransferContext context,
         FileTransferLeg leg,
         string reason)
+        => ClearInboundFallbackTailRecoveryOwnershipAfterYieldWithSnapshotLocked(
+            context, leg, reason, context.LastFallbackTailYieldSnapshotEnvelope);
+
+    private static void ClearInboundFallbackTailRecoveryOwnershipAfterYieldWithSnapshotLocked(
+        InboundTransferContext context,
+        FileTransferLeg leg,
+        string reason,
+        FileTransferCoordinatorTransitionEnvelope? yieldSnapshot)
     {
         var previousHandoffEpoch = context.V6TransportHandoff?.EpochId ?? 0;
         var previousHandoffState = context.V6TransportHandoff is { } handoff
@@ -18257,7 +18267,13 @@ public sealed partial class SessionFileTransferService :
         context.FallbackTailRetiredOwnerSuppressionDiagnostics.Clear();
 
         EnqueueFallbackTailYieldAuthorityEffect(
-            context,
+            context.CoordinatorSnapshotEmitter,
+            context.CoordinatorInstanceId,
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.CoordinatorPersistentState.SnapshotStateGeneration,
+            yieldSnapshot,
             "yield",
             "recovery_owner_retired_after_yield");
 
@@ -19368,6 +19384,9 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
+        // The proof send can adopt another Snapshot inline. Retirement must
+        // still bind to the exact Coordinator-issued quiescent yield.
+        var yieldSnapshot = context.LastFallbackTailYieldSnapshotEnvelope;
         if (!RecordInboundFallbackTailLocalYieldLocked(
                 context,
                 currentLeg,
@@ -19379,10 +19398,11 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        ClearInboundFallbackTailRecoveryOwnershipAfterYieldLocked(
+        ClearInboundFallbackTailRecoveryOwnershipAfterYieldWithSnapshotLocked(
             context,
             currentLeg,
-            "fallback_tail_quiescent");
+            "fallback_tail_quiescent",
+            yieldSnapshot);
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Inbound,
             context.TransferId,

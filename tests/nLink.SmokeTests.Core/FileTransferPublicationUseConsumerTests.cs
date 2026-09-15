@@ -84,6 +84,41 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
     public async Task PublicationPositiveIntegration_PrimarySelectsSeededOfflineFailure()
         => await RunGeneratedConsumerAsync("PublicationPositiveIntegrationGenerated", "positive-integration=", "publication-positive-integration-20260914", failureFixture: true);
 
+    [Theory]
+    [InlineData("prior")]
+    [InlineData("selected")]
+    [Trait("FileTransferAnalyzerSuite", "PublicationObservationBudget")]
+    public async Task PublicationObservationBudget_OnlySelectedStateAlternativesConsumeLocalBucket(string observationScope)
+        => await RunGeneratedConsumerAsync("PublicationObservationBudgetGenerated", "observation-budget=", "publication-observation-budget-20260915",
+            failureFixture: true, observationBudgetFixture: observationScope);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationReceiveIntegration")]
+    public async Task PublicationReceiveIntegration_PrimarySelectsGenuineSecondTunaGuardRejection()
+        => await RunGeneratedConsumerAsync("PublicationReceiveIntegrationGenerated", "receive-integration=", "publication-receive-integration-20260915",
+            receiveFixture: true);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationTwoWriterIntegration")]
+    public async Task PublicationTwoWriterIntegration_PrimaryPreservesGenuineDelayedEnvelopeProvenance()
+        => await RunGeneratedConsumerAsync("PublicationTwoWriterIntegrationGenerated", "receive-integration=", "publication-two-writer-integration-20260915",
+            twoWriterFixture: true);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationServiceIngressIntegration")]
+    public async Task PublicationServiceIngressIntegration_PrimaryRequiresExactTunaPayloadAfterServiceCommit()
+        => await RunGeneratedConsumerAsync("PublicationServiceIngressIntegrationGenerated", "receive-integration=", "publication-service-ingress-integration-20260915",
+            twoWriterFixture: true, serviceIngressFixture: true);
+
+    [Theory]
+    [InlineData("missing_receive")]
+    [InlineData("wrong_range")]
+    [InlineData("exact")]
+    [Trait("FileTransferAnalyzerSuite", "PublicationTunaPayloadIntegration")]
+    public async Task PublicationTunaPayloadIntegration_PrimaryRequiresExactSendAndReceive(string mode)
+        => await RunGeneratedConsumerAsync("PublicationTunaPayloadIntegrationGenerated", "tuna-payload-integration=", "publication-tuna-payload-integration-20260915",
+            twoWriterFixture: true, serviceIngressFixture: true, tunaPayloadMode: mode);
+
     [Fact]
     [Trait("FileTransferAnalyzerSuite", "PublicationPersistence")]
     public async Task PublicationPersistence_RealAdoptedFailurePersistsWithoutChangingPrimaryOutcome()
@@ -106,7 +141,8 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         => await RunGeneratedConsumerAsync("PublicationLiveObserverGenerated", "positive-integration=", "publication-live-inputs-20260914", failureFixture: true);
 
     private static async Task RunGeneratedConsumerAsync(string supportScript, string resultPrefix, string artifactName,
-        bool failureFixture = false, bool liveScaleFixture = false)
+        bool failureFixture = false, bool liveScaleFixture = false, string observationBudgetFixture = "none", bool receiveFixture = false,
+        bool twoWriterFixture = false, bool serviceIngressFixture = false, string tunaPayloadMode = "none")
     {
         if (!OperatingSystem.IsWindows()) { return; }
         if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_CONSUMER_FIXTURE") == "1")
@@ -115,9 +151,19 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
             {
                 await NknFileTransferTransportTests.ProducePublicationBulkConsumerFixture();
             }
-            if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_FAILURE_FIXTURE") == "1")
+            if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_TWO_WRITER_FIXTURE") == "1")
             {
-                await NknFileTransferTransportTests.ProducePublicationFailureFixture();
+                await NknFileTransferTransportTests.ProduceTwoWriterIngressFixture();
+            }
+            else if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_RECEIVE_FIXTURE") == "1")
+            {
+                await NknFileTransferTransportTests.CreateRejectedDataPathEnvelopeProvenanceFixture(true,
+                    capturePublicationUse: true, captureSnapshots: true);
+            }
+            else if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_FAILURE_FIXTURE") == "1")
+            {
+                await NknFileTransferTransportTests.ProducePublicationFailureFixture(
+                    Environment.GetEnvironmentVariable("NLINK_PUBLICATION_OBSERVATION_BUDGET_FIXTURE") ?? "none");
             }
             else { await NknFileTransferTransportTests.ProducePublicationConsumerFixture(); }
             Assert.True(LocalOperationalLog.CompleteAndFlush(TimeSpan.FromSeconds(5)));
@@ -142,6 +188,11 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         child.StartInfo.Environment["NLINK_PUBLICATION_CONSUMER_FIXTURE"] = "1";
         child.StartInfo.Environment["NLINK_PUBLICATION_FAILURE_FIXTURE"] = failureFixture ? "1" : "0";
         child.StartInfo.Environment["NLINK_PUBLICATION_LIVE_SCALE_FIXTURE"] = liveScaleFixture ? "1" : "0";
+        child.StartInfo.Environment["NLINK_PUBLICATION_OBSERVATION_BUDGET_FIXTURE"] = observationBudgetFixture;
+        child.StartInfo.Environment["NLINK_PUBLICATION_RECEIVE_FIXTURE"] = receiveFixture ? "1" : "0";
+        child.StartInfo.Environment["NLINK_PUBLICATION_TWO_WRITER_FIXTURE"] = twoWriterFixture ? "1" : "0";
+        child.StartInfo.Environment["NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE"] = serviceIngressFixture ? "1" : "0";
+        child.StartInfo.Environment["NLINK_PUBLICATION_TUNA_PAYLOAD_MODE"] = tunaPayloadMode;
         child.StartInfo.Environment["NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR"] = directory;
         child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH"] = Path.Combine(directory, "nlink.log");
         child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID"] = runId;
@@ -153,18 +204,30 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         try { await child.WaitForExitAsync(deadline.Token); }
         catch { if (!child.HasExited) { child.Kill(entireProcessTree: true); } throw; }
         Assert.True(child.ExitCode == 0, await stdout + Environment.NewLine + await stderr);
+        if (twoWriterFixture)
+        {
+            // Fresh test collection only: preserve every original record and
+            // merge by its actual writer attempt time, never rewrite identities.
+            var records = new[] { "nlink.log", "sender.log" }.SelectMany(name => File.ReadAllLines(Path.Combine(directory, name))).ToArray();
+            var ordered = records.OrderBy(line => long.Parse(System.Text.RegularExpressions.Regex.Match(line,
+                @"(?:^|;\s*)log_writer_attempt_utc_ticks=([0-9]+)").Groups[1].Value));
+            await File.WriteAllLinesAsync(Path.Combine(directory, "two-writer-source.log"), ordered);
+        }
 
         const string script = """
-            param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[string]$SupportScript)
+            param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[string]$SupportScript,[string]$ObservationBudgetFixture,[string]$TunaPayloadMode)
+            $extra=@{}
+            if($ObservationBudgetFixture -cne 'none') { $extra.ObservationScope=$ObservationBudgetFixture }
+            if($TunaPayloadMode -cne 'none') { $extra.TunaPayloadMode=$TunaPayloadMode }
             & (Join-Path $RepoRoot ('tests/nLink.SmokeTests.Core/Support/'+$SupportScript+'.ps1')) `
-                -RepoRoot $RepoRoot -Directory $Directory -RunId $RunId -ScenarioId $ScenarioId
+                -RepoRoot $RepoRoot -Directory $Directory -RunId $RunId -ScenarioId $ScenarioId @extra
             """;
         string? normalized = null;
         foreach (var host in new[] { "powershell", "pwsh" })
         {
             // Large input keeps the original 1,800-second analyzer watchdog plus
             // the 150-second GUI hard deadline and 30 seconds for parent cleanup.
-            var result = await RunPowerShellScriptTextAsync(script, [root, directory, runId, scenarioId, supportScript], host,
+            var result = await RunPowerShellScriptTextAsync(script, [root, directory, runId, scenarioId, supportScript, observationBudgetFixture, tunaPayloadMode], host,
                 liveScaleFixture ? TimeSpan.FromSeconds(1980) : null);
             Assert.True(result.ExitCode == 0 && result.Stdout.Contains(resultPrefix, StringComparison.Ordinal),
                 $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");

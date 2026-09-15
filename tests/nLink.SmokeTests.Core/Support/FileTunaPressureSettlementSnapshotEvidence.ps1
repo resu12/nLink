@@ -5,6 +5,20 @@ $ErrorActionPreference = 'Stop'
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog
 if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2') { throw 'Frozen catalog changed.' }
 $envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+$continuityOperations = @($envelopes.aggregate.operations | Where-Object {
+    Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_
+})
+if ($continuityOperations.Count -gt 0) {
+    foreach ($envelope in $envelopes) {
+        foreach ($operation in @($envelope.aggregate.operations | Where-Object { Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_ })) {
+            if (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $operation $catalog) {
+                throw 'The base catalog accepted an unsupported checkpoint-continuity operation.'
+            }
+        }
+    }
+    $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion
+    if ($catalog.Hash -cne 'e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d') { throw 'Frozen continuity catalog changed.' }
+}
 $first = $envelopes[0]
 $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$($first.coordinatorInstanceId); session_id=$($first.sessionId); transfer_id=$($first.transferId); direction=$($first.direction)"
 $families = $catalog.RequiredFamilies -join ','
@@ -141,8 +155,22 @@ foreach ($name in @('New-TunaGuiFileTransferFailureClassificationResult','Get-Tu
     if ($definitions.Count -ne 1) { throw "GUI function not unique: $name" }
     . ([scriptblock]::Create($definitions[0].Extent.Text))
 }
+$script:parityCase = 0
 function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
+    $script:parityCase++
+    [IO.File]::WriteAllLines((Join-Path $OutputRoot "primary-input-$script:parityCase.log"), @('event=unrelated_diagnostic')+$inputLines)
     $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (@('event=unrelated_diagnostic')+$inputLines)
+    [IO.File]::WriteAllText((Join-Path $OutputRoot "primary-result-$script:parityCase.json"), (ConvertTo-Json -InputObject $full -Depth 64))
+    if ($script:parityCase -eq 1) {
+        $missingSource = $full | ConvertTo-Json -Depth 64 | ConvertFrom-Json
+        $missingSource.Boundaries = @($missingSource.Boundaries | Where-Object {
+            @($_.operations | Where-Object { $_.operationRole -ceq 'route_publication' -and
+                $_.beforeState -ceq 'None' -and $_.operationGeneration -eq 1 }).Count -eq 0
+        })
+        if ((Get-FileTransferCoordinatorSnapshotRouteConsistency -Evaluation $missingSource).Verdict -cne 'fail') {
+            throw 'A missing initial publication was accepted as complete route history.'
+        }
+    }
     $compactLines = @($inputLines | Where-Object {
         $name = Get-FileTransferCoordinatorSnapshotEventName -Line $_
         $catalog.SnapshotAuthorityV1 -contains $name -or $catalog.GenerationStampedEffects -contains $name
@@ -169,6 +197,7 @@ function Assert-Parity([string[]]$inputLines, [bool]$missingClosure) {
     $path = Join-Path $OutputRoot 'gui-input.log'
     [IO.File]::WriteAllLines($path,$compactLines)
     $gui = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage 'fixture' -RouteMode 'regular-v4-live-activation-off-on-off-256mb' -ImmutableEvidencePaths @($path)
+    [IO.File]::WriteAllText((Join-Path $OutputRoot "gui-result-$script:parityCase.json"), (ConvertTo-Json -InputObject $gui -Depth 32))
     if ($missingClosure) {
         $boundary = $full.FirstUnresolvedBoundary
         if ($gui.CoordinatorBoundaryHash -cne $boundary.boundaryHash -or $gui.CoordinatorBoundaryId -cne $boundary.boundaryId -or

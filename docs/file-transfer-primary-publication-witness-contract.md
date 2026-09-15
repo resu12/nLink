@@ -87,6 +87,12 @@ using the resolver with a fabricated index or a source-only request.
 Each view's boundary index is built independently from its actual private rows.
 Every boundary is checked against its own exact native transition/hash/writer
 location. All observed-state alternatives are preserved, with bounded ambiguity.
+The C2b follow-up retains only the selected use's exact coordinator/publication
+boundary key and coordinator/observed-generation key in the lookup maps. Every
+original boundary still consumes the same validation and operation budgets.
+All alternatives for either selected key remain mandatory and capped at 64;
+unrelated state buckets do not consume that per-key diagnostic bound. No first,
+latest, matching-subset or deduplicated alternative is substituted.
 The unchanged A/B1 checks independently resolve the selected use and exact
 forwarding effect in both views. Canonical selected semantic rows must agree, as
 must original publication/effect physical source positions. Different full/reduced

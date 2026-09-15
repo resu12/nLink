@@ -6441,12 +6441,15 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             $"GUI shared-boundary validation failed.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
     }
 
-    [Fact]
-    public async Task FileTransferOps_PreparationFirstResponderUsesSharedSnapshotEvaluation()
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    public async Task FileTransferOps_PreparationFirstResponderUsesSharedSnapshotEvaluation(string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
-        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-preparation-first", Guid.NewGuid().ToString("N"));
+        var artifactRoot = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR");
+        var tempRoot = Path.Combine(artifactRoot ?? Path.GetTempPath(), "nlink-preparation-first", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         try
         {
@@ -6457,10 +6460,11 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "PreparationFirstResponderSnapshotEvidence.ps1"));
-            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot], host);
+            await File.WriteAllTextAsync(Path.Combine(tempRoot, "result.txt"), result.Stdout + result.Stderr);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }
-        finally { TryDeleteDirectory(tempRoot); }
+        finally { if (artifactRoot is null) { TryDeleteDirectory(tempRoot); } }
     }
 
     [Theory]
@@ -6568,14 +6572,17 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Theory]
-    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound)]
-    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "powershell")]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "powershell")]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, "pwsh")]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, "pwsh")]
     public async Task FileTransferOps_RetainedHandoffReceiptUsesSharedSnapshotEvaluation(
-        NLink.Core.FileTransfer.FileTransferDirection direction)
+        NLink.Core.FileTransfer.FileTransferDirection direction, string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
-        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-retained-handoff", Guid.NewGuid().ToString("N"));
+        var artifactRoot = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR");
+        var tempRoot = Path.Combine(artifactRoot ?? Path.GetTempPath(), "nlink-retained-handoff", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         try
         {
@@ -6586,10 +6593,11 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]");
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "FileTunaPressureSettlementSnapshotEvidence.ps1"));
-            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot], host);
+            await File.WriteAllTextAsync(Path.Combine(tempRoot, "result.txt"), result.Stdout + result.Stderr);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }
-        finally { TryDeleteDirectory(tempRoot); }
+        finally { if (artifactRoot is null) { TryDeleteDirectory(tempRoot); } }
     }
 
     [Theory]
