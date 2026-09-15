@@ -23754,6 +23754,7 @@ public sealed partial class SessionFileTransferService
         long pendingBytesAfterCommit;
         int highestReceivedChunkIndexAfterCommit;
         int lateArrivalDistanceAfterCommit;
+        bool frontierStallGraceWakeRefreshed;
         FileTransferRepairProofFrameV6? repairProofFrame = null;
         string? primaryRegularNknFrontierRepairTransactionObservedId = null;
         bool primaryRegularNknFrontierRepairTransactionMatchedActive = false;
@@ -23901,6 +23902,9 @@ public sealed partial class SessionFileTransferService
                         out fallbackV6ProofBootstrapRecheckStatus,
                         out fallbackV6ProofBootstrapRecheckResult);
             }
+            // V4-compatible tail writes also run under a fallback-v6 owner.
+            // Refresh only the current wake; retain its exact source and deadline.
+            frontierStallGraceWakeRefreshed = RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked(context);
             snapshot = CreateSnapshotLocked();
         }
 
@@ -23916,6 +23920,11 @@ public sealed partial class SessionFileTransferService
         {
             _ = ProcessFallbackV6ProofBootstrapPendingWriteRecheckAsync(
                 fallbackV6ProofBootstrapRecheck);
+        }
+
+        if (frontierStallGraceWakeRefreshed)
+        {
+            SchedulePendingInboundV6FrontierStallGraceWake(context);
         }
 
         LogReceiverWriteBatchCommitted(

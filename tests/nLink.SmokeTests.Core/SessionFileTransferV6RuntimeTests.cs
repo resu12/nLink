@@ -2005,14 +2005,17 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
     [Trait("FileTransferRuntimeSuite", "PostTunaFallbackV6FrontierStallGrace")]
     public async Task V6SparseReceiver_PostTunaFallbackStallGraceWake_ContinuousRejectedFramesCannotStarveExactReceiverRequest(
         bool adoptValueEquivalentCoordinatorState,
-        bool advanceHighestReceived)
+        bool advanceHighestReceived,
+        bool v4CompatibilityBatch)
     {
         const string transferId = "transfer_v6_post_fallback_stall_grace_wake";
         const string sessionId = "session_v6_post_fallback_stall_grace_wake";
@@ -2130,16 +2133,35 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                             SetPrivateProperty(inboundContext, "V6FrontierStallGraceWakeScheduledGeneration", 0L);
                         }
                     }
-                    await senderSession.SendAsync(
-                        new FileTransferChunkBatchFrameV6
+                    FileTransferChunkBatchFrameV4 highestBatch = v4CompatibilityBatch
+                        ? new FileTransferChunkBatchFrameV4
                         {
                             SessionId = sessionId,
                             TransferId = transferId,
                             StartChunkIndex = highest,
                             ChunkCount = 1,
                             DataSegments = [payload.Skip(highest * chunkSize).Take(chunkSize).ToArray()],
-                        },
-                        CancellationToken.None);
+                        }
+                        : new FileTransferChunkBatchFrameV6
+                        {
+                            SessionId = sessionId,
+                            TransferId = transferId,
+                            StartChunkIndex = highest,
+                            ChunkCount = 1,
+                            DataSegments = [payload.Skip(highest * chunkSize).Take(chunkSize).ToArray()],
+                        };
+                    if (v4CompatibilityBatch)
+                    {
+                        // The manual fixture owns a v6-only receive loop. Drive the
+                        // production v4 handler used by a regular-v4 live fallback.
+                        await Assert.IsAssignableFrom<Task>(InvokePrivateMethod(receiver,
+                            "HandleInboundV4ChunkBatchAsync", inboundContext, highestBatch,
+                            FileTransferTransportKind.RegularNkn));
+                    }
+                    else
+                    {
+                        await senderSession.SendAsync(highestBatch, CancellationToken.None);
+                    }
                     await WaitUntilAsync(() =>
                     {
                         lock (GetPrivateField(receiver, "gate")!)
@@ -2154,6 +2176,10 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                     Assert.Equal(Property(oldWake, "FrontierChunkIndex"), Property(newWake, "FrontierChunkIndex"));
                     Assert.Equal(Property(oldWake, "RoutePublication"), Property(newWake, "RoutePublication"));
                     Assert.Equal(Property(oldWake, "RuntimeOwner"), Property(newWake, "RuntimeOwner"));
+                    Assert.Equal(Property(oldWake, "CheckpointContinuitySource"), Property(newWake, "CheckpointContinuitySource"));
+                    Assert.Equal(Property(oldWake, "CheckpointGeneration"), Property(newWake, "CheckpointGeneration"));
+                    Assert.Equal(Property(oldWake, "DataSessionIdentity"), Property(newWake, "DataSessionIdentity"));
+                    Assert.Equal(Property(oldWake, "DataSessionGeneration"), Property(newWake, "DataSessionGeneration"));
                     Assert.Equal(Assert.IsType<long>(Property(oldWake, "WakeGeneration")) + 1,
                         Assert.IsType<long>(Property(newWake, "WakeGeneration")));
                     Assert.Equal(highest, Assert.IsType<int>(Property(newWake, "HighestReceivedChunkIndex")));
@@ -4806,6 +4832,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             // Value-equivalent adoption is harmless; real authority changes remain stale.
             epoch = Assert.IsType<LiveRouteEpoch>(Property(context, "CurrentLiveRouteEpoch"));
             leg = Assert.IsType<FileTransferLeg>(Property(context, "CurrentTransferLeg"));
+            RejectChange(wake, "SessionId", Property(wake, "SessionId") + "-replacement");
+            RejectChange(wake, "TransferId", Property(wake, "TransferId") + "-replacement");
             RejectChange(epoch, "EpochId", epoch.EpochId + 1);
             RejectChange(epoch, "State", "invalidated");
             RejectChange(epoch, "RouteSelection", epoch.RouteSelection with { ProtocolVersion = FileTransferProtocol.ProtocolVersionV4 });
