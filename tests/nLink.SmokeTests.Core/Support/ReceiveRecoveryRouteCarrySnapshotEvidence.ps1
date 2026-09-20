@@ -367,6 +367,10 @@ if ((Test-FileTransferCoordinatorReceiveRecoveryRouteTargetCarry $targetRequeste
 $baseline = Get-FileTransferCoordinatorSnapshotEvaluation -Lines (New-Lines $envelopes[0..($issueIndex-1)])
 if ($baseline.ArtifactEvidenceVerdict -cne 'pass') { throw "Original route history malformed: $($baseline.ArtifactEvidenceFailureReason)" }
 if ($null -ne $baseline.FirstUnresolvedBoundary) { throw 'The completed retained-frame route must be closed before recovery carries.' }
+$baselineRoute = Get-FileTransferCoordinatorSnapshotRouteConsistency $baseline
+if ($baselineRoute.Verdict -cne 'pass') {
+    throw "Recovery fixture lacks its authoritative publication chain: $($baselineRoute.Findings)"
+}
 $script:BaselineSemanticFailures = Semantic-Failures $baseline
 $lines = @(New-Lines $envelopes)
 Assert-Parity $lines $true '' 'original'

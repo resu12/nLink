@@ -5535,8 +5535,12 @@ public sealed partial class FileTransferCoordinatorTests
             envelopes.Add(envelope);
         }
 
-        var bootstrap = IssueFallbackV6ProofBootstrapForPeerBoundary(
-            direction, $"receive-recovery-route-carry-{direction}");
+        var (regularState, _, _) = CreateReceiveRecoveryRolloverInitialState(direction, Capture);
+        var activated = direction == FileTransferDirection.Inbound
+            ? ActivateInitialResponderTunaForFallbackFixture(regularState, Capture)
+            : ActivateTuna(regularState,
+                FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4), committedChunk: 4, capture: Capture);
+        var bootstrap = IssueFallbackV6ProofBootstrapForCurrentTuna(activated.State, direction);
         Capture(bootstrap.SnapshotEnvelope!);
         var command = Assert.IsType<FileTransferFallbackV6ProofBootstrapCommand>(bootstrap.Command);
         var delivered = FileTransferCoordinator.ApplyFileTransferFallbackV6ProofBootstrapReceipt(
@@ -5712,9 +5716,14 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    internal static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
+        CreateReceiveRecoveryTerminalCheckpointConvergenceSnapshotFixture(FileTransferDirection direction)
+        => CreateReceiveRecoveryRouteCarryTerminalRolloverSnapshotFixture(direction, replaceFallbackLeg: true);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static IReadOnlyList<FileTransferCoordinatorTransitionEnvelope>
         CreateReceiveRecoveryRouteCarryTerminalRolloverSnapshotFixture(
-            FileTransferDirection direction)
+            FileTransferDirection direction, bool replaceFallbackLeg = false)
     {
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope>();
         void Capture(FileTransferCoordinatorTransitionEnvelope envelope)
@@ -5734,24 +5743,35 @@ public sealed partial class FileTransferCoordinatorTests
             envelopes.Add(envelope);
         }
 
-        var (state, owner, leg) = CreateReceiveRecoveryRolloverInitialState(direction);
+        var (state, owner, leg) = CreateReceiveRecoveryRolloverInitialState(direction, Capture);
         var (firstProof, firstAuthority) = CreateReceiveRecoveryRolloverFirstProof(state, direction, Capture);
         return CompleteReceiveRecoveryRouteCarryTerminalRollover(
-            direction, envelopes, Capture, owner, leg, firstProof, firstAuthority);
+            direction, envelopes, Capture, owner, leg, firstProof, firstAuthority, replaceFallbackLeg);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (FileTransferCoordinatorState State, RuntimeOwnerToken Owner, FileTransferLeg Leg)
-        CreateReceiveRecoveryRolloverInitialState(FileTransferDirection direction)
+        CreateReceiveRecoveryRolloverInitialState(
+            FileTransferDirection direction, Action<FileTransferCoordinatorTransitionEnvelope> capture)
     {
         var regular = FileTransferRouteResolver.Resolve(
             FileTransferRoute.RegularNknV4Fast);
-        var state = StartRegular(regular, direction).State with
+        var state = EmptyState(regular, direction);
+        state = state with
         {
             CurrentDataSessionIdentity =
                 "initial-responder-fallback-fixture-data-session",
             CurrentDataSessionGeneration = 17,
+            PersistentState = state.PersistentState with
+            {
+                CoordinatorInstanceId = $"receive-recovery-route-rollover-{direction}",
+            },
         };
+        var started = FileTransferCoordinator.Apply(CoordinatorEvent(
+            FileTransferCoordinatorEventKind.StartTransfer, regular,
+            state: FileTransferLegState.Active, canSendData: true), state);
+        capture(started.SnapshotEnvelope!);
+        state = started.State;
         var owner = state.CurrentRuntimeOwner!.Value;
         var leg = state.CurrentLeg!;
         var published = FileTransferCoordinator.AuthorizeAction(
@@ -5771,18 +5791,8 @@ public sealed partial class FileTransferCoordinatorTests
                 TargetProtocolVersion: regular.ProtocolVersion,
                 TargetTransport: FileTransferTransportKind.RegularNkn));
         Assert.True(published.Accepted, published.RejectionReason);
-        state = published.State with
-        {
-            PersistentState = published.State.PersistentState with
-            {
-                CoordinatorInstanceId =
-                    $"receive-recovery-route-rollover-{direction}",
-                SnapshotStateGeneration = 0,
-                SnapshotStateFingerprint = null,
-            },
-        };
-
-        return (state, owner, leg);
+        capture(published.SnapshotEnvelope!);
+        return (published.State, owner, leg);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
@@ -5839,7 +5849,8 @@ public sealed partial class FileTransferCoordinatorTests
         CompleteReceiveRecoveryRouteCarryTerminalRollover(
             FileTransferDirection direction, List<FileTransferCoordinatorTransitionEnvelope> envelopes,
             Action<FileTransferCoordinatorTransitionEnvelope> Capture, RuntimeOwnerToken owner, FileTransferLeg leg,
-            FileTransferReceiveRecoveryDecision firstProof, FileTransferReceiveRecoveryOperationAuthority firstAuthority)
+            FileTransferReceiveRecoveryDecision firstProof, FileTransferReceiveRecoveryOperationAuthority firstAuthority,
+            bool replaceFallbackLeg)
     {
         FileTransferCoordinatorState tuna;
         if (direction == FileTransferDirection.Inbound)
@@ -5924,6 +5935,60 @@ public sealed partial class FileTransferCoordinatorTests
             committedChunk: 8,
             transportEpoch: bootstrapCommand.TargetTransportEpoch,
             capture: Capture).State;
+
+        if (replaceFallbackLeg)
+        {
+            if (fallback.CurrentFallbackCheckpointLease is null)
+            {
+                var requested = FileTransferCoordinator.Apply(CoordinatorEvent(
+                    FileTransferCoordinatorEventKind.FallbackCheckpointRequested, fallback.RouteSelection,
+                    reason: "regular_nkn_state_refresh", state: FileTransferLegState.RecoveryActive,
+                    canSendData: false, committedChunk: 8, highestObservedChunk: 9,
+                    transportEpoch: fallback.CurrentLeg!.TransportEpochId,
+                    checkpointRequestId: "terminal-convergence-checkpoint",
+                    checkpointPriority: "state_refresh"), fallback);
+                Assert.Null(requested.MutationRejectedReason);
+                Capture(requested.SnapshotEnvelope!);
+                fallback = requested.State;
+            }
+            var accepted = FileTransferCoordinator.Apply(CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointAccepted, fallback.RouteSelection,
+                reason: "regular_nkn_state_refresh", state: FileTransferLegState.RecoveryActive,
+                canSendData: true, committedChunk: 8, highestObservedChunk: 9,
+                transportEpoch: fallback.CurrentLeg!.TransportEpochId), fallback);
+            Assert.Null(accepted.MutationRejectedReason);
+            Capture(accepted.SnapshotEnvelope!);
+            var before = Assert.Single(accepted.SnapshotEnvelope!.Aggregate.Operations, operation =>
+                operation.Family == "receive_recovery" && operation.OperationRole == "operation_terminal");
+            Assert.Equal("Invalidated:None", before.AfterState);
+            Assert.True(before.ReceiveRecovery!.SourceBoundary.CheckpointGeneration > 0);
+            Assert.Equal(before.ReceiveRecovery.SourceBoundary, before.ReceiveRecovery.EffectiveBoundary);
+            var history = envelopes.Select(envelope => envelope.ToCanonicalJson()).ToArray();
+            var restarted = FileTransferCoordinator.Apply(CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer, accepted.State.RouteSelection,
+                reason: "state_refresh_received", state: FileTransferLegState.RecoveryActive,
+                canSendData: true, committedChunk: 8, highestObservedChunk: 9,
+                transportEpoch: accepted.State.CurrentLeg!.TransportEpochId), accepted.State);
+            Assert.Null(restarted.MutationRejectedReason);
+            Capture(restarted.SnapshotEnvelope!);
+            var after = Assert.Single(restarted.SnapshotEnvelope!.Aggregate.Operations, operation =>
+                operation.Family == "receive_recovery" && operation.OperationRole == "operation_terminal");
+            Assert.Equal("Invalidated:None", after.BeforeState);
+            Assert.Equal(before.ReceiveRecovery.SourceBoundary with { CheckpointGeneration = 0 },
+                after.ReceiveRecovery!.SourceBoundary);
+            Assert.Equal(after.ReceiveRecovery.SourceBoundary, after.ReceiveRecovery.EffectiveBoundary);
+            Assert.Equal(before.ReceiveRecovery.Receipts.ToArray(), after.ReceiveRecovery.Receipts.ToArray());
+            Assert.Equal(before.ReceiveRecovery with
+            {
+                SourceBoundary = after.ReceiveRecovery.SourceBoundary,
+                EffectiveBoundary = after.ReceiveRecovery.EffectiveBoundary,
+                Receipts = after.ReceiveRecovery.Receipts,
+            }, after.ReceiveRecovery);
+            Assert.Equal(before with { ReceiveRecovery = after.ReceiveRecovery }, after);
+            Assert.Equal(history,
+                envelopes.Take(history.Length).Select(envelope => envelope.ToCanonicalJson()).ToArray());
+            return envelopes;
+        }
 
         var successor = FileTransferCoordinator.IssueReceiveRecoveryOperation(
             fallback,
@@ -24498,6 +24563,13 @@ public sealed partial class FileTransferCoordinatorTests
                 },
             };
         }
+        return IssueFallbackV6ProofBootstrapForCurrentTuna(tuna, direction);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferFallbackV6ProofBootstrapDecision IssueFallbackV6ProofBootstrapForCurrentTuna(
+        FileTransferCoordinatorState tuna, FileTransferDirection direction)
+    {
         var owner = tuna.CurrentRuntimeOwner!.Value;
         var publication = tuna.CurrentRoutePublicationToken!.Value;
         var leg = tuna.CurrentLeg!;

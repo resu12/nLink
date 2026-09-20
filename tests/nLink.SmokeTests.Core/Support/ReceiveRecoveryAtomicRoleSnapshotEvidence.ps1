@@ -41,6 +41,8 @@ function Assert-Parity([string]$name, [string[]]$lines, [string]$expectedId, [st
     }
     $boundary = $full.FirstUnresolvedBoundary
     if ($valid) {
+        $route = Get-FileTransferCoordinatorSnapshotRouteConsistency $full
+        if ($route.Verdict -cne 'pass') { throw "$name missing publication history: $($route.Findings)" }
         if ($expectedId -ceq '') {
             if ($null -ne $boundary) { throw "$name invented incident: $($boundary.boundaryId)/$($boundary.taxonomyClass)" }
         }

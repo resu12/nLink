@@ -7650,9 +7650,113 @@ function Test-FileTransferCoordinatorReceiveRecoveryTerminalSlotCarry {
             (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
                 $Operation.receiveRecovery.sourceBoundary `
                 $Operation.receiveRecovery.effectiveBoundary)
-        if (-not $checkpointCarry -and -not $routeCommitCheckpointConvergence) {
+        $legReplacementCheckpointConvergence =
+            -not $checkpointCarry -and -not $routeCommitCheckpointConvergence -and
+            (Test-FileTransferCoordinatorReceiveRecoveryTerminalCheckpointLegReplacement `
+                $Prior $Operation $Boundary $AggregateEntry)
+        if (-not $checkpointCarry -and -not $routeCommitCheckpointConvergence -and
+            -not $legReplacementCheckpointConvergence) {
             return $false
         }
+    }
+    return $true
+}
+
+function Test-FileTransferCoordinatorReceiveRecoveryTerminalCheckpointLegReplacement {
+    param($Prior, $Operation, $Boundary, $AggregateEntry)
+
+    # This is retained receiver evidence, not a recovery or route grant. The
+    # caller still checks immutable terminal identity; shared stream/receipt
+    # validation remains responsible for predecessor history and authority effects.
+    if ($null -eq $Boundary -or $null -eq $AggregateEntry -or
+        $Boundary.decisionKind -cne 'StartTransfer' -or $Boundary.decisionStatus -cne 'Accepted' -or
+        $AggregateEntry.Direction -cne 'inbound' -or
+        [long]$Boundary.afterStateGeneration -ne ([long]$Boundary.beforeStateGeneration + 1L) -or
+        $Boundary.beforeStateHash -ceq $Boundary.afterStateHash -or
+        $Operation.family -cne 'receive_recovery' -or $Operation.operationRole -cne 'operation_terminal' -or
+        -not $Operation.stateApplied -or -not $Prior.stateApplied -or
+        $Operation.beforeState -cne 'Invalidated:None' -or $Operation.afterState -cne 'Invalidated:None' -or
+        $Prior.afterState -cne 'Invalidated:None' -or
+        -not $Operation.receiptValidated -or $Operation.receiptStatus -cne 'Adopted' -or
+        $Operation.receiveRecovery.proofIdentity -ceq '(none)') { return $false }
+    foreach ($field in @('coordinatorInstanceId','writer','boundaryId','beforeStateGeneration',
+            'afterStateGeneration','beforeStateHash','afterStateHash','decisionKind','decisionStatus')) {
+        if ([string]$Boundary.$field -cne [string]$AggregateEntry.Boundary.$field) { return $false }
+    }
+    foreach ($field in @('sourceBoundary','effectiveBoundary')) {
+        $old = $Prior.receiveRecovery.$field; $new = $Operation.receiveRecovery.$field
+        if (-not (Test-FileTransferCoordinatorSnapshotBoundaryEqualExceptCheckpoint $old $new) -or
+            [long]$old.checkpointGeneration -le 0 -or [long]$new.checkpointGeneration -ne 0 -or
+            $old.checkpointRequestId -cne '(none)' -or $new.checkpointRequestId -cne '(none)') { return $false }
+    }
+    if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            $Prior.receiveRecovery.sourceBoundary $Prior.receiveRecovery.effectiveBoundary) -or
+        -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual `
+            $Operation.receiveRecovery.sourceBoundary $Operation.receiveRecovery.effectiveBoundary) -or
+        ($Prior.receiveRecovery | Select-Object * -ExcludeProperty sourceBoundary,effectiveBoundary | ConvertTo-Json -Depth 64 -Compress) -cne
+            ($Operation.receiveRecovery | Select-Object * -ExcludeProperty sourceBoundary,effectiveBoundary | ConvertTo-Json -Depth 64 -Compress)) { return $false }
+
+    $before = $AggregateEntry.BeforeBoundary; $after = $AggregateEntry.AfterBoundary
+    if ($before.route -cne 'post_tuna_fallback_v6' -or [long]$before.protocolVersion -ne 6 -or
+        [long]$before.terminalGeneration -ne 0 -or [long]$before.routeCommitGeneration -ne 0 -or
+        [long]$before.checkpointGeneration -ne 0 -or $before.checkpointRequestId -cne '(none)') { return $false }
+    foreach ($field in @('route','protocolVersion','liveRouteEpoch','routeCommitGeneration','terminalGeneration',
+            'transportEpoch','bridgeRecoveryGeneration','checkpointGeneration','checkpointRequestId',
+            'dataSessionIdentity','dataSessionGeneration')) {
+        if ([string]$before.$field -cne [string]$after.$field) { return $false }
+    }
+    foreach ($field in @('legGeneration','runtimeGeneration','routePublicationGeneration')) {
+        if ([long]$before.$field -le 0 -or [long]$after.$field -ne ([long]$before.$field + 1L)) { return $false }
+    }
+    $retirements = @($Boundary.operations | Where-Object {
+        $_.family -ceq 'route_runtime' -and $_.operationRole -ceq 'checkpoint_acceptance_retained'
+    })
+    if ($retirements.Count -ne 1) { return $false }
+    $retirement = $retirements[0]
+    $envelope = [pscustomobject]@{
+        coordinatorInstanceId = $Boundary.coordinatorInstanceId; sessionId = $AggregateEntry.SessionId
+        transferId = $AggregateEntry.TransferId; direction = $AggregateEntry.Direction
+        decisionKind = $Boundary.decisionKind; decisionStatus = $Boundary.decisionStatus; decisionReason = $Boundary.decisionReason
+        aggregate = [pscustomobject]@{
+            beforeStateGeneration = $Boundary.beforeStateGeneration; afterStateGeneration = $Boundary.afterStateGeneration
+            beforeBoundary = $before; afterBoundary = $after; operations = $Boundary.operations
+        }
+    }
+    $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion
+    if ($retirement.beforeState -cne 'Retained' -or $retirement.afterState -cne 'None' -or
+        -not (Test-FileTransferCoordinatorCheckpointRepairContinuityOperation $envelope $retirement $catalog)) { return $false }
+    $scope = $retirement.checkpointRepairContinuity.currentScope
+    if ([long]$scope.retainedLegCheckpointGeneration -ne [long]$Prior.receiveRecovery.sourceBoundary.checkpointGeneration -or
+        $scope.retainedLegCheckpointRequestId -cne '(none)' -or
+        -not (Test-FileTransferCheckpointRepairContinuityAggregateScope $scope $before)) { return $false }
+
+    foreach ($role in @('runtime_owner','route_publication')) {
+        $operations = @($Boundary.operations | Where-Object {
+            $_.family -ceq 'route_runtime' -and $_.operationRole -ceq $role -and $_.stateApplied
+        })
+        $state = if ($role -ceq 'runtime_owner') { 'Current' } else { 'Published' }
+        $kind = if ($role -ceq 'runtime_owner') { 'RuntimeOwner' } else { 'RoutePublication' }
+        $generation = if ($role -ceq 'runtime_owner') { 'runtimeGeneration' } else { 'routePublicationGeneration' }
+        $old = @($operations | Where-Object { $_.beforeState -ceq $state -and $_.afterState -ceq 'None' })
+        $new = @($operations | Where-Object { $_.beforeState -ceq 'None' -and $_.afterState -ceq $state })
+        if ($operations.Count -ne 2 -or $old.Count -ne 1 -or $new.Count -ne 1 -or
+            $old[0].authorityId -ceq $new[0].authorityId) { return $false }
+        foreach ($pair in @(@($old[0], $before), @($new[0], $after))) {
+            $subject = $pair[0]; $boundaryScope = $pair[1]
+            if ($subject.operationKind -cne $kind -or $subject.routeRuntime.role -cne $role -or
+                [long]$subject.operationGeneration -ne [long]$boundaryScope.$generation -or
+                $subject.operationKey -cne "route_runtime|$role|$($subject.authorityId)|$($subject.operationGeneration)|$kind" -or
+                $subject.commandIdentity -cne $subject.authorityId -or
+                [long]$subject.commandGeneration -ne [long]$subject.operationGeneration -or
+                $subject.commandFingerprint -cne $subject.routeRuntime.tokenFingerprint -or
+                -not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $subject.routeRuntime.boundary $boundaryScope)) { return $false }
+            if ($role -ceq 'route_publication' -and (-not $subject.receiptValidated -or
+                $subject.receiptStatus -cne 'Accepted' -or $subject.receiptIdentity -cne $subject.authorityId -or
+                [long]$subject.receiptGeneration -ne [long]$subject.operationGeneration -or
+                $subject.receiptFingerprint -cne $subject.commandFingerprint)) { return $false }
+        }
+        $fingerprint = if ($role -ceq 'runtime_owner') { $scope.runtimeOwnerFingerprint } else { $scope.publicationFingerprint }
+        if ($old[0].commandFingerprint -cne $fingerprint) { return $false }
     }
     return $true
 }
