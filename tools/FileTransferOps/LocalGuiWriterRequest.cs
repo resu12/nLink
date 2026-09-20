@@ -31,7 +31,8 @@ namespace NLink.Tools
         private long workerCreation;
         public string Name { get; private set; }
         public Guid RequestId { get; private set; }
-        private LocalGuiWriterRequest() { }
+        private readonly LocalGuiWriterRequest original;
+        private LocalGuiWriterRequest() { original = this; }
 
         public static LocalGuiWriterRequest TryCreate(Guid id, string run, string scenario, string artifactRoot)
         { return TryCreateCore(id, run, scenario, artifactRoot, false); }
@@ -67,6 +68,7 @@ namespace NLink.Tools
 
         public bool BindWorker(Process process)
         {
+            if (!Object.ReferenceEquals(original, this)) return false;
             bool held = false;
             try
             {
@@ -128,7 +130,7 @@ namespace NLink.Tools
                 owner.parentExit = new ProcessWait(parent);
                 long creation, exit, kernel, user;
                 if (!GetProcessTimes(parent, out creation, out exit, out kernel, out user) || creation != view.ReadInt64(8) || !owner.IsCurrent) return null;
-                owner.root = artifactRoot; owner.run = run; owner.scenario = scenario; owner.id = id;
+                owner.root = artifactRoot; owner.run = run; owner.scenario = scenario; owner.id = id; owner.endpointName = name;
                 owner.relayMode = relay;
                 view.Write(48, 1);
                 Release(owner.gate, held); held = false;
@@ -143,20 +145,28 @@ namespace NLink.Tools
         // persistence path. A held kernel process handle independently gates exit.
         public Completion TakeAfterExit()
         {
+            if (!Object.ReferenceEquals(original, this)) return null;
+            byte[] body = null; Completion result = null;
             try
             {
-                var body = TakeBodyAfterExit(false);
+                BeginFrontierCustodyTake();
+                body = TakeBodyAfterExit(false);
                 if (body == null) return null;
-                var result = Decode(body, RequestId, run, scenario, root, workerId, workerCreation);
+                result = Decode(body, RequestId, run, scenario, root, workerId, workerCreation);
                 if (result != null) result.MarkAcceptedHere();
                 return result;
             }
-            catch { return null; }
+            catch { result = null; return null; }
+            finally { FinishFrontierCustody(body, result); }
         }
 
         private byte[] TakeBodyAfterExit(bool relay)
         {
+            if (!Object.ReferenceEquals(original, this)) return null;
             if (Interlocked.Exchange(ref sealedState, 1) != 0) return null;
+            RetireFrontierRelayRegistration();
+            if (relay) RetireFrontierCustody();
+            RetireFrontierParentRegistration();
             bool held = false;
             try
             {
@@ -179,7 +189,15 @@ namespace NLink.Tools
 
         public void Dispose()
         {
+            if (!Object.ReferenceEquals(original, this)) return;
             Interlocked.Exchange(ref sealedState, 1);
+            RetireFrontierRelayRegistration();
+            RetireFrontierRelayCustody();
+            CloseFrontierRelayStart();
+            lock (frontierParentSync)
+            { if (frontierGuiStart != null) { frontierGuiStart.Dispose(); frontierGuiStart = null; } }
+            RetireFrontierCustody();
+            RetireFrontierParentRegistration();
             if (closed != null) { closed.Set(); closed.Dispose(); closed = null; }
             if (view != null) { view.Dispose(); view = null; }
             if (map != null) { map.Dispose(); map = null; }
@@ -187,18 +205,19 @@ namespace NLink.Tools
             if (workerExit != null) { workerExit.Dispose(); workerExit = null; }
         }
 
-        public sealed class Finalizer : IDisposable
+        public sealed partial class Finalizer : IDisposable
         {
             internal MemoryMappedFile map;
             internal MemoryMappedViewAccessor view;
             internal Mutex gate;
             internal EventWaitHandle closed;
             internal ProcessWait parentExit;
-            internal string root, run, scenario;
+            internal string root, run, scenario, endpointName;
             internal Guid id;
             internal bool relayMode;
             private int attempted, disposed;
-            internal Finalizer() { }
+            private readonly Finalizer original;
+            internal Finalizer() { original = this; }
             internal bool IsCurrent { get { return Volatile.Read(ref disposed) == 0 && parentExit != null && !parentExit.WaitOne(0) && !closed.WaitOne(0); } }
 
             // This is a capability method, not a public success-verdict factory.
@@ -208,7 +227,8 @@ namespace NLink.Tools
                 string[] hashes, string[] identities, long[] byteCounts, long[] lineCounts,
                 string[] writerIds, long[] lastSequences)
             {
-                if (Interlocked.Exchange(ref attempted, 1) != 0) return false;
+                if (!Object.ReferenceEquals(original, this) || Interlocked.Exchange(ref attempted, 1) != 0) return false;
+                RetireFrontierBinding();
                 bool held = false;
                 try
                 {
@@ -256,7 +276,8 @@ namespace NLink.Tools
 
             public void Dispose()
             {
-                if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+                if (!Object.ReferenceEquals(original, this) || Interlocked.Exchange(ref disposed, 1) != 0) return;
+                RetireFrontierBinding();
                 if (view != null) view.Dispose();
                 if (map != null) map.Dispose();
                 if (gate != null) gate.Dispose();

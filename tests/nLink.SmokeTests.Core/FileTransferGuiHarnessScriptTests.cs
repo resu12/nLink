@@ -23,6 +23,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $names = @(Get-GuiSmokeSemanticEvidenceEventNames)
             foreach ($required in @(
                 'filetransfer_fallback_tail_terminal_proof_consumed',
+                'filetransfer_frontier_publication_receipt_closed',
                 'integrity_verify_passed',
                 'temp_finalize_succeeded',
                 'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
@@ -31,6 +32,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 'runtime_unlock_retry_physical_send_scope_cancellation_requested',
                 'runtime_unlock_retry_physical_send_drain_decided')) {
                 if ($required -notin $names) { throw "semantic event missing: $required" }
+            }
+            $authority = Get-FileTransferCoordinatorEvidenceCatalog
+            if ('filetransfer_frontier_publication_receipt_closed' -in @($authority.SnapshotAuthorityV1 + $authority.GenerationStampedEffects)) {
+                throw 'Offline receipt marker must remain non-authoritative'
             }
             Write-Output 'terminal-frontier-semantic-catalog-ok'
             """;

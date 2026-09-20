@@ -383,7 +383,9 @@ function Test-FileTransferFallbackV6BootstrapCorrelatedEpisodeConsumed {
     $latest = @($entries | Where-Object { $_.Boundary.decisionStatus -ceq 'Accepted' })[-1]
     $correlation = $latest.Operation.routeTransition.bootstrapCorrelation
     if ($SnapshotEvaluation.CatalogVersion -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
-            $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion) -and
+            $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
+            $script:FileTransferCoordinatorRepairOwnerCatalogVersion,
+            $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and
         -not (Test-FileTransferFallbackV6BootstrapSourceHoldConsumed $completed[0] $streamHistory)) { return $false }
     return $latest.Key -ceq $owner.Key -and $latest.Operation.afterState -ceq 'Completed' -and
         $correlation.agreementEnabled -and $correlation.version -eq 1 -and

@@ -55,6 +55,7 @@ function New-FileTransferPrimaryEvaluationInputs {
             FullView = $null; CompactView = $null; Associated = $false; Disposed = $false
             PublicationAttempted = $false; PublicationOmissionReason = ''; WriterReader = $null
             PublicationCompletionOmissionReason = ''
+            FrontierPublicationOmissionReason = ''
             Work = $watch; RecordVisitCeiling = 7L * $FullLines.Length + 4L * $CompactLines.Length
         }
         $watch.Stop()

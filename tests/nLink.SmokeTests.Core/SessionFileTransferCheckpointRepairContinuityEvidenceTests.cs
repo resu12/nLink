@@ -23,15 +23,21 @@ public sealed partial class SessionFileTransferV4SenderTests
     internal static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityDelayedDispositionEvidenceFixtureAsync()
         => await CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(delayedDisposition: true);
 
-    private static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(bool delayedDisposition)
+    private static async Task<IReadOnlyList<string>> CreateCheckpointRepairContinuityServiceEvidenceFixtureAsync(bool delayedDisposition,
+        FileTransferCoordinator.FrontierPublicationObservation? publicationObservation = null,
+        Func<SessionFileTransferService, object, PeerVisibleControlPlaneLoopbackTransport, Task>? afterProgress = null,
+        int priorStateSends = 0, Action<object>? beforeRepairWrite = null, int initialHighest = 255, bool appOwnedService = false,
+        Action<SessionFileTransferService, object>? beforeServiceRepairWrite = null, bool waitForLogEvidence = true)
     {
         // Keep synthetic identities below secret-token redaction thresholds so
         // persisted diagnostics retain the exact data-session projection.
         var transferId = "continuity_" + Guid.NewGuid().ToString("N")[..16];
         var sessionId = "session_" + transferId;
         var serviceType = typeof(SessionFileTransferService);
-        using var delivery = new PeerVisibleControlPlaneLoopbackTransport(sessionId, deliverFrames: false);
-        using var service = new SessionFileTransferService();
+        using PeerVisibleControlPlaneLoopbackTransport delivery = afterProgress is null
+            ? new PeerVisibleControlPlaneLoopbackTransport(sessionId, deliverFrames: false)
+            : new FrontierPublicationDeliveryTransport(sessionId);
+        using var service = appOwnedService ? SessionFileTransferService.CreateForApp() : new SessionFileTransferService();
         service.AttachTransport(delivery);
         var contextType = serviceType.GetNestedType("InboundTransferContext", BindingFlags.NonPublic)!;
         var route = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
@@ -54,7 +60,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         SetPrivateProperty(context, "V6DestinationMode", Enum.Parse(
             serviceType.GetNestedType("V6ReceiveDestinationMode", BindingFlags.NonPublic)!, "SparseSeekable"));
         SetPrivateProperty(context, "NextChunkIndex", 100);
-        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 255);
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", initialHighest);
         SetPrivateProperty(context, "V6ReceiverTransportEpoch", 3L);
         SetPrivateProperty(context, "DataSession", new RecordingDataSession(sessionId, transferId));
         SetPrivateProperty(context, "DataSessionGeneration", 1L);
@@ -63,6 +69,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         leg.TransportEpochId = 3;
         leg.BridgeRecoveryGeneration = 1;
         serviceType.GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(service, context);
+        if (publicationObservation is not null) { SetPrivateProperty(context, "FrontierPublicationObservation", publicationObservation); }
         if (delayedDisposition)
         {
             // Establish actual Tuna authority before the captured stream; no
@@ -71,7 +78,7 @@ public sealed partial class SessionFileTransferV4SenderTests
                 forwardPublication: false, adopt: false);
             var written = new System.Collections.BitArray(256);
             for (var index = 0; index < 100; index++) { written[index] = true; }
-            written[255] = true;
+            written[initialHighest] = true;
             SetPrivateProperty(context, "ReceiverSparseChunksWritten", written);
             SetPrivateProperty(context, "V4CreditUntilChunkIndexExclusive", 256);
             SetPrivateProperty(context, "V6SparseAcceptWindowEndExclusive", 256);
@@ -150,9 +157,19 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.Equal(authority.ProtocolRepairRequestId,
             Assert.IsType<FileTransferFrontierRequestFrameV6>(delivery.LastRequest!.Frame).RepairRequestId);
 
+        for (var i = 0; i < priorStateSends; i++)
+        {
+            SetPrivateProperty(context, "V6LastReceiverStateSentUtc", DateTimeOffset.UtcNow.AddSeconds(-2));
+            Assert.True(await Assert.IsAssignableFrom<Task<bool>>(serviceType.GetMethod("SendInboundV6ReceiverStateAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
+                [context, "before_publication_episode_fixture", true, false, null])));
+        }
+
         if (delayedDisposition)
         {
             using var destination = new MemoryStream(new byte[256 * chunkSize], writable: true);
+            beforeRepairWrite?.Invoke(context);
+            beforeServiceRepairWrite?.Invoke(service, context);
             var chunk = Enumerable.Repeat((byte)0xa5, chunkSize).ToArray();
             var batch = new FileTransferChunkBatchFrameV6
             {
@@ -183,7 +200,9 @@ public sealed partial class SessionFileTransferV4SenderTests
                 BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
                 [context, "chunk_batch_committed", true, false, progress])));
         }
+        if (afterProgress is not null) { await afterProgress(service, context, delivery); }
         service.Dispose();
+        if (!waitForLogEvidence) { return []; }
         Assert.True(SpinWait.SpinUntil(() => ReadOperationalLogTail(logStart).Contains(
             "event=filetransfer_coordinator_snapshot_stream_completed;", StringComparison.Ordinal), TimeSpan.FromSeconds(3)));
         var lines = ReadOperationalLogTail(logStart).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
@@ -194,11 +213,14 @@ public sealed partial class SessionFileTransferV4SenderTests
             line.Contains("; log_writer_attempt_utc_ticks=", StringComparison.Ordinal),
             $"Fixture requires persisted operational log capture, not the unstamped recent ring: {LocalOperationalLog.LogFilePath}"));
         var holdLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_request_deferred;", StringComparison.Ordinal) &&
+            GetDelimitedLogField(line, "transfer_id") == transferId &&
             (!delayedDisposition || GetDelimitedLogField(line, "frontier_chunk_index") == "100"));
         Assert.Equal(sessionId, GetDelimitedLogField(holdLine, "session_id"));
         Assert.Equal(transferId, GetDelimitedLogField(holdLine, "transfer_id"));
         Assert.Equal(transferId + ":1", GetDelimitedLogField(holdLine, "data_session_identity"));
-        var staleLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal));
+        var staleLine = Assert.Single(lines, line => line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal) &&
+            GetDelimitedLogField(line, "transfer_id") == transferId &&
+            (afterProgress is null || GetDelimitedLogField(line, "frontier_chunk_index") == "100"));
         Assert.Contains("authority_effect=none;", staleLine, StringComparison.Ordinal);
         Assert.Contains("decision_status=stale;", staleLine, StringComparison.Ordinal);
         foreach (var field in new[] { "continuity_profile", "continuity_coordinator_id", "continuity_source_fingerprint",
@@ -244,7 +266,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             var state = CreateCoordinatorStateForTest(context);
             var currentLeg = state.CurrentLeg!;
             var decision = FileTransferCoordinator.Apply(new(kind, route, FileTransferTransportHandoffKind.None,
-                FileTransferTransportKind.Unknown, "regular_nkn_state_refresh", legState, canSend, 100, 255,
+                FileTransferTransportKind.Unknown, "regular_nkn_state_refresh", legState, canSend, 100, initialHighest,
                 currentLeg.TransportEpochId, currentLeg.BridgeRecoveryGeneration, requestId, "state_refresh"), state);
             Assert.Null(decision.MutationRejectedReason);
             // The service adopts the whole runtime graph, including leg history;
@@ -335,6 +357,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         await CoreSmokeTestsBase.WaitUntilAsync(() => ReadOperationalLogTail(logStart)
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Any(line =>
                 line.Contains("event=filetransfer_v6_frontier_stall_grace_recheck_decided;", StringComparison.Ordinal) &&
+                line.Contains($"transfer_id={GetPrivateProperty<string>(context, "TransferId")};", StringComparison.Ordinal) &&
                 line.Contains("decision_status=stale;", StringComparison.Ordinal)), TimeSpan.FromSeconds(3));
         var afterWake = CreateCoordinatorStateForTest(context);
         Assert.Equal(beforeWake.PersistentState, afterWake.PersistentState);

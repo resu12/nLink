@@ -5252,6 +5252,8 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        TryAdmitFrontierRepairObservation(context, fallbackFrontierContract, acceptedChunks);
+
         var writeStopwatch = Stopwatch.StartNew();
         long writtenBytes = 0;
         var writeGateEntered = false;
@@ -5331,9 +5333,13 @@ public sealed partial class SessionFileTransferService
             }
 
             (committedChunkCount, committedByteCount) = CommitInboundV4ContiguousWrittenLocked(context);
+            context.FrontierPublicationObservation?.Commit(CreateCoordinatorStateLocked(context), context.DataSession,
+                previousCommittedChunkIndex, context.NextChunkIndex, committedChunkCount,
+                context.PullHighestReceivedChunkIndex, context.BytesTransferred);
             context.PullLateArrivalDistance = Math.Max(0, context.PullHighestReceivedChunkIndex - context.NextChunkIndex);
-            var progressUtc = DateTimeOffset.UtcNow;
+            var progressUtc = ReadPublicationBoundaryUtc(context);
             context.PullLastProgressUtc = progressUtc;
+            context.FrontierBoundaryObservation?.Write(context, previousCommittedChunkIndex, committedChunkCount, "v6_sparse");
             if (committedChunkCount > 0)
             {
                 context.PullLastCommittedProgressUtc = progressUtc;
@@ -5887,6 +5893,8 @@ public sealed partial class SessionFileTransferService
             context.V6LastReceiverStateCommittedChunkIndex = context.NextChunkIndex;
             context.V6LastReceiverStateHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
             dataSession = context.DataSession;
+            context.FrontierPublicationObservation?.Capture(CreateCoordinatorStateLocked(context), dataSession, state);
+            context.FrontierBoundaryObservation?.Frame(context, state);
         }
 
         if (validatedFallbackFrontierProgressReceipt is { } progressReceipt)
@@ -5935,12 +5943,22 @@ public sealed partial class SessionFileTransferService
                     .ConfigureAwait(false);
                 if (!delivery.Sent)
                 {
+                    lock (gate)
+                    {
+                        context.FrontierPublicationObservation?.Reject(state);
+                        context.FrontierBoundaryObservation?.Reject(state);
+                    }
                     return false;
                 }
 
                 peerVisibleControlPlaneProof = delivery.Result?.PeerVisibleAny == true;
                 lock (gate)
                 {
+                    if (delivery.Result is null)
+                    {
+                        context.FrontierPublicationObservation?.Unsupported(state);
+                        context.FrontierBoundaryObservation?.Reject(state);
+                    }
                     if (ReferenceEquals(inboundTransfer, context) &&
                         !context.IsTerminal)
                     {
@@ -5956,6 +5974,11 @@ public sealed partial class SessionFileTransferService
             else
             {
                 await dataSession.SendAsync(state, context.LifetimeCts.Token).ConfigureAwait(false);
+                lock (gate)
+                {
+                    context.FrontierPublicationObservation?.Unsupported(state);
+                    context.FrontierBoundaryObservation?.Reject(state);
+                }
             }
 
             if (string.Equals(state.RecoveryMode, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal))
@@ -6001,6 +6024,11 @@ public sealed partial class SessionFileTransferService
         }
         catch (Exception ex) when (!context.LifetimeCts.IsCancellationRequested)
         {
+            lock (gate)
+            {
+                context.FrontierPublicationObservation?.Reject(state);
+                context.FrontierBoundaryObservation?.Reject(state);
+            }
             if (TryDeferInboundV6ControlSendForTunaActivationBarrier(
                     context,
                     "receiver_state",
@@ -6437,7 +6465,7 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            var now = DateTimeOffset.UtcNow;
+            var now = ReadPublicationBoundaryUtc(context);
             if (!ShouldSendInboundV6FrontierRequestLocked(context, now, unresolvedFrontierProofRequest, reason))
             {
                 return false;
@@ -7660,6 +7688,9 @@ public sealed partial class SessionFileTransferService
             CheckpointContinuitySource = FileTransferCoordinator.CreateCheckpointContinuitySourceStamp(
                 CreateCoordinatorStateLocked(context)),
         };
+        context.FrontierPublicationObservation?.StallArm(CreateCoordinatorStateLocked(context), dataSession,
+            wakeGeneration, context.NextChunkIndex, context.PullHighestReceivedChunkIndex, now, now + stallGrace);
+        context.FrontierBoundaryObservation?.Stall(context);
     }
 
     private bool RefreshInboundV6FrontierStallGraceWakeForHighestProgressLocked(InboundTransferContext context)
@@ -7681,6 +7712,7 @@ public sealed partial class SessionFileTransferService
             HighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex,
         };
         context.CurrentV6FrontierStallGraceWake = successor;
+        context.FrontierBoundaryObservation?.Successor(context, current, successor);
         context.V6FrontierStallGraceWakeScheduledGeneration = 0;
         LogInboundV6FrontierStallGraceRecheckDecision(successor, "rearmed", "highest_received_advanced");
         return true;
@@ -8024,6 +8056,9 @@ public sealed partial class SessionFileTransferService
                 context.DataSessionGeneration),
             context.DataSessionGeneration);
         context.CurrentV6FrontierRecentProgressGraceWake = wake;
+        context.FrontierPublicationObservation?.RecentArm(CreateCoordinatorStateLocked(context), dataSession,
+            wakeGeneration, wake.FrontierChunkIndex, wake.HighestReceivedChunkIndex, committedProgressUtc, wake.DueUtc);
+        context.FrontierBoundaryObservation?.Recent(context, wake);
         LogInboundV6FrontierRecentProgressGraceDeferred(
             wake,
             current is null ? "held" : "rearmed",
@@ -8106,6 +8141,9 @@ public sealed partial class SessionFileTransferService
                 "frontier_recent_progress_grace_elapsed",
                 forceSend: true)
             .ConfigureAwait(false);
+        // Test-only inter-gate race: the original root diagnostic is already
+        // emitted, but the recent recheck has not yet bound its current tip.
+        context.FrontierBoundaryObservation?.AfterStallForTesting?.Invoke();
         bool stallGraceArmed;
         lock (gate)
         {
@@ -8114,6 +8152,12 @@ public sealed partial class SessionFileTransferService
                 !context.IsTerminal &&
                 context.V6FrontierStallChunkIndex == wake.FrontierChunkIndex &&
                 context.CurrentV6FrontierStallGraceWake is not null;
+            if (!sent && stallGraceArmed)
+            {
+                context.FrontierPublicationObservation?.RecentRechecked(wake.WakeGeneration,
+                    context.CurrentV6FrontierStallGraceWake!.WakeGeneration);
+                context.FrontierBoundaryObservation?.Rechecked(context, wake);
+            }
         }
 
         LogInboundV6FrontierRecentProgressGraceRecheckDecision(

@@ -1,4 +1,4 @@
-param([string]$RepoRoot,[string]$Directory)
+param([string]$RepoRoot,[string]$Directory,[switch]$FrontierReports)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferSoak/RetainedAnalysisEvidence.ps1')
@@ -55,6 +55,7 @@ try {
             Write-FileTransferEvidenceAtomicJson (Join-Path $output 'case.json') @{proofPass=$mode -cne 'proof-fail';optionalMode=$optionalMode;sourceRequest=$true;writerBinding=$true;repoRoot=$RepoRoot}
             Write-FileTransferEvidenceAtomicJson (Join-Path $output 'filetransfer-tuna-gui-summary.json') @{completed=$true;integrityOk=$true;inboundTerminalState='Completed';outboundTerminalState='Completed'}
             $args=@{CaptureLocalSourceOwnership=$mode -cne 'baseline';LocalWriterContext=$candidate}; $failure=''
+            if($FrontierReports) {$args.CaptureFrontierReports=$true}
             try {
                 if($owner -ceq 'Wrapper') { Invoke-TunaGuiRetainedAnalysis -RepoRoot $Directory -AnalysisDir $output -LogPath $log -LiveRouteProofMode RegularActivationCycle @args }
                 else { Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $output -LiveRouteProofMode RegularActivationCycle @args }

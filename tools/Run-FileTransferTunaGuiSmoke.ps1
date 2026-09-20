@@ -381,14 +381,29 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         [Parameter(Mandatory = $true)][string]$ExePath,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [AllowNull()]$LocalWriterCompletion = $null,
-        [AllowNull()]$LocalWriterRelay = $null
+        [AllowNull()]$LocalWriterRelay = $null,
+        [switch]$CaptureFrontierLaunch,
+        [AllowNull()]$PreparedFrontierSource = $null,
+        [AllowNull()]$FrontierRelayHandoff = $null
     )
 
     Set-Variable -Name LocalWriterCompletion -Option Private -Value $LocalWriterCompletion
     Set-Variable -Name LocalWriterRelay -Option Private -Value $LocalWriterRelay
+    Set-Variable -Name PreparedFrontierSource -Option Private -Value $PreparedFrontierSource
+    Set-Variable -Name FrontierRelayHandoff -Option Private -Value $FrontierRelayHandoff
+    $private:frontierRelayRequested = $false
+    $private:frontierHandoffRequested = $CaptureFrontierLaunch -and $null -eq $LocalWriterRelay -and
+        $PreparedFrontierSource -is [ref] -and $null -eq $PreparedFrontierSource.Value -and
+        $LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value
     if ($null -ne $LocalWriterRelay) {
         $private:relayType = 'NLink.Tools.LocalGuiWriterRequest+Relay' -as [type]
         if ($null -eq $private:relayType -or -not $private:relayType.IsInstanceOfType($LocalWriterRelay)) { $LocalWriterRelay = $null }
+        elseif ($null -ne $FrontierRelayHandoff) {
+            $private:handoffType = 'NLink.Tools.LocalGuiWriterRequest+FrontierRelayHandoff' -as [type]
+            $private:frontierRelayRequested = $null -ne $private:handoffType -and $private:handoffType.IsInstanceOfType($FrontierRelayHandoff) -and
+                $LocalWriterRelay.OwnsFrontierHandoff($FrontierRelayHandoff)
+            if ($private:frontierRelayRequested) { $CaptureFrontierLaunch = $true }
+        }
     }
     $finalizationGraceSeconds = Get-TunaGuiFinalizationGraceSeconds
     $hardDeadlineSeconds = [long]$TimeoutSeconds + [long]$finalizationGraceSeconds
@@ -419,6 +434,9 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
     $stderrTask = $null
     $localWriterRequest = $null
     Set-Variable -Name localWriterRequest -Option Private -Value $localWriterRequest
+    $private:frontierGuiReports = $null
+    $private:frontierParentCustody = $null
+    $private:pendingFrontierSource = $null
     try {
         Remove-Item -LiteralPath $terminalPhaseDeadlinePath -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $terminalPhaseDeadlinePath -PathType Leaf) {
@@ -463,12 +481,14 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.CreateNoWindow = $true
-        # Only explicit completion/relay custody opts in; never inherit requests.
+        # Only explicit local ownership opts in; never inherit requests.
         $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_REQUEST')
         $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_REQUEST_ID')
         $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_RELAY')
         $startInfo.EnvironmentVariables.Remove('NLINK_GUI_WRITER_RELAY_ID')
-        if (($LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value) -or $null -ne $LocalWriterRelay) {
+        $startInfo.EnvironmentVariables.Remove('NLINK_GUI_FRONTIER_START_V1')
+        $startInfo.EnvironmentVariables.Remove('NLINK_GUI_FRONTIER_RELAY_START_V1')
+        if ($CaptureFrontierLaunch -or ($LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value) -or $null -ne $LocalWriterRelay) {
             try {
                 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
                 $localWriterRequest = [NLink.Tools.LocalGuiWriterRequest]::TryCreate(
@@ -483,12 +503,21 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         }
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
-        if (-not $process.Start()) {
-            throw 'Failed to start the Tuna GUI smoke child process.'
+        if ($CaptureFrontierLaunch -and $null -ne $localWriterRequest) {
+            # Internal opt-in only; no live caller enables native GUI ownership.
+            # Readiness omission keeps the one original launch and report tasks.
+            $private:frontierGuiReports = $localWriterRequest.StartFrontierGuiWorkerWithReports($process)
+            $stdoutTask = $private:frontierGuiReports.Stdout
+            $stderrTask = $private:frontierGuiReports.Stderr
         }
-        if ($null -ne $localWriterRequest) { [void]$localWriterRequest.BindWorker($process) }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        else {
+            if (-not $process.Start()) {
+                throw 'Failed to start the Tuna GUI smoke child process.'
+            }
+            if ($null -ne $localWriterRequest) { [void]$localWriterRequest.BindWorker($process) }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+        }
 
         $state.guiChildProcessId = $process.Id
         $state.lastCompletedStage = 'gui_child_started'
@@ -506,6 +535,12 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
                 break
             }
 
+            if (($private:frontierHandoffRequested -or $private:frontierRelayRequested) -and $null -eq $private:frontierParentCustody -and
+                $null -ne $private:frontierGuiReports -and $null -ne $private:frontierGuiReports.ParentRegistration) {
+                # The original nonblocking probe consumes only offered work, once.
+                try { $private:frontierParentCustody = $private:frontierGuiReports.ParentRegistration.TryPrepareCommitIfOffered() }
+                catch { } # Optional ownership cannot replace watchdog/exit gates.
+            }
             $nowUtc = [DateTimeOffset]::UtcNow
             if (-not $terminalPhaseDeadlineAdopted) {
                 $terminalPhaseDeadline = Get-TunaGuiTerminalPhaseDeadlineRequest `
@@ -798,7 +833,30 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             try {
                 $private:acceptedWriter = $localWriterRequest.TakeAfterExit()
                 if ($LocalWriterCompletion -is [ref] -and $null -eq $LocalWriterCompletion.Value) { $LocalWriterCompletion.Value = $private:acceptedWriter }
+                if ($private:frontierRelayRequested -and $null -ne $private:frontierParentCustody) {
+                    try { $null = $FrontierRelayHandoff.TryOfferAndWait($private:frontierParentCustody, $private:acceptedWriter) } catch { }
+                }
                 if ($null -ne $LocalWriterRelay) { [void]$LocalWriterRelay.Forward($private:acceptedWriter) }
+                if ($private:frontierHandoffRequested -and $null -ne $private:frontierParentCustody -and
+                    $null -ne $private:acceptedWriter -and $null -eq $PreparedFrontierSource.Value -and
+                    [object]::ReferenceEquals($LocalWriterCompletion.Value, $private:acceptedWriter)) {
+                    # Duplicate the original native pins before the GUI request's
+                    # finally closes custody; analysis remains at its later call site.
+                    $private:pendingFrontierSource = $private:frontierParentCustody.TryPreparePrimarySource([guid]::NewGuid(), 'Wrapper',
+                        [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+                        [IO.Path]::GetFullPath((Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log')), $private:acceptedWriter)
+                    if ($null -ne $private:pendingFrontierSource -and $null -eq $PreparedFrontierSource.Value) {
+                        $PreparedFrontierSource.Value = $private:pendingFrontierSource
+                        if ([object]::ReferenceEquals($PreparedFrontierSource.Value, $private:pendingFrontierSource)) {
+                            $private:pendingFrontierSource = $null
+                        }
+                        else {
+                            # A typed reference can coerce instead of throwing;
+                            # only exact ownership transfer releases local cleanup.
+                            $PreparedFrontierSource.Value = $null
+                        }
+                    }
+                }
             }
             catch { } # Diagnostic JSON is not a completion issuer.
         }
@@ -831,6 +889,8 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
         if ($process -is [System.IDisposable]) {
             $process.Dispose()
         }
+        if ($null -ne $private:pendingFrontierSource) { $private:pendingFrontierSource.Dispose() }
+        if ($null -ne $private:frontierParentCustody) { $private:frontierParentCustody.Dispose() }
         if ($null -ne $localWriterRequest) { $localWriterRequest.Dispose() }
     }
 }
@@ -1192,31 +1252,74 @@ function Invoke-TunaGuiRetainedAnalysis {
         [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None',
         [switch]$CaptureLocalSourceOwnership,
+        [switch]$CaptureFrontierReports,
         [AllowNull()]$LocalWriterContext = $null,
-        [AllowNull()]$LocalPublication = $null
+        [AllowNull()]$LocalPublication = $null,
+        [AllowNull()]$FrontierParentCustody = $null,
+        [AllowNull()]$PreparedFrontierSource = $null
     )
 
-    if ([string]::IsNullOrWhiteSpace($LogPath) -or -not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+    if ([string]::IsNullOrWhiteSpace($LogPath)) {
         throw "Retained log slice was not available: $LogPath"
     }
-
-    New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
 
     $sourceReadLease = $null
     $sourceRequest = $null
     Set-Variable -Name sourceRequest -Option Private -Value $sourceRequest
     Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
     Set-Variable -Name LocalWriterContext -Option Private -Value $LocalWriterContext
+    Set-Variable -Name FrontierParentCustody -Option Private -Value $FrontierParentCustody
+    Set-Variable -Name PreparedFrontierSource -Option Private -Value $PreparedFrontierSource
+    $private:frontierPreparation = $null
+    $private:frontierReports = $null
+    $private:frontierTerminal = $null
+    $private:frontierSource = $null
     $private:localAdoption = $null
     $private:localTerminalReceipt = $null
     $private:publicationRequested = $CaptureLocalSourceOwnership -and $LocalPublication -is [ref] -and $null -eq $LocalPublication.Value
     $process = $null
     try {
         $attemptId = [guid]::NewGuid().ToString('N')
-        $sourceLeaseReference = if ($CaptureLocalSourceOwnership) { [ref]$sourceReadLease } else { $null }
-        $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $LogPath -ReadLease $sourceLeaseReference
-        $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $LogPath
+        if ($null -ne $PreparedFrontierSource) {
+            $private:preparationType = 'NLink.Tools.LocalRetainedSourceRequest+FrontierPrimaryPreparation' -as [type]
+            $private:frontierCompletionType = 'NLink.Tools.LocalGuiWriterRequest+Completion' -as [type]
+            if (-not $CaptureFrontierReports -or -not $CaptureLocalSourceOwnership -or
+                ($LiveRouteProofMode -eq 'None' -and $RouteMode -notlike 'live-*') -or $null -ne $FrontierParentCustody -or
+                $null -eq $private:preparationType -or -not $private:preparationType.IsInstanceOfType($PreparedFrontierSource) -or
+                $null -eq $private:frontierCompletionType -or -not $private:frontierCompletionType.IsInstanceOfType($LocalWriterContext) -or
+                -not $PreparedFrontierSource.TryClaimForAnalysis('Wrapper', [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,
+                    [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, $LogPath, $LocalWriterContext)) {
+                throw 'Prepared frontier source is not available for this retained analysis.'
+            }
+            $private:frontierPreparation = $PreparedFrontierSource
+            $attemptId = $private:frontierPreparation.Request.RequestId.ToString('N')
+        }
+        elseif ($CaptureFrontierReports -and $CaptureLocalSourceOwnership -and ($LiveRouteProofMode -ne 'None' -or $RouteMode -like 'live-*')) {
+            $private:frontierParentType = 'NLink.Tools.LocalGuiWriterRequest+FrontierParentCustody' -as [type]
+            $private:frontierCompletionType = 'NLink.Tools.LocalGuiWriterRequest+Completion' -as [type]
+            if ($null -ne $private:frontierParentType -and $private:frontierParentType.IsInstanceOfType($FrontierParentCustody) -and
+                $null -ne $private:frontierCompletionType -and $private:frontierCompletionType.IsInstanceOfType($LocalWriterContext)) {
+                $private:frontierPreparation = $FrontierParentCustody.TryPreparePrimarySource([guid]$attemptId, 'Wrapper',
+                    [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, $LogPath, $LocalWriterContext)
+            }
+        }
+        if ($null -ne $private:frontierPreparation) {
+            $sourceRequest = $private:frontierPreparation.Request
+            $private:frontierSource = $sourceRequest
+            $inputSha256Before = $private:frontierPreparation.InputSha256
+            $inputLineCountBefore = $private:frontierPreparation.InputLineCount
+        }
+        else {
+            # Only original native preparation can supply a logical source label.
+            if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+                throw "Retained log slice was not available: $LogPath"
+            }
+            $sourceLeaseReference = if ($CaptureLocalSourceOwnership) { [ref]$sourceReadLease } else { $null }
+            $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $LogPath -ReadLease $sourceLeaseReference
+            $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $LogPath
+        }
 
+        New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
         $stdoutPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stdout.txt'
         $stderrPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stderr.txt'
         $diagnosticsPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis-diagnostics.json'
@@ -1270,19 +1373,33 @@ function Invoke-TunaGuiRetainedAnalysis {
             }
             catch { } # Source ownership is optional; preserve the primary launch.
         }
-        if (-not $process.Start()) {
-            throw "Failed to start retained analysis. Artifacts: $AnalysisDir"
+        if ($CaptureFrontierReports -and $null -ne $sourceRequest) {
+            # Internal opt-in only. A started primary always returns its ordinary
+            # readers; optional diagnostic failure must never trigger a restart.
+            $private:frontierReports = if ($null -ne $private:frontierPreparation) {
+                $private:frontierPreparation.StartWorkerWithReports($process, $AnalysisDir, $LiveRouteProofMode, $startedUtc.ToString('O'))
+            }
+            else { $sourceRequest.StartFrontierWorkerWithReports($process, $AnalysisDir, $LiveRouteProofMode, $startedUtc.ToString('O')) }
+            $stdoutTask = $private:frontierReports.Stdout
+            $stderrTask = $private:frontierReports.Stderr
+            if (-not $private:frontierReports.SourceBound -and $null -eq $private:frontierPreparation) { $sourceRequest.Dispose(); $sourceRequest = $null }
         }
-
-        if ($null -ne $sourceRequest) {
-            if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
+        else {
+            if (-not $process.Start()) {
+                throw "Failed to start retained analysis. Artifacts: $AnalysisDir"
+            }
+            if ($null -ne $sourceRequest) {
+                if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
+            }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
         }
-
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)
         while (-not $process.WaitForExit(5000)) {
             if ([DateTimeOffset]::UtcNow -lt $deadlineUtc) {
+                if ($null -ne $private:frontierReports -and $null -ne $private:frontierReports.DiagnosticReceiver) {
+                    try { $null = $private:frontierReports.DiagnosticReceiver.TryAdoptIfOffered() } catch { }
+                }
                 continue
             }
 
@@ -1323,7 +1440,8 @@ function Invoke-TunaGuiRetainedAnalysis {
                 -TimedOut $true `
                 -ExitCodeAvailable $false `
                 -ExitCode -1 `
-                -CompletedProofArtifacts $false | Out-Null
+                -CompletedProofArtifacts $false `
+                -FrontierSourceRequest $private:frontierSource | Out-Null
 
             throw "Retained analysis timed out after ${analysisTimeoutSeconds}s. Artifacts: $AnalysisDir"
         }
@@ -1350,6 +1468,16 @@ function Invoke-TunaGuiRetainedAnalysis {
             -AnalysisDir $AnalysisDir `
             -LogPath $LogPath `
             -LiveRouteProofMode $LiveRouteProofMode
+        if ($null -ne $private:frontierReports -and $null -ne $private:frontierReports.DiagnosticReceiver) {
+            try {
+                $private:frontierTransport = $private:frontierReports.DiagnosticReceiver.TakeAfterExit()
+                if ($null -ne $private:frontierTransport -and $null -ne $private:frontierReports.DiagnosticOutput) {
+                    $private:frontierJoin = $private:frontierReports.DiagnosticOutput.TryJoinDiagnostic($private:frontierTransport)
+                    if ($null -ne $private:frontierJoin) { $private:frontierTerminal = $private:frontierJoin.TryBeginTerminalReceipt() }
+                }
+            }
+            catch { } # Optional diagnostics cannot replace the original receipt.
+        }
         $private:localTerminalReceipt = Write-FileTransferRetainedAnalysisAttemptReceipt `
             -ArtifactDir $AnalysisDir `
             -Owner 'Wrapper' `
@@ -1368,7 +1496,17 @@ function Invoke-TunaGuiRetainedAnalysis {
             -ExitCodeAvailable $true `
             -ExitCode $process.ExitCode `
             -CompletedProofArtifacts $completedProofArtifacts `
-            -LocalPublicationCustody $private:localAdoption
+            -LocalPublicationCustody $private:localAdoption `
+            -FrontierTerminalCustody $private:frontierTerminal `
+            -FrontierSourceRequest $private:frontierSource
+
+        if ($null -ne $private:frontierTerminal) {
+            try {
+                $private:frontierAccepted = $private:frontierTerminal.Take($private:localTerminalReceipt)
+                if ($null -ne $private:frontierAccepted) { $null = $private:frontierAccepted.TryPersistDiagnostic() }
+            }
+            catch { } # Historical evidence only; the original outcome is unchanged.
+        }
 
         if ($null -ne $private:localAdoption) {
             try {
@@ -1390,6 +1528,7 @@ function Invoke-TunaGuiRetainedAnalysis {
             $process.Dispose()
         }
         if ($null -ne $sourceRequest) { $sourceRequest.Dispose() }
+        if ($null -ne $private:frontierPreparation) { $private:frontierPreparation.Dispose() }
         if ($null -ne $private:localAdoption) { $private:localAdoption.Dispose() }
         if ($null -ne $sourceReadLease) { $sourceReadLease.Dispose() }
     }
@@ -1481,9 +1620,11 @@ function Write-TunaGuiDerivedAnalyzerInputReceipt {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][string]$AnalyzerInputPath,
-        [Parameter(Mandatory = $true)][string]$MilestonePath
+        [Parameter(Mandatory = $true)][string]$MilestonePath,
+        [AllowNull()]$FrontierPreparation = $null
     )
 
+    Set-Variable -Name FrontierPreparation -Option Private -Value $FrontierPreparation
     $ledgerPath = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
     if (-not (Test-Path -LiteralPath $ledgerPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $AnalyzerInputPath -PathType Leaf)) {
@@ -1505,7 +1646,8 @@ function Write-TunaGuiDerivedAnalyzerInputReceipt {
         milestonePath = [System.IO.Path]::GetFullPath($MilestonePath)
         milestoneSha256 = $(if ($milestoneExists) { (Get-FileHash -LiteralPath $MilestonePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' })
         derivedAnalyzerInputPath = [System.IO.Path]::GetFullPath($AnalyzerInputPath)
-        derivedAnalyzerInputSha256 = (Get-FileHash -LiteralPath $AnalyzerInputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        derivedAnalyzerInputSha256 = $(if ($null -ne $FrontierPreparation) { $FrontierPreparation.HashAndHoldAnalysisInput() } else {
+            (Get-FileHash -LiteralPath $AnalyzerInputPath -Algorithm SHA256).Hash.ToLowerInvariant() })
         derivedAnalyzerInputLineCount = Get-TunaGuiStrictUtf8LineCount -Path $AnalyzerInputPath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
     }
@@ -1517,13 +1659,30 @@ function Write-TunaGuiDerivedAnalyzerInputReceipt {
 function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
-        [string]$FileName = 'filetransfer-retained-log-slice.log'
+        [string]$FileName = 'filetransfer-retained-log-slice.log',
+        [AllowNull()]$PreparedFrontierSource = $null
     )
 
     $milestonePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'
     $retainedPath = Join-Path $ArtifactDir $FileName
+    Set-Variable -Name PreparedFrontierSource -Option Private -Value $PreparedFrontierSource
+    $private:mergePreparation = $null
+    $private:mergeCompleted = $false
+    if ($null -ne $PreparedFrontierSource) {
+        $private:preparationType = 'NLink.Tools.LocalRetainedSourceRequest+FrontierPrimaryPreparation' -as [type]
+        if ($PreparedFrontierSource -isnot [ref]) { throw 'Prepared frontier merge source requires an original in-process reference.' }
+        if ($null -ne $PreparedFrontierSource.Value) {
+            if ($null -eq $private:preparationType -or -not $private:preparationType.IsInstanceOfType($PreparedFrontierSource.Value) -or
+                -not $PreparedFrontierSource.Value.TryBeginAnalysisInput([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,
+                    [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, [IO.Path]::GetFullPath($retainedPath))) {
+                throw 'Prepared frontier source is not available for this milestone merge.'
+            }
+            $private:mergePreparation = $PreparedFrontierSource.Value
+        }
+    }
     try {
         if (-not (Test-Path -LiteralPath $milestonePath -PathType Leaf)) {
+            $private:mergeCompleted = $true
             return
         }
 
@@ -1537,6 +1696,7 @@ function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
                 }
         )
         if ($milestoneLines.Count -eq 0) {
+            $private:mergeCompleted = $true
             return
         }
 
@@ -1562,18 +1722,34 @@ function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
         }
 
         if ($missingLines.Count -eq 0) {
+            $private:mergeCompleted = $true
             return
         }
 
         $combined = Sort-TunaGuiRetainedLogLinesChronologically -Lines (@($missingLines.ToArray()) + @($existingLines))
 
         [System.IO.File]::WriteAllText($retainedPath, ($combined -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+        $private:mergeCompleted = $true
     }
     finally {
-        Write-TunaGuiDerivedAnalyzerInputReceipt `
-            -ArtifactDir $ArtifactDir `
-            -AnalyzerInputPath $retainedPath `
-            -MilestonePath $milestonePath
+        $private:keepPreparation = $false
+        try {
+            Write-TunaGuiDerivedAnalyzerInputReceipt `
+                -ArtifactDir $ArtifactDir `
+                -AnalyzerInputPath $retainedPath `
+                -MilestonePath $milestonePath `
+                -FrontierPreparation $private:mergePreparation
+            if ($private:mergeCompleted -and $null -ne $private:mergePreparation -and
+                [object]::ReferenceEquals($PreparedFrontierSource.Value, $private:mergePreparation)) {
+                $private:keepPreparation = $private:mergePreparation.TryCompleteAnalysisInput()
+            }
+        }
+        finally {
+            if ($null -ne $private:mergePreparation -and -not $private:keepPreparation) {
+                $private:mergePreparation.Dispose()
+                if ([object]::ReferenceEquals($PreparedFrontierSource.Value, $private:mergePreparation)) { $PreparedFrontierSource.Value = $null }
+            }
+        }
     }
 }
 
@@ -2331,6 +2507,7 @@ $resolvedExe = ''
 $guiSmokeExitCode = -1
 $guiSmokeExitCodeAvailable = $false
 $private:localGuiWriterRelay = $null
+$private:localFrontierRelayHandoff = $null
 Push-Location $repoRoot
 try {
     if ([string]::IsNullOrWhiteSpace($WalletPassword)) {
@@ -2451,10 +2628,19 @@ try {
     if ($RetainedAnalysisOwner -eq 'RouteAcceptance' -and -not [string]::IsNullOrWhiteSpace([string]$env:NLINK_GUI_WRITER_RELAY)) {
         try {
             . (Join-Path $repoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
-            $private:localGuiWriterRelay = [NLink.Tools.LocalGuiWriterRequest]::TryAttachRelay(
-                [string]$env:NLINK_GUI_WRITER_RELAY, [guid]$env:NLINK_GUI_WRITER_RELAY_ID,
-                [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
-                $resolvedArtifactDir)
+            if ($RouteMode -eq 'live-regular-activation-cycle' -and [string]$env:NLINK_GUI_FRONTIER_RELAY_START_V1 -eq '1') {
+                $private:localGuiWriterRelay = [NLink.Tools.LocalGuiWriterRequest]::TryAttachRelayReady(
+                    [string]$env:NLINK_GUI_WRITER_RELAY, [guid]$env:NLINK_GUI_WRITER_RELAY_ID,
+                    [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+                    $resolvedArtifactDir)
+                if ($null -ne $private:localGuiWriterRelay) { $private:localFrontierRelayHandoff = $private:localGuiWriterRelay.TryAttachFrontier() }
+            }
+            else {
+                $private:localGuiWriterRelay = [NLink.Tools.LocalGuiWriterRequest]::TryAttachRelay(
+                    [string]$env:NLINK_GUI_WRITER_RELAY, [guid]$env:NLINK_GUI_WRITER_RELAY_ID,
+                    [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+                    $resolvedArtifactDir)
+            }
         }
         catch { } # Only a live, exact parent request can enable the optional relay.
     }
@@ -2463,7 +2649,8 @@ try {
         -ArtifactDir $resolvedArtifactDir `
         -ExePath $resolvedExe `
         -TimeoutSeconds $TimeoutSeconds `
-        -LocalWriterRelay $private:localGuiWriterRelay
+        -LocalWriterRelay $private:localGuiWriterRelay `
+        -FrontierRelayHandoff $private:localFrontierRelayHandoff
     $guiSmokeExitCodeAvailable = $null -ne $guiSmokeResult -and
         $guiSmokeResult.PSObject.Properties.Name -contains 'ExitCodeAvailable' -and
         [bool]$guiSmokeResult.ExitCodeAvailable

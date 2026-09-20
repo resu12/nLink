@@ -56,10 +56,12 @@ foreach($pair in @(@($route,'Invoke-RouteAcceptanceRetainedAnalysis'),@($wrapper
         $text=$text.Replace($loader,"Join-Path `$script:sourceModuleRoot 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1'")
     }
     if($readLeaseMode) {
-        $hashAssignment=@($definition.FindAll({param($node)
+        $hashAssignments=@($definition.FindAll({param($node)
             $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$inputSha256Before'
         },$true))
-        if($hashAssignment.Count -ne 1 -or $hashAssignment[0].Right.Extent.Text -notlike 'Get-FileTransferEvidenceSha256 *') { throw 'Parent source hash seam changed' }
+        $hashAssignment=@($hashAssignments | Where-Object {$_.Right.Extent.Text -like 'Get-FileTransferEvidenceSha256 *'})
+        $nativeHashAssignment=@($hashAssignments | Where-Object {$_.Right.Extent.Text -ceq '$private:frontierPreparation.InputSha256'})
+        if($hashAssignments.Count -ne 2 -or $hashAssignment.Count -ne 1 -or $nativeHashAssignment.Count -ne 1) { throw 'Parent source hash seam changed' }
         $needle='-ReadLease $sourceLeaseReference'
         if($hashAssignment[0].Extent.Text.Split([string[]]@($needle),[StringSplitOptions]::None).Length -ne 2) { throw 'Parent optional source lease changed' }
         $text=$text.Replace($hashAssignment[0].Extent.Text,($hashAssignment[0].Extent.Text.Replace($needle,'-ReadLease ([ref]$script:inputReadLease)')))

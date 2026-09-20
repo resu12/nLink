@@ -213,7 +213,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     private readonly Func<ISignalingTransport> createTransport;
     private readonly SessionChatService chatService = new();
-    private readonly SessionFileTransferService fileTransferService = new();
+    private readonly SessionFileTransferService fileTransferService = SessionFileTransferService.CreateForApp();
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
     private readonly Dictionary<TransportState, long> transportStateEntryTimestamps = new();
     private readonly Dictionary<string, double> lastDurationMetricsMs = new(StringComparer.Ordinal);

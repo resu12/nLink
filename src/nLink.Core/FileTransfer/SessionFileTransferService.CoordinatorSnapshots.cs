@@ -2872,6 +2872,10 @@ public sealed partial class SessionFileTransferService
     internal static FileTransferCoordinatorTransitionEnvelope
         CreateCoordinatorSnapshotEvidenceForTesting(
             FileTransferCoordinatorTransitionEnvelope envelope)
+        => CreateCoordinatorSnapshotEvidence(envelope);
+
+    internal static FileTransferCoordinatorTransitionEnvelope
+        CreateCoordinatorSnapshotEvidence(FileTransferCoordinatorTransitionEnvelope envelope)
         => CoordinatorSnapshotStreamEmitter.CreateEvidenceEnvelope(envelope);
 
     private sealed class CoordinatorSnapshotStreamEmitter
@@ -2888,6 +2892,12 @@ public sealed partial class SessionFileTransferService
             }
         }
         private readonly ConcurrentQueue<string> pending = new();
+        private readonly ConcurrentDictionary<string, FrontierCompletionWriteBinding> frontierCompletionMessages =
+            new(ReferenceEqualityComparer.Instance);
+        private FrontierCompletionWriteBinding? stagedFrontierCompletion;
+        private readonly TaskCompletionSource finalSubmission = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal Task FinalSubmission => finalSubmission.Task;
+        private string? finalMessage;
         private readonly object stateGate = new();
         private int drainScheduled;
         private bool started;
@@ -2959,6 +2969,21 @@ public sealed partial class SessionFileTransferService
             }
         }
 
+        internal void StageFrontierCompletion(FrontierCompletionWriteBinding binding, FileTransferCoordinatorTransitionEnvelope envelope)
+        {
+            lock (stateGate)
+            {
+                if (completed || stagedFrontierCompletion is not null || !binding.TryStage(envelope, this))
+                {
+                    binding.Revoke();
+                    stagedFrontierCompletion?.Revoke();
+                    stagedFrontierCompletion = null;
+                    return;
+                }
+                stagedFrontierCompletion = binding;
+            }
+        }
+
         internal void Enqueue(FileTransferCoordinatorTransitionEnvelope envelope)
         {
             lock (stateGate)
@@ -2983,7 +3008,10 @@ public sealed partial class SessionFileTransferService
 
                 var evidenceEnvelope = CreateEvidenceEnvelope(envelope);
                 var payloadHash = evidenceEnvelope.CalculatePayloadSha256();
-                pending.Enqueue(
+                var completion = stagedFrontierCompletion;
+                stagedFrontierCompletion = null;
+                if (completion?.TryEnqueue(envelope) != true) { completion = null; }
+                var message =
                     "event=filetransfer_coordinator_transition_snapshot; " +
                     $"snapshot_contract_version={evidenceEnvelope.SnapshotContractVersion}; " +
                     $"snapshot_selection_mode={evidenceEnvelope.SnapshotSelectionMode}; " +
@@ -2994,7 +3022,11 @@ public sealed partial class SessionFileTransferService
                     $"direction={evidenceEnvelope.Direction}; transition_id={evidenceEnvelope.TransitionId}; " +
                     $"before_state_generation={evidenceEnvelope.Aggregate.BeforeStateGeneration}; " +
                     $"after_state_generation={evidenceEnvelope.Aggregate.AfterStateGeneration}; " +
-                    $"snapshot_sha256={payloadHash}; snapshot_payload={evidenceEnvelope.ToBase64UrlPayload()}; authority_effect=none");
+                    $"snapshot_sha256={payloadHash}; snapshot_payload={evidenceEnvelope.ToBase64UrlPayload()}; authority_effect=none";
+                // Key by the exact queued string object, never by equal text or parsed IDs.
+                // At most the native catalog's 16 admitted producers can supply bindings.
+                if (completion is not null) { frontierCompletionMessages.TryAdd(message, completion); }
+                pending.Enqueue(message);
                 transitionCount++;
                 finalGeneration = envelope.Aggregate.AfterStateGeneration;
                 finalHash = EvidenceToken(envelope.Aggregate.AfterStateFingerprint);
@@ -3078,8 +3110,9 @@ public sealed partial class SessionFileTransferService
                 }
 
                 completed = true;
-                pending.Enqueue(
-                    "event=filetransfer_coordinator_snapshot_stream_completed; " +
+                stagedFrontierCompletion?.Revoke();
+                stagedFrontierCompletion = null;
+                finalMessage = "event=filetransfer_coordinator_snapshot_stream_completed; " +
                     $"snapshot_contract_version={FileTransferCoordinatorTransitionEnvelope.CurrentContractVersion}; " +
                     "snapshot_selection_mode=SnapshotV1Authoritative; " +
                     $"snapshot_catalog_version={CoordinatorSnapshotCatalogVersion}; " +
@@ -3090,7 +3123,8 @@ public sealed partial class SessionFileTransferService
                     $"final_state_hash={finalHash}; transition_count={transitionCount}; " +
                     $"emitted_family_coverage={CoordinatorSnapshotEmittedFamilyCoverage}; " +
                     $"shadow_family_coverage={CoordinatorSnapshotShadowFamilyCoverage}; " +
-                    $"authoritative_family_coverage={CoordinatorSnapshotAuthoritativeFamilyCoverage}; authority_effect=none");
+                    $"authoritative_family_coverage={CoordinatorSnapshotAuthoritativeFamilyCoverage}; authority_effect=none";
+                pending.Enqueue(finalMessage);
             }
 
             ScheduleDrain();
@@ -3820,13 +3854,19 @@ public sealed partial class SessionFileTransferService
                 preferLocal: false);
         }
 
+        // Scheduling readiness only: all messages through the original final
+        // stream message have reached the writer. Exact persistence is separate.
+        internal bool WaitForFinalSubmission(TimeSpan timeout) => finalSubmission.Task.Wait(timeout);
+
         private void Drain()
         {
             while (true)
             {
                 while (pending.TryDequeue(out var message))
                 {
-                    LocalOperationalLog.Info("FileTransferCoordinator", message);
+                    if (frontierCompletionMessages.TryRemove(message, out var completion)) { completion.Write(message); }
+                    else { LocalOperationalLog.Info("FileTransferCoordinator", message); }
+                    if (ReferenceEquals(message, finalMessage)) { finalSubmission.TrySetResult(); }
                 }
 
                 Interlocked.Exchange(ref drainScheduled, 0);

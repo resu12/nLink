@@ -10,6 +10,7 @@ if ($null -eq ('NLink.Tools.GuiSmokeLogLedgerStreamingProcessor' -as [type])) {
 
 $script:GuiSmokeLegacyV0EvidenceCatalog = $null
 $script:GuiSmokeLiveDiagnosticEvidenceEventNames = @(
+    'filetransfer_frontier_publication_receipt_closed',
     'filetransfer_fallback_v6_proof_bootstrap_trigger_bound',
     'filetransfer_fallback_v6_proof_bootstrap_peer_first_wake_decided',
     'filetransfer_fallback_v6_proof_bootstrap_pending_write_deferred',
@@ -176,9 +177,12 @@ function Enable-GuiSmokeAppendOnlyLogLedgerState {
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)][string]$Path,
-        [long]$MaximumBytes = 4L * 1024L * 1024L * 1024L
+        [long]$MaximumBytes = 4L * 1024L * 1024L * 1024L,
+        [AllowNull()]$FrontierOwner = $null,
+        [AllowNull()]$FrontierOrigin = $null
     )
 
+    Set-Variable -Name FrontierOwner,FrontierOrigin -Option Private
     if ($MaximumBytes -le 0) {
         throw 'Gui smoke append-only ledger maximum bytes must be positive.'
     }
@@ -192,10 +196,22 @@ function Enable-GuiSmokeAppendOnlyLogLedgerState {
         throw "gui_smoke_append_only_log_parent_missing:$resolvedPath"
     }
 
-    [void][IO.Directory]::CreateDirectory($directory)
-    $stream = [IO.File]::Open($resolvedPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
-    $stream.Flush($true)
-    $stream.Dispose()
+    $sourceCreated = $false
+    if ($null -ne $FrontierOwner) {
+        if ($FrontierOwner -isnot [NLink.Tools.LocalGuiWriterRequest+FrontierLaunchOwner] -or
+            $FrontierOrigin -isnot [ref] -or $null -ne $FrontierOrigin.Value) {
+            throw 'gui_smoke_frontier_ledger_owner_invalid'
+        }
+        $private:origin = $FrontierOwner.TryCreateLedgerOriginForGui($resolvedPath, [ref]$sourceCreated)
+        if ($null -ne $origin -and $origin.IsCurrent) { $FrontierOrigin.Value = $origin }
+        elseif ($null -ne $origin) { $origin.Dispose() }
+    }
+    if (-not $sourceCreated) {
+        [void][IO.Directory]::CreateDirectory($directory)
+        $stream = [IO.File]::Open($resolvedPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $stream.Flush($true)
+        $stream.Dispose()
+    }
 
     $generationKey = 'append-only:' + (Get-GuiSmokeLogLedgerHash -Value $resolvedPath.ToLowerInvariant())
     $creationTicks = [IO.File]::GetCreationTimeUtc($resolvedPath).Ticks

@@ -2,6 +2,14 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'LocalInputReadLease.ps1')
 if ($null -eq ('NLink.Tools.LocalRetainedSourceRequest' -as [type])) { throw 'native_source_request_type_unavailable' }
 
+function Open-FileTransferRetainedSourceOwner {
+    param([string]$Name, [guid]$RequestId, [string]$Path, [string]$Run, [string]$Scenario, [switch]$FrontierReady)
+    if ($FrontierReady) {
+        return [NLink.Tools.LocalRetainedSourceRequest]::TryAttachFrontierReady($Name, $RequestId, $Path, $Run, $Scenario)
+    }
+    return [NLink.Tools.LocalRetainedSourceRequest]::TryAttach($Name, $RequestId, $Path, $Run, $Scenario)
+}
+
 function New-FileTransferRetainedSourceRequest {
     param($ReadLease, [string]$AttemptId, [string]$Owner, [long]$LineCount, $WriterContext = $null, [bool]$PublicationRequested = $false)
     try {

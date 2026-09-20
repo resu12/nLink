@@ -94,13 +94,20 @@ function Write-FileTransferEvidenceAtomicJson {
 }
 
 function Get-FileTransferEvidenceSha256 {
-    param([AllowEmptyString()][string]$Path, $ReadLease = $null)
+    param([AllowEmptyString()][string]$Path, $ReadLease = $null, $OwnedSource = $null)
 
+    if ($null -ne $OwnedSource) {
+        $sourceType = 'NLink.Tools.LocalRetainedSourceRequest+TerminalSourceRead' -as [type]
+        if ($null -eq $sourceType -or -not $sourceType.IsInstanceOfType($OwnedSource) -or -not $OwnedSource.CanRead -or $null -ne $ReadLease) {
+            throw 'frontier_terminal_hash_source_type'
+        }
+    }
     if ($null -ne $ReadLease -and ($ReadLease -isnot [ref] -or $null -ne $ReadLease.Value)) {
         throw 'input_read_lease_requires_empty_reference'
     }
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    # An original owned reader uses a logical label, not a filesystem locator.
+    if ([string]::IsNullOrWhiteSpace($Path) -or ($null -eq $OwnedSource -and -not (Test-Path -LiteralPath $Path -PathType Leaf))) {
         return ''
     }
 
@@ -121,7 +128,7 @@ function Get-FileTransferEvidenceSha256 {
         }
     }
 
-    $stream = [System.IO.File]::OpenRead($Path)
+    $stream = if ($null -ne $OwnedSource) { $OwnedSource } else { [System.IO.File]::OpenRead($Path) }
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
@@ -133,14 +140,30 @@ function Get-FileTransferEvidenceSha256 {
 }
 
 function Get-FileTransferEvidenceLineCount {
-    param([AllowEmptyString()][string]$Path)
+    param([AllowEmptyString()][string]$Path, $OwnedSource = $null, $ReadLease = $null)
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    if ($null -ne $ReadLease) {
+        $leaseType = 'NLink.Tools.LocalInputReadLease' -as [type]
+        if ($null -ne $OwnedSource -or $null -eq $leaseType -or -not $leaseType.IsInstanceOfType($ReadLease)) {
+            throw 'frontier_primary_count_source_type'
+        }
+        return $ReadLease.CountFrontierSourceLines($Path)
+    }
+
+    if ($null -ne $OwnedSource) {
+        $sourceType = 'NLink.Tools.LocalRetainedSourceRequest+TerminalSourceRead' -as [type]
+        if ($null -eq $sourceType -or -not $sourceType.IsInstanceOfType($OwnedSource) -or -not $OwnedSource.CanRead) {
+            throw 'frontier_terminal_count_source_type'
+        }
+    }
+    # The verified native file can exist independently of the legacy label.
+    if ([string]::IsNullOrWhiteSpace($Path) -or ($null -eq $OwnedSource -and -not (Test-Path -LiteralPath $Path -PathType Leaf))) {
         return -1L
     }
 
     $count = 0L
-    $reader = [System.IO.StreamReader]::new($Path, [System.Text.UTF8Encoding]::new($false, $true), $true)
+    $reader = if ($null -ne $OwnedSource) { [System.IO.StreamReader]::new($OwnedSource, [System.Text.UTF8Encoding]::new($false, $true), $true) }
+        else { [System.IO.StreamReader]::new($Path, [System.Text.UTF8Encoding]::new($false, $true), $true) }
     try {
         while ($null -ne $reader.ReadLine()) {
             $count++
@@ -249,10 +272,28 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         [Parameter(Mandatory = $true)][bool]$ExitCodeAvailable,
         [Parameter(Mandatory = $true)][int]$ExitCode,
         [Parameter(Mandatory = $true)][bool]$CompletedProofArtifacts,
-        [AllowNull()]$LocalPublicationCustody = $null
+        [AllowNull()]$LocalPublicationCustody = $null,
+        [AllowNull()]$FrontierTerminalCustody = $null,
+        [AllowNull()]$FrontierSourceRequest = $null
     )
 
     $receiptPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-attempt-receipt.json'
+    Set-Variable -Name FrontierTerminalCustody -Option Private -Value $FrontierTerminalCustody
+    Set-Variable -Name FrontierSourceRequest -Option Private -Value $FrontierSourceRequest
+    if ($null -ne $FrontierSourceRequest) {
+        $private:frontierSourceType = 'NLink.Tools.LocalRetainedSourceRequest' -as [type]
+        if ($null -eq $private:frontierSourceType -or -not $private:frontierSourceType.IsInstanceOfType($FrontierSourceRequest)) {
+            throw 'frontier_terminal_source_type'
+        }
+    }
+    $private:frontierReceiptPrepared = $false
+    $private:frontierReceiptRecorded = $false
+    if ($null -ne $FrontierTerminalCustody) {
+        $private:frontierCustodyType = 'NLink.Tools.LocalRetainedSourceRequest+FrontierPrimaryOutput+TerminalReceiptCustody' -as [type]
+        if ($null -eq $private:frontierCustodyType -or -not $private:frontierCustodyType.IsInstanceOfType($FrontierTerminalCustody)) {
+            $FrontierTerminalCustody = $null
+        }
+    }
     Set-Variable -Name LocalPublicationCustody -Option Private -Value $LocalPublicationCustody
     if ($null -ne $LocalPublicationCustody) {
         $private:localCustodyType = 'NLink.Tools.LocalRetainedSourceRequest+ParentAdoptionCustody' -as [type]
@@ -260,12 +301,25 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
             $LocalPublicationCustody = $null
         }
     }
+    try {
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
         throw "retained_analysis_attempt_receipt_already_terminal:$receiptPath"
     }
 
-    $inputSha256After = Get-FileTransferEvidenceSha256 -Path $LogPath
-    $inputLineCountAfter = Get-FileTransferEvidenceLineCount -Path $LogPath
+    if ($null -eq $FrontierSourceRequest) {
+        $inputSha256After = Get-FileTransferEvidenceSha256 -Path $LogPath
+        $inputLineCountAfter = Get-FileTransferEvidenceLineCount -Path $LogPath
+    }
+    else {
+        $private:frontierSourceRead = $FrontierSourceRequest.TryOpenTerminalSource($LogPath)
+        if ($null -eq $private:frontierSourceRead) { throw 'frontier_terminal_source_hash_unavailable' }
+        try { $inputSha256After = Get-FileTransferEvidenceSha256 -Path $LogPath -OwnedSource $private:frontierSourceRead }
+        finally { $private:frontierSourceRead.Dispose() }
+        $private:frontierSourceRead = $FrontierSourceRequest.TryOpenTerminalSource($LogPath)
+        if ($null -eq $private:frontierSourceRead) { throw 'frontier_terminal_source_count_unavailable' }
+        try { $inputLineCountAfter = Get-FileTransferEvidenceLineCount -Path $LogPath -OwnedSource $private:frontierSourceRead }
+        finally { $private:frontierSourceRead.Dispose() }
+    }
     $inputUnchanged = -not [string]::IsNullOrWhiteSpace($InputSha256Before) -and
         [string]::Equals($InputSha256Before, $inputSha256After, [System.StringComparison]::OrdinalIgnoreCase) -and
         $InputLineCountBefore -eq $inputLineCountAfter
@@ -362,6 +416,10 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
         try { $private:localReceiptPrepared = $LocalPublicationCustody.PrepareReceipt($receipt, $receiptPath) }
         catch { } # Optional custody cannot replace the primary receipt write.
     }
+    if ($null -ne $FrontierTerminalCustody) {
+        try { $private:frontierReceiptPrepared = $FrontierTerminalCustody.PrepareReceipt($receipt, $receiptPath, $FrontierSourceRequest) }
+        catch { } # Diagnostic omission cannot replace the original write.
+    }
     try {
         Write-FileTransferEvidenceAtomicJson -Path $receiptPath -Value $receipt
         $private:localReceiptReturn = [pscustomobject]$receipt
@@ -369,11 +427,21 @@ function Write-FileTransferRetainedAnalysisAttemptReceipt {
             try { $private:localReceiptRecorded = $LocalPublicationCustody.RecordWrittenReceipt($receipt, $private:localReceiptReturn) }
             catch { }
         }
+        if ($private:frontierReceiptPrepared) {
+            try { $private:frontierReceiptRecorded = $FrontierTerminalCustody.RecordWrittenReceipt($receipt, $private:localReceiptReturn) }
+            catch { }
+        }
         return $private:localReceiptReturn
     }
     finally {
         if ($null -ne $LocalPublicationCustody -and -not $private:localReceiptRecorded) {
             try { $LocalPublicationCustody.Dispose() } catch { }
+        }
+    }
+    }
+    finally {
+        if ($null -ne $FrontierTerminalCustody -and -not $private:frontierReceiptRecorded) {
+            try { $FrontierTerminalCustody.Dispose() } catch { }
         }
     }
 }

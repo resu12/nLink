@@ -62,7 +62,12 @@ public sealed class RollingFileLogger
         => _ = TryWriteLine(line);
 
     internal RollingFileWriteResult TryWriteLine(string line)
+        => TryWriteLine(line, captureSource: false, freezeSource: false, out _);
+
+    internal RollingFileWriteResult TryWriteLine(string line, bool captureSource, bool freezeSource,
+        out OperationalLogNativeAppend? append, bool retainProvisional = false)
     {
+        append = null;
         var text = line ?? string.Empty;
         try
         {
@@ -82,7 +87,9 @@ public sealed class RollingFileLogger
                 {
                     EnsureDirectoryExists();
                     RotateIfNeededCore();
-                    File.AppendAllText(logFilePath, text + Environment.NewLine, Encoding.UTF8);
+                    if (captureSource && OperatingSystem.IsWindows())
+                    { append = OperationalLogNativeAppend.Write(logFilePath, text, freezeSource, retainProvisional); }
+                    else { File.AppendAllText(logFilePath, text + Environment.NewLine, Encoding.UTF8); }
                     return RollingFileWriteResult.Succeeded;
                 }
                 finally

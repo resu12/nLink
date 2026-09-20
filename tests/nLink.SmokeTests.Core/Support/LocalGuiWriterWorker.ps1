@@ -4,6 +4,13 @@ Set-StrictMode -Version Latest
 $settings=[IO.File]::ReadAllText($env:NLINK_GUI_WRITER_TEST_SETTINGS) | ConvertFrom-Json
 $RepoRoot=[string]$settings.RepoRoot; $Directory=[string]$settings.Directory; $mode=[string]$settings.Mode
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
+$nativeLaunch=$null
+if($settings.PSObject.Properties.Name -contains 'FrontierLaunch' -and $settings.FrontierLaunch) {
+    if($env:NLINK_GUI_FRONTIER_START_V1 -cne '1') {throw 'Original GUI parent omitted readiness selector'}
+    $nativeLaunch=[NLink.Tools.LocalGuiWriterRequest]::TryAttachFrontierLauncherReady($env:NLINK_GUI_WRITER_REQUEST,
+        [guid]$env:NLINK_GUI_WRITER_REQUEST_ID,$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,$Directory)
+    if($null -eq $nativeLaunch -or -not $nativeLaunch.IsCurrent) {throw 'Original GUI parent failed early native attachment'}
+} elseif(-not [string]::IsNullOrEmpty($env:NLINK_GUI_FRONTIER_START_V1)) {throw 'Default GUI parent inherited native readiness'}
 . (Join-Path $RepoRoot 'tools/GuiSmokeLogLedger.ps1')
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools/GuiSmoke-Windows.ps1'),[ref]$tokens,[ref]$errors)
@@ -67,6 +74,10 @@ $second=[NLink.Tools.LocalGuiWriterRequest]::TryAttach([string]$env:NLINK_GUI_WR
     $(if($env:NLINK_GUI_WRITER_REQUEST_ID) { [guid]$env:NLINK_GUI_WRITER_REQUEST_ID } else { [guid]::Empty }),
     $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,$Directory)
 if($null -ne $second) { $second.Dispose(); throw 'Second issuer attached' }
+if($null -ne $nativeLaunch) {
+    if($nativeLaunch.IsCurrent) {throw 'Original finalizer failed to retire early native ownership'}
+    $nativeLaunch.Dispose()
+}
 $result=@{NativeCapture=$null -ne $capture; Stages=$script:stages.ToArray(); PrimaryFailure=$failure; PrivateIssuerNotExposed=$true}
 [IO.File]::WriteAllText((Join-Path $Directory 'worker-result.json'),($result | ConvertTo-Json -Depth 4))
 if($mode -ceq 'nonzero') { exit 7 }

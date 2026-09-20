@@ -3236,7 +3236,18 @@ internal readonly record struct FileTransferLegStartRequest(
 
 internal sealed class LiveRouteEpoch
 {
-    public RoutePublicationToken? RoutePublicationToken { get; set; }
+    // Passive fixture-only observation; never participates in runtime authority.
+    internal event Action<string>? FrontierPublicationSourceChanged;
+    private RoutePublicationToken? routePublicationToken;
+    public RoutePublicationToken? RoutePublicationToken
+    {
+        get => routePublicationToken;
+        set
+        {
+            if (value != routePublicationToken) { FrontierPublicationSourceChanged?.Invoke("LiveRouteEpoch.RoutePublicationToken"); }
+            routePublicationToken = value;
+        }
+    }
 
     public required int EpochId { get; init; }
 
@@ -3248,7 +3259,16 @@ internal sealed class LiveRouteEpoch
 
     public required string Reason { get; init; }
 
-    public required string State { get; set; }
+    private string state = "";
+    public required string State
+    {
+        get => state;
+        set
+        {
+            if (value != state) { FrontierPublicationSourceChanged?.Invoke("LiveRouteEpoch.State"); }
+            state = value;
+        }
+    }
 }
 
 internal enum FileTransferLegState
@@ -3263,6 +3283,15 @@ internal enum FileTransferLegState
 
 internal sealed class FileTransferLeg
 {
+    internal event Action<string>? FrontierPublicationSourceChanged;
+
+    private void SetPublicationSource<T>(ref T field, T value, string member)
+    {
+        if (FrontierPublicationSourceChanged is { } changed && !EqualityComparer<T>.Default.Equals(field, value))
+        { changed("FileTransferLeg." + member); }
+        field = value;
+    }
+
     public required string LegId { get; init; }
 
     public required int Generation { get; init; }
@@ -3273,13 +3302,23 @@ internal sealed class FileTransferLeg
 
     public required int LiveRouteEpochId { get; init; }
 
-    public required long TransportEpochId { get; set; }
+    private long transportEpochId;
+    public required long TransportEpochId
+    {
+        get => transportEpochId;
+        set => SetPublicationSource(ref transportEpochId, value, nameof(TransportEpochId));
+    }
 
     public required DateTimeOffset StartedUtc { get; init; }
 
     public DateTimeOffset? FrozenUtc { get; set; }
 
-    public FileTransferLegState State { get; set; } = FileTransferLegState.Active;
+    private FileTransferLegState state = FileTransferLegState.Active;
+    public FileTransferLegState State
+    {
+        get => state;
+        set => SetPublicationSource(ref state, value, nameof(State));
+    }
 
     public int StartCommittedChunkIndex { get; init; }
 
@@ -3287,15 +3326,30 @@ internal sealed class FileTransferLeg
 
     public int ProvenHighestObservedChunkIndex { get; set; } = -1;
 
-    public string? CheckpointRequestId { get; set; }
+    private string? checkpointRequestId;
+    public string? CheckpointRequestId
+    {
+        get => checkpointRequestId;
+        set => SetPublicationSource(ref checkpointRequestId, value, nameof(CheckpointRequestId));
+    }
 
     public string? CheckpointPriority { get; set; }
 
     public DateTimeOffset? CheckpointRequestedUtc { get; set; }
 
-    public int CheckpointGeneration { get; set; }
+    private int checkpointGeneration;
+    public int CheckpointGeneration
+    {
+        get => checkpointGeneration;
+        set => SetPublicationSource(ref checkpointGeneration, value, nameof(CheckpointGeneration));
+    }
 
-    public int BridgeRecoveryGeneration { get; set; }
+    private int bridgeRecoveryGeneration;
+    public int BridgeRecoveryGeneration
+    {
+        get => bridgeRecoveryGeneration;
+        set => SetPublicationSource(ref bridgeRecoveryGeneration, value, nameof(BridgeRecoveryGeneration));
+    }
 
     public bool CanSendData { get; set; } = true;
 

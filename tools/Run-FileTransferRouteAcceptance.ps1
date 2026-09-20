@@ -6832,14 +6832,14 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         [ValidateSet("None", "SwitchOff", "MultiToggle", "RegularActivationCycle")]
         [string]$LiveRouteProofMode = "None",
         [switch]$CaptureLocalSourceOwnership,
+        [switch]$CaptureFrontierReports,
         [AllowNull()]$LocalWriterContext = $null,
-        [AllowNull()]$LocalPublication = $null
+        [AllowNull()]$LocalPublication = $null,
+        [AllowNull()]$FrontierParentCustody = $null,
+        [AllowNull()]$FrontierRelayCustody = $null
     )
 
     $logPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
-    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
-        throw "Retained log slice missing: $logPath"
-    }
 
     $receiptPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-attempt-receipt.json'
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
@@ -6851,15 +6851,56 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
     Set-Variable -Name sourceRequest -Option Private -Value $sourceRequest
     Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
     Set-Variable -Name LocalWriterContext -Option Private -Value $LocalWriterContext
+    Set-Variable -Name FrontierParentCustody -Option Private -Value $FrontierParentCustody
+    Set-Variable -Name FrontierRelayCustody -Option Private -Value $FrontierRelayCustody
+    $private:frontierPreparation = $null
+    $private:frontierReports = $null
+    $private:frontierTerminal = $null
+    $private:frontierSource = $null
     $private:localAdoption = $null
     $private:localTerminalReceipt = $null
     $private:publicationRequested = $CaptureLocalSourceOwnership -and $LocalPublication -is [ref] -and $null -eq $LocalPublication.Value
     $process = $null
     try {
         $attemptId = [guid]::NewGuid().ToString('N')
-        $sourceLeaseReference = if ($CaptureLocalSourceOwnership) { [ref]$sourceReadLease } else { $null }
-        $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $logPath -ReadLease $sourceLeaseReference
-        $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $logPath
+        if ($CaptureFrontierReports -and $CaptureLocalSourceOwnership) {
+            $private:frontierParentType = 'NLink.Tools.LocalGuiWriterRequest+FrontierParentCustody' -as [type]
+            $private:frontierCompletionType = 'NLink.Tools.LocalGuiWriterRequest+Completion' -as [type]
+            if ($null -ne $private:frontierParentType -and $private:frontierParentType.IsInstanceOfType($FrontierParentCustody) -and
+                $null -ne $private:frontierCompletionType -and $private:frontierCompletionType.IsInstanceOfType($LocalWriterContext)) {
+                $private:frontierPreparation = $FrontierParentCustody.TryPreparePrimarySource([guid]$attemptId, 'RouteAcceptance',
+                    [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID, $logPath, $LocalWriterContext)
+            }
+        }
+        if ($null -ne $private:frontierPreparation) {
+            $sourceRequest = $private:frontierPreparation.Request
+            $private:frontierSource = $sourceRequest
+            $inputSha256Before = $private:frontierPreparation.InputSha256
+            $inputLineCountBefore = $private:frontierPreparation.InputLineCount
+        }
+        else {
+            # A failed/missing native preparation still requires the ordinary file.
+            if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+                throw "Retained log slice missing: $logPath"
+            }
+            $sourceLeaseReference = if ($CaptureLocalSourceOwnership) { [ref]$sourceReadLease } else { $null }
+            $inputSha256Before = Get-FileTransferEvidenceSha256 -Path $logPath -ReadLease $sourceLeaseReference
+            $inputLineCountBefore = Get-FileTransferEvidenceLineCount -Path $logPath
+            if ($CaptureFrontierReports -and $CaptureLocalSourceOwnership -and $null -eq $FrontierParentCustody) {
+                $private:relayCustodyType = 'NLink.Tools.LocalGuiWriterRequest+FrontierRelayCustody' -as [type]
+                if ($null -ne $private:relayCustodyType -and $private:relayCustodyType.IsInstanceOfType($FrontierRelayCustody)) {
+                    # The original ordinary source passes decide compatibility.
+                    # A mismatch omits native diagnostics, never the original input.
+                    $private:frontierPreparation = $FrontierRelayCustody.TryPreparePrimarySource([guid]$attemptId,
+                        [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+                        $logPath, $LocalWriterContext, $sourceReadLease, $inputLineCountBefore)
+                    if ($null -ne $private:frontierPreparation) {
+                        $sourceRequest = $private:frontierPreparation.Request
+                        $private:frontierSource = $sourceRequest
+                    }
+                }
+            }
+        }
         $analysisStdoutPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stdout.txt'
         $analysisStderrPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stderr.txt'
         $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
@@ -6901,7 +6942,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         $process.StartInfo = $startInfo
         $stdoutTask = $null
         $stderrTask = $null
-        if ($CaptureLocalSourceOwnership -and $null -ne $sourceReadLease) {
+        if ($CaptureLocalSourceOwnership -and $null -ne $sourceReadLease -and $null -eq $private:frontierPreparation) {
             try {
                 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/FileTransferOps/LocalRetainedSourceRequest.ps1')
                 $sourceRequest = New-FileTransferRetainedSourceRequest -ReadLease $sourceReadLease -AttemptId $attemptId -Owner 'RouteAcceptance' -LineCount $inputLineCountBefore -WriterContext $LocalWriterContext -PublicationRequested $private:publicationRequested
@@ -6913,19 +6954,33 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             }
             catch { } # Source ownership is optional; preserve the primary launch.
         }
-        if (-not $process.Start()) {
-            throw "Failed to start FileTransfer-Ops retained analysis for $ArtifactDir"
+        if ($CaptureFrontierReports -and $null -ne $sourceRequest) {
+            # Internal opt-in only. A started primary always returns its ordinary
+            # readers; optional diagnostic failure must never trigger a restart.
+            $private:frontierReports = if ($null -ne $private:frontierPreparation) {
+                $private:frontierPreparation.StartWorkerWithReports($process, $ArtifactDir, $LiveRouteProofMode, $startedUtc.ToString('O'))
+            }
+            else { $sourceRequest.StartFrontierWorkerWithReports($process, $ArtifactDir, $LiveRouteProofMode, $startedUtc.ToString('O')) }
+            $stdoutTask = $private:frontierReports.Stdout
+            $stderrTask = $private:frontierReports.Stderr
+            if (-not $private:frontierReports.SourceBound -and $null -eq $private:frontierPreparation) { $sourceRequest.Dispose(); $sourceRequest = $null }
         }
-
-        if ($null -ne $sourceRequest) {
-            if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
+        else {
+            if (-not $process.Start()) {
+                throw "Failed to start FileTransfer-Ops retained analysis for $ArtifactDir"
+            }
+            if ($null -ne $sourceRequest) {
+                if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
+            }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
         }
-
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)
         while (-not $process.WaitForExit(5000)) {
             if ([DateTimeOffset]::UtcNow -lt $deadlineUtc) {
+                if ($null -ne $private:frontierReports -and $null -ne $private:frontierReports.DiagnosticReceiver) {
+                    try { $null = $private:frontierReports.DiagnosticReceiver.TryAdoptIfOffered() } catch { }
+                }
                 continue
             }
 
@@ -6966,7 +7021,8 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
                 -TimedOut $true `
                 -ExitCodeAvailable $false `
                 -ExitCode -1 `
-                -CompletedProofArtifacts $false | Out-Null
+                -CompletedProofArtifacts $false `
+                -FrontierSourceRequest $private:frontierSource | Out-Null
 
             throw "FileTransfer-Ops retained analysis timed out after ${analysisTimeoutSeconds}s for $ArtifactDir"
         }
@@ -6991,6 +7047,16 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         $completedProofArtifacts = Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts `
             -ArtifactDir $ArtifactDir `
             -LiveRouteProofMode $LiveRouteProofMode
+        if ($null -ne $private:frontierReports -and $null -ne $private:frontierReports.DiagnosticReceiver) {
+            try {
+                $private:frontierTransport = $private:frontierReports.DiagnosticReceiver.TakeAfterExit()
+                if ($null -ne $private:frontierTransport -and $null -ne $private:frontierReports.DiagnosticOutput) {
+                    $private:frontierJoin = $private:frontierReports.DiagnosticOutput.TryJoinDiagnostic($private:frontierTransport)
+                    if ($null -ne $private:frontierJoin) { $private:frontierTerminal = $private:frontierJoin.TryBeginTerminalReceipt() }
+                }
+            }
+            catch { } # Optional diagnostics cannot replace the original receipt.
+        }
         $private:localTerminalReceipt = Write-FileTransferRetainedAnalysisAttemptReceipt `
             -ArtifactDir $ArtifactDir `
             -Owner 'RouteAcceptance' `
@@ -7009,7 +7075,16 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             -ExitCodeAvailable $true `
             -ExitCode $process.ExitCode `
             -CompletedProofArtifacts $completedProofArtifacts `
-            -LocalPublicationCustody $private:localAdoption
+            -LocalPublicationCustody $private:localAdoption `
+            -FrontierTerminalCustody $private:frontierTerminal `
+            -FrontierSourceRequest $private:frontierSource
+        if ($null -ne $private:frontierTerminal) {
+            try {
+                $private:frontierAccepted = $private:frontierTerminal.Take($private:localTerminalReceipt)
+                if ($null -ne $private:frontierAccepted) { $null = $private:frontierAccepted.TryPersistDiagnostic() }
+            }
+            catch { } # Historical evidence only; the original outcome is unchanged.
+        }
         if ($null -ne $private:localAdoption) {
             try {
                 $private:localAdopted = $private:localAdoption.Take($private:localTerminalReceipt)
@@ -7029,6 +7104,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             $process.Dispose()
         }
         if ($null -ne $sourceRequest) { $sourceRequest.Dispose() }
+        if ($null -ne $private:frontierPreparation) { $private:frontierPreparation.Dispose() }
         if ($null -ne $private:localAdoption) { $private:localAdoption.Dispose() }
         if ($null -ne $sourceReadLease) { $sourceReadLease.Dispose() }
     }
@@ -7581,13 +7657,17 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [AllowNull()]$LocalWriterRelay = $null,
-        [string]$LocalWriterArtifactDir = ''
+        [string]$LocalWriterArtifactDir = '',
+        [AllowNull()]$FrontierRelayCustody = $null
     )
 
     Set-Variable -Name LocalWriterRelay -Option Private -Value $LocalWriterRelay
+    Set-Variable -Name FrontierRelayCustody -Option Private -Value $FrontierRelayCustody
     $private:relayRequest = $null
     $private:relayProcess = $null
     $private:relayOutputCaptured = $false
+    $private:relayReports = $null
+    $private:pendingRelayCustody = $null
     $previousErrorActionPreference = $ErrorActionPreference
     $oldRetainedAnalysisCompact = $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT
     try {
@@ -7627,15 +7707,28 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
             }
             $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY'] = $private:relayRequest.Name
             $private:relayStartInfo.EnvironmentVariables['NLINK_GUI_WRITER_RELAY_ID'] = $private:relayRequest.RequestId.ToString('D')
+            $private:relayStartInfo.EnvironmentVariables.Remove('NLINK_GUI_FRONTIER_RELAY_START_V1')
             $private:relayProcess = [Diagnostics.Process]::new()
             $private:relayProcess.StartInfo = $private:relayStartInfo
-            if (-not $private:relayProcess.Start()) { throw 'Failed to start the owned Tuna GUI wrapper.' }
-            [void]$private:relayRequest.BindWorker($private:relayProcess)
-            $private:relayStdout = $private:relayProcess.StandardOutput.ReadToEndAsync()
-            $private:relayStderr = $private:relayProcess.StandardError.ReadToEndAsync()
+            if ($FrontierRelayCustody -is [ref] -and $null -eq $FrontierRelayCustody.Value) {
+                $private:relayReports = $private:relayRequest.StartFrontierRelayWorkerWithReports($private:relayProcess)
+                $private:relayStdout = $private:relayReports.Stdout
+                $private:relayStderr = $private:relayReports.Stderr
+            }
+            else {
+                if (-not $private:relayProcess.Start()) { throw 'Failed to start the owned Tuna GUI wrapper.' }
+                [void]$private:relayRequest.BindWorker($private:relayProcess)
+                $private:relayStdout = $private:relayProcess.StandardOutput.ReadToEndAsync()
+                $private:relayStderr = $private:relayProcess.StandardError.ReadToEndAsync()
+            }
             # Same synchronous child lifetime as the original native invocation;
             # the Wrapper still owns all existing GUI deadlines and cleanup.
-            $private:relayProcess.WaitForExit()
+            if ($null -ne $private:relayReports -and $null -ne $private:relayReports.Registration) {
+                while (-not $private:relayProcess.WaitForExit(50)) {
+                    try { $null = $private:relayReports.Registration.TryPullIfOffered() } catch { }
+                }
+            }
+            else { $private:relayProcess.WaitForExit() }
             $childOutput = @(foreach ($text in @($private:relayStdout.GetAwaiter().GetResult(), $private:relayStderr.GetAwaiter().GetResult())) {
                 if ($text.Length -gt 0) { ($text -replace '\r?\n$', '') -split '\r?\n' }
             })
@@ -7645,7 +7738,13 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     }
     catch {
         $childOutput = @($_)
-        $exitCode = if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -eq 0) { 1 } else { [int]$LASTEXITCODE }
+        # Process.Start does not set LASTEXITCODE. A relay/output exception must
+        # not reuse an unrelated native command's status or throw under strict mode.
+        $exitCode = 1
+        if ($null -eq $private:relayRequest) {
+            $nativeExitCode = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
+            if ($null -ne $nativeExitCode -and $nativeExitCode -ne 0) { $exitCode = [int]$nativeExitCode }
+        }
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -7665,12 +7764,23 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
             try {
                 $private:relayedWriter = $private:relayRequest.TakeRelayAfterExit()
                 if ($LocalWriterRelay -is [ref] -and $null -eq $LocalWriterRelay.Value) { $LocalWriterRelay.Value = $private:relayedWriter }
+                if ($null -ne $private:relayedWriter -and $LocalWriterRelay -is [ref] -and
+                    [object]::ReferenceEquals($LocalWriterRelay.Value, $private:relayedWriter) -and
+                    $FrontierRelayCustody -is [ref] -and $null -eq $FrontierRelayCustody.Value) {
+                    $private:pendingRelayCustody = $private:relayedWriter.TryTakeFrontierCustody()
+                    if ($null -ne $private:pendingRelayCustody) {
+                        $FrontierRelayCustody.Value = $private:pendingRelayCustody
+                        if ([object]::ReferenceEquals($FrontierRelayCustody.Value, $private:pendingRelayCustody)) { $private:pendingRelayCustody = $null }
+                        else { $FrontierRelayCustody.Value = $null }
+                    }
+                }
             }
             catch { } # Optional relay cannot reclassify the original child exit.
         }
         return $exitCode
     }
     finally {
+        if ($null -ne $private:pendingRelayCustody) { $private:pendingRelayCustody.Dispose() }
         if ($null -ne $private:relayProcess) { $private:relayProcess.Dispose() }
         if ($null -ne $private:relayRequest) { $private:relayRequest.Dispose() }
     }
@@ -8918,6 +9028,7 @@ function Invoke-TunaRouteAcceptanceRun {
 
     Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
     $private:localRelayedWriter = $null
+    $private:localFrontierRelayCustody = $null
     $private:localRelayArguments = @{}
     $scriptPath = Join-Path $RepoRoot 'tools\Run-FileTransferTunaGuiSmoke.ps1'
     $retainedAnalysisOwner = 'RouteAcceptance'
@@ -9040,6 +9151,9 @@ function Invoke-TunaRouteAcceptanceRun {
 
     if ($LocalPublication -is [ref] -and $null -eq $LocalPublication.Value) {
         $private:localRelayArguments = @{LocalWriterRelay=[ref]$private:localRelayedWriter;LocalWriterArtifactDir=$ArtifactDir}
+        if ($CaptureLocalPublicationDiagnostics -and $RouteMode -eq 'live-regular-activation-cycle' -and $LiveProofMode -eq 'RegularActivationCycle') {
+            $private:localRelayArguments.FrontierRelayCustody = [ref]$private:localFrontierRelayCustody
+        }
     }
     $childExitCode = Invoke-RouteAcceptanceChildScriptNoThrow `
         -ScriptPath $scriptPath `
@@ -9057,6 +9171,10 @@ function Invoke-TunaRouteAcceptanceRun {
         $private:localAnalysisArguments = @{}
         if ($null -ne $private:localRelayedWriter) {
             $private:localAnalysisArguments = @{CaptureLocalSourceOwnership=$true;LocalWriterContext=$private:localRelayedWriter.WriterContext;LocalPublication=$LocalPublication}
+            if ($null -ne $private:localFrontierRelayCustody) {
+                $private:localAnalysisArguments.CaptureFrontierReports = $true
+                $private:localAnalysisArguments.FrontierRelayCustody = $private:localFrontierRelayCustody
+            }
         }
         Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode @localAnalysisArguments
         $reconciliation = Update-FileTransferTunaDirectEvidenceManifestFromReceipt `
@@ -9090,6 +9208,7 @@ function Invoke-TunaRouteAcceptanceRun {
         }
         catch { }
         $private:localPersistentPublication = $null
+        if ($null -ne $private:localFrontierRelayCustody) { $private:localFrontierRelayCustody.Dispose() }
     }
 }
 

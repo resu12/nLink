@@ -5,7 +5,7 @@ using NLink.Core.SessionConnect;
 
 namespace NLink.Core.Logging;
 
-public static class LocalOperationalLog
+public static partial class LocalOperationalLog
 {
     private const int RecentEntryCapacity = 512;
     private const long AcceptanceLogMaximumBytes = 4L * 1024L * 1024L * 1024L;
@@ -40,28 +40,51 @@ public static class LocalOperationalLog
             $"event=invite_security_status; version={version}; mode={inviteSecurity.Mode}; signing={inviteSecurity.SigningConfiguration}; public_invite_flow={inviteSecurity.PublicInviteFlow}; release_ready={(inviteSecurity.ReleaseReady ? "yes" : "no")}; warning={inviteSecurity.Warning}");
     }
 
-    private static void Write(string level, string source, string message)
+    private static FrontierWriteReceipt? Write(string level, string source, string message,
+        FrontierWriterRegistration? registration = null, object? association = null,
+        FrontierWriteKind kind = FrontierWriteKind.Completion)
     {
         try
         {
             lock (Gate)
             {
                 EnsureWriterStartAttemptedLocked();
+                if (writerCompletionAttempted && frontierWriter is { } completedWriter)
+                {
+                    // A new write attempt is not normal catalog retirement: it
+                    // invalidates even an acknowledged/completed app handoff.
+                    if (OperatingSystem.IsWindows()) { completedWriter.Handoff?.Cancel(); }
+                    RevokeFrontierWriterLocked(completedWriter);
+                }
                 var safeSource = SensitiveDataRedactor.Redact(source);
                 var safeMessage = SensitiveDataRedactor.Redact(message);
                 var line = $"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [{level}] [{safeSource}] {safeMessage}";
-                TryWritePersistedEntryLocked(line);
+                var batch = CreatePersistedEntryBatchLocked(line, isDrain: false);
+                FrontierWriteReceipt? receipt = null;
+                if (registration is not null && association is not null && TryBeginFrontierWriteLocked(registration, association, kind))
+                {
+                    _ = WritePump.SubmitWithSourceReceipt(batch, out var exact);
+                    if (exact is not null && IsFrontierWriterCurrentLocked(registration))
+                    {
+                        receipt = new(registration, association, exact, batch, kind);
+                        (kind == FrontierWriteKind.Marker ? registration.Markers : registration.Writes)[association] = receipt;
+                    }
+                    else { RevokeFrontierWriterLocked(registration); }
+                }
+                else { _ = WritePump.Submit(batch); }
                 RecentEntries.Enqueue(line);
                 while (RecentEntries.Count > RecentEntryCapacity)
                 {
                     RecentEntries.Dequeue();
                 }
+                return receipt;
             }
         }
         catch
         {
             // Logging must never break application flow.
         }
+        return null;
     }
 
     private static void EnsureWriterStartAttemptedLocked()
@@ -195,6 +218,20 @@ public static class LocalOperationalLog
                 $"; last_payload_sequence={lastPayloadSequence}";
             var line = $"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [INFO] [OperationalLog] {message}";
             var drainBatch = CreatePersistedEntryBatchLocked(line, isDrain: true);
+            if (frontierWriter is { } registration && IsFrontierWriterCurrentLocked(registration))
+            {
+                OrderedOperationalLogWritePump.ExactBatchReceipt? exact;
+                var flushed = registration.Handoff is not null
+                    ? WritePump.CompleteAndFlushWithProvisionalSourceReceipt(drainBatch, timeout, out exact)
+                    : WritePump.CompleteAndFlushWithSourceReceipt(drainBatch, timeout, out exact);
+                if (exact is not null && IsFrontierWriterCurrentLocked(registration))
+                {
+                    registration.Drain = new(registration, registration, exact, drainBatch, FrontierWriteKind.Drain);
+                    registration.DrainFlushed = flushed;
+                }
+                else { WritePump.ReleaseSource(exact); RevokeFrontierWriterLocked(registration); }
+                return flushed;
+            }
             return WritePump.CompleteAndFlush(drainBatch, timeout);
         }
     }

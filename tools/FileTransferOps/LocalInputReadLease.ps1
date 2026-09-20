@@ -1,13 +1,100 @@
 Set-StrictMode -Version Latest
 if ($null -eq ('NLink.Tools.LocalInputReadLease' -as [type])) {
-    if ($null -ne ('NLink.Tools.LocalNativeInputCapture' -as [type])) { throw 'incompatible_local_ownership_types' }
+    if ($null -ne ('NLink.Tools.LocalNativeInputCapture' -as [type]) -or
+        $null -ne ('NLink.Tools.LocalFrontierAppRequest' -as [type])) { throw 'incompatible_local_ownership_types' }
+    $compilerArguments = @{ CompilerOptions = '/define:NLINK_FRONTIER_LEDGER' }
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        $compilerParameters = [CodeDom.Compiler.CompilerParameters]::new()
+        $compilerParameters.GenerateInMemory = $true
+        $compilerParameters.CompilerOptions = '/define:NLINK_FRONTIER_LEDGER'
+        [void]$compilerParameters.ReferencedAssemblies.Add('System.dll')
+        [void]$compilerParameters.ReferencedAssemblies.Add('System.Core.dll')
+        [void]$compilerParameters.ReferencedAssemblies.Add([Management.Automation.PSObject].Assembly.Location)
+        $compilerArguments = @{ CompilerParameters = $compilerParameters }
+    }
     Add-Type -Path @(
         (Join-Path $PSScriptRoot 'LocalInputReadLease.cs'),
         (Join-Path $PSScriptRoot 'LocalRetainedSourceRequest.cs'),
         (Join-Path $PSScriptRoot 'LocalGuiWriterRequest.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierLaunch.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierStart.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterLedgerOrigin.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterLedgerCursor.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterCursorMatch.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterSemanticCopy.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterEvidencePersistence.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentRegistration.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentRendezvous.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentPreparation.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPreparedFiles.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentFilePacket.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentFileChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentFiles.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentFacts.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentFactsValidation.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentFactsChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentFacts.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentAcknowledgmentChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentAcknowledgment.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentCommitChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierParentCommitPins.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentCommit.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterParentCompletion.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryRequest.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryReaders.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryHash.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryPreparation.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryStart.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryHandoff.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryTransport.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryWorker.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimarySource.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryEvaluations.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryPayloads.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryWitnesses.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticState.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticPreparation.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticRendezvous.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticPacket.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticHandoff.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierDiagnosticPublisher.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryOutput.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierPrimaryReports.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierTerminalReceipt.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierTerminalSnapshot.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierTerminalOutput.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierTerminalSource.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierTerminalPersistence.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierEvidenceFile.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierAppRequests.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierOutput.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterAppReports.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterRecoveryOutput.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterRecoveryRead.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierRecoveryMarkers.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterRecoveryMatch.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierAppRequest.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierAppStart.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierFileManifest.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierFileAdoption.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierFileSeal.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierFileChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierAppFileHandoff.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierFiles.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierSeal.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierFinalizer.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierSource.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierWriterMatch.cs'),
+        (Join-Path (Split-Path $PSScriptRoot -Parent) 'GuiSmokeLogLedgerStreamingProcessor.cs'),
         (Join-Path $PSScriptRoot 'LocalGuiWriterRelay.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterRelayRegistration.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterRelayTransfer.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterRelayStart.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierRelayTransferChannel.cs'),
+        (Join-Path $PSScriptRoot 'LocalFrontierRelayPrimary.cs'),
         (Join-Path $PSScriptRoot 'LocalNativeInputCapture.cs'),
         (Join-Path $PSScriptRoot 'LocalPrimaryPublicationCompletion.cs'),
         (Join-Path $PSScriptRoot 'LocalPrimaryPublicationChannel.cs'),
-        (Join-Path $PSScriptRoot 'LocalPublicationAdoption.cs')) -ErrorAction Stop
+        (Join-Path $PSScriptRoot 'LocalPublicationAdoption.cs')) @compilerArguments -ErrorAction Stop
 }

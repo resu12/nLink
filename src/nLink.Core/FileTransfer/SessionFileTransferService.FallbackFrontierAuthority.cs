@@ -891,7 +891,7 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            var now = DateTimeOffset.UtcNow;
+            var now = ReadPublicationBoundaryUtc(context);
             var unresolvedFrontierProofRequest =
                 IsV6TransportEpochUnresolved(context.V6TransportEpoch) &&
                 context.V6TransportEpoch!.State is V6TransportEpochState.TargetProofPending
@@ -1376,7 +1376,7 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_fallback_frontier_repair_progress_observed; {FormatCheckpointRepairContinuity(GetCheckpointRepairContinuityStamp(expectedContract, normalizedProtocolRepairRequestId, alias.RequestCorrelationId))}{FormatFallbackFrontierRepairAuthorityTuple(authority)}; request_correlation_id={FormatProtocolLogValue(authority.RequestCorrelationId)}; reason={FormatProtocolLogValue(reason)}; previous_frontier_chunk_index={previousFrontierChunkIndex}; current_frontier_chunk_index={currentFrontierChunkIndex}");
 
-        return new InboundFallbackFrontierProgressReceipt(
+        var receipt = new InboundFallbackFrontierProgressReceipt(
             expectedContract,
             authority,
             normalizedProtocolRepairRequestId,
@@ -1391,6 +1391,12 @@ public sealed partial class SessionFileTransferService
             context.DataSessionGeneration,
             previousFrontierChunkIndex,
             currentFrontierChunkIndex);
+        context.FrontierPublicationObservation?.RepairProgress(CreateCoordinatorStateLocked(context),
+            GetCheckpointRepairContinuityStamp(receipt), authority, context.DataSession,
+            currentFrontierChunkIndex, context.PullHighestReceivedChunkIndex, context.BytesTransferred,
+            context.UserPaused, context.PeerPaused, context.PullTransportPaused);
+        context.FrontierBoundaryObservation?.Repair(context, receipt);
+        return receipt;
     }
 
     private static bool TryValidateInboundFallbackFrontierProgressReceiptLocked(

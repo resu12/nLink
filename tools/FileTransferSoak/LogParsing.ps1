@@ -153,10 +153,6 @@ function Read-FileTransferLogEvents {
     }
 
     foreach ($file in @($LogFiles)) {
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-            continue
-        }
-
         $lineNumber = 0
         if ($null -ne $OwnedSource -and
             $OwnedSource.GetType().FullName -ceq 'NLink.Tools.LocalRetainedSourceRequest+SourceReader' -and
@@ -164,6 +160,9 @@ function Read-FileTransferLogEvents {
             $sourceLines = $OwnedSource.ReadLines()
         }
         else {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+                continue
+            }
             $sourceLines = [System.IO.File]::ReadLines($file)
         }
         foreach ($line in $sourceLines) {

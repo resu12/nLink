@@ -23794,10 +23794,12 @@ public sealed partial class SessionFileTransferService
                 }
             }
 
+            var publicationFrontierBefore = context.NextChunkIndex;
             (committedChunkCount, committedByteCount) = CommitInboundV4ContiguousWrittenLocked(context);
 
             context.PullLateArrivalDistance = Math.Max(0, context.PullHighestReceivedChunkIndex - context.NextChunkIndex);
-            context.PullLastProgressUtc = DateTimeOffset.UtcNow;
+            context.PullLastProgressUtc = ReadPublicationBoundaryUtc(context);
+            context.FrontierBoundaryObservation?.Write(context, publicationFrontierBefore, committedChunkCount, "v4_sparse");
             context.PullReceiverWriteBatchCountRecent++;
             context.PullReceiverWriteBatchBytesRecent += sparseWriteBytes;
             context.PullReceiverWriteDurationMsRecent += writeStopwatch.ElapsedMilliseconds;
@@ -24115,6 +24117,7 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            context.FrontierBoundaryObservation?.Close("FlushInvalidated");
             var (committedChunkCount, committedByteCount) = CommitInboundV4ContiguousWrittenLocked(context);
             if (committedChunkCount > 0)
             {

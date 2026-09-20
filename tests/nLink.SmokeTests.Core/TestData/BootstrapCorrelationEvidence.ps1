@@ -2,7 +2,7 @@ param([string]$RepoRoot, [string]$InputPath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
-$version = $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion
+$version = $script:FileTransferCoordinatorActivationRetryCatalogVersion
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $version
 $captured = [IO.File]::ReadAllLines($InputPath)
 if ($captured[0] -cnotmatch ([regex]::Escape('snapshot_catalog_version=' + $version) + ';')) { throw 'correlation profile not declared' }
@@ -11,13 +11,21 @@ $frozen = [ordered]@{
     'snapshot-authority-v1-receiver-barrier-v1'='e507b186e037924e5785e563742fedd9111552684fc8cc2f46eef38225b0bb94'
     'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1'='e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d'
     'snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1'='ebbaf19d291129caa47b34e69395de2b38985661560791c7c762c437ed6e679b'
+    $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion='40a8177eae51664f06bc2bc7aaa4dc2fb62983fc2262c3c2f99d030401efd7db'
+    $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion='0ad879a93ec4d4639ecffd0fecf1c64d2aa32dc594bd39c680b8ca30c3c492dd'
+    $script:FileTransferCoordinatorRepairOwnerCatalogVersion='02ecc01ad2fae32da2da0688930b6720a55d5a4833f59e986aeee90e521039d7'
+    $script:FileTransferCoordinatorActivationRetryCatalogVersion='6f8667e92dae781e679bbe6f59fbd4f3d6284cd893ad2f643a9e47a21d451b00'
 }
+$previousHash = $null
 foreach ($name in $frozen.Keys) {
     $old = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $name
     if ($old.Hash -cne $frozen[$name] -or ($old.RequiredFamilies -join ',') -cne ($catalog.RequiredFamilies -join ',')) { throw 'Frozen catalog changed' }
+    if ($name -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
+            $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
+            $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $version) -and
+        $old.ParentCatalogHash -cne $previousHash) { throw 'Extension parent hash mismatch' }
+    $previousHash = $old.Hash
 }
-if ($catalog.ParentCatalogHash -cne $frozen[$script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion] -or
-    $catalog.Hash -cne '40a8177eae51664f06bc2bc7aaa4dc2fb62983fc2262c3c2f99d030401efd7db') { throw 'Extension hash mismatch' }
 $marker = [pscustomobject]@{operationKind='FallbackBootstrapPhase';receiptValidated=$true}
 if ((Test-FileTransferCoordinatorSnapshotEffectScope $marker ([pscustomobject]@{})) -or
     (Test-FileTransferCoordinatorSnapshotEffectReceipt $marker ([pscustomobject]@{}))) { throw 'Correlation evidence granted physical authority' }

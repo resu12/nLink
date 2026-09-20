@@ -44,6 +44,8 @@ public static partial class SensitiveDataRedactor
         redacted = ProtectRepairOwnerEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectDataPathEnvelopeEvidenceValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectFileTransferSecurityEvidenceValues(redacted, protectedSnapshotEvidenceValues);
+        redacted = ProtectFrontierReceiptEvidenceValues(redacted, protectedSnapshotEvidenceValues);
+        redacted = ProtectFrontierPayloadMarkerValues(redacted, protectedSnapshotEvidenceValues);
         redacted = ProtectTunaDeliveryTraceValues(redacted, protectedSnapshotEvidenceValues);
         var protectedFallbackBootstrapProofKinds = new List<string>();
         redacted = ProtectFallbackBootstrapProofKinds(
@@ -154,6 +156,42 @@ public static partial class SensitiveDataRedactor
 
     [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>security_transport_id)=(?<value>ftst1-[a-f0-9]{32})|(?<key>security_installation_id)=(?<value>ftsi1-[a-f0-9]{32})|(?<key>security_establishment_fingerprint)=(?<value>ftest1-[a-f0-9]{64})|(?<key>security_payload_fingerprint)=(?<value>ftpay1-[a-f0-9]{64})|(?<key>security_(?:session|transfer)_id)=(?<value>fte1-[a-f0-9]{24}))(?=;\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex FileTransferSecurityEvidenceValueRegex();
+
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=filetransfer_frontier_publication_receipt_closed(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex FrontierReceiptEvidenceLineRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?<key>frontier_receipt_hash|frontier_completion_hash|frontier_observation_id)=(?<value>ftfr1-[a-f0-9]{64})(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex FrontierReceiptEvidenceValueRegex();
+
+    [GeneratedRegex(@"^[^\r\n]*(?<![A-Za-z0-9._/-])event=filetransfer_frontier_payload_marker(?=;\s|$)[^\r\n]*(?=\r?$)", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex FrontierPayloadMarkerLineRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z0-9._/-])(?:(?<key>frontier_payload_sha256|frontier_completion_sha256)=(?<value>[a-f0-9]{64})|(?<key>frontier_payload_observation_id)=(?<value>[a-f0-9]{32})|(?<key>frontier_payload_hash_domain)=(?<value>sha256-utf8-frontier-boundary-producer-v1))(?=;\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex FrontierPayloadMarkerValueRegex();
+
+    private static string ProtectFrontierPayloadMarkerValues(string text, List<string> protectedValues)
+        => FrontierPayloadMarkerLineRegex().Replace(text, line =>
+        {
+            if (EventKeyValueRegex().Matches(line.Value).Count != 1) { return line.Value; }
+            return FrontierPayloadMarkerValueRegex().Replace(line.Value, match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"{match.Groups["key"].Value}={placeholder}";
+            });
+        });
+
+    private static string ProtectFrontierReceiptEvidenceValues(string text, List<string> protectedValues)
+        => FrontierReceiptEvidenceLineRegex().Replace(text, line =>
+        {
+            if (EventKeyValueRegex().Matches(line.Value).Count != 1) { return line.Value; }
+            return FrontierReceiptEvidenceValueRegex().Replace(line.Value, match =>
+            {
+                var placeholder = $"SEVP{protectedValues.Count}";
+                protectedValues.Add(match.Groups["value"].Value);
+                return $"{match.Groups["key"].Value}={placeholder}";
+            });
+        });
 
     private static string ProtectFileTransferSecurityEvidenceValues(string text, List<string> protectedValues)
         => FileTransferSecurityEvidenceLineRegex().Replace(text, line =>

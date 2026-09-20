@@ -24,8 +24,10 @@ namespace NLink.Tools
 
         public RelayedCompletion TakeRelayAfterExit()
         {
+            bool acceptedNative = false;
             try
             {
+                if (Object.ReferenceEquals(original, this) && frontierRelayCustody != null) frontierRelayCustody.BeginTake();
                 var clock = Stopwatch.StartNew();
                 var body = TakeBodyAfterExit(true);
                 if (body == null) return null;
@@ -37,21 +39,26 @@ namespace NLink.Tools
                         clock.ElapsedMilliseconds > MaximumCompletionMilliseconds) return null;
                     // Deliberately not MarkAcceptedHere: a relayed/historical
                     // completion is not a fresh GUI adoption by this process.
-                    return new RelayedCompletion(RequestId, workerId, workerCreation, writer);
+                    var result = new RelayedCompletion(RequestId, workerId, workerCreation, writer);
+                    if (frontierRelayCustody != null && frontierRelayCustody.Accept(body, result))
+                    { result.frontierCustody = frontierRelayCustody; acceptedNative = true; }
+                    return result;
                 }
             }
             catch { return null; }
+            finally { if (Object.ReferenceEquals(original, this) && !acceptedNative) RetireFrontierRelayCustody(); }
         }
 
-        public sealed class Relay : IDisposable
+        public sealed partial class Relay : IDisposable
         {
-            private readonly Finalizer owner;
-            private int attempted;
-            internal Relay(Finalizer owner) { this.owner = owner; }
+            internal readonly Finalizer owner;
+            private readonly Relay original;
+            internal int attempted;
+            internal Relay(Finalizer owner) { this.owner = owner; original = this; }
 
             public bool Forward(Completion completion)
             {
-                if (Interlocked.Exchange(ref attempted, 1) != 0) return false;
+                if (!Object.ReferenceEquals(original, this) || Interlocked.Exchange(ref attempted, 1) != 0) return false;
                 bool held = false;
                 try
                 {
@@ -71,6 +78,7 @@ namespace NLink.Tools
                     owner.view.WriteArray(HeaderBytes + RequestBytes, body, 0, body.Length);
                     if (!owner.IsCurrent || clock.ElapsedMilliseconds > MaximumCompletionMilliseconds) return false;
                     owner.view.Write(48, 2);
+                    if (frontierRelayHandoff != null) frontierRelayHandoff.Forwarded(body);
                     return true;
                 }
                 catch (AbandonedMutexException) { held = true; return false; }
@@ -78,11 +86,22 @@ namespace NLink.Tools
                 finally { Release(owner.gate, held); }
             }
 
-            public void Dispose() { owner.Dispose(); }
+            public void Dispose()
+            {
+                if (!Object.ReferenceEquals(original, this)) return;
+                lock (frontierRelaySync)
+                {
+                    if (frontierRelayHandoff != null) frontierRelayHandoff.Close();
+                    owner.Dispose();
+                }
+            }
         }
 
         public sealed class RelayedCompletion
         {
+            internal FrontierRelayCustody frontierCustody;
+            public FrontierRelayCustody TryTakeFrontierCustody()
+            { return frontierCustody == null ? null : frontierCustody.Detach(this); }
             public Guid RelayRequestId { get; private set; }
             public int WrapperProcessId { get; private set; }
             public long WrapperProcessCreationFileTime { get; private set; }

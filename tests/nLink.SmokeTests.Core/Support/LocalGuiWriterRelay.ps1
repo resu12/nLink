@@ -1,4 +1,4 @@
-param([string]$RepoRoot,[string]$Directory,[string[]]$CaseSelection=@(),[switch]$RequireHashCmdlet)
+param([string]$RepoRoot,[string]$Directory,[string[]]$CaseSelection=@(),[switch]$RequireHashCmdlet,[switch]$RequireFrontierIsolation)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $parentModulePath=$env:PSModulePath
 . (Join-Path $RepoRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1')
@@ -8,10 +8,21 @@ if($e.Count) { throw 'Route parent parse failed' }
 $found=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-RouteAcceptanceChildScriptNoThrow'},$true))
 if($found.Count -ne 1) { throw 'Actual launcher ambiguous' }
 $text=$found[0].Extent.Text.Replace("Join-Path `$PSScriptRoot 'FileTransferOps/LocalGuiWriterRequest.ps1'","Join-Path `$script:moduleRoot 'tools/FileTransferOps/LocalGuiWriterRequest.ps1'")
+if($RequireFrontierIsolation) {
+    # Exercise the original relay, not a fabricated writer request. Native GUI
+    # startup must reject this role before inspecting or starting a process.
+    $start='if (-not $private:relayProcess.Start())'
+    if($text.Split([string[]]@($start),[StringSplitOptions]::None).Length -ne 2) { throw 'Relay start seam changed' }
+    $text=$text.Replace($start,@'
+Test-RelayNativeIsolation -Request $private:relayRequest -Stage before-start
+if (-not $private:relayProcess.Start())
+'@)
+}
 $bind='[void]$private:relayRequest.BindWorker($private:relayProcess)'
 $text=$text.Replace($bind,@'
 if ($script:mode -ceq 'wrong-worker') { [void]$private:relayRequest.BindWorker((Get-Process -Id $PID)) }
 else { [void]$private:relayRequest.BindWorker($private:relayProcess) }
+if ($RequireFrontierIsolation) { Test-RelayNativeIsolation -Request $private:relayRequest -Stage after-bind }
 if ($script:mode -ceq 'early-take') { if ($null -ne $private:relayRequest.TakeRelayAfterExit()) { throw 'Running Wrapper adopted' } }
 if ($script:mode -ceq 'cancelled') { $private:relayRequest.Dispose() }
 '@)
@@ -36,6 +47,23 @@ $private:relayedWriter = $private:relayRequest.TakeRelayAfterExit()
 '@)
 $text=$text.Replace('$private:relayOutputCaptured = $true',"if (`$script:mode -ceq 'output-fails') { throw 'injected_output_capture_failure' }; `$private:relayOutputCaptured = `$true")
 Invoke-Expression $text
+function Test-RelayNativeIsolation {
+    param($Request,[string]$Stage)
+    if($Stage -ceq 'before-start') {
+        $script:isolatedRelayRequest=$Request
+        $failure=''
+        try { $null=$Request.StartFrontierGuiWorkerWithReports($null) } catch { $failure=$_.Exception.Message }
+        if($failure -notmatch 'frontier_gui_launch_unavailable_or_repeated') { throw 'Relay admitted native GUI startup' }
+    } else {
+        if($null -ne $Request.TryRegisterFrontierParent()) { throw 'Relay admitted native GUI-parent registration' }
+    }
+    $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+    foreach($name in @('frontierParentRegistration','frontierParentCustody','frontierGuiStart')) {
+        if($null -ne $Request.GetType().GetField($name,$flags).GetValue($Request)) { throw "Scalar relay acquired native resource: $name" }
+    }
+    $script:frontierIsolationChecks++
+}
+$script:frontierIsolationChecks=0
 $script:moduleRoot=$RepoRoot; $script:RouteAcceptanceExecutionMode='live'
 $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID='gui-writer-parent-run'; $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID='gui-writer-parent-run:scenario:1'
 $env:NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT='preserve-parent'
@@ -78,6 +106,14 @@ foreach($script:mode in $modes) {
     if($mode -ceq 'prefilled' -and $value -cne 'existing-owner') { throw 'Prefilled output replaced' }
     if($mode -ceq 'host-output-fails') { if($failure -cne 'injected_host_output_failure') { throw 'Host output failure changed' } }
     elseif($failure -or $code -ne $(if($mode -ceq 'wrapper-nonzero'){9}elseif($mode -ceq 'output-fails'){1}else{0})) { throw "Original Wrapper outcome drift $mode : $code : $failure : $($script:output -join ' | ')" }
+    if($RequireFrontierIsolation) {
+        $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+        foreach($name in @('map','view','gate','closed','workerExit')) {
+            if($null -ne $script:isolatedRelayRequest.GetType().GetField($name,$flags).GetValue($script:isolatedRelayRequest)) {
+                throw "Original relay resource was not disposed: $mode/$name"
+            }
+        }
+    }
     $worker=Get-Content -LiteralPath (Join-Path $case 'worker.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if($worker.Probe -cne $probe) { throw "Argument quoting drift: $mode" }
     if($RequireHashCmdlet) {
@@ -97,6 +133,16 @@ foreach($script:mode in $modes) {
             $request=[NLink.Tools.LocalRetainedSourceRequest]::TryCreateWithPublication([guid]::NewGuid(),'RouteAcceptance',
                 $value.WriterContext.AcceptanceRunId,$value.WriterContext.ScenarioRunId,$hash.Lease,$value.WriterContext.Outputs[3].LineCount,$value.WriterContext)
             if($null -eq $request) { throw 'Real retained source request rejected the relayed GUI owner' }
+            if($RequireFrontierIsolation) {
+                $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+                if($value.WriterContext.GetType().GetMethod('WasAcceptedHere',$flags).Invoke($value.WriterContext,@())) {
+                    throw 'Relayed GUI context became a fresh local GUI adoption'
+                }
+                if($null -ne $request.GetType().GetField('frontierInputs',$flags).GetValue($request)) {
+                    throw 'Legacy source hash and relayed context reconstructed native inputs'
+                }
+                $script:frontierIsolationChecks++
+            }
         } finally { if($null -ne $request){$request.Dispose()}; if($null -ne $hash.Lease){$hash.Lease.Dispose()} }
         if($mode -ceq 'valid') { $genuine=$value }
     }
@@ -155,3 +201,4 @@ if($null -ne $genuine) {
     }
 }
 'gui-writer-relay='+(@{Cases=$rows.Count;WorkflowCases=$workflowCases;Adopted=@($rows | Where-Object Adopted).Count;LiveExport=$false;AuthorityEvaluations=0;SeparateWrapperAndGuiIdentity=$true} | ConvertTo-Json -Compress)
+if($RequireFrontierIsolation) { 'frontier-relay-isolation-checks='+$script:frontierIsolationChecks }

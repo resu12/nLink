@@ -20986,7 +20986,8 @@ function Get-FileTransferPostTunaFallbackSubmissionEpochFailureCorrelation {
 
 function Get-FileTransferBridgeRecoveryStartupRawEvidence {
     param(
-        [AllowEmptyCollection()][object[]]$Events = @()
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [System.Collections.IDictionary]$RawSourceLines = $null
     )
 
     $rawEvidence = New-Object System.Collections.Generic.List[object]
@@ -21002,7 +21003,13 @@ function Get-FileTransferBridgeRecoveryStartupRawEvidence {
 
         $sequenceOffset = [int64]$fileEvents[0].Sequence - [int64]$fileEvents[0].LineNumber
         $lineNumber = 0
-        foreach ($line in [System.IO.File]::ReadLines([string]$fileGroup.Name)) {
+        # An original complete native read can supply this evidence scan. It
+        # neither substitutes the scan nor grants route/publication authority.
+        if ($null -ne $RawSourceLines -and $RawSourceLines.Contains([string]$fileGroup.Name)) {
+            $rawLines = $RawSourceLines[[string]$fileGroup.Name]
+        }
+        else { $rawLines = [System.IO.File]::ReadLines([string]$fileGroup.Name) }
+        foreach ($line in $rawLines) {
             $lineNumber++
             $kind = ''
             $processId = ''
@@ -21065,7 +21072,8 @@ function Get-FileTransferBridgeRecoveryStartupRawEvidence {
 function Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation {
     param(
         [AllowEmptyCollection()][object[]]$Events = @(),
-        [switch]$AlreadyChronologicallyOrdered
+        [switch]$AlreadyChronologicallyOrdered,
+        [System.Collections.IDictionary]$RawSourceLines = $null
     )
 
     [object[]]$orderedEvents = if ($null -eq $Events -or $Events.Count -eq 0) {
@@ -21077,7 +21085,7 @@ function Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelati
     else {
         @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)
     }
-    [object[]]$rawEvidence = @(Get-FileTransferBridgeRecoveryStartupRawEvidence -Events $orderedEvents)
+    [object[]]$rawEvidence = @(Get-FileTransferBridgeRecoveryStartupRawEvidence -Events $orderedEvents -RawSourceLines $RawSourceLines)
     [object[]]$commands = @($orderedEvents | Where-Object {
         $_.EventName -eq 'filetransfer_bridge_recovery_execution_command_issued'
     })
@@ -64824,7 +64832,8 @@ function Get-FileTransferRecoveryFailureClassification {
         [string]$LiveRouteProofMode = 'None',
         $CoordinatorSnapshotEvaluationHandoff = $null,
         [scriptblock]$StageObserver = $null,
-        $ReportProofHandoff = $null
+        $ReportProofHandoff = $null,
+        [System.Collections.IDictionary]$RawSourceLines = $null
     )
 
     if ($null -ne $ReportProofHandoff) { $ReportProofHandoff.Value = $null }
@@ -65184,7 +65193,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $bridgeRecoveryExecutionSoftToHardHandoffProof =
         Get-FileTransferBridgeRecoveryExecutionSoftToHardHandoffCorrelation -Events $events
     $bridgeRecoveryExecutionStartupPayloadIsolationProof =
-        Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation -Events $events
+        Get-FileTransferBridgeRecoveryExecutionStartupPayloadIsolationCorrelation -Events $events -RawSourceLines $RawSourceLines
     $bridgeRecoveryExecutionPayloadHoldBaseProof =
         Get-FileTransferBridgeRecoveryExecutionPayloadHoldCorrelation -Events $events
     $postTunaDeferredPhysicalLeaseGenerations = @{}

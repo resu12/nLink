@@ -13,7 +13,7 @@ namespace NLink.Tools
 {
     // Read-only file identity. Not a parent/worker, evaluator or completion token.
     // One reader owns verification; Dispose may invalidate the lease concurrently.
-    public sealed class LocalInputReadLease : IDisposable
+    public sealed partial class LocalInputReadLease : IDisposable
     {
         public const int MaximumVerificationRecords = LocalPublicationInputLimits.InputRecords;
         public const long MaximumVerificationCodeUnits = LocalPublicationInputLimits.InputCodeUnits;
@@ -161,7 +161,8 @@ namespace NLink.Tools
             try
             {
                 if (!IsActive) return null;
-                handle = ReOpenFile(anchor.SafeFileHandle, 0x80000000, 1, 0x08000000);
+                handle = frontierNative ? DuplicateFrontierRead(anchor.SafeFileHandle) : ReOpenFile(anchor.SafeFileHandle, 0x80000000, 1, 0x08000000);
+                if (handle == null) return null;
                 if (handle.IsInvalid || !IsActive) return null;
                 var stream = new FileStream(handle, FileAccess.Read);
                 handle = null; return stream;

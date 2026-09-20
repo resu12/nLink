@@ -29986,9 +29986,9 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
             Priority = "state_refresh",
             RecoveryMode = "regular_nkn_state_refresh",
         };
-        serviceType
-            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [context, frame, "test_terminal_callback"]);
+        Assert.True(Assert.IsType<bool>(serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, frame, "test_terminal_callback"])));
         var request = Assert.IsType<FileTransferControlPlaneDeliveryRequest>(serviceType
             .GetMethod("CreateOutboundControlPlaneDeliveryRequestLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(
@@ -33066,7 +33066,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         public int SendCount { get; private set; }
 
-        public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+        public virtual async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
             FileTransferControlPlaneDeliveryRequest request,
             CancellationToken ct)
         {

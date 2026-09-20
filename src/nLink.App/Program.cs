@@ -3,7 +3,7 @@ using System.Linq;
 using System.Threading;
 using Avalonia;
 using NLink.App.Configuration;
-using NLink.Core.Logging;
+using NLink.Core.FileTransfer;
 
 namespace NLink.App;
 
@@ -12,17 +12,18 @@ sealed class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        SessionFileTransferService.FrontierAppLifetime? frontier = null;
         try
         {
-            MainCore(args);
+            MainCore(args, ref frontier);
         }
         finally
         {
-            _ = LocalOperationalLog.CompleteAndFlush(TimeSpan.FromSeconds(5));
+            _ = SessionFileTransferService.FrontierAppLifetime.CompleteAndFlush(frontier, TimeSpan.FromSeconds(5));
         }
     }
 
-    private static void MainCore(string[] args)
+    private static void MainCore(string[] args, ref SessionFileTransferService.FrontierAppLifetime? frontier)
     {
         AppStartupTelemetry.Mark("app_startup_program_main_entered");
 
@@ -80,6 +81,7 @@ sealed class Program
             return;
         }
 
+        frontier = SessionFileTransferService.FrontierAppLifetime.StartFromEnvironment();
         AppStartupTelemetry.Mark("app_startup_before_classic_desktop_lifetime");
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }

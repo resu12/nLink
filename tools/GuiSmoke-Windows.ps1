@@ -1598,9 +1598,11 @@ function Wait-GuiSmokeProcessOutputCaptureDrain {
     param(
         [AllowEmptyCollection()][object[]]$Processes = @(),
         [int]$TimeoutMs = 5000,
-        [int]$QuietPeriodMs = 500
+        [int]$QuietPeriodMs = 500,
+        [AllowEmptyCollection()][object[]]$FrontierReports = @()
     )
 
+    Set-Variable -Name FrontierReports -Option Private
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     foreach ($process in @($Processes)) {
         if ($null -eq $process) {
@@ -1615,6 +1617,16 @@ function Wait-GuiSmokeProcessOutputCaptureDrain {
         # The parameterless overload waits for redirected asynchronous output
         # handlers to receive EOF after the process has exited.
         $process.WaitForExit()
+    }
+
+    $private:report = $null
+    foreach ($report in $FrontierReports) {
+        if ($null -eq $report) { continue }
+        foreach ($task in @($report.Stdout, $report.Stderr)) {
+            $remainingMs = [Math]::Max(1, $TimeoutMs - [int]$stopwatch.ElapsedMilliseconds)
+            if (-not $task.Wait($remainingMs)) { throw 'process_output_eof_timeout:frontier_app_reports' }
+            [void]$task.GetAwaiter().GetResult()
+        }
     }
 
     $lastFingerprint = ''
@@ -1702,7 +1714,28 @@ function Copy-AppLogsIfPresent {
     }
 }
 
+function Get-GuiSmokeFrontierLaunchOwner {
+    # The marker selects one bounded wait, not authority or a retry. Default
+    # startup does not load the native ownership types or consume the slot.
+    if ([string]$env:NLINK_GUI_FRONTIER_START_V1 -cne '1') { return $null }
+    try {
+        if ($null -eq ('NLink.Tools.LocalGuiWriterRequest' -as [type])) {
+            . (Join-Path $PSScriptRoot 'FileTransferOps/LocalGuiWriterRequest.ps1')
+        }
+        $requestId = [guid]::Empty
+        if (-not [guid]::TryParseExact([string]$env:NLINK_GUI_WRITER_REQUEST_ID, 'D', [ref]$requestId)) { return $null }
+        return [NLink.Tools.LocalGuiWriterRequest]::TryAttachFrontierLauncherReady(
+            [string]$env:NLINK_GUI_WRITER_REQUEST, $requestId,
+            [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID,
+            [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+            [IO.Path]::GetFullPath([string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR))
+    }
+    catch { return $null } # Omit optional ownership, not ordinary GUI startup.
+}
+
 function Clear-AppLogsIfPresent {
+    param([AllowNull()]$FrontierOwner = $null, [AllowNull()]$FrontierOrigin = $null)
+    Set-Variable -Name FrontierOwner,FrontierOrigin -Option Private
     Reset-GuiSmokeLogLedgerState -State $script:GuiSmokeAppLogLedger
     $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
     if (Test-Path $logsDir) {
@@ -1727,7 +1760,8 @@ function Clear-AppLogsIfPresent {
     if (-not $acceptanceLogPath.StartsWith($resolvedArtifactDir, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "gui_smoke_append_only_log_outside_artifact:$acceptanceLogPath"
     }
-    Enable-GuiSmokeAppendOnlyLogLedgerState -State $script:GuiSmokeAppLogLedger -Path $acceptanceLogPath
+    Enable-GuiSmokeAppendOnlyLogLedgerState -State $script:GuiSmokeAppLogLedger -Path $acceptanceLogPath `
+        -FrontierOwner $FrontierOwner -FrontierOrigin $FrontierOrigin
     $env:NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH = $acceptanceLogPath
 }
 
@@ -3376,14 +3410,21 @@ function Write-FileTransferGuiLogLedgerEvidence {
         [Parameter(Mandatory = $true)]$InitialSnapshot,
         [AllowNull()][scriptblock]$ProcessOutputDrainAction = $null,
         [AllowNull()]$TestMetrics = $null,
-        [AllowNull()]$LocalNativeWriterCapture = $null
+        [AllowNull()]$LocalNativeWriterCapture = $null,
+        [AllowEmptyCollection()][object[]]$FrontierReports = @(),
+        [AllowNull()]$FrontierOwner = $null
     )
 
+    Set-Variable -Name FrontierReports -Option Private
+    Set-Variable -Name FrontierOwner -Option Private
     $finalizationErrors = New-Object System.Collections.Generic.List[string]
     $captureNativeWriterInputs = $LocalNativeWriterCapture -is [ref] -and $null -eq $LocalNativeWriterCapture.Value
     # This issuer stays private to the actual finalizer, never in formatter
     # inputs or the provisional native capture. Child scopes cannot inherit it.
     $private:localWriterIssuer = $null
+    $private:localFrontierBinding = $null
+    $private:localFrontierResult = $null
+    $private:localFrontierEvidence = $null
     try {
     if (-not [string]::IsNullOrWhiteSpace([string]$env:NLINK_GUI_WRITER_REQUEST)) {
         try {
@@ -3409,14 +3450,40 @@ function Write-FileTransferGuiLogLedgerEvidence {
     if ($null -ne $ProcessOutputDrainAction) {
         try {
             Update-FileTransferGuiEvidenceFinalizationStage -Stage 'process_cleanup_started'
-            [object[]]$drainProcesses = @(& $ProcessOutputDrainAction)
-            Wait-GuiSmokeProcessOutputCaptureDrain -Processes $drainProcesses
+            [object[]]$drainProcesses = @(if ($null -ne $FrontierOwner) {
+                & $ProcessOutputDrainAction $FrontierOwner
+            } else { & $ProcessOutputDrainAction })
+            Wait-GuiSmokeProcessOutputCaptureDrain -Processes $drainProcesses -FrontierReports $FrontierReports
             Update-FileTransferGuiEvidenceFinalizationStage -Stage 'process_output_drained'
         }
         catch {
             $processOutputDrainFailure = "process_output_drain_failed:$($_.Exception.Message)"
             $finalizationErrors.Add($processOutputDrainFailure) | Out-Null
         }
+    }
+
+    # Optional native source/copy/persistence belongs to this original finalizer,
+    # after native app exits and output EOF. Legacy snapshots are not inputs.
+    if ($null -ne $FrontierOwner) {
+        $private:frontierPrepared = $false
+        try {
+            if ([string]::IsNullOrWhiteSpace($processOutputDrainFailure) -and
+                $null -ne $localWriterIssuer -and $FrontierOwner.IsCurrent -and
+                $null -ne $FrontierOwner.TrySealFiles()) {
+                $localFrontierBinding = $localWriterIssuer.TryTakeFrontierBinding()
+                if ($null -ne $localFrontierBinding) {
+                    $localFrontierResult = $localFrontierBinding.TryProcessObservedLedger(
+                        [string[]](Get-GuiSmokeSemanticEvidenceEventNames))
+                    if ($null -ne $localFrontierResult -and $localFrontierBinding.IsCurrent -and
+                        $null -ne $localFrontierBinding.TryCopySemanticEvidence()) {
+                        $localFrontierEvidence = $localFrontierBinding.TryPersistEvidence()
+                        $frontierPrepared = $null -ne $localFrontierEvidence -and $localFrontierEvidence.IsCurrent
+                    }
+                }
+            }
+        }
+        catch { } # Optional failure cannot replace ordinary evidence finalization.
+        finally { if (-not $frontierPrepared) { $FrontierOwner.Dispose() } }
     }
 
     # The authoritative log boundary must be captured only after all scenario
@@ -4604,18 +4671,32 @@ function Write-FileTransferGuiLogLedgerEvidence {
                         $nativeCapture.Semantic.Sha256 -ceq $analyzerInput.Sha256 -and
                         $nativeCapture.Semantic.ByteCount -eq $analyzerInput.ByteCount -and
                         $nativeCapture.Semantic.LineCount -eq $analyzerInput.LineCount) {
-                        # Bounded original native facts and original verified copy.
-                        # No new file scan, hash, or authority evaluation.
-                        $outputs = @($nativeCapture.Retained, $nativeCapture.Writer, $nativeCapture.Semantic)
-                        [void]$localWriterIssuer.Complete(
-                            [string]$script:GuiSmokeAppLogLedger.LedgerId, $nativeCapture.SourcePath,
-                            $nativeCapture.FrozenLineCount, $nativeCapture.Bookmark,
-                            [string[]]@($outputs | ForEach-Object { $_.Sha256 }),
-                            [string[]]@($outputs | ForEach-Object { $_.FileIdentity }),
-                            [long[]]@($outputs | ForEach-Object { $_.ByteCount }),
-                            [long[]]@($outputs | ForEach-Object { $_.LineCount }),
-                            [string[]]@($nativeCapture.Writers | ForEach-Object { $_.WriterId }),
-                            [long[]]@($nativeCapture.Writers | ForEach-Object { $_.LastSequence }))
+                        $private:frontierHandoffPrepared = $false
+                        try {
+                            if ($null -ne $localFrontierBinding -and $localFrontierBinding.IsCurrent) {
+                                $frontierHandoffPrepared = $localFrontierBinding.TryPrepareParentHandoffWhenReady()
+                            }
+                        }
+                        catch { } # Earlier optional failure preserves ordinary completion.
+                        if ($frontierHandoffPrepared) {
+                            # This already invokes the original Complete. A failed
+                            # native completion must not be retried as ordinary.
+                            [void]$localFrontierBinding.TryCompleteParentHandoff()
+                        }
+                        else {
+                            # Bounded original native facts and verified copy.
+                            # No new file scan, hash, or authority evaluation.
+                            $outputs = @($nativeCapture.Retained, $nativeCapture.Writer, $nativeCapture.Semantic)
+                            [void]$localWriterIssuer.Complete(
+                                [string]$script:GuiSmokeAppLogLedger.LedgerId, $nativeCapture.SourcePath,
+                                $nativeCapture.FrozenLineCount, $nativeCapture.Bookmark,
+                                [string[]]@($outputs | ForEach-Object { $_.Sha256 }),
+                                [string[]]@($outputs | ForEach-Object { $_.FileIdentity }),
+                                [long[]]@($outputs | ForEach-Object { $_.ByteCount }),
+                                [long[]]@($outputs | ForEach-Object { $_.LineCount }),
+                                [string[]]@($nativeCapture.Writers | ForEach-Object { $_.WriterId }),
+                                [long[]]@($nativeCapture.Writers | ForEach-Object { $_.LastSequence }))
+                        }
                     }
                     if ($LocalNativeWriterCapture -is [ref] -and $null -eq $LocalNativeWriterCapture.Value) {
                         $LocalNativeWriterCapture.Value = $nativeCapture
@@ -4636,7 +4717,14 @@ function Write-FileTransferGuiLogLedgerEvidence {
     }
     }
     finally {
-        if ($null -ne $localWriterIssuer) { $localWriterIssuer.Dispose() }
+        try {
+            if ($null -ne $localFrontierEvidence) { $localFrontierEvidence.Dispose() }
+            if ($null -ne $localFrontierResult -and $null -ne $localFrontierResult.StreamCapture) {
+                $localFrontierResult.StreamCapture.Dispose()
+            }
+            if ($null -ne $localFrontierBinding) { $localFrontierBinding.Dispose() }
+        }
+        finally { if ($null -ne $localWriterIssuer) { $localWriterIssuer.Dispose() } }
     }
 }
 
@@ -37847,7 +37935,15 @@ function Wait-FileTransferTerminalOrProgressBeforeAction {
 }
 
 function Run-ScenarioFileTransferTunaHandoffFallback {
-    param([Parameter(Mandatory = $true)]$Context)
+    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierOwner = $null)
+    Set-Variable -Name FrontierOwner -Option Private
+    $private:frontierHelpeeRequest = $null
+    $private:frontierHelperRequest = $null
+    $private:frontierHelpeeReports = $null
+    $private:frontierHelperReports = $null
+    if ($null -ne $FrontierOwner -and $FrontierOwner -isnot [NLink.Tools.LocalGuiWriterRequest+FrontierLaunchOwner]) {
+        throw 'gui_smoke_frontier_scenario_owner_invalid'
+    }
 
     if (-not (Test-GuiSmokeEnvEnabled -Name 'NLINK_RUN_TUNA_GUI_FILETRANSFER')) {
         Write-Host '[GUI Smoke][filetransfer_tuna] SKIP: set NLINK_RUN_TUNA_GUI_FILETRANSFER=1 to run paid Tuna GUI file-transfer automation.' -ForegroundColor Yellow
@@ -37997,7 +38093,18 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     try {
         $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
 
-        Start-HelpeeFlow -Context $Context
+        # The live entry does not pass an owner until finalizer/parent custody
+        # is integrated. This explicit branch owns requests and shutdown adoption.
+        if ($null -ne $FrontierOwner) {
+            $frontierHelpeeRequest = $FrontierOwner.TryCreateAppRequest()
+            $frontierHelperRequest = $FrontierOwner.TryCreateAppRequest()
+            if ($null -eq $frontierHelpeeRequest -or $null -eq $frontierHelperRequest) {
+                $FrontierOwner.Dispose()
+                $frontierHelpeeRequest = $null
+                $frontierHelperRequest = $null
+            }
+        }
+        Start-HelpeeFlow -Context $Context -FrontierRequest $frontierHelpeeRequest -FrontierReports ([ref]$frontierHelpeeReports)
         $runBookmark = Get-AppLogBookmark
         $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot `
             -State $script:GuiSmokeAppLogLedger `
@@ -38009,7 +38116,12 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             @($initialLogLedgerSnapshot.generations).Count -eq 0) {
             throw 'gui_smoke_log_cursor_initial_generation_missing: helpee startup did not establish an indexable active log generation'
         }
-        Start-HelperFlow -Context $Context
+        if ($null -ne $FrontierOwner -and $null -eq $FrontierOwner.TryCaptureInitialLedgerObservation()) {
+            $FrontierOwner.Dispose()
+        }
+        Start-HelperFlow -Context $Context -FrontierRequest $frontierHelperRequest -FrontierReports ([ref]$frontierHelperReports)
+        if ($null -ne $FrontierOwner -and
+            (-not $FrontierOwner.SealLaunches() -or -not $FrontierOwner.TryEnableFileHandoff())) { $FrontierOwner.Dispose() }
         [void](Connect-HelperAndHelpee -Context $Context)
         if ($mixedScreenShare) {
             $mixedShareButton = Start-FileTransferMixedScreenShare -Context $Context -WarmupTimeoutMs (Get-FileTransferMixedScreenShareWarmupTimeoutMs)
@@ -38092,25 +38204,32 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             }
         }
 
-        Write-FileTransferGuiLogLedgerEvidence `
-            -ArtifactDir $artifactDir `
-            -Bookmark $runBookmark `
-            -InitialSnapshot $initialLogLedgerSnapshot `
-            -ProcessOutputDrainAction {
-                $processesToDrain = @($Context.Processes.ToArray())
-                $cleanupDiagnostic = $null
-                Cleanup-ProcessesWithOperationalLogDrain -Processes $processesToDrain -ExePath $Context.ExePath `
-                    -CleanupDiagnostic ([ref]$cleanupDiagnostic)
-                if ($null -ne $cleanupDiagnostic) {
-                    try {
-                        Write-GuiSmokeAtomicJson `
-                            -Path (Join-Path $artifactDir 'filetransfer-gui-process-cleanup-diagnostic.json') `
-                            -Value $cleanupDiagnostic
+        try {
+            Write-FileTransferGuiLogLedgerEvidence `
+                -ArtifactDir $artifactDir `
+                -Bookmark $runBookmark `
+                -InitialSnapshot $initialLogLedgerSnapshot `
+                -FrontierReports @($frontierHelpeeReports, $frontierHelperReports) `
+                -FrontierOwner $FrontierOwner `
+                -ProcessOutputDrainAction {
+                    param([AllowNull()]$FrontierOwner = $null)
+                    Set-Variable -Name FrontierOwner -Option Private
+                    $processesToDrain = @($Context.Processes.ToArray())
+                    $cleanupDiagnostic = $null
+                    Cleanup-ProcessesWithOperationalLogDrain -Processes $processesToDrain -ExePath $Context.ExePath `
+                        -CleanupDiagnostic ([ref]$cleanupDiagnostic) -FrontierOwner $FrontierOwner
+                    if ($null -ne $cleanupDiagnostic) {
+                        try {
+                            Write-GuiSmokeAtomicJson `
+                                -Path (Join-Path $artifactDir 'filetransfer-gui-process-cleanup-diagnostic.json') `
+                                -Value $cleanupDiagnostic
+                        }
+                        catch {} # Optional cleanup detail cannot block immutable evidence capture.
                     }
-                    catch {} # Optional cleanup detail cannot block immutable evidence capture.
+                    return $processesToDrain
                 }
-                return $processesToDrain
-            }
+        }
+        finally { if ($null -ne $FrontierOwner) { $FrontierOwner.Dispose() } }
         if ($null -eq $previousInboundRoot) {
             Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
         }
@@ -38250,10 +38369,15 @@ function Cleanup-ProcessesWithOperationalLogDrain {
         [array]$Processes,
         [string]$ExePath = '',
         [int]$TimeoutMs = 7000,
-        [AllowNull()]$CleanupDiagnostic = $null
+        [AllowNull()]$CleanupDiagnostic = $null,
+        [AllowNull()]$FrontierOwner = $null
     )
 
-    if ($null -eq $Processes -or $Processes.Count -eq 0) { return }
+    Set-Variable -Name FrontierOwner -Option Private
+    if ($null -eq $Processes -or $Processes.Count -eq 0) {
+        if ($null -ne $FrontierOwner) { $FrontierOwner.Dispose() }
+        return
+    }
     $targets = @($Processes | Where-Object { $null -ne $_ })
     $captureCleanupDiagnostic = $CleanupDiagnostic -is [ref] -and
         $null -eq $CleanupDiagnostic.Value -and $targets.Count -ge 1 -and $targets.Count -le 2
@@ -38287,6 +38411,14 @@ function Cleanup-ProcessesWithOperationalLogDrain {
     }
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($null -ne $FrontierOwner) {
+        try {
+            # Adoption shares the original exit-wait budget; no renewed timeout.
+            $remainingMs = [Math]::Max(0, $TimeoutMs - [int]$stopwatch.ElapsedMilliseconds)
+            if (-not $FrontierOwner.WaitForFileAdoptions($remainingMs)) { $FrontierOwner.Dispose() }
+        }
+        catch { $FrontierOwner.Dispose() }
+    }
     for ($i = 0; $i -lt $targets.Count; $i++) {
         $process = $targets[$i]
         try {
@@ -38302,6 +38434,21 @@ function Cleanup-ProcessesWithOperationalLogDrain {
             }
         }
         catch { if ($captureCleanupDiagnostic) { $cleanupRows[$i].waitOutcome = 'exception' } }
+    }
+
+    if ($null -ne $FrontierOwner) {
+        try {
+            # HasExited is not the original native process-handle signal. This
+            # wait shares the same cleanup deadline, without renewing its budget.
+            $remainingMs = [Math]::Max(0, $TimeoutMs - [int]$stopwatch.ElapsedMilliseconds)
+            if (-not $FrontierOwner.WaitForAppExitSignals($remainingMs)) { $FrontierOwner.Dispose() }
+        }
+        catch { $FrontierOwner.Dispose() }
+    }
+    if ($null -ne $FrontierOwner -and
+        ($stopwatch.ElapsedMilliseconds -ge $TimeoutMs -or
+         -not $FrontierOwner.AllFileHandoffsAcknowledged -or -not $FrontierOwner.AllAppRequestsCompletedSuccessfully)) {
+        $FrontierOwner.Dispose()
     }
 
     for ($i = 0; $i -lt $targets.Count; $i++) {
@@ -38411,8 +38558,12 @@ function Stop-BridgeNodeProcessesForExePath {
 function Start-AppInstance {
     param(
         [Parameter(Mandatory = $true)][string]$ExePath,
-        [Parameter(Mandatory = $true)][string]$RoleName
+        [Parameter(Mandatory = $true)][string]$RoleName,
+        [AllowNull()]$FrontierRequest = $null,
+        [AllowNull()]$FrontierReports = $null,
+        [AllowNull()][System.Collections.IList]$StartedProcesses = $null
     )
+    Set-Variable -Name FrontierRequest,FrontierReports -Option Private
     Write-Host "[GUI Smoke] Starting $RoleName instance..." -ForegroundColor Cyan
 
     $launchEnvironment = Get-AppLaunchEnvironmentOverrides -RoleName $RoleName
@@ -38431,6 +38582,25 @@ function Start-AppInstance {
 
     foreach ($entry in $launchEnvironment.GetEnumerator()) {
         $startInfo.Environment[$entry.Key] = [string]$entry.Value
+    }
+
+    if ($null -ne $FrontierRequest) {
+        if ($FrontierRequest -isnot [NLink.Tools.LocalGuiWriterRequest+FrontierAppRequest] -or
+            $FrontierReports -isnot [ref] -or $null -ne $FrontierReports.Value) {
+            throw 'gui_smoke_frontier_app_request_invalid'
+        }
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        $private:createReports = [Func[int,string[]]]{
+            param([int]$ProcessId)
+            # This callback runs only after the original process starts. Retain
+            # ordinary cleanup ownership before report setup can throw.
+            if ($null -ne $StartedProcesses) { [void]$StartedProcesses.Add($process) }
+            $capture = New-GuiSmokeProcessOutputCapture -RoleName $RoleName -ProcessId $ProcessId
+            return [string[]]@($capture.StdoutPath, $capture.StderrPath)
+        }
+        $FrontierReports.Value = $FrontierRequest.StartAppWithReports($process, $createReports)
+        return $process
     }
 
     $process = [System.Diagnostics.Process]::Start($startInfo)
@@ -40961,10 +41131,11 @@ function Reset-ScenarioContext {
 }
 
 function Start-HelpeeFlow {
-    param([Parameter(Mandatory = $true)]$Context)
+    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierRequest = $null, [AllowNull()]$FrontierReports = $null)
+    Set-Variable -Name FrontierRequest,FrontierReports -Option Private
     $Context.HelpeeLaunchGeneration = [int]$Context.HelpeeLaunchGeneration + 1
-    $Context.HelpeeProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helpee'
-    [void]$Context.Processes.Add($Context.HelpeeProc)
+    $Context.HelpeeProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helpee' -FrontierRequest $FrontierRequest -FrontierReports $FrontierReports -StartedProcesses $Context.Processes
+    if ($null -eq $FrontierRequest) { [void]$Context.Processes.Add($Context.HelpeeProc) }
     Set-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helpee' -Window (Wait-Window -Process $Context.HelpeeProc -RoleName 'helpee' -TimeoutMs (Get-StartupWindowTimeoutMs))
     Click-HomeButton -Window $Context.HelpeeWindow -Text 'I need help'
     if (Try-ClickRoleButtonIfPresent -Window $Context.HelpeeWindow -RoleButtonText 'I need help') {
@@ -40973,20 +41144,21 @@ function Start-HelpeeFlow {
 }
 
 function Start-HelperFlow {
-    param([Parameter(Mandatory = $true)]$Context)
+    param([Parameter(Mandatory = $true)]$Context, [AllowNull()]$FrontierRequest = $null, [AllowNull()]$FrontierReports = $null)
+    Set-Variable -Name FrontierRequest,FrontierReports -Option Private
     $Context.HelperLaunchGeneration = [int]$Context.HelperLaunchGeneration + 1
     $Context.HelperLogBookmark = Get-AppLogBookmark
     $Context.HelperRunId = ''
     $Context.HelperListenerGeneration = -1
     Clear-HelperIdentityArtifact
-    $Context.HelperProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helper'
+    $Context.HelperProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helper' -FrontierRequest $FrontierRequest -FrontierReports $FrontierReports -StartedProcesses $Context.Processes
     try {
         $Context.HelperStartedUtcMs = [DateTimeOffset]::new($Context.HelperProc.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()
     }
     catch {
         $Context.HelperStartedUtcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     }
-    [void]$Context.Processes.Add($Context.HelperProc)
+    if ($null -eq $FrontierRequest) { [void]$Context.Processes.Add($Context.HelperProc) }
     Set-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helper' -Window (Wait-Window -Process $Context.HelperProc -RoleName 'helper' -TimeoutMs (Get-StartupWindowTimeoutMs))
     Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
     if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
@@ -42397,6 +42569,8 @@ $ctx = New-ScenarioContext -ExePath $resolvedExe
 $failureArtifactsDir = $null
 $exitCode = 1
 $decoderDebugSnapshotBefore = @()
+$private:guiFrontierOwner = $null
+$private:guiFrontierOrigin = $null
 
 try {
     # GUI smoke intentionally drives release-affecting test overrides such as
@@ -42409,7 +42583,12 @@ try {
         $env:NLINK_TRANSPORT = 'DEVLOCAL'
     }
 
-    Clear-AppLogsIfPresent
+    $guiFrontierOwner = Get-GuiSmokeFrontierLaunchOwner
+    Clear-AppLogsIfPresent -FrontierOwner $guiFrontierOwner -FrontierOrigin ([ref]$guiFrontierOrigin)
+    if ($null -ne $guiFrontierOwner -and $null -eq $guiFrontierOrigin) {
+        $guiFrontierOwner.Dispose()
+        $guiFrontierOwner = $null
+    }
     $decoderDebugSnapshotBefore = Get-DecoderDebugSnapshot
 
     foreach ($scenario in @($scenarioList)) {
@@ -42466,7 +42645,8 @@ catch {
     $exitCode = 1
 }
 finally {
-    Reset-ScenarioContext -Context $ctx
+    try { Reset-ScenarioContext -Context $ctx }
+    finally { if ($null -ne $guiFrontierOwner) { $guiFrontierOwner.Dispose() } }
 
     if ($null -eq $oldTransport) {
         Remove-Item Env:NLINK_TRANSPORT -ErrorAction SilentlyContinue

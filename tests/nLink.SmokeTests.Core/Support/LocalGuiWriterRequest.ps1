@@ -1,6 +1,6 @@
 param([string]$RepoRoot,[string]$Directory,$AcceptedCompletion = $null,
     [string]$GeneratedSource='', [string]$GeneratedRun='', [string]$GeneratedScenario='',
-    [AllowNull()]$ForwardRelay=$null,[string]$SingleCase='valid')
+    [AllowNull()]$ForwardRelay=$null,[string]$SingleCase='valid',[switch]$FrontierLaunch)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Set-Variable -Name ForwardRelay -Option Private -Value $ForwardRelay
@@ -19,6 +19,7 @@ foreach($name in @('ConvertTo-TunaGuiProcessArgument','Write-TunaGuiAtomicJson',
 $originalAtomic=${function:Write-TunaGuiAtomicJson}; $originalOutput=${function:Complete-TunaGuiChildOutputCapture}
 function Write-TunaGuiAtomicJson {
     param($Path,$Value)
+    if($null -ne (Get-Variable frontierGuiReports -ErrorAction SilentlyContinue)) {throw 'Private native GUI reports leaked into formatter'}
     if($script:mode -ceq 'parent-state-fails' -and $Value.lastCompletedStage -ceq 'gui_child_exited') { throw 'injected parent persistence failure' }
     & $originalAtomic -Path $Path -Value $Value
     if($Value.lastCompletedStage -ceq 'gui_child_exited' -and $script:mode -cin @('packet-overflow','packet-truncated','packet-stage')) {
@@ -63,6 +64,17 @@ if ($null -ne $localWriterRequest) {
 }
 '@))
 Invoke-Expression $parent
+if($FrontierLaunch) {
+    $nativeRead='$stderrTask = $private:frontierGuiReports.Stderr'
+    if($parent.Split([string[]]@($nativeRead),[StringSplitOptions]::None).Length -ne 2) {throw 'Native GUI report seam changed'}
+    $parent=$parent.Replace($nativeRead,($nativeRead+@'
+
+$script:ownedRequest = $localWriterRequest
+$script:requestName = $localWriterRequest.Name
+$script:nativeReports = $private:frontierGuiReports
+'@))
+    Invoke-Expression $parent
+}
 $env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID='gui-writer-parent-run'
 $env:NLINK_FILETRANSFER_SCENARIO_RUN_ID='gui-writer-parent-run:scenario:1'
 if($GeneratedSource) {
@@ -72,6 +84,7 @@ if($GeneratedSource) {
 $env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY='1'
 $env:NLINK_GUI_WRITER_REQUEST='inherited-unrelated-request'
 $env:NLINK_GUI_WRITER_REQUEST_ID=[guid]::NewGuid().ToString('D')
+$env:NLINK_GUI_FRONTIER_START_V1='inherited-unrelated-marker'
 foreach($type in @([NLink.Tools.LocalGuiWriterRequest],[NLink.Tools.LocalGuiWriterRequest+Finalizer],
     [NLink.Tools.LocalGuiWriterRequest+Completion],[NLink.Tools.LocalGuiWriterRequest+Output],[NLink.Tools.LocalGuiWriterRequest+Writer])) {
     if($type.GetConstructors().Length -or @($type.GetProperties() | Where-Object { $null -ne $_.GetSetMethod() }).Count) { throw 'Public construction/mutation exposed' }
@@ -89,13 +102,14 @@ $cases=if($AcceptedCompletion -is [ref]) { @($SingleCase) } else { @('baseline',
 foreach($script:mode in $cases) {
     $output=Join-Path $Directory $mode; [void][IO.Directory]::CreateDirectory($output)
     $settings=Join-Path $output 'settings.json'
-    [IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot; Directory=$output; Mode=$mode;GeneratedSource=$GeneratedSource} | ConvertTo-Json))
+    [IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot; Directory=$output; Mode=$mode;GeneratedSource=$GeneratedSource;FrontierLaunch=[bool]$FrontierLaunch} | ConvertTo-Json))
     $env:NLINK_GUI_WRITER_TEST_SETTINGS=$settings
     $completion=$null; [uri]$incompatible=$null; $script:heldGate=$null; $script:ownedRequest=$null; $script:requestName=''
     if($mode -ceq 'assigned') { $completion='existing-owner' }
     $arguments=@{RepoRoot=$RepoRoot; ArtifactDir=$output; ExePath='unused-controlled-child'; TimeoutSeconds=$(if($mode -ceq 'timeout') {10} else {30})}
     if($null -ne $ForwardRelay) { $arguments.LocalWriterRelay=$ForwardRelay }
     if($mode -cne 'baseline') { $arguments.LocalWriterCompletion=[ref]$completion }
+    if($FrontierLaunch) {$arguments.CaptureFrontierLaunch=$true; $script:nativeReports=$null}
     if($mode -ceq 'incompatible') { $arguments.LocalWriterCompletion=[ref]$incompatible }
     $failure=''; $result=$null
     try { $result=Invoke-TunaGuiSmokeWithHardDeadline @arguments } catch { $failure=$_.Exception.Message }
@@ -115,6 +129,14 @@ foreach($script:mode in $cases) {
         try { $existing=[Threading.EventWaitHandle]::OpenExisting($script:requestName+'.closed') }
         catch [Threading.WaitHandleCannotBeOpenedException] { }
         if($null -ne $existing) { $existing.Dispose(); throw 'Parent channel leaked after finally' }
+    }
+    if($FrontierLaunch) {
+        if($null -eq $script:nativeReports -or -not $script:nativeReports.NativeLaunchReady -or $null -eq $script:nativeReports.ParentRegistration -or
+            $script:nativeReports.ParentRegistration.IsCurrent) {throw 'Original GUI parent native launch/cleanup changed'}
+        foreach($part in @('ready','failed')) {
+            $existing=$null; try {$existing=[Threading.EventWaitHandle]::OpenExisting($script:requestName+'.frontier-gui-start-v1.'+$part)} catch [Threading.WaitHandleCannotBeOpenedException] { }
+            if($null -ne $existing) {$existing.Dispose(); throw 'Native GUI readiness signal leaked after parent cleanup'}
+        }
     }
     if($mode -ceq 'valid') {
         $ledger=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-gui-log-ledger.json')) | ConvertFrom-Json
@@ -144,6 +166,7 @@ foreach($script:mode in $cases) {
         elseif($null -ne $baselineHashes -and ($hashes -join '|') -cne ($baselineHashes -join '|')) { throw "Primary output bytes changed: $mode" }
     }
     if($env:NLINK_GUI_WRITER_REQUEST -cne 'inherited-unrelated-request') { throw 'Parent environment changed' }
+    if($env:NLINK_GUI_FRONTIER_START_V1 -cne 'inherited-unrelated-marker') {throw 'Parent readiness environment changed'}
     $rows.Add(@{Mode=$mode; CompletionAdopted=$mode -ceq 'valid'; PrimaryExitCode=$expectedCode; ParentFailure=$failure})
     if($mode -ceq 'valid' -and $AcceptedCompletion -is [ref]) { $AcceptedCompletion.Value=$completion }
 }

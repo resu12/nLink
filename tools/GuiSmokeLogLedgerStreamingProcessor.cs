@@ -7,10 +7,480 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
+#if NLINK_FRONTIER_LEDGER
+namespace NLink.Tools.FrontierLedger
+#else
 namespace NLink.Tools
+#endif
 {
+    // Exact processor/source/output provenance, not finalizer or publication authority.
+    public sealed partial class GuiSmokeLedgerStreamCapture : IDisposable
+    {
+        private readonly GuiSmokeLedgerStreamCapture original;
+        private readonly GuiSmokeLedgerStreamingResult owner;
+        private readonly Stream source;
+        private readonly GuiSmokeLedgerRetainedOutputs outputs;
+        internal readonly ReadOnlyCollection<long> CursorLineStarts;
+        private bool disposed;
+        public string AcceptanceRunId { get; private set; }
+        public string ScenarioRunId { get; private set; }
+        public long SourceBytes { get; private set; }
+        public long SourceLines { get; private set; }
+        public long Bookmark { get; private set; }
+        public GuiSmokeLedgerCapturedOutput Retained { get; private set; }
+        public GuiSmokeLedgerCapturedOutput Writer { get; private set; }
+        public GuiSmokeLedgerCapturedOutput Semantic { get; private set; }
+        public ReadOnlyCollection<int> RetainedOrigins { get; private set; }
+        public ReadOnlyCollection<int> WriterOrigins { get; private set; }
+        public ReadOnlyCollection<int> SemanticOrigins { get; private set; }
+        public bool HasWriterValidationErrors { get; private set; }
+        public GuiSmokeLedgerValidationSnapshot Validation { get; private set; }
+        public bool OwnsValidation(GuiSmokeLedgerValidationSnapshot value)
+        { return Object.ReferenceEquals(original, this) && value != null && Object.ReferenceEquals(Validation, value); }
+        public bool LiveProofEligible { get { return false; } }
+        public bool NativeWriterCustodyEstablished { get { return false; } }
+        public bool PublicationCompletionIssued { get { return false; } }
+        public bool HasRetainedOutputs { get { return outputs != null && IsCurrent; } }
+        internal GuiSmokeLedgerStreamCapture(GuiSmokeLedgerStreamingResult owner, GuiSmokeLedgerStreamRead input,
+            string run, string scenario, long lines, long bookmark, GuiSmokeLedgerCapturedOutput retained,
+            GuiSmokeLedgerCapturedOutput writer, GuiSmokeLedgerCapturedOutput semantic, GuiSmokeLedgerRetainedOutputs outputs)
+        {
+            original = this; this.owner = owner; source = input.Source;
+            this.outputs = outputs;
+            AcceptanceRunId = run; ScenarioRunId = scenario; SourceBytes = input.SourceBytes; SourceLines = lines; Bookmark = bookmark;
+            Retained = retained; Writer = writer; Semantic = semantic;
+            RetainedOrigins = input.Origins[0].AsReadOnly(); WriterOrigins = input.Origins[1].AsReadOnly(); SemanticOrigins = input.Origins[2].AsReadOnly();
+            HasWriterValidationErrors = owner.WriterGapCount != 0 || owner.WriterDuplicateCount != 0 || owner.WriterIdentityMismatchCount != 0 ||
+                owner.ChronologyBatchInvalid || owner.ChronologyInversionCount != 0 || owner.ChronologyCollisionCount != 0;
+            CursorLineStarts = input.CursorLineStarts;
+            Validation = GuiSmokeLedgerValidationSnapshot.TryCapture(this, owner, input.InitialWriters);
+        }
+        public bool IsCurrent
+        {
+            get
+            {
+                if (!Object.ReferenceEquals(original, this) || disposed) return false;
+                try
+                {
+                    // Source checks stay outside the output lock: owner retirement
+                    // can synchronously close the outputs through cancellation.
+                    if (owner.OwnsStreamCapture(this) && source.CanRead && source.Length == SourceBytes && source.Position == SourceBytes &&
+                        (outputs == null || outputs.IsCurrent) && source.CanRead) return true;
+                }
+                catch { }
+                Dispose(); return false;
+            }
+        }
+        public bool MatchesOriginalSource(Stream value) { return Object.ReferenceEquals(source, value) && IsCurrent; }
+        // Called only under the original adopter's bounded I/O interval. Do not
+        // enter source/finalizer locks from inside the retained-output lock.
+        internal GuiSmokeLedgerCapturedOutput CopySemantic(string destination, Func<bool> current)
+        {
+            return Object.ReferenceEquals(original, this) && !disposed && outputs != null ?
+                outputs.CopySemantic(destination, Semantic, SemanticOrigins.Count, current) : null;
+        }
+        internal bool OwnsSemanticCopy(GuiSmokeLedgerCapturedOutput value)
+        { return IsCurrent && outputs != null && outputs.OwnsSemanticCopy(value); }
+        public void Dispose()
+        {
+            if (!Object.ReferenceEquals(original, this) || disposed) return;
+            disposed = true;
+            if (outputs != null) outputs.Dispose();
+            source.Dispose();
+        }
+    }
+
+    // Immutable processing facts only. Recovery markers, native writer membership,
+    // cursor integrity, semantic-copy and persistence still need original gates.
+    public sealed class GuiSmokeLedgerValidationSnapshot
+    {
+        public const int MaximumWriters = 64, MaximumDeferredBatches = 64, MaximumMetadataCodeUnits = 65536;
+        private readonly GuiSmokeLedgerValidationSnapshot original;
+        private readonly GuiSmokeLedgerStreamCapture owner;
+        public ReadOnlyCollection<GuiSmokeLedgerValidationWriter> Writers { get; private set; }
+        public ReadOnlyCollection<GuiSmokeLedgerPrefixWriter> InitialWriters { get; private set; }
+        public ReadOnlyCollection<GuiSmokeLedgerValidationBatch> DeferredBatches { get; private set; }
+        public long SourceLineVisitCount { get; private set; }
+        public long WriterGapCount { get; private set; }
+        public long WriterDuplicateCount { get; private set; }
+        public long WriterIdentityMismatchCount { get; private set; }
+        public long ChronologyInversionCount { get; private set; }
+        public long ChronologyCollisionCount { get; private set; }
+        public bool ChronologyBatchInvalid { get; private set; }
+        public int WriterBoundaryMismatchCount { get; private set; }
+        public int WriterDrainMissingCount { get; private set; }
+        public int MetadataCodeUnits { get; private set; }
+        public bool HasProcessorErrors { get { return WriterGapCount != 0 || WriterDuplicateCount != 0 || WriterIdentityMismatchCount != 0 ||
+            ChronologyBatchInvalid || ChronologyInversionCount != 0 || ChronologyCollisionCount != 0; } }
+        public bool HasWriterClosureErrors { get { return HasProcessorErrors || Writers.Count == 0 ||
+            WriterBoundaryMismatchCount != 0 || WriterDrainMissingCount != 0; } }
+        public bool IsCurrent { get { return Object.ReferenceEquals(original, this) && owner.OwnsValidation(this) && owner.IsCurrent; } }
+        public bool LiveProofEligible { get { return false; } }
+        public bool NativeWriterCustodyEstablished { get { return false; } }
+        public bool PublicationCompletionIssued { get { return false; } }
+        private GuiSmokeLedgerValidationSnapshot(GuiSmokeLedgerStreamCapture owner, GuiSmokeLedgerStreamingResult result)
+        {
+            original = this; this.owner = owner;
+            SourceLineVisitCount = result.SourceLineVisitCount;
+            WriterGapCount = result.WriterGapCount; WriterDuplicateCount = result.WriterDuplicateCount;
+            WriterIdentityMismatchCount = result.WriterIdentityMismatchCount; ChronologyBatchInvalid = result.ChronologyBatchInvalid;
+            ChronologyInversionCount = result.ChronologyInversionCount; ChronologyCollisionCount = result.ChronologyCollisionCount;
+        }
+        internal static GuiSmokeLedgerValidationSnapshot TryCapture(GuiSmokeLedgerStreamCapture owner, GuiSmokeLedgerStreamingResult result,
+            ReadOnlyCollection<GuiSmokeLedgerPrefixWriter> initialWriters)
+        {
+            if (result.Writers.Length > MaximumWriters || result.DeferredBatches.Length > MaximumDeferredBatches ||
+                result.Drains.Length > MaximumWriters) return null;
+            var value = new GuiSmokeLedgerValidationSnapshot(owner, result);
+            var writers = new List<GuiSmokeLedgerValidationWriter>();
+            var batches = new List<GuiSmokeLedgerValidationBatch>();
+            var drains = new Dictionary<string, long[]>(StringComparer.OrdinalIgnoreCase);
+            foreach (var drain in result.Drains) drains.Add(drain.WriterId, drain.Sequences);
+            foreach (var writer in result.Writers)
+            {
+                if (!value.AddText(writer.WriterId) || !value.AddText(writer.AcceptanceRunId) || !value.AddText(writer.ScenarioRunId)) return null;
+                long[] sequences;
+                drains.TryGetValue(writer.WriterId, out sequences);
+                var captured = new GuiSmokeLedgerValidationWriter(writer, sequences);
+                writers.Add(captured);
+                if (captured.FirstSequence != 1 || captured.LastSequence < 1 || captured.ObservedCount != captured.LastSequence ||
+                    captured.AcceptanceRunId != owner.AcceptanceRunId || captured.ScenarioRunId != owner.ScenarioRunId)
+                    value.WriterBoundaryMismatchCount++;
+                if (captured.DrainCount != 1 || captured.DrainSequence != captured.LastSequence) value.WriterDrainMissingCount++;
+            }
+            foreach (var batch in result.DeferredBatches)
+            {
+                if (!value.AddText(batch.WriterId) || !value.AddText(batch.PayloadSha256)) return null;
+                batches.Add(new GuiSmokeLedgerValidationBatch(batch));
+            }
+            // Prefix strings are the same immutable writer/scope strings already
+            // counted above, not another caller-controlled metadata allocation.
+            value.InitialWriters = initialWriters;
+            value.Writers = writers.AsReadOnly(); value.DeferredBatches = batches.AsReadOnly();
+            return value;
+        }
+        private bool AddText(string text)
+        {
+            if (!GuiSmokeLedgerNativeCapture.ValidText(text, 1024)) return false;
+            MetadataCodeUnits += text.Length;
+            return MetadataCodeUnits <= MaximumMetadataCodeUnits;
+        }
+    }
+
+    public sealed class GuiSmokeLedgerPrefixWriter
+    {
+        public string WriterId { get; private set; }
+        public string AcceptanceRunId { get; private set; }
+        public string ScenarioRunId { get; private set; }
+        public long FirstSequence { get; private set; }
+        public long LastSequence { get; private set; }
+        public long ObservedCount { get; private set; }
+        internal GuiSmokeLedgerPrefixWriter(GuiSmokeLedgerWriterResult writer)
+        {
+            WriterId = writer.WriterId; AcceptanceRunId = writer.AcceptanceRunId; ScenarioRunId = writer.ScenarioRunId;
+            FirstSequence = writer.FirstSequence; LastSequence = writer.LastSequence; ObservedCount = writer.ObservedCount;
+        }
+    }
+
+    public sealed class GuiSmokeLedgerValidationWriter
+    {
+        public string WriterId { get; private set; }
+        public string AcceptanceRunId { get; private set; }
+        public string ScenarioRunId { get; private set; }
+        public long FirstSequence { get; private set; }
+        public long LastSequence { get; private set; }
+        public long ObservedCount { get; private set; }
+        public int DrainCount { get; private set; }
+        public long DrainSequence { get; private set; }
+        internal GuiSmokeLedgerValidationWriter(GuiSmokeLedgerWriterResult writer, long[] drains)
+        {
+            WriterId = writer.WriterId; AcceptanceRunId = writer.AcceptanceRunId; ScenarioRunId = writer.ScenarioRunId;
+            FirstSequence = writer.FirstSequence; LastSequence = writer.LastSequence; ObservedCount = writer.ObservedCount;
+            DrainCount = drains == null ? 0 : drains.Length; DrainSequence = DrainCount == 1 ? drains[0] : 0;
+        }
+    }
+
+    public sealed class GuiSmokeLedgerValidationBatch
+    {
+        public string WriterId { get; private set; }
+        public long BatchGeneration { get; private set; }
+        public long BatchFirstSequence { get; private set; }
+        public long BatchLastSequence { get; private set; }
+        public long AttemptUtcTicks { get; private set; }
+        public long MinSequence { get; private set; }
+        public long MaxSequence { get; private set; }
+        public long LineCount { get; private set; }
+        public bool TupleValid { get; private set; }
+        public string PayloadSha256 { get; private set; }
+        internal GuiSmokeLedgerValidationBatch(GuiSmokeLedgerBatchResult batch)
+        {
+            WriterId = batch.WriterId; BatchGeneration = batch.BatchGeneration;
+            BatchFirstSequence = batch.BatchFirstSequence; BatchLastSequence = batch.BatchLastSequence;
+            AttemptUtcTicks = batch.AttemptUtcTicks; MinSequence = batch.MinSequence; MaxSequence = batch.MaxSequence;
+            LineCount = batch.LineCount; TupleValid = batch.TupleValid; PayloadSha256 = batch.PayloadSha256;
+        }
+    }
+
+    // Exactly three read-only duplicates of this invocation's original output
+    // handles. No pathname reopen, external handle import or public handle export.
+    internal sealed partial class GuiSmokeLedgerRetainedOutputs : IDisposable
+    {
+        private readonly GuiSmokeLedgerRetainedOutputs original;
+        private readonly object sync = new object();
+        private readonly FileStream[] files = new FileStream[3];
+        private readonly GuiSmokeLedgerCapturedOutput[] metadata = new GuiSmokeLedgerCapturedOutput[3];
+        private readonly CancellationTokenRegistration cancellation;
+        private bool disposed, sealedOutputs;
+        private bool semanticCopyAttempted;
+        private FileStream semanticCopy;
+        private GuiSmokeLedgerCapturedOutput semanticCopyInfo;
+        internal GuiSmokeLedgerRetainedOutputs(CancellationToken lifetime)
+        { original = this; cancellation = lifetime.Register(Close); }
+        internal void Seal(FileStream retained, FileStream writer, FileStream semantic,
+            GuiSmokeLedgerCapturedOutput retainedInfo, GuiSmokeLedgerCapturedOutput writerInfo, GuiSmokeLedgerCapturedOutput semanticInfo)
+        {
+            lock (sync)
+            {
+                if (disposed || sealedOutputs) throw new InvalidDataException("stream_outputs_not_current");
+                var originals = new[] { retained, writer, semantic };
+                var descriptions = new[] { retainedInfo, writerInfo, semanticInfo };
+                for (int i = 0; i < 3; i++)
+                {
+                    SafeFileHandle handle = null;
+                    try
+                    {
+                        // Duplicate the same file object with reduced access. Its
+                        // original read-only sharing continues denying write/delete
+                        // even after the processor closes its writable handle.
+                        if (descriptions[i] == null || !DuplicateHandle(GetCurrentProcess(), originals[i].SafeFileHandle,
+                            GetCurrentProcess(), out handle, 0x80000000, false, 0))
+                            throw new IOException("stream_output_duplicate_failed");
+                        files[i] = new FileStream(handle, FileAccess.Read); handle = null;
+                        metadata[i] = descriptions[i];
+                        if (!metadata[i].Matches(files[i])) throw new InvalidDataException("stream_output_identity_mismatch");
+                    }
+                    finally { if (handle != null) handle.Dispose(); }
+                }
+                sealedOutputs = true;
+            }
+        }
+        internal bool IsCurrent
+        {
+            get
+            {
+                lock (sync)
+                {
+                    if (!Object.ReferenceEquals(original, this) || disposed || !sealedOutputs) return false;
+                    try
+                    {
+                        for (int i = 0; i < 3; i++)
+                            if (!files[i].CanRead || files[i].CanWrite || !metadata[i].Matches(files[i])) { Close(); return false; }
+                        if (semanticCopy != null && (!semanticCopy.CanRead || semanticCopy.CanWrite ||
+                            semanticCopyInfo == null || !semanticCopyInfo.Matches(semanticCopy))) { Close(); return false; }
+                        return true;
+                    }
+                    catch { Close(); return false; }
+                }
+            }
+        }
+        internal bool OwnsSemanticCopy(GuiSmokeLedgerCapturedOutput value)
+        { lock (sync) { return value != null && Object.ReferenceEquals(value, semanticCopyInfo) && semanticCopy != null && IsCurrent; } }
+
+        internal GuiSmokeLedgerCapturedOutput CopySemantic(string destination, GuiSmokeLedgerCapturedOutput expected,
+            int originCount, Func<bool> current)
+        {
+            lock (sync)
+            {
+                if (!Object.ReferenceEquals(original, this)) return null;
+                bool success = false; SafeFileHandle duplicate = null;
+                try
+                {
+                    if (!IsCurrent || semanticCopyAttempted || !Object.ReferenceEquals(expected, metadata[2]) || current == null) return null;
+                    semanticCopyAttempted = true;
+                    if (expected.LineCount != originCount || originCount < 0 || originCount > GuiSmokeLedgerStreamRead.MaximumOriginEntries ||
+                        expected.ByteCount < 0 || expected.ByteCount > GuiSmokeLedgerStreamRead.MaximumSourceBytes +
+                            (long)GuiSmokeLedgerStreamRead.MaximumLines * Environment.NewLine.Length || !current()) return null;
+                    var input = files[2]; input.Position = 0;
+                    // This optional gate retains creation custody, not a path-only
+                    // publication. A failed/partial file is never an owned result.
+                    using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read, 32768))
+                    using (var hash = SHA256.Create())
+                    {
+                        var buffer = new byte[32768]; long bytes = 0, feeds = 0; int last = -1;
+                        while (bytes < expected.ByteCount)
+                        {
+                            if (!current() || !IsCurrent) return null;
+                            int read = input.Read(buffer, 0, (int)Math.Min(buffer.Length, expected.ByteCount - bytes));
+                            if (read == 0 || !current()) return null;
+                            output.Write(buffer, 0, read); hash.TransformBlock(buffer, 0, read, buffer, 0);
+                            for (int i = 0; i < read; i++) if (buffer[i] == 10) feeds++;
+                            bytes += read; last = buffer[read - 1];
+                        }
+                        if (!current() || !IsCurrent || input.ReadByte() != -1 || input.Position != expected.ByteCount) return null;
+                        hash.TransformFinalBlock(new byte[0], 0, 0);
+                        long lines = bytes == 0 ? 0 : feeds + (last == 10 ? 0 : 1);
+                        string digest = BitConverter.ToString(hash.Hash).Replace("-", "").ToLowerInvariant();
+                        if (bytes != expected.ByteCount || lines != expected.LineCount || digest != expected.Sha256) return null;
+                        output.Flush(true);
+                        semanticCopyInfo = GuiSmokeLedgerCapturedOutput.Capture(output, destination, digest, lines, bytes);
+                        if (!current() || !IsCurrent || semanticCopyInfo == null || semanticCopyInfo.FileIdentity == expected.FileIdentity ||
+                            !DuplicateHandle(GetCurrentProcess(), output.SafeFileHandle, GetCurrentProcess(), out duplicate, 0x80000000, false, 0)) return null;
+                        semanticCopy = new FileStream(duplicate, FileAccess.Read); duplicate = null;
+                    }
+                    success = current() && OwnsSemanticCopy(semanticCopyInfo);
+                    return success ? semanticCopyInfo : null;
+                }
+                catch { return null; }
+                finally { if (duplicate != null) duplicate.Dispose(); if (!success) Close(); }
+            }
+        }
+        // The cancellation callback only closes native resources. It never
+        // enters source/finalizer ownership locks or unregisters itself.
+        private void Close()
+        {
+            lock (sync)
+            {
+                if (!Object.ReferenceEquals(original, this) || disposed) return;
+                disposed = true;
+                foreach (var file in files) if (file != null) file.Dispose();
+                if (semanticCopy != null) semanticCopy.Dispose();
+            }
+        }
+        public void Dispose() { if (!Object.ReferenceEquals(original, this)) return; Close(); cancellation.Dispose(); }
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DuplicateHandle(IntPtr process, SafeFileHandle source, IntPtr target,
+            out SafeFileHandle duplicate, uint access, bool inherit, uint options);
+    }
+
+    internal sealed class GuiSmokeLedgerStreamRead : TextReader
+    {
+        internal const int MaximumLines = 262144, MaximumLineCodeUnits = 262144, MaximumOriginEntries = 262144;
+        internal const long MaximumSourceBytes = 268435456;
+        internal readonly Stream Source;
+        internal readonly long SourceBytes;
+        internal readonly List<int>[] Origins = { new List<int>(), new List<int>(), new List<int>() };
+        private readonly StreamReader reader;
+        private readonly GuiSmokeLedgerLfRead cursorReader;
+        internal ReadOnlyCollection<long> CursorLineStarts { get { return cursorReader == null ? null : cursorReader.LineStarts.AsReadOnly(); } }
+        internal ReadOnlyCollection<GuiSmokeLedgerPrefixWriter> InitialWriters;
+        private readonly Stopwatch clock = Stopwatch.StartNew();
+        private readonly char[] buffer = new char[32768];
+        private int offset, count, originCount;
+        private bool skipLf;
+        internal GuiSmokeLedgerStreamRead(Stream source, bool cursorMode = false)
+        {
+            Source = source; SourceBytes = source.Length;
+            if (!source.CanRead || source.CanWrite || source.Position != 0 || SourceBytes < 1 || SourceBytes > MaximumSourceBytes)
+                throw new InvalidDataException("stream_source_not_original_start");
+            if (cursorMode) cursorReader = new GuiSmokeLedgerLfRead(source, CheckCurrent);
+            else reader = new StreamReader(source, new UTF8Encoding(false, true), true, 32768, true);
+        }
+        internal void CaptureInitialWriters(ICollection<GuiSmokeLedgerWriterResult> writers)
+        {
+            if (cursorReader == null) return;
+            if (InitialWriters != null || writers.Count > GuiSmokeLedgerValidationSnapshot.MaximumWriters)
+                throw new InvalidDataException("cursor_initial_writer_limit");
+            var prefix = new List<GuiSmokeLedgerPrefixWriter>();
+            foreach (var writer in writers) prefix.Add(new GuiSmokeLedgerPrefixWriter(writer));
+            InitialWriters = prefix.AsReadOnly();
+        }
+        internal void CheckCurrent()
+        { if (clock.ElapsedMilliseconds > 5000 || !Source.CanRead) throw new InvalidDataException("stream_source_not_current"); }
+        internal void AddOrigin(int role, long line)
+        {
+            CheckCurrent();
+            if (originCount == MaximumOriginEntries) throw new InvalidDataException("stream_source_origin_limit");
+            Origins[role].Add(checked((int)line)); originCount++;
+        }
+        private bool Fill()
+        {
+            CheckCurrent();
+            if (offset != count) return true;
+            count = reader.Read(buffer, 0, buffer.Length); offset = 0; CheckCurrent(); return count != 0;
+        }
+        public override string ReadLine()
+        {
+            CheckCurrent();
+            if (cursorReader != null) return cursorReader.ReadLine();
+            if (skipLf) { if (Fill() && buffer[offset] == '\n') offset++; skipLf = false; }
+            StringBuilder line = null;
+            while (Fill())
+            {
+                int start = offset;
+                while (offset < count && buffer[offset] != '\r' && buffer[offset] != '\n') offset++;
+                int length = offset - start;
+                if ((line == null ? 0 : line.Length) + length > MaximumLineCodeUnits)
+                    throw new InvalidDataException("stream_source_line_limit");
+                if (line == null) line = new StringBuilder(length);
+                line.Append(buffer, start, length);
+                if (offset < count) { skipLf = buffer[offset++] == '\r'; return line.ToString(); }
+            }
+            return line == null ? null : line.ToString();
+        }
+        protected override void Dispose(bool disposing) { if (disposing && reader != null) reader.Dispose(); base.Dispose(disposing); }
+    }
+
+    // Owned ledger cursors require final LF. Native primary semantic copies
+    // explicitly allow their original final record without a separator. Legacy
+    // and generic readers retain their CR/LF behavior. UTF-8 tails stay strict.
+    internal sealed class GuiSmokeLedgerLfRead
+    {
+        internal readonly List<long> LineStarts = new List<long>();
+        private readonly Stream source;
+        private readonly Action current;
+        private readonly byte[] buffer = new byte[32768];
+        private readonly UTF8Encoding utf8 = new UTF8Encoding(false, true);
+        private readonly bool allowFinalLine;
+        private int offset, count;
+        private long position, lineStart;
+        internal GuiSmokeLedgerLfRead(Stream source, Action current, bool allowFinalLine = false)
+        { this.source = source; this.current = current; this.allowFinalLine = allowFinalLine; }
+        internal string ReadLine()
+        {
+            using (var bytes = new MemoryStream())
+            {
+                while (true)
+                {
+                    current();
+                    if (offset == count)
+                    {
+                        count = source.Read(buffer, 0, buffer.Length); offset = 0;
+                        if (count == 0)
+                        {
+                            if (bytes.Length != 0)
+                            {
+                                if (!allowFinalLine) throw new InvalidDataException("cursor_unterminated_line");
+                                return FinishLine(bytes);
+                            }
+                            return null;
+                        }
+                    }
+                    int lf = Array.IndexOf(buffer, (byte)10, offset, count - offset);
+                    int take = (lf < 0 ? count : lf) - offset;
+                    if (bytes.Length + take > 4L * GuiSmokeLedgerStreamRead.MaximumLineCodeUnits + 3)
+                        throw new InvalidDataException("stream_source_line_limit");
+                    bytes.Write(buffer, offset, take); offset += take; position += take;
+                    if (lf < 0) continue;
+                    offset++; position++;
+                    return FinishLine(bytes);
+                }
+            }
+        }
+        private string FinishLine(MemoryStream bytes)
+        {
+            if (LineStarts.Count == GuiSmokeLedgerStreamRead.MaximumLines) throw new InvalidDataException("cursor_line_limit");
+            string line = utf8.GetString(bytes.ToArray());
+            if (lineStart == 0 && line.Length != 0 && line[0] == '\ufeff') line = line.Substring(1);
+            if (line.EndsWith("\r", StringComparison.Ordinal)) line = line.Substring(0, line.Length - 1);
+            if (line.Length > GuiSmokeLedgerStreamRead.MaximumLineCodeUnits) throw new InvalidDataException("stream_source_line_limit");
+            LineStarts.Add(lineStart); lineStart = position; current(); return line;
+        }
+    }
+
     public sealed class GuiSmokeLedgerWriterResult
     {
         public GuiSmokeLedgerWriterResult() { WriterId = ""; AcceptanceRunId = ""; ScenarioRunId = ""; }
@@ -46,8 +516,11 @@ namespace NLink.Tools
 
     public sealed class GuiSmokeLedgerStreamingResult
     {
+        private readonly GuiSmokeLedgerStreamingResult original;
+        private GuiSmokeLedgerStreamCapture streamCapture;
         public GuiSmokeLedgerStreamingResult()
         {
+            original = this;
             RetainedSha256 = "";
             WriterSha256 = "";
             SemanticSha256 = "";
@@ -77,6 +550,13 @@ namespace NLink.Tools
         private GuiSmokeLedgerNativeCapture nativeCapture;
         private object nativeCaptureIdentity;
         public GuiSmokeLedgerNativeCapture NativeCapture { get { return nativeCapture; } }
+        public GuiSmokeLedgerStreamCapture StreamCapture { get { return streamCapture; } }
+        public bool OwnsStreamCapture(GuiSmokeLedgerStreamCapture capture)
+        { return Object.ReferenceEquals(original, this) && capture != null && Object.ReferenceEquals(streamCapture, capture); }
+        internal void CaptureStream(GuiSmokeLedgerStreamRead input, string run, string scenario, long lines, long bookmark,
+            GuiSmokeLedgerCapturedOutput retained, GuiSmokeLedgerCapturedOutput writer, GuiSmokeLedgerCapturedOutput semantic,
+            GuiSmokeLedgerRetainedOutputs outputs)
+        { streamCapture = new GuiSmokeLedgerStreamCapture(this, input, run, scenario, lines, bookmark, retained, writer, semantic, outputs); }
         public bool OwnsNativeCapture(GuiSmokeLedgerNativeCapture capture)
         { return capture != null && Object.ReferenceEquals(nativeCapture, capture) && capture.IsOwnedBy(nativeCaptureIdentity); }
         internal void CaptureNativeOutputs(string sourcePath, string run, string scenario, long frozenLines, long bookmark,
@@ -165,6 +645,13 @@ namespace NLink.Tools
         public long LineCount { get; private set; }
         internal int MetadataCodeUnits { get { return CreationPath.Length + Sha256.Length + FileIdentity.Length; } }
         private GuiSmokeLedgerCapturedOutput() { }
+        internal bool Matches(FileStream stream)
+        {
+            FileInformation info;
+            return stream != null && !stream.SafeFileHandle.IsClosed && GetFileInformationByHandle(stream.SafeFileHandle, out info) &&
+                (info.Attributes & 16) == 0 && ((long)info.SizeHigh << 32 | info.SizeLow) == ByteCount &&
+                info.Volume.ToString("x8") + ":" + info.IndexHigh.ToString("x8") + info.IndexLow.ToString("x8") == FileIdentity;
+        }
         internal static GuiSmokeLedgerCapturedOutput Capture(FileStream stream, string path, string hash, long lines, long bytes)
         {
             if (!GuiSmokeLedgerNativeCapture.ValidText(path, 4096) || lines < 0 || bytes < 0 ||
@@ -210,6 +697,9 @@ namespace NLink.Tools
 
     public static class GuiSmokeLogLedgerStreamingProcessor
     {
+        // The current shared catalog exceeds 1024 names. Aggregate metadata
+        // remains capped at 65536 code units, including deferred batch keys.
+        public const int MaximumSemanticEventNames = 2048;
         private static readonly HashSet<string> WriterFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "event", "acceptance_run_id", "scenario_run_id", "log_writer_id",
@@ -317,6 +807,65 @@ namespace NLink.Tools
                 expectedAcceptanceRunId, expectedScenarioRunId, deferredBatchKeys, semanticTempPath, semanticEventNames, true);
         }
 
+        // Stream provenance only: a generic caller stream is not frontier custody.
+        // The original GUI integration separately supplies its owned reader.
+        public static GuiSmokeLedgerStreamingResult ProcessFromStream(
+            Stream source, long frozenLineCount, long bookmark, string retainedTempPath, string writerTempPath,
+            string expectedAcceptanceRunId, string expectedScenarioRunId, string[] deferredBatchKeys,
+            string semanticTempPath, string[] semanticEventNames)
+        {
+            return ProcessStreamCore(source, frozenLineCount, bookmark, retainedTempPath, writerTempPath,
+                expectedAcceptanceRunId, expectedScenarioRunId, deferredBatchKeys, semanticTempPath, semanticEventNames,
+                false, CancellationToken.None);
+        }
+
+        // The token controls cleanup only. It does not establish GUI custody.
+        public static GuiSmokeLedgerStreamingResult ProcessFromStreamWithRetainedOutputs(
+            Stream source, long frozenLineCount, long bookmark, string retainedTempPath, string writerTempPath,
+            string expectedAcceptanceRunId, string expectedScenarioRunId, string[] deferredBatchKeys,
+            string semanticTempPath, string[] semanticEventNames, CancellationToken outputLifetime)
+        {
+            return ProcessStreamCore(source, frozenLineCount, bookmark, retainedTempPath, writerTempPath,
+                expectedAcceptanceRunId, expectedScenarioRunId, deferredBatchKeys, semanticTempPath, semanticEventNames,
+                true, outputLifetime);
+        }
+
+#if NLINK_FRONTIER_LEDGER
+        internal static GuiSmokeLedgerStreamingResult ProcessOwnedCursor(
+            Stream source, long lines, long bookmark, string retained, string writer, string run, string scenario,
+            string[] keys, string semantic, string[] events, CancellationToken lifetime)
+        {
+            return ProcessStreamCore(source, lines, bookmark, retained, writer, run, scenario, keys, semantic, events, true, lifetime, true);
+        }
+#endif
+
+        private static GuiSmokeLedgerStreamingResult ProcessStreamCore(
+            Stream source, long frozenLineCount, long bookmark, string retainedTempPath, string writerTempPath,
+            string expectedAcceptanceRunId, string expectedScenarioRunId, string[] deferredBatchKeys,
+            string semanticTempPath, string[] semanticEventNames, bool retainOutputs, CancellationToken outputLifetime, bool cursorMode = false)
+        {
+            if (retainOutputs) outputLifetime.ThrowIfCancellationRequested();
+            if (source == null || frozenLineCount < 1 || frozenLineCount > GuiSmokeLedgerStreamRead.MaximumLines ||
+                !GuiSmokeLedgerNativeCapture.ValidText(expectedAcceptanceRunId, 1024) ||
+                !GuiSmokeLedgerNativeCapture.ValidText(expectedScenarioRunId, 1024) ||
+                !GuiSmokeLedgerNativeCapture.ValidText(retainedTempPath, 4096) ||
+                !GuiSmokeLedgerNativeCapture.ValidText(writerTempPath, 4096) ||
+                !GuiSmokeLedgerNativeCapture.ValidText(semanticTempPath, 4096) ||
+                (deferredBatchKeys != null && deferredBatchKeys.Length > 64) ||
+                (semanticEventNames != null && semanticEventNames.Length > MaximumSemanticEventNames))
+                throw new InvalidDataException("stream_source_bounds");
+            int metadata = 0;
+            foreach (var values in new[] { deferredBatchKeys, semanticEventNames })
+                if (values != null) foreach (string value in values)
+                {
+                    if (!GuiSmokeLedgerNativeCapture.ValidText(value, 1024) || (metadata += value.Length) > 65536)
+                        throw new InvalidDataException("stream_source_metadata_limit");
+                }
+            return ProcessCore(null, frozenLineCount, bookmark, retainedTempPath, writerTempPath,
+                expectedAcceptanceRunId, expectedScenarioRunId, deferredBatchKeys, semanticTempPath, semanticEventNames, true, source,
+                retainOutputs, outputLifetime, cursorMode);
+        }
+
         private static GuiSmokeLedgerStreamingResult ProcessCore(
             string sourcePath,
             long frozenLineCount,
@@ -328,7 +877,8 @@ namespace NLink.Tools
             string[] deferredBatchKeys,
             string semanticTempPath,
             string[] semanticEventNames,
-            bool captureNativeOutputs)
+            bool captureNativeOutputs, Stream suppliedSource = null, bool retainOutputs = false,
+            CancellationToken outputLifetime = default(CancellationToken), bool cursorMode = false)
         {
             if (frozenLineCount < 0 || bookmark < 0 || bookmark > frozenLineCount)
                 throw new InvalidDataException("writer_evidence_invalid_frozen_range");
@@ -356,19 +906,25 @@ namespace NLink.Tools
             var separator = utf8.GetBytes(Environment.NewLine);
             GuiSmokeLedgerCapturedOutput retainedCapture = null, writerCapture = null, semanticCapture = null;
             Stopwatch captureClock = null;
+            var streamRead = suppliedSource == null ? null : new GuiSmokeLedgerStreamRead(suppliedSource, cursorMode);
+            var outputLease = retainOutputs ? new GuiSmokeLedgerRetainedOutputs(outputLifetime) : null;
+            bool outputsTransferred = false;
+            try
+            {
 
-            using (var retained = NewOutput(retainedTempPath))
-            using (var writer = NewOutput(writerTempPath))
-            using (var semantic = writeSemantic ? (Stream)NewOutput(semanticTempPath) : Stream.Null)
+            using (var retained = NewOutput(retainedTempPath, retainOutputs))
+            using (var writer = NewOutput(writerTempPath, retainOutputs))
+            using (var semantic = writeSemantic ? (Stream)NewOutput(semanticTempPath, retainOutputs) : Stream.Null)
             using (var retainedHash = SHA256.Create())
             using (var writerHash = SHA256.Create())
             using (var semanticHash = SHA256.Create())
-            using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, 1024 * 1024, FileOptions.SequentialScan))
-            using (var reader = new StreamReader(input, utf8, true, 1024 * 1024))
+            using (var input = suppliedSource == null ? new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 1024 * 1024, FileOptions.SequentialScan) : null)
+            using (var reader = streamRead == null ? (TextReader)new StreamReader(input, utf8, true, 1024 * 1024) : streamRead)
             {
                 for (long index = 0; index < frozenLineCount; index++)
                 {
+                    if (streamRead != null && index == bookmark) streamRead.CaptureInitialWriters(writers.Values);
                     string line = reader.ReadLine();
                     if (line == null)
                         throw new InvalidDataException("writer_evidence_source_short_read:index=" +
@@ -378,14 +934,20 @@ namespace NLink.Tools
                     byte[] lineBytes = utf8.GetBytes(line);
 
                     if (index >= bookmark)
+                    {
+                        if (streamRead != null) streamRead.AddOrigin(0, index + 1);
                         WriteLine(retained, retainedHash, separator, lineBytes,
                             ref retainedLineCount, ref retainedByteCount);
+                    }
 
                     ParsedLine parsed = Parse(line);
                     string eventName = Get(parsed, "event");
                     if (writeSemantic && semanticNames.Contains(eventName))
+                    {
+                        if (streamRead != null) streamRead.AddOrigin(2, index + 1);
                         WriteLine(semantic, semanticHash, separator, lineBytes,
                             ref semanticLineCount, ref semanticByteCount);
+                    }
                     string writerId = Get(parsed, "log_writer_id");
                     if (parsed.DuplicateWriterEvidenceField)
                     {
@@ -465,6 +1027,7 @@ namespace NLink.Tools
                             result.WriterIdentityMismatchCount++;
                     }
 
+                    if (streamRead != null) streamRead.AddOrigin(1, index + 1);
                     WriteLine(writer, writerHash, separator, lineBytes,
                         ref writerLineCount, ref writerByteCount);
 
@@ -521,6 +1084,9 @@ namespace NLink.Tools
                     }
                 }
 
+                if (streamRead != null && bookmark == frozenLineCount) streamRead.CaptureInitialWriters(writers.Values);
+                if (streamRead != null && streamRead.ReadLine() != null)
+                    throw new InvalidDataException("stream_source_unconsumed_lines");
                 foreach (BatchState batch in currentBatches.Values)
                     FoldBatch(batch, result, previousTicks);
                 FinalizeHash(retainedHash);
@@ -552,6 +1118,8 @@ namespace NLink.Tools
                     }
                     catch { captureClock = null; } // Optional provenance cannot change primary writes.
                 }
+                if (outputLease != null)
+                    outputLease.Seal(retained, writer, (FileStream)semantic, retainedCapture, writerCapture, semanticCapture);
             }
 
             var writerResults = new List<GuiSmokeLedgerWriterResult>(writers.Values);
@@ -579,18 +1147,31 @@ namespace NLink.Tools
             foreach (var pair in drains)
                 drainResults.Add(new GuiSmokeLedgerDrainResult { WriterId = pair.Key, Sequences = pair.Value.ToArray() });
             result.Drains = drainResults.ToArray();
-            if (captureNativeOutputs && (!writeSemantic || semanticCapture != null))
+            if (streamRead != null)
+            {
+                streamRead.CheckCurrent();
+                if (retainedCapture == null || writerCapture == null || semanticCapture == null || suppliedSource.Position != streamRead.SourceBytes)
+                    throw new InvalidDataException("stream_source_capture_incomplete");
+                result.CaptureStream(streamRead, expectedAcceptanceRunId, expectedScenarioRunId, frozenLineCount, bookmark,
+                    retainedCapture, writerCapture, semanticCapture, outputLease);
+                streamRead.CheckCurrent();
+                if (!result.StreamCapture.IsCurrent) throw new InvalidDataException("stream_output_capture_not_current");
+            }
+            else if (captureNativeOutputs && (!writeSemantic || semanticCapture != null))
             {
                 try { result.CaptureNativeOutputs(sourcePath, expectedAcceptanceRunId, expectedScenarioRunId, frozenLineCount, bookmark,
                     retainedCapture, writerCapture, semanticCapture, captureClock); }
                 catch { } // No partial capture or substitute expected digest.
             }
+            outputsTransferred = true;
             return result;
+            }
+            finally { if (!outputsTransferred && outputLease != null) outputLease.Dispose(); }
         }
 
-        private static FileStream NewOutput(string path)
+        private static FileStream NewOutput(string path, bool retain = false)
         {
-            return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            return new FileStream(path, FileMode.CreateNew, retain ? FileAccess.ReadWrite : FileAccess.Write, retain ? FileShare.Read : FileShare.None,
                 1024 * 1024, FileOptions.SequentialScan);
         }
 

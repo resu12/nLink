@@ -37,7 +37,7 @@ namespace NLink.Tools
         public string Name { get; private set; }
         public Guid RequestId { get; private set; }
 
-        private LocalRetainedSourceRequest() { }
+        private LocalRetainedSourceRequest() { frontierOriginal = this; }
 
         // The lease owns the parent's actual primary hash pass. Keep a separate
         // read-only handle; never accept a caller-declared digest as that proof.
@@ -106,6 +106,7 @@ namespace NLink.Tools
                 request.view.Write(20, body.Length);
                 request.view.WriteArray(24, attempt.ToByteArray(), 0, 16);
                 request.view.WriteArray(HeaderBytes, body, 0, body.Length);
+                request.RememberFrontierSource(body, writerContext);
                 if (!lease.IsVerified) return null;
                 var completed = request; request = null; return completed;
             }
@@ -115,6 +116,7 @@ namespace NLink.Tools
 
         public bool BindWorker(Process process)
         {
+            if (!Object.ReferenceEquals(frontierOriginal, this)) return false;
             bool held = false;
             try
             {
@@ -129,6 +131,7 @@ namespace NLink.Tools
                 view.Write(40, creation);
                 view.Write(16, process.Id);
                 workerId = process.Id; workerCreation = creation;
+                WatchFrontierWorker();
                 return true;
             }
             catch (AbandonedMutexException) { held = true; return false; }
@@ -137,9 +140,13 @@ namespace NLink.Tools
         }
 
         public static Worker TryAttach(string name, Guid requestId, string path, string run, string scenario)
+        { return TryAttachCore(name, requestId, path, run, scenario, false); }
+
+        private static Worker TryAttachCore(string name, Guid requestId, string path, string run, string scenario, bool frontier, bool waitForFrontierStart = false)
         {
             if (!TextValid(name, 128) || !Regex.IsMatch(name, @"\ALocal\\nlink-retained-source-[0-9a-f]{32}\z") ||
                 requestId == Guid.Empty || Interlocked.Exchange(ref attachAttempted, 1) != 0) return null;
+            if (waitForFrontierStart && !WaitForFrontierStart(name, requestId)) return null;
             Worker worker = new Worker();
             bool held = false;
             Mutex gate = null;
@@ -155,6 +162,7 @@ namespace NLink.Tools
                 {
                     var id = new byte[16];
                     int magic = view.ReadInt32(0);
+                    if (frontier && (magic != WriterMagic || view.ReadInt32(4) == view.ReadInt32(16))) return null;
                     int maximumBytes = magic == WriterMagic || magic == PublicationMagic ? MaximumWriterRequestBytes : MaximumRequestBytes;
                     if ((magic != Magic && magic != WriterMagic && magic != PublicationMagic) ||
                         view.ReadInt32(16) != GetCurrentProcessId() ||
@@ -191,7 +199,7 @@ namespace NLink.Tools
                         !Regex.IsMatch(worker.SourceSha256, @"\A[0-9a-f]{64}\z") ||
                         worker.SourceLines < 1 || worker.SourceLines > MaximumSourceLines ||
                         worker.SourceBytes < 0 || worker.SourceBytes > MaximumSourceBytes) return null;
-                    var parent = OpenProcess(0x00101000, false, view.ReadInt32(4));
+                    var parent = OpenProcess(frontier ? 0x00101040U : 0x00101000U, false, view.ReadInt32(4));
                     if (parent.IsInvalid) { parent.Dispose(); return null; }
                     worker.parentExit = new ProcessWait(parent);
                     long creation, exit, kernel, user;
@@ -199,6 +207,7 @@ namespace NLink.Tools
                     worker.RequestId = requestId;
                     if (!worker.IsCurrent) return null;
                     if (magic == PublicationMagic) worker.OpenPublicationChannel(name + ".publication");
+                    if (frontier && !worker.AttachFrontierInputs(name, map, body)) return null;
                 }
                 var completed = worker; worker = null; return completed;
             }
@@ -209,7 +218,12 @@ namespace NLink.Tools
 
         public void Dispose()
         {
+            if (!Object.ReferenceEquals(frontierOriginal, this)) return;
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+            CloseFrontierInputs();
+            if (frontierStart != null) frontierStart.Dispose();
+            if (frontierDiagnosticReceiver != null) frontierDiagnosticReceiver.Close();
+            if (frontierOutput != null) frontierOutput.Close();
             if (adoptionCustody != null) adoptionCustody.Dispose();
             if (publicationChannel != null) publicationChannel.Dispose();
             if (closed != null) { closed.Set(); closed.Dispose(); }
@@ -243,13 +257,14 @@ namespace NLink.Tools
             public int ProcessId { get; internal set; }
             public long ProcessCreationFileTime { get; internal set; }
             public LocalGuiWriterRequest.Completion WriterContext { get; internal set; }
-            internal Worker() { }
+            internal Worker() { frontierOriginal = this; }
             public bool IsCurrent
             {
-                get { try { return Volatile.Read(ref disposed) == 0 && parentExit != null && !parentExit.WaitOne(0) && !closed.WaitOne(0); } catch { return false; } }
+                get { try { return Object.ReferenceEquals(frontierOriginal, this) && Volatile.Read(ref disposed) == 0 && parentExit != null && !parentExit.WaitOne(0) && !closed.WaitOne(0) && (!frontierRequested || FrontierWorkerCurrent); } catch { return false; } }
             }
             public SourceReader TryOpenSource()
             {
+                if (frontierRequested) return TryOpenFrontierSource();
                 if (!IsCurrent || Interlocked.Exchange(ref opened, 1) != 0) return null;
                 FileStream stream = null;
                 try
@@ -264,19 +279,20 @@ namespace NLink.Tools
             public bool OwnsCompletedSource(SourceReader candidate)
             {
                 // InputReadComplete already checks this worker's current lifetime.
-                return candidate != null && Object.ReferenceEquals(candidate, sourceReader) && candidate.InputReadComplete;
+                return Object.ReferenceEquals(frontierOriginal, this) && candidate != null &&
+                    Object.ReferenceEquals(candidate, sourceReader) && candidate.InputReadComplete;
             }
             public LocalNativeInputCapture.NativeInputs CaptureNativeInputs(SourceReader source, LocalNativeInputCapture capture,
                 string[] full, string[] compact, Stopwatch work)
             {
-                if (capture == null || work == null || !OwnsCompletedSource(source)) return null;
+                if (frontierRequested || capture == null || work == null || !OwnsCompletedSource(source)) return null;
                 return capture.CaptureInputs(new[] { full, full, full, compact },
                     () => work.ElapsedMilliseconds <= LocalPublicationInputLimits.ProducerMilliseconds && OwnsCompletedSource(source));
             }
             public bool ValidateInputReferences(SourceReader source, string[] full, string[] fullOriginal,
                 string[] compact, string[] compactOriginal, Stopwatch work)
             {
-                if (work == null || full == null || compact == null || fullOriginal == null || compactOriginal == null ||
+                if (frontierRequested || work == null || full == null || compact == null || fullOriginal == null || compactOriginal == null ||
                     full.Length > LocalPublicationInputLimits.InputRecords || compact.Length > full.Length ||
                     full.Length != fullOriginal.Length || compact.Length != compactOriginal.Length) return false;
                 for (int role = 0; role < 2; role++)
@@ -296,7 +312,7 @@ namespace NLink.Tools
                 LocalNativeInputCapture.NativeInputs inputs, object[] events, string[] full,
                 string[] fullOriginal, int[] origins, Stopwatch work)
             {
-                if (capture == null || inputs == null || work == null || events == null || full == null ||
+                if (frontierRequested || capture == null || inputs == null || work == null || events == null || full == null ||
                     fullOriginal == null || origins == null || full.Length > LocalPublicationInputLimits.InputRecords ||
                     events.Length != full.Length || fullOriginal.Length != full.Length || origins.Length != full.Length) return false;
                 try
@@ -326,6 +342,7 @@ namespace NLink.Tools
             // context or passed to an evaluator, resolver or formatter helper.
             public PrimaryEvaluationCustody TryBeginPrimary(SourceReader source, object context, string[] full, string[] compact)
             {
+                if (frontierRequested) return null; // Native array/view ownership is a separate gate.
                 if (Interlocked.Exchange(ref primaryOpened, 1) != 0 || !OwnsCompletedSource(source) || WriterContext == null ||
                     context == null || full == null || compact == null || compact.Length > full.Length ||
                     full.Length > LocalPublicationInputLimits.InputRecords ||
@@ -338,6 +355,7 @@ namespace NLink.Tools
             // length; its actual bytes remain unverified until admitted EOF.
             public WriterReader TryOpenWriter()
             {
+                if (frontierRequested) return null; // Never reopen a legacy writer path for a native worker.
                 if (Interlocked.Exchange(ref writerOpened, 1) != 0 || !IsCurrent || WriterContext == null ||
                     sourceReader == null || !sourceReader.InputReadComplete) return null;
                 LocalInputReadLease lease = null;
@@ -355,7 +373,9 @@ namespace NLink.Tools
             { return candidate != null && Object.ReferenceEquals(candidate, writerReader) && candidate.IsVerified; }
             public void Dispose()
             {
+                if (!Object.ReferenceEquals(frontierOriginal, this)) return;
                 if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+                CloseFrontierWorker();
                 if (primary != null) primary.Dispose();
                 ClosePublicationChannel();
                 if (writerReader != null) writerReader.Dispose();
@@ -587,7 +607,7 @@ namespace NLink.Tools
             { SelectedIndex = selected; RecordVisits = records; CodeUnitVisits = units; }
         }
 
-        public sealed class SourceReader : IDisposable
+        public sealed partial class SourceReader : IDisposable
         {
             private readonly Worker worker;
             private StreamReader reader;
@@ -596,11 +616,12 @@ namespace NLink.Tools
             private bool complete;
             public string SourcePath { get { return worker.SourcePath; } }
             public long LinesRead { get; private set; }
-            public bool InputReadComplete { get { return complete && Volatile.Read(ref disposed) == 0 && worker.IsCurrent; } }
+            public bool InputReadComplete { get { return frontier != null ? frontier.SourceComplete(this) : complete && Volatile.Read(ref disposed) == 0 && worker.IsCurrent; } }
             internal SourceReader(Worker owner, FileStream stream)
             { worker = owner; reader = new StreamReader(stream, Encoding.UTF8, true, 1024); }
             public IEnumerable<string> ReadLines()
             {
+                if (frontier != null) { foreach (string nativeLine in ReadFrontierLines()) yield return nativeLine; yield break; }
                 if (Volatile.Read(ref disposed) != 0 || Interlocked.Exchange(ref started, 1) != 0)
                     throw new InvalidOperationException("source_reader_already_consumed");
                 string line;
@@ -609,6 +630,7 @@ namespace NLink.Tools
             }
             public void Dispose()
             {
+                if (frontier != null) { frontier.DisposeSource(this); return; }
                 if (Interlocked.Exchange(ref disposed, 1) != 0) return;
                 complete = false; reader.Dispose();
             }

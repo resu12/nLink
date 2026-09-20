@@ -97,6 +97,69 @@ function Assert-LegacyRetained([string]$Name, [string[]]$InputLines, $Evaluation
 }
 function Clone($Value) { ConvertFrom-Json (ConvertTo-Json $Value -Depth 64 -Compress) }
 
+# Project the same modeled decisions into each supported initiation catalog and
+# validate the complete stream before exercising ownership. The initiation-only
+# projection omits the later callback extension, not any source-hold evidence.
+if ($Scenario -cin @('hold_invalidated','committed_cleanup')) {
+    foreach ($profile in @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion,
+            $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
+            $script:FileTransferCoordinatorRepairOwnerCatalogVersion,
+            $script:FileTransferCoordinatorActivationRetryCatalogVersion)) {
+        $profileLines = [string[]]$lines.Clone()
+        $profileCatalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profile
+        for ($i=0; $i -lt $profileLines.Count; $i++) {
+            $profileLines[$i] = [regex]::Replace($profileLines[$i], '(?<=snapshot_catalog_version=)[^;]*', $profile)
+            $profileLines[$i] = [regex]::Replace($profileLines[$i], '(?<=snapshot_catalog_hash=)[^;]*', $profileCatalog.Hash)
+            if ($profile -cne $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion -or
+                (Get-FileTransferCoordinatorSnapshotEventName $profileLines[$i]) -cne 'filetransfer_coordinator_transition_snapshot') { continue }
+            $envelope = (ConvertFrom-FileTransferCoordinatorSnapshotPayload (Get-FileTransferCoordinatorSnapshotLineField $profileLines[$i] 'snapshot_payload')).Value
+            if (@($envelope.aggregate.operations | Where-Object operationRole -CEQ 'fallback_bootstrap_source_callback').Count) {
+                throw 'Initiation projection cannot remove callback decisions'
+            }
+            foreach ($op in $envelope.aggregate.operations) {
+                if ($null -ne $op.routeTransition) { $op.routeTransition.PSObject.Properties.Remove('bootstrapCallbacks') }
+            }
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $envelope -Depth 64 -Compress))
+            $profileLines[$i] = [regex]::Replace($profileLines[$i], '(?<=snapshot_sha256=)[^;]*', (Get-FileTransferCoordinatorSnapshotSha256 -Bytes $bytes))
+            $profileLines[$i] = [regex]::Replace($profileLines[$i], '(?<=snapshot_payload=)[^;]*', [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_'))
+        }
+        $profileFull = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $profileLines
+        $profileRecords = @(for ($i=0; $i -lt $profileLines.Count; $i++) { [pscustomobject]@{Line=$profileLines[$i];LineIndex=$i} })
+        $profileCompact = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords $profileRecords
+        if ($profileFull.ArtifactEvidenceVerdict -cne 'pass' -or -not $profileFull.StreamComplete -or
+            $profileFull.CatalogVersion -cne $profile -or
+            (Compare-FileTransferCoordinatorSnapshotEvaluations $profileFull $profileCompact).Verdict -cne 'pass') {
+            throw "$profile modeled catalog input invalid: $($profileFull.ArtifactEvidenceFailureReason)"
+        }
+        foreach ($view in @($profileFull,$profileCompact)) {
+            $result = Get-FileTransferFallbackV6BootstrapDirectionCorrelation -Lines $profileLines -SnapshotEvaluation $view
+            if ($result.RawCount -ne $expectedLegacy -or $result.UnresolvedCount -ne $expectedLegacy) { throw "$profile lost source-hold semantics" }
+            # Deliberately predicate-only mutation of the validated view.
+            $missingHold = Clone $view
+            foreach ($boundary in $missingHold.Boundaries) {
+                $boundary.operations = @($boundary.operations | Where-Object operationRole -CNE 'fallback_bootstrap_source_hold')
+            }
+            Assert-LegacyRetained "$profile missing hold" $profileLines $missingHold
+            $preserved = Add-FileTransferFallbackV6BootstrapDirectionToSnapshotProof -Events $events -SnapshotProof $independentProof -SnapshotEvaluation $view
+            if ($preserved.Verdict -cne 'fail' -or $preserved.UnresolvedCount -ne (1 + $expectedLegacy) -or
+                -not [object]::ReferenceEquals($preserved.UnresolvedCandidateRecords[0], $independent)) { throw "$profile waived independent failure" }
+        }
+    }
+    $unknownLines = @($lines | ForEach-Object {
+        [regex]::Replace($_, '(?<=snapshot_catalog_version=)[^;]*', $script:FileTransferCoordinatorActivationRetryCatalogVersion + '-unknown')
+    })
+    $unknown = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $unknownLines
+    if ($unknown.ArtifactEvidenceVerdict -cne 'fail' -or $unknown.ArtifactEvidenceFailureReason -cnotmatch 'snapshot_catalog_mismatch:') {
+        throw 'Unknown catalog input was not rejected'
+    }
+    Assert-LegacyRetained 'unknown catalog input' $unknownLines $unknown
+    # Predicate-only control: even an otherwise valid view cannot admit a suffix.
+    $unknown = Clone $full
+    $unknown.CatalogVersion = $script:FileTransferCoordinatorActivationRetryCatalogVersion + '-unknown'
+    Assert-LegacyRetained 'unknown catalog selector' $lines $unknown
+    Write-Output "bootstrap-ownership-catalog-coverage-ok:$Scenario"
+}
+
 # These mutations exercise selector boundaries, not artifact validity. The
 # unmodified scenarios above are emitted by real Coordinator decisions.
 if ($Scenario -ceq 'committed_cleanup') {
