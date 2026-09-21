@@ -975,6 +975,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         disposed = true;
+        RetireSessionPreparationExecution();
         CancelRuntimeUnlockRetryPhysicalSendScope("dispose");
         InvalidateInboundRuntimeUnlockDialLifecycleForSessionChange("dispose");
         TryCancelHostReady();
@@ -2721,6 +2722,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
             MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
             MsgType.TransportAccelerationAnswerAck => "transport_acceleration_answer_ack",
+            MsgType.SessionPreparationOffer => "session_preparation_offer",
+            MsgType.SessionPreparationAnswer => "session_preparation_answer",
+            MsgType.SessionPreparationAnswerAck => "session_preparation_answer_ack",
             _ => messageType.ToString(),
         };
 

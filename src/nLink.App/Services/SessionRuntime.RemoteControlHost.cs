@@ -1740,6 +1740,7 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        preparationObservationBridge?.Dispose();
         StopHelperRemoteScreenSharePressureTimer();
         CancelRemoteControlScreenChangedStatus();
         chatService.MessageReceived -= OnChatMessageReceived;

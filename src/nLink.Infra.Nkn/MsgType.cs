@@ -54,4 +54,7 @@ internal enum MsgType
     FileTransferRepairProof = 49,
     TransportAccelerationAnswerAck = 50,
     SessionHeartbeat = 51,
+    SessionPreparationOffer = 52,
+    SessionPreparationAnswer = 53,
+    SessionPreparationAnswerAck = 54,
 }

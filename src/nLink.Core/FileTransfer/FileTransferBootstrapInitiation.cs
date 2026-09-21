@@ -24,25 +24,49 @@ internal sealed record FileTransferBootstrapLocalStopObservation(
 
 internal static partial class FileTransferCoordinator
 {
-    internal static bool IsFallbackBootstrapLocalStopScopeCurrent(
-        FileTransferCoordinatorState state, FileTransferBootstrapLocalStopScope scope)
+    // Projects a current Core publication, never transport readiness. Data-session
+    // and physical-provider lifetimes remain pinned by each operation using it.
+    internal static FileTransferBootstrapLocalStopScope? CaptureFallbackBootstrapSourceScope(
+        FileTransferCoordinatorState state, string? coordinatorDecisionReason = null)
     {
-        if (scope is not { Publication: { }, Source: { } } || state.IsTerminal || state.RouteSelection.Route != FileTransferRoute.FileTunaV4 ||
+        if (state.IsTerminal || state.RouteSelection.Route != FileTransferRoute.FileTunaV4 || state.RouteSelection.ProtocolVersion != 4 ||
             state.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not { IsEnabled: true } agreement ||
             !IsBootstrapAgreementCurrent(state, agreement) ||
-            scope.LocalIssuer != CreateLocalFallbackBootstrapIssuer(state) ||
-            state.CurrentRoutePublicationToken is not { } publication || state.CurrentRouteCommit is not { } commit ||
+            state.CurrentRoutePublicationToken is not { } publication ||
             state.CurrentRuntimeOwner is not { } owner || state.CurrentLeg is not { } leg ||
+            publication.RuntimeOwner != owner || leg.RouteSelection.Route != FileTransferRoute.FileTunaV4 ||
+            leg.ProtocolVersion != 4 || leg.LiveRouteEpochId != publication.LiveRouteEpoch ||
+            state.CurrentDataSessionIdentity is not { Length: > 0 } || state.CurrentDataSessionGeneration <= 0 ||
             !IsRoutePublicationTokenCurrent(state, publication, out _) ||
-            scope.Publication != CreateRoutePublicationAuthority(publication, scope.Publication.CoordinatorDecisionReason))
+            publication.PublicationGeneration != state.LastRoutePublicationGeneration)
         {
-            return false;
+            return null;
         }
-        return scope.Source == new FileTransferFallbackV6ProofBootstrapTriggerSourceScope(
-            commit.RouteToken, commit.ProtocolVersion, commit.LiveRouteEpoch, owner.RuntimeGeneration,
-            publication.PublicationGeneration, commit.CommitGeneration, state.TerminalGeneration, leg.Generation,
-            leg.TransportEpochId, leg.BridgeRecoveryGeneration, leg.CheckpointRequestId ?? "(none)", leg.CheckpointGeneration);
+        if (state.CurrentRouteCommit is { } commit)
+        {
+            if (!IsRouteCommitTokenCurrent(state, commit, out _) || commit.RuntimeOwner != owner ||
+                publication.RouteCommitGeneration != commit.CommitGeneration) { return null; }
+        }
+        else if (publication.ActionKind != FileTransferCoordinatorActionKind.RoutePublication ||
+                 publication.PublicationGeneration != 1 || publication.RouteCommitGeneration is not null ||
+                 publication.LiveRouteEpoch != 0 || state.CurrentLiveRouteEpoch is not null ||
+                 state.LastLiveRouteEpochId != 0 || state.LastRouteCommitGeneration != 0 || state.TerminalGeneration != 0)
+        {
+            // A missing commit is legitimate only for the exact initial owner,
+            // not for a retired commit, route transition, or republication.
+            return null;
+        }
+        return new(CreateLocalFallbackBootstrapIssuer(state),
+            CreateRoutePublicationAuthority(publication, coordinatorDecisionReason)!,
+            new(publication.RouteToken, publication.ProtocolVersion, publication.LiveRouteEpoch, owner.RuntimeGeneration,
+                publication.PublicationGeneration, publication.RouteCommitGeneration ?? 0, state.TerminalGeneration, leg.Generation,
+                leg.TransportEpochId, leg.BridgeRecoveryGeneration, leg.CheckpointRequestId ?? "(none)", leg.CheckpointGeneration));
     }
+
+    internal static bool IsFallbackBootstrapLocalStopScopeCurrent(
+        FileTransferCoordinatorState state, FileTransferBootstrapLocalStopScope scope)
+        => scope is { Publication: { }, Source: { } } &&
+            CaptureFallbackBootstrapSourceScope(state, scope.Publication.CoordinatorDecisionReason) is { } current && current == scope;
 
     private static bool IsFallbackBootstrapInitiationCurrent(
         FileTransferCoordinatorState state, FileTransferFallbackV6ProofBootstrapObservation observation)

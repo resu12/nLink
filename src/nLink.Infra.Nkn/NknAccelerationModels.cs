@@ -15,11 +15,13 @@ internal sealed class AccelerationStateChangedEventArgs : EventArgs
     public AccelerationStateChangedEventArgs(
         bool isAvailable,
         string reason,
-        NknAccelerationFailureOrigin? failureOrigin = null)
+        NknAccelerationFailureOrigin? failureOrigin = null,
+        string? sessionPreparationExecutionIdentity = null)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
         FailureOrigin = failureOrigin;
+        SessionPreparationExecutionIdentity = sessionPreparationExecutionIdentity;
     }
 
     public bool IsAvailable { get; }
@@ -27,6 +29,8 @@ internal sealed class AccelerationStateChangedEventArgs : EventArgs
     public string Reason { get; }
 
     public NknAccelerationFailureOrigin? FailureOrigin { get; }
+
+    public string? SessionPreparationExecutionIdentity { get; }
 }
 
 internal readonly record struct NknAccelerationFailureOrigin(
@@ -137,12 +141,45 @@ internal interface INknTunaAccelerationSession : INknAccelerationLane
     Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct);
 
     Task StopAsync(string reason, CancellationToken ct);
+
+    // Physical ownership only; neither receipt nor cleanup grants file authority.
+    NknTunaLaneLease? CaptureCurrentLaneLease() => null;
+
+    bool TryStopCurrentLaneLease(NknTunaLaneLease lease, string reason) => false;
+
+    Task<NknTunaLaneLease?> StartPreparationLaneAsync(NknTunaLanePreparationRequest request, CancellationToken ct)
+        => Task.FromResult<NknTunaLaneLease?>(null);
+
+    bool TryRetainCurrentLaneLease(NknTunaLaneLease lease, out NknTunaLaneLease? retained)
+    {
+        retained = null;
+        return false;
+    }
+
+    bool TryTransferPreparationLaneLease(NknTunaLaneLease lease, string identity, bool activate,
+        out NknTunaLaneLease? successor)
+    {
+        successor = null;
+        return false;
+    }
 }
+
+internal sealed record NknTunaLaneLease(
+    Guid LaneInstanceId, long StartGeneration, long ClientGeneration,
+    NknTunaSidecarClient Client, NknTunaSidecarProcessOwner? DialerOwner,
+    NknTunaListenerAdoptionSnapshot? Listener);
+
+// A physical-resource request, not Core authorization. Callers must hold the
+// current preparation permit and revoke the supplied token on its retirement.
+internal sealed record NknTunaLanePreparationRequest(
+    string ExecutionIdentity, string ExpectedRemotePeer, bool LocalIsPayer, string? RemoteTunaAddress = null);
 
 internal enum NknTunaListenerLifetimePolicy
 {
     GenericBounded = 0,
     CoordinatorScopedInitialActivation = 1,
+    SessionPreparation = 2,
+    CoordinatorAdmittedTransfer = 3,
 }
 
 internal sealed record NknTunaListenerStartRequest(
@@ -161,7 +198,8 @@ internal sealed record NknTunaListenerAdoptionSnapshot(
     NknTunaListenerSidecarEndpoint Endpoint,
     int ProcessId,
     string ProcessRunId,
-    DateTimeOffset ProcessStartedUtc);
+    DateTimeOffset ProcessStartedUtc,
+    long OwnershipGeneration = 0);
 
 internal sealed record NknTunaListenerAdoptionReceipt(
     NknTunaListenerAdoptionSnapshot Previous,
@@ -201,6 +239,9 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
 
     Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct);
 
+    Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedIfIdleAsync(NknTunaListenerStartRequest request, CancellationToken ct)
+        => Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+
     NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot();
 
     bool TryAdoptCurrentListener(
@@ -208,6 +249,13 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
         NknTunaListenerStartRequest successorRequest);
 
     void Stop(string reason);
+
+    // Atomically detach an exact owner; execute its cleanup outside lane locks.
+    bool TryDetachCurrentListener(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop)
+    {
+        stop = null;
+        return false;
+    }
 
     event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
 }

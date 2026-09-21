@@ -16,7 +16,7 @@ function Copy-Value($Value) { ConvertFrom-Json (ConvertTo-Json -InputObject $Val
 function Get-Proofs([object[]]$Boundaries, [object[]]$Effects) {
     $index = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries @(
         $Boundaries | ForEach-Object { [pscustomobject]@{ Boundary=$_ } })
-    Get-FileTransferCoordinatorSnapshotInitialRegularPublications -AggregateIndex $index -Effects $Effects
+    Get-FileTransferCoordinatorSnapshotInitialPublications -AggregateIndex $index -Effects $Effects
 }
 function Publication($Boundary) {
     $matches = @($Boundary.operations | Where-Object {

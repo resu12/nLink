@@ -28,18 +28,12 @@ public sealed partial class SessionFileTransferService
         var state = CreateCoordinatorStateLocked(context);
         if (session is not IFileTransferPhysicalSendSubmissionSession ||
             session is not IFileTransferDataSessionGenerationProvider { Generation: > 0 } provider ||
-            state.CurrentRoutePublicationToken is not { } publication || state.CurrentRouteCommit is not { } commit ||
-            state.CurrentLeg is not { } leg || state.CurrentDataSessionIdentity is not { Length: > 0 } identity ||
+            FileTransferCoordinator.CaptureFallbackBootstrapSourceScope(state) is not { } source ||
+            state.CurrentDataSessionIdentity is not { Length: > 0 } identity ||
             state.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not { IsEnabled: true } agreement)
         {
             return false;
         }
-        var source = new FileTransferBootstrapLocalStopScope(FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(state),
-            FileTransferCoordinator.CreateRoutePublicationAuthority(publication)!,
-            new(commit.RouteToken, commit.ProtocolVersion, commit.LiveRouteEpoch, publication.RuntimeGeneration,
-                publication.PublicationGeneration, commit.CommitGeneration, state.TerminalGeneration, leg.Generation,
-                leg.TransportEpochId, leg.BridgeRecoveryGeneration, leg.CheckpointRequestId ?? "(none)", leg.CheckpointGeneration));
-        if (!FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, source)) { return false; }
         operation = new(checked(++context.LastBootstrapFeedbackOperationGeneration), context.CoordinatorInstanceId, agreement,
             source, session, identity, provider.Generation, context.DataSessionGeneration,
             context.PullTransportPaused, context.PullTransportPausedSinceUtc, CreateFileTransferV4StateWireFingerprint(frame));

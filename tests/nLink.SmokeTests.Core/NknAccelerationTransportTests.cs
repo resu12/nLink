@@ -20985,6 +20985,9 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
     public async Task RuntimeUnlockInitialOffer_PreflightDoesNotMutateInstalledRetryState()
     {
         FakeNknClient.ResetNetwork();
+        var previousInstallBarrier = NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests;
+        var installEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseInstall = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -21000,7 +21003,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     "host-tuna-initial-authority-preflight-id",
                     hostClient.Address),
                 NknTunaAccelerationOptions.Disabled,
-                new FakeNknAccelerationLane(isAvailable: true));
+                new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0));
             using var helper = new NknSignalingTransport(
                 helperClient,
                 options,
@@ -21011,30 +21014,25 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+                suppressAutomaticAccelerationNegotiation: true);
             const string transferId =
                 "transfer_tuna_initial_authority_preflight";
-            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
             _ = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
                 transferId,
                 cts.Token);
-            TrackAuthorizedRegularV4RouteForTests(host, transferId);
-            InvokePrivateMethod(
-                host,
-                "ArmRuntimeUnlockRetryAfterRecovery",
-                3L,
-                sessionId,
-                "runtime_unlock_offer_send_not_observed",
-                "tuna_activation_offer_send_timeout");
-            InvokePrivateMethod(
-                host,
-                "MarkFileTransferTunaActivationBridgeRecoverySettled",
-                "test_recovery_settled");
-            InvokePrivateMethod(
-                host,
-                "MarkRuntimeUnlockRecoveryContractRetryDispatched",
-                "runtime_unlock");
+            InvokePrivateMethod(host, "ClearAccelerationUserStoppedForCurrentSession");
+            NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests = () =>
+            {
+                installEntered.TrySetResult(true);
+                return releaseInstall.Task;
+            };
+            _ = QueueExactFallbackPairedTailYieldRuntimeUnlockRetryForTests(host, sessionId, transferId,
+                "runtime_unlock_offer_send_not_observed", "fallback_tail_pairing_committed");
+            await host.DrainCoordinatorQueuedRuntimeUnlockRetryDispatchAuthorityRequestsForTestsAsync();
+            await installEntered.Task.WaitAsync(cts.Token);
+            Assert.NotNull(GetLastCommittedRuntimeUnlockRetryDispatchInstallReceipt(host));
             var installedState =
                 GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
             Assert.NotNull(installedState);
@@ -21065,6 +21063,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     host,
                     "TrySendAccelerationOfferAsync",
                     "runtime_unlock",
+                    0L,
                     0L,
                     cts.Token,
                     null,
@@ -21113,6 +21112,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
         }
         finally
         {
+            releaseInstall.TrySetResult(true);
+            NknSignalingTransport.RuntimeUnlockRetryDispatchInstallFollowUpBarrierForTests = previousInstallBarrier;
             FakeNknClient.ResetNetwork();
         }
     }

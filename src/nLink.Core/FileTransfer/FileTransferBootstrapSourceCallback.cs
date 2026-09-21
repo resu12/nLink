@@ -55,17 +55,11 @@ internal static partial class FileTransferCoordinator
         FileTransferCoordinatorState state, long leaseGeneration, long providerGeneration, bool paused, long pauseInstance)
     {
         if (state.Direction != FileTransferDirection.Outbound || leaseGeneration <= 0 || providerGeneration <= 0 ||
-            state.CurrentRoutePublicationToken is not { } publication || state.CurrentRouteCommit is not { } commit ||
-            state.CurrentRuntimeOwner is not { } owner || state.CurrentLeg is not { } leg ||
+            CaptureFallbackBootstrapSourceScope(state) is not { } source ||
             state.CurrentDataSessionIdentity is not { Length: > 0 } session || state.CurrentDataSessionGeneration <= 0 ||
             state.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not { IsEnabled: true } agreement)
         { return null; }
-        var source = new FileTransferBootstrapLocalStopScope(CreateLocalFallbackBootstrapIssuer(state),
-            CreateRoutePublicationAuthority(publication)!, new(commit.RouteToken, commit.ProtocolVersion, commit.LiveRouteEpoch,
-                owner.RuntimeGeneration, publication.PublicationGeneration, commit.CommitGeneration, state.TerminalGeneration,
-                leg.Generation, leg.TransportEpochId, leg.BridgeRecoveryGeneration, leg.CheckpointRequestId ?? "(none)", leg.CheckpointGeneration));
-        if (!IsFallbackBootstrapLocalStopScopeCurrent(state, source) ||
-            state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold?.Command.Source == source) { return null; }
+        if (state.PersistentState.FileTransferRouteTransition.BootstrapSourceHold?.Command.Source == source) { return null; }
         var callback = new FileTransferBootstrapSourceCallback(leaseGeneration, state.PersistentState.CoordinatorInstanceId!, agreement, source, session,
             state.CurrentDataSessionGeneration, providerGeneration, paused, pauseInstance, "");
         return callback with { Identity = CalculateSnapshotFingerprint(callback) };

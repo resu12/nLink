@@ -45,8 +45,8 @@ internal static partial class FileTransferCoordinator
     {
         var transition = state.PersistentState.FileTransferRouteTransition;
         if (!IsFallbackBootstrapInitiationCurrent(state, initiation) || !CanStartFallbackBootstrapExchange(state) ||
-            state.CurrentRoutePublicationToken is not { } publication || state.CurrentRouteCommit is not { } commit ||
-            state.CurrentRuntimeOwner is not { } owner || state.CurrentLeg is not { } leg ||
+            state.CurrentRoutePublicationToken is null || state.CurrentRouteCommit is null ||
+            state.CurrentRuntimeOwner is null || state.CurrentLeg is null ||
             state.CurrentDataSessionIdentity is not { Length: > 0 } sessionIdentity || state.CurrentDataSessionGeneration <= 0 ||
             transition.BootstrapAgreement is not { IsEnabled: true } agreement ||
             initiation.InitiationKind == FileTransferBootstrapInitiationKind.PeerEvidence &&
@@ -54,11 +54,8 @@ internal static partial class FileTransferCoordinator
         {
             return new(state, false, "bootstrap_source_hold_initiation_rejected");
         }
-        var source = new FileTransferBootstrapLocalStopScope(CreateLocalFallbackBootstrapIssuer(state),
-            CreateRoutePublicationAuthority(publication)!, new(commit.RouteToken, commit.ProtocolVersion, commit.LiveRouteEpoch,
-                owner.RuntimeGeneration, publication.PublicationGeneration, commit.CommitGeneration, state.TerminalGeneration,
-                leg.Generation, leg.TransportEpochId, leg.BridgeRecoveryGeneration, leg.CheckpointRequestId ?? "(none)", leg.CheckpointGeneration));
-        if (!IsFallbackBootstrapLocalStopScopeCurrent(state, source)) { return new(state, false, "bootstrap_source_hold_source_stale"); }
+        var source = CaptureFallbackBootstrapSourceScope(state);
+        if (source is null) { return new(state, false, "bootstrap_source_hold_source_stale"); }
         if (transition.BootstrapSourceHold is { } prior && prior.Command.Source == source)
         {
             var same = IsFallbackBootstrapSourceHoldCurrent(state, prior.Command) &&

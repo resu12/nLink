@@ -384,6 +384,7 @@ public sealed partial class NknSignalingTransport
         Generic = 1,
         RuntimeUnlockRetryIntent = 2,
         InstalledRuntimeUnlockRetry = 3,
+        SessionPreparation = 4,
     }
 
     private enum RuntimeUnlockPostFallbackSchedulingBoundaryKind
@@ -1533,6 +1534,7 @@ public sealed partial class NknSignalingTransport
         {
             accelerationSessionId = null;
             accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
+            accelerationPreparationAdmission = null;
             outboundAccelerationOfferNonce = normalizedNonce;
             outboundAccelerationOfferTrigger = "runtime_unlock";
             outboundAccelerationOfferInstallReceipt = installReceipt;
@@ -3196,6 +3198,7 @@ public sealed partial class NknSignalingTransport
                 ? currentSessionSecurityState.SessionId?.Value
                 : sessionId.Trim();
             accelerationNegotiatedLanes = lanes;
+            accelerationPreparationAdmission = null;
             acceptedSessionId = accelerationSessionId;
         }
 
@@ -11099,6 +11102,7 @@ public sealed partial class NknSignalingTransport
 
     private bool IsAccelerationNegotiatedAndHealthyUnsafe(string? sessionId)
         => accelerationLane?.IsAvailable == true &&
+           (accelerationPreparationAdmission is null || IsPreparationAdmissionResourceCurrent(accelerationPreparationAdmission)) &&
            accelerationNegotiatedLanes != NknAccelerationLaneKind.None &&
            !string.IsNullOrWhiteSpace(accelerationSessionId) &&
            string.Equals(accelerationSessionId, sessionId, StringComparison.Ordinal);
@@ -11278,7 +11282,8 @@ public sealed partial class NknSignalingTransport
 
     private void RecordTunaFallbackNknControlSent(MsgType messageType)
     {
-        if (messageType is MsgType.ScreenShareFrame or MsgType.FileTransferDataFrame)
+        if (IsSessionPreparationMessageType(messageType) ||
+            messageType is MsgType.ScreenShareFrame or MsgType.FileTransferDataFrame)
         {
             return;
         }
@@ -13179,6 +13184,11 @@ public sealed partial class NknSignalingTransport
 
     private void OnAccelerationStateChanged(object? sender, AccelerationStateChangedEventArgs e)
     {
+        if (e.SessionPreparationExecutionIdentity is not null)
+        {
+            HandleSessionPreparationLaneState(e);
+            return;
+        }
         var reason = SanitizeLogToken(e.Reason);
         if (!e.IsAvailable &&
             string.Equals(
@@ -32282,6 +32292,7 @@ public sealed partial class NknSignalingTransport
             RetireOutboundAccelerationOfferLocked(sessionId, "accepted_peer_offer");
             accelerationSessionId = null;
             accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
+            accelerationPreparationAdmission = null;
             pendingAccelerationAnswerAckSessionId = sessionId;
             pendingAccelerationAnswerAckNonce = nonce;
             pendingAccelerationAnswerAckTrigger = SanitizeLogToken(offer.Trigger);
@@ -37414,6 +37425,7 @@ public sealed partial class NknSignalingTransport
                 expectedOfferAuthorityBoundary);
             accelerationSessionId = answer.SessionId.Trim();
             accelerationNegotiatedLanes = validation.AcceptedLanes;
+            accelerationPreparationAdmission = null;
         }
 
         if (expectedOfferAuthorityBoundary is { } acceptedBoundary)
@@ -38207,6 +38219,7 @@ public sealed partial class NknSignalingTransport
                     {
                         accelerationSessionId = ack.SessionId.Trim();
                         accelerationNegotiatedLanes = acceptedLanes;
+                        accelerationPreparationAdmission = null;
                         if (pendingAuthorityMode is { } authorityMode &&
                             (IsRuntimeUnlockResponderWaitingForPeerProbe(
                                  runtimeUnlockTransactionState) ||
@@ -40227,10 +40240,7 @@ public sealed partial class NknSignalingTransport
     {
         lock (accelerationGate)
         {
-            return accelerationLane?.IsAvailable == true &&
-                   accelerationNegotiatedLanes != NknAccelerationLaneKind.None &&
-                   !string.IsNullOrWhiteSpace(accelerationSessionId) &&
-                   string.Equals(accelerationSessionId, currentSessionSecurityState.SessionId?.Value, StringComparison.Ordinal);
+            return IsAccelerationNegotiatedAndHealthyUnsafe(currentSessionSecurityState.SessionId?.Value);
         }
     }
 
@@ -40249,7 +40259,7 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            return accelerationLane?.IsAvailable == true &&
+            return IsAccelerationNegotiatedAndHealthyUnsafe(currentSessionId) &&
                    GetPublishedAccelerationLanesUnsafe(currentSessionId) != NknAccelerationLaneKind.None &&
                    !string.IsNullOrWhiteSpace(accelerationSessionId) &&
                    string.Equals(accelerationSessionId, currentSessionId, StringComparison.Ordinal);
@@ -40633,6 +40643,20 @@ public sealed partial class NknSignalingTransport
             return Task.CompletedTask;
         }
 
+        if (runtimeUnlockRequested && currentSessionSecurityState.HasCapability(CapabilityGrant.FileTransfer, DateTimeOffset.UtcNow))
+        {
+            var selection = SelectSessionPreparationRequest();
+            if (selection.Purpose != FileTransferAccelerationRequestPurpose.TransferActivation)
+            {
+                if (selection.Purpose == FileTransferAccelerationRequestPurpose.SessionPreparation)
+                    _ = RequestSessionPreparationAsync(ct);
+                else
+                    LocalOperationalLog.Info("NKN.Tuna",
+                        $"event=session_preparation_request_rejected; reason={SanitizeLogToken(selection.Reason)}; authority_effect=none");
+                return Task.CompletedTask;
+            }
+        }
+
         bool hasPendingOffer;
         bool hasPendingAnswerAck;
         lock (accelerationGate)
@@ -40684,6 +40708,7 @@ public sealed partial class NknSignalingTransport
 
     public async Task StopAccelerationAsync(string reason, CancellationToken ct)
     {
+        RetireSessionPreparationExecution();
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : SanitizeLogToken(reason);
         var bootstrapLocalStops = CaptureFallbackBootstrapLocalStopSources(normalizedReason);
         var shouldNotifyRemoteDown = TryCaptureAccelerationNegotiation(out var downSessionId, out var downLanes);
@@ -41024,6 +41049,7 @@ public sealed partial class NknSignalingTransport
             }
             accelerationSessionId = null;
             accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
+            accelerationPreparationAdmission = null;
             ClearPendingAccelerationAnswerAckLocked();
             InvalidateInboundRuntimeUnlockDialLifecycleLocked(
                 $"reset_{normalizedReason}");

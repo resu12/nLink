@@ -777,7 +777,7 @@ public sealed partial class SessionFileTransferService :
 
         DetachTransportCore(markActiveTransfersFailed: true, failureCode: DetachedErrorCode, failureMessage: "Transport was detached.");
 
-        this.transport = transport;
+        AttachPreparationTransport(transport);
         transport.FileTransferOfferReceived += OnFileTransferOfferReceived;
         transport.FileTransferAcceptReceived += OnFileTransferAcceptReceived;
         transport.FileTransferDeclineReceived += OnFileTransferDeclineReceived;
@@ -882,6 +882,7 @@ public sealed partial class SessionFileTransferService :
         OutboundTransferContext? outbound;
         lock (gate)
         {
+            RevokePreparationScopeLocked();
             inbound = inboundTransfer;
             outbound = outboundTransfer;
             if (outbound is not null)
@@ -1311,13 +1312,17 @@ public sealed partial class SessionFileTransferService :
         FileTransferRouteResolverInput routeInput;
         FileTransferInitialTunaReadinessEvidence? initialTunaEvidence;
         FileTransferOfferV2 offerMessage;
+        RoutePublicationToken? preparedPublication = null;
+
+        var preparation = ReservePreparationSend(normalizedDescriptor.TransferId ?? string.Empty);
+        var preparedEvidence = CapturePreparationAdmissionEvidence(preparation);
 
         OutboundTransferContext? uninstalled = null;
         try
         {
             lock (gate)
             {
-                if (disposed || transport is null)
+                if (disposed || transport is null || preparation is not null && !IsPreparationCaptureCurrentLocked(preparation))
                 {
                     return null;
                 }
@@ -1330,7 +1335,9 @@ public sealed partial class SessionFileTransferService :
 
                 var transportRouteInput = FileTransferRouteResolverInput.FromTransport(currentTransport);
                 routeInput = CreateInitialRouteResolverInputForNewTransfer(currentTransport);
-                initialTunaEvidence = CaptureInitialTunaReadinessEvidence(
+                initialTunaEvidence = preparation is not null
+                    ? RecheckPreparationEvidenceLocked(preparation, preparedEvidence)
+                    : CaptureInitialTunaReadinessEvidence(
                     currentTransport,
                     ResolveCurrentFileTransferSessionId(currentTransport),
                     normalizedDescriptor.TransferId ?? string.Empty,
@@ -1386,6 +1393,13 @@ public sealed partial class SessionFileTransferService :
                 }
 
                 routeInput = CreateRouteInputForPublishedSelection(context.RouteSelection, routeInput.TransportProfileKind);
+                if (RequiresPreparationAdmissionLocked(preparation, context.RouteSelection))
+                {
+                    if (!TryAuthorizeRoutePublicationLocked(context, FileTransferCoordinatorActionKind.RoutePublication,
+                            "new_transfer", "new_transfer", null, out var publication, out _) ||
+                        !AdoptPreparationAdmissionLocked(preparation, CreateCoordinatorStateLocked(context), context.LifetimeCts.Token)) return null;
+                    preparedPublication = publication;
+                }
                 outboundTransfer = context;
                 uninstalled = null;
             }
@@ -1395,19 +1409,32 @@ public sealed partial class SessionFileTransferService :
             // The creator owns rejected/exceptional setup until installation.
             // Resource/stream closure runs after releasing the service gate.
             uninstalled?.DisposeResources();
+            RetireUnadoptedPreparationAdmission(preparation);
+        }
+
+        if (!ActivatePreparationAdmission(preparation, preparedPublication is not null))
+        {
+            await TransitionOutboundToTerminalAsync(context, FileTransferTransferState.Failed,
+                errorCode: InvalidStateErrorCode, statusMessage: "Prepared transport ownership changed before activation.",
+                notifyPeer: false, cancelReason: null, ct: CancellationToken.None).ConfigureAwait(false);
+            return CaptureCurrentOutboundSnapshot();
         }
 
         lock (gate)
         {
             if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
             {
-                if (TryPublishRouteSelectedIfAuthorizedLocked(
+                var routePublicationToken = preparedPublication.GetValueOrDefault();
+                if (preparedPublication is not null
+                    ? TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "new_transfer", "new_transfer", routePublicationToken)
+                    : TryPublishRouteSelectedIfAuthorizedLocked(
                     context,
                     routeInput,
                     "new_transfer",
                     "new_transfer",
-                    out var routePublicationToken))
+                    out routePublicationToken))
                 {
+                    if (preparedPublication is not null) EnqueueRoutePublicationAuthorityEffect(context, routePublicationToken);
                     TryPublishRouteHintIfAuthorizedLocked(
                         context,
                         "new_transfer_route_hint",
@@ -2329,6 +2356,7 @@ public sealed partial class SessionFileTransferService :
         disposed = true;
         lock (gate)
         {
+            RevokePreparationScopeLocked();
             frontierProducerScope?.Close();
             if (inboundTransfer is { } currentInbound)
             {
@@ -2617,7 +2645,10 @@ public sealed partial class SessionFileTransferService :
     }
 
     private void OnFileTransferOfferReceived(object? sender, FileTransferOfferReceivedEventArgs e)
-        => EnqueueInboundLifecycle("offer", () => HandleIncomingOfferAsync(e.Message));
+    {
+        var preparation = ReservePreparationOffer(sender, e.Message);
+        EnqueueInboundLifecycle("offer", () => HandleIncomingPreparedOfferAsync(e.Message, preparation));
+    }
 
     private void OnFileTransferAcceptReceived(object? sender, FileTransferAcceptReceivedEventArgs e)
         => EnqueueInboundLifecycle("accept", () => HandleIncomingAcceptAsync(e.Message));
@@ -2656,10 +2687,16 @@ public sealed partial class SessionFileTransferService :
         => RunHardPriorityInboundLifecycle("fallback_tail_yield_proof", () => HandleIncomingFallbackTailYieldProofAsync(e.Message));
 
     private void OnTransportRejected(object? sender, EventArgs e)
-        => RunHardPriorityInboundLifecycle("transport_rejected", HandleTransportRejectedAsync);
+    {
+        RevokePreparationForTransport(sender);
+        RunHardPriorityInboundLifecycle("transport_rejected", HandleTransportRejectedAsync);
+    }
 
     private void OnTransportDisconnected(object? sender, EventArgs e)
-        => RunHardPriorityInboundLifecycle("transport_disconnect", HandleTransportDisconnectedAsync);
+    {
+        RevokePreparationForTransport(sender);
+        RunHardPriorityInboundLifecycle("transport_disconnect", HandleTransportDisconnectedAsync);
+    }
 
     private void RunHardPriorityInboundLifecycle(string operation, Func<Task> work)
     {
@@ -2901,7 +2938,10 @@ public sealed partial class SessionFileTransferService :
             $"event=filetransfer_v6_peer_disconnect_deferred_for_epoch; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason)}; transport_epoch={epoch?.EpochId ?? 0}; epoch_state={FormatProtocolLogValue(epoch is null ? null : FormatV6TransportEpochState(epoch.State))}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch?.Kind ?? FileTransferTransportHandoffKind.None)}; target_transport={FormatFileTransferTransportKind(epoch?.TargetTransport ?? FileTransferTransportKind.Unknown)}; pause_reason={FormatProtocolLogValue(pauseReason)}");
     }
 
-    private async Task HandleIncomingOfferAsync(FileTransferOfferV2 message)
+    private Task HandleIncomingOfferAsync(FileTransferOfferV2 message)
+        => HandleIncomingPreparedOfferAsync(message, ReservePreparationOffer(transport, message));
+
+    private async Task HandleIncomingPreparedOfferAsync(FileTransferOfferV2 message, PreparationAdmissionCapture? preparation)
     {
         ArgumentNullException.ThrowIfNull(message);
 
@@ -2921,11 +2961,12 @@ public sealed partial class SessionFileTransferService :
         IFileTransferSignalingTransport? currentTransport;
         lock (gate)
         {
+            if (preparation is not null && !IsPreparationCaptureCurrentLocked(preparation)) return;
             currentTransport = transport;
         }
 
         var routeInput = CreateInitialRouteResolverInputForNewTransfer(currentTransport);
-        var initialTunaEvidence = CaptureInitialTunaReadinessEvidence(
+        var initialTunaEvidence = preparation is not null ? null : CaptureInitialTunaReadinessEvidence(
             currentTransport,
             message.SessionId,
             message.TransferId,
@@ -2942,6 +2983,8 @@ public sealed partial class SessionFileTransferService :
             await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
             return;
         }
+
+        if (preparation is not null) initialTunaEvidence = CapturePreparationAdmissionEvidence(preparation);
 
         InboundTransferContext? busyTransfer = null;
         InboundTransferContext? duplicateTransfer = null;
@@ -2982,11 +3025,12 @@ public sealed partial class SessionFileTransferService :
         CoordinatorSnapshotStreamEmitter incomingEmitter;
         lock (gate)
         {
-            if (disposed) { return; }
+            if (disposed || preparation is not null && !IsPreparationCaptureCurrentLocked(preparation)) { return; }
             incomingEmitter = CreateCoordinatorEmitter();
         }
         var incoming = new InboundTransferContext(message, routeSelection, incomingEmitter);
         var installed = false;
+        RoutePublicationToken? preparedPublication = null;
         try
         {
             if (currentTransport is IFileTransferRouteTransitionBridge { SupportsFallbackBootstrapCorrelation: true } ||
@@ -3012,7 +3056,21 @@ public sealed partial class SessionFileTransferService :
             ApplyFileTransferRuntimeProfileSelectionLocked(
                 incoming,
                 FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
-            if (EnsureInboundTransferLegLocked(incoming, "offer_received", initialTunaEvidence) is null)
+            bool legAdmitted;
+            if (preparation is null)
+            {
+                legAdmitted = EnsureInboundTransferLegLocked(incoming, "offer_received", initialTunaEvidence) is not null;
+            }
+            else
+            {
+                lock (gate)
+                {
+                    if (!IsPreparationCaptureCurrentLocked(preparation)) return;
+                    legAdmitted = EnsureInboundTransferLegLocked(incoming, "offer_received",
+                        RecheckPreparationEvidenceLocked(preparation, initialTunaEvidence)) is not null;
+                }
+            }
+            if (!legAdmitted)
             {
                 LogLegacyNegotiationRejected(
                     message.TransferId,
@@ -3029,7 +3087,7 @@ public sealed partial class SessionFileTransferService :
 
             lock (gate)
             {
-                if (disposed)
+                if (disposed || preparation is not null && !IsPreparationCaptureCurrentLocked(preparation))
                 {
                     return;
                 }
@@ -3063,6 +3121,13 @@ public sealed partial class SessionFileTransferService :
                 }
                 else
                 {
+                    if (RequiresPreparationAdmissionLocked(preparation, incoming.RouteSelection))
+                    {
+                        if (!TryAuthorizeRoutePublicationLocked(incoming, FileTransferCoordinatorActionKind.RoutePublication,
+                                "offer_received", "offer_received", null, out var publication, out _) ||
+                            !AdoptPreparationAdmissionLocked(preparation, CreateCoordinatorStateLocked(incoming), incoming.LifetimeCts.Token)) return;
+                        preparedPublication = publication;
+                    }
                     inboundTransfer = incoming;
                     installed = true;
                     snapshotToRaise = CreateSnapshotLocked();
@@ -3071,17 +3136,29 @@ public sealed partial class SessionFileTransferService :
 
             if (snapshotToRaise is not null)
             {
+                if (!ActivatePreparationAdmission(preparation, preparedPublication is not null))
+                {
+                    await TransitionInboundToTerminalAsync(incoming, FileTransferTransferState.Failed,
+                        errorCode: InvalidStateErrorCode, statusMessage: "Prepared transport ownership changed before activation.",
+                        sendError: false, errorMessage: null, cancelReason: null, ct: CancellationToken.None).ConfigureAwait(false);
+                    await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+                    return;
+                }
                 lock (gate)
                 {
                     if (ReferenceEquals(inboundTransfer, incoming) && !incoming.IsTerminal)
                     {
-                        if (TryPublishRouteSelectedIfAuthorizedLocked(
+                        var routePublicationToken = preparedPublication.GetValueOrDefault();
+                        if (preparedPublication is not null
+                            ? TryPublishRouteSelectedIfAuthorizedLocked(incoming, routeInput, "offer_received", "offer_received", routePublicationToken)
+                            : TryPublishRouteSelectedIfAuthorizedLocked(
                             incoming,
                             routeInput,
                             "offer_received",
                             "offer_received",
-                            out var routePublicationToken))
+                            out routePublicationToken))
                         {
+                            if (preparedPublication is not null) EnqueueRoutePublicationAuthorityEffect(incoming, routePublicationToken);
                             TryPublishRouteHintIfAuthorizedLocked(
                                 incoming,
                                 "offer_received_route_hint",
@@ -3125,6 +3202,7 @@ public sealed partial class SessionFileTransferService :
             // Busy, rejected, disposed and exceptional setup never transfer
             // ownership to the service. Do not orphan their original streams.
             if (!installed) { incoming.DisposeResources(); }
+            RetireUnadoptedPreparationAdmission(preparation);
         }
     }
 

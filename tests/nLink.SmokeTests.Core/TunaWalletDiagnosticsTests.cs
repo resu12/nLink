@@ -839,6 +839,39 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "SessionPreparationLane")]
+    public async Task TunaRuntimeListenerSupervisor_ExactCleanupAndIdleStartNeverReplaceChild(bool retireChild)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateListenerSupervisorRuntimeContextAsync(root);
+            var snapshot = CreateListenerAdoptionSnapshot();
+            var child = new RecordingTunaListenerSidecarSupervisor(snapshot);
+            using var supervisor = context.RuntimeService.CreateRuntimeListenerSupervisorForTests(child);
+            // The injected child's option identity is unknown. Strict preparation
+            // must not replace it just to obtain a matching runtime configuration.
+            Assert.Null(await supervisor.EnsureStartedIfIdleAsync(snapshot.CurrentRequest, CancellationToken.None));
+            Assert.Equal(0, child.DisposeCount);
+            Assert.Equal(0, child.EnsureStartedCount);
+            if (retireChild) supervisor.Dispose();
+            Assert.Equal(!retireChild, supervisor.TryDetachCurrentListener(snapshot, out var cleanup));
+            if (!retireChild)
+            {
+                Assert.NotNull(cleanup);
+                Assert.Equal(0, child.StopCount);
+                Assert.False(supervisor.TryDetachCurrentListener(snapshot, out _));
+                cleanup!("exact_cleanup");
+                Assert.Equal(1, child.StopCount);
+            }
+            else Assert.Null(cleanup);
+        }
+        finally { DeleteTempRoot(root); }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task TunaRuntimeListenerSupervisor_NoChildOrDisposedReturnsNoAdoptionAuthority()
@@ -1921,6 +1954,18 @@ public sealed class TunaWalletDiagnosticsTests
 
         public void Stop(string reason)
             => Interlocked.Increment(ref stopCount);
+
+        public bool TryDetachCurrentListener(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop)
+        {
+            lock (gate)
+            {
+                stop = null;
+                if (disposed || current != snapshot) return false;
+                current = null;
+                stop = Stop;
+                return true;
+            }
+        }
 
         public void ReleaseAdoption()
             => adoptionRelease.TrySetResult();

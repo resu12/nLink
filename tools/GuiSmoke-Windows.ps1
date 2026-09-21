@@ -17,6 +17,7 @@ $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
 $script:GuiSmokeScenarioDeadlineName = ''
 $script:GuiSmokeTerminalPhaseGeneration = 0L
 $script:GuiSmokeTerminalEvidenceGeneration = 0L
+$script:GuiPreparationObservationRoot = ''
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -6240,7 +6241,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     }
 
     function Get-FileTransferCoordinatorSnapshotEventName {
-        param([Parameter(Mandatory = $true)][string]$Line)
+        param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
 
         $match = [regex]::Match(
             $Line,
@@ -33028,6 +33029,141 @@ function Wait-AppLogContainsAnyAllAfterBookmark {
     }
 }
 
+# Smoke-only diagnostic precondition, never transfer/route authority.
+function Read-GuiPreparationJson {
+    param([string]$Path)
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item.Length -le 0 -or $item.Length -gt 16384 -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
+        return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch { return $null }
+}
+
+function Set-GuiPreparationProcessIdentity {
+    param($Process, $EnvironmentOverrides)
+    if ($EnvironmentOverrides.ContainsKey('NLINK_GUI_PREPARATION_OBSERVATION_ROOT')) {
+        $Process | Add-Member -NotePropertyName PreparationObservationRoot -NotePropertyValue $EnvironmentOverrides['NLINK_GUI_PREPARATION_OBSERVATION_ROOT']
+        $Process | Add-Member -NotePropertyName PreparationObservationBoot -NotePropertyValue $EnvironmentOverrides['NLINK_GUI_PREPARATION_OBSERVATION_BOOT']
+    }
+}
+
+function Test-GuiPreparationIdentity {
+    param($Identity, $Process, [string]$Role)
+    try {
+        return $null -ne $Identity -and -not $Process.HasExited -and
+            $Identity.processId -eq $Process.Id -and $Identity.bootId -ceq $Process.PreparationObservationBoot -and
+            $Identity.processStartedUtcMs -eq ([DateTimeOffset]$Process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() -and
+            $Identity.localRole -ceq $Role -and $null -ne $Identity.scope -and
+            -not [string]::IsNullOrWhiteSpace($Identity.scope.sessionId) -and
+            -not [string]::IsNullOrWhiteSpace($Identity.scope.helpeeIdentity) -and
+            -not [string]::IsNullOrWhiteSpace($Identity.scope.helperIdentity) -and
+            $Identity.scope.helpeeIdentity -cne $Identity.scope.helperIdentity -and
+            [guid]$Identity.scope.incarnation -ne [guid]::Empty
+    }
+    catch { return $false }
+}
+
+function Test-GuiPreparationResponse {
+    param($Response, $Request, $Identity, [long]$NowUtcMs)
+    try {
+        if ($null -eq $Response -or $Response.requestId -cne $Request.requestId -or
+            $Response.requestedUtcMs -ne $Request.requestedUtcMs -or
+            $Response.capturedUtcMs -lt $Request.requestedUtcMs -or $Response.capturedUtcMs -gt $NowUtcMs) { return $false }
+        foreach ($field in @('processId', 'bootId', 'processStartedUtcMs', 'localRole')) {
+            if ($Response.identity.$field -cne $Identity.$field) { return $false }
+        }
+        foreach ($field in @('sessionId', 'incarnation', 'helpeeIdentity', 'helperIdentity')) {
+            if ($Response.identity.scope.$field -cne $Identity.scope.$field -or
+                $Response.observation.scope.$field -cne $Identity.scope.$field) { return $false }
+        }
+        $observation = $Response.observation
+        return $observation.ready -is [bool] -and $observation.ready -and
+            $observation.consumed -is [bool] -and -not $observation.consumed -and
+            $observation.revoked -is [bool] -and -not $observation.revoked -and
+            $observation.scope.sessionId -ceq $Request.expectedSessionId -and
+            $observation.direction -ceq $Request.direction -and $observation.phase -ceq 'Ready' -and
+            $observation.reason -ceq 'preparation_ready' -and $observation.authorityEffect -ceq 'none' -and
+            $observation.episodeFingerprint -cmatch '^[0-9A-F]{64}$' -and
+            $observation.preparationGeneration -gt 0 -and $observation.snapshotGeneration -gt 0 -and $observation.leaseGeneration -gt 0 -and
+            ([DateTimeOffset]$observation.sourceCapturedUtc).ToUnixTimeMilliseconds() -gt 0 -and
+            ([DateTimeOffset]$observation.sourceCapturedUtc).ToUnixTimeMilliseconds() -le $Request.requestedUtcMs -and
+            ([DateTimeOffset]$observation.expiresUtc).ToUnixTimeMilliseconds() -gt $NowUtcMs
+    }
+    catch { return $false }
+}
+
+function Test-GuiPreparationPair {
+    param($Responses, $Requests, $Identities, [long]$NowUtcMs)
+    try {
+        if ($Responses.Count -ne 2 -or $Requests.Count -ne 2 -or $Identities.Count -ne 2 -or
+            $Identities[0].processId -eq $Identities[1].processId -or
+            $Identities[0].bootId -ceq $Identities[1].bootId -or
+            $Identities[0].localRole -ceq $Identities[1].localRole -or
+            $Requests[0].requestId -ceq $Requests[1].requestId -or
+            $Requests[0].direction -cne 'Outbound' -or $Requests[1].direction -cne 'Inbound') { return $false }
+        for ($i = 0; $i -lt 2; $i++) {
+            if (-not (Test-GuiPreparationResponse $Responses[$i] $Requests[$i] $Identities[$i] $NowUtcMs)) { return $false }
+        }
+        foreach ($field in @('sessionId', 'helpeeIdentity', 'helperIdentity')) {
+            if ($Identities[0].scope.$field -cne $Identities[1].scope.$field) { return $false }
+        }
+        # Incarnations/generations are local. Only the authenticated episode fingerprint is shared.
+        return $Responses[0].observation.episodeFingerprint -ceq $Responses[1].observation.episodeFingerprint
+    }
+    catch { return $false }
+}
+
+function Wait-GuiPairedPreparationReadiness {
+    param($Context, [string]$Direction, [string]$ArtifactDir, [int]$TimeoutMs = 150000)
+    $processes = if ($Direction -eq 'helper-to-helpee') { @($Context.HelperProc, $Context.HelpeeProc) } else { @($Context.HelpeeProc, $Context.HelperProc) }
+    $roles = if ($Direction -eq 'helper-to-helpee') { @('Helper', 'Helpee') } else { @('Helpee', 'Helper') }
+    $directories = @($processes | ForEach-Object {
+        Join-Path $_.PreparationObservationRoot ('{0}-{1}' -f $_.Id, $_.PreparationObservationBoot)
+    })
+    $poll = [pscustomobject]@{ Identities = $null; Requests = $null }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Phase 5 paired preparation readiness missing: failurePhase=diagnostic_tuna_readiness; failureReason=paired_preparation_readiness_missing' -Condition {
+        if ($null -eq $poll.Identities) {
+            $identities = @((Read-GuiPreparationJson (Join-Path $directories[0] 'identity.json')), (Read-GuiPreparationJson (Join-Path $directories[1] 'identity.json')))
+            for ($i = 0; $i -lt 2; $i++) {
+                if (-not (Test-GuiPreparationIdentity $identities[$i] $processes[$i] $roles[$i])) { return $null }
+            }
+            foreach ($field in @('sessionId', 'helpeeIdentity', 'helperIdentity')) {
+                if ($identities[0].scope.$field -cne $identities[1].scope.$field) { return $null }
+            }
+            $poll.Identities = $identities
+        }
+        if ($null -eq $poll.Requests) {
+            $poll.Requests = @(0, 1 | ForEach-Object {
+                [pscustomobject]@{ requestId = [guid]::NewGuid().ToString('N'); expectedSessionId = $poll.Identities[$_].scope.sessionId
+                    direction = @('Outbound', 'Inbound')[$_]; requestedUtcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+            })
+            for ($i = 0; $i -lt 2; $i++) {
+                Write-GuiSmokeAtomicJson -Path (Join-Path $directories[$i] 'request.json') -Value $poll.Requests[$i]
+            }
+        }
+        $responses = @((Read-GuiPreparationJson (Join-Path $directories[0] 'response.json')), (Read-GuiPreparationJson (Join-Path $directories[1] 'response.json')))
+        for ($i = 0; $i -lt 2; $i++) {
+            if ($null -ne $responses[$i]) {
+                Write-GuiSmokeAtomicJson -Path (Join-Path $ArtifactDir ('preparation-response-{0}-latest.json' -f $roles[$i])) -Value $responses[$i]
+            }
+        }
+        for ($i = 0; $i -lt 2; $i++) {
+            if ($null -eq $responses[$i] -or $responses[$i].requestId -cne $poll.Requests[$i].requestId) { return $null }
+            if ($processes[$i].HasExited) { return $null }
+        }
+        $evidence = [ordered]@{ authorityEffect = 'none'; requests = $poll.Requests; responses = $responses }
+        Write-GuiSmokeAtomicJson -Path (Join-Path $ArtifactDir 'paired-preparation-latest.json') -Value $evidence
+        if (Test-GuiPreparationPair $responses $poll.Requests $poll.Identities ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())) {
+            Write-GuiSmokeAtomicJson -Path (Join-Path $ArtifactDir 'paired-preparation-ready.json') -Value $evidence
+            return 'event=gui_paired_session_preparation_ready; paired_peer_count=2; authority_effect=none'
+        }
+        $poll.Requests = $null
+        return $null
+    }
+}
+
 function Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer {
     param(
         [Parameter(Mandatory = $true)][int]$Bookmark,
@@ -36515,14 +36651,10 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $liveSwitchOffDataPathProofMissing = $false
 
     if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'post-fallback' -or $RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
-        $preconditionBookmark = Get-AppLogBookmark
         Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
-        $diagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $preconditionBookmark -TimeoutMs 150000)
+        $diagnosticReadinessLine = [string](Wait-GuiPairedPreparationReadiness -Context $Context -Direction $Direction -ArtifactDir $ArtifactDir -TimeoutMs 150000)
         $observedEvidenceLines.Add($diagnosticReadinessLine) | Out-Null
         $diagnosticTunaReadinessObserved = $true
-        if ($diagnosticReadinessLine.IndexOf('event=tuna_acceleration_negotiated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $tunaNegotiatedObserved = $true
-        }
 
         if ($RouteMode -eq 'post-fallback') {
             $precondition = Invoke-FileTransferTunaPostFallbackPrecondition `
@@ -38600,6 +38732,7 @@ function Start-AppInstance {
             return [string[]]@($capture.StdoutPath, $capture.StderrPath)
         }
         $FrontierReports.Value = $FrontierRequest.StartAppWithReports($process, $createReports)
+        Set-GuiPreparationProcessIdentity -Process $process -EnvironmentOverrides $launchEnvironment
         return $process
     }
 
@@ -38621,6 +38754,7 @@ function Start-AppInstance {
     } | Out-Null
     $process.BeginOutputReadLine()
     $process.BeginErrorReadLine()
+    Set-GuiPreparationProcessIdentity -Process $process -EnvironmentOverrides $launchEnvironment
 
     return $process
 }
@@ -38646,6 +38780,14 @@ function Get-AppLaunchEnvironmentOverrides {
     param([string]$RoleName = '')
 
     $overrides = @{}
+    $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if (-not [string]::IsNullOrWhiteSpace($env:NLINK_GUI_SMOKE_SCENARIOS) -and -not [string]::IsNullOrWhiteSpace($artifactDir)) {
+        if ([string]::IsNullOrWhiteSpace($script:GuiPreparationObservationRoot)) {
+            $script:GuiPreparationObservationRoot = [IO.Path]::GetFullPath((Join-Path $artifactDir ('preparation-observations-' + [guid]::NewGuid().ToString('N'))))
+        }
+        $overrides['NLINK_GUI_PREPARATION_OBSERVATION_ROOT'] = $script:GuiPreparationObservationRoot
+        $overrides['NLINK_GUI_PREPARATION_OBSERVATION_BOOT'] = [guid]::NewGuid().ToString('N')
+    }
     if ([string]$script:GuiSmokeAppLogLedger.StorageMode -eq 'AppendOnlyFile') {
         $overrides['NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH'] = [string]$script:GuiSmokeAppLogLedger.AppendOnlyPath
     }

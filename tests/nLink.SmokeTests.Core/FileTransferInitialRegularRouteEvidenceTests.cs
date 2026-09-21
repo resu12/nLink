@@ -53,7 +53,7 @@ public sealed class FileTransferInitialRegularRouteEvidenceTests : FileTransferO
         finally { TryDeleteDirectory(tempRoot); }
     }
 
-    private static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
+    internal static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
     {
         var emitterType = typeof(SessionFileTransferService).GetNestedType("CoordinatorSnapshotStreamEmitter", BindingFlags.NonPublic)!;
         var emitter = Activator.CreateInstance(emitterType, nonPublic: true)!;

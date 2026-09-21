@@ -56,6 +56,9 @@ internal sealed class NknEnvelopeRouter
             case MsgType.TransportAccelerationAnswerAck:
             case MsgType.TransportAccelerationDown:
             case MsgType.TransportAccelerationPayerIntent:
+            case MsgType.SessionPreparationOffer:
+            case MsgType.SessionPreparationAnswer:
+            case MsgType.SessionPreparationAnswerAck:
                 controlChannel.Handle(inboundContext);
                 break;
             case MsgType.ScreenShareFrame:

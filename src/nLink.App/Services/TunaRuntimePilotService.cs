@@ -2232,7 +2232,15 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
         }
 
-        public async Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
+        public Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
+            => GetOrCreateSupervisor(requireIdle: false)?.EnsureStartedAsync(request, ct)
+                ?? Task.FromResult<NknTunaListenerSidecarEndpoint?>(null);
+
+        public Task<NknTunaListenerAdoptionSnapshot?> EnsureStartedIfIdleAsync(NknTunaListenerStartRequest request, CancellationToken ct)
+            => GetOrCreateSupervisor(requireIdle: true)?.EnsureStartedIfIdleAsync(request, ct)
+                ?? Task.FromResult<NknTunaListenerAdoptionSnapshot?>(null);
+
+        private INknTunaListenerSidecarSupervisor? GetOrCreateSupervisor(bool requireIdle)
         {
             INknTunaListenerSidecarSupervisor current;
             var usageSink = new RuntimeUsageSink(owner);
@@ -2246,6 +2254,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             lock (gate)
             {
                 ObjectDisposedException.ThrowIf(disposed, this);
+                if (requireIdle && supervisor is not null && !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
+                    return null; // Preparation may not replace another child/configuration.
                 if (supervisor is null || !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
                 {
                     if (supervisor is not null)
@@ -2262,7 +2272,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 current = supervisor;
             }
 
-            return await current.EnsureStartedAsync(request, ct).ConfigureAwait(false);
+            return current;
         }
 
         public NknTunaListenerAdoptionSnapshot? CaptureCurrentListenerAdoptionSnapshot()
@@ -2283,6 +2293,15 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             {
                 return !disposed &&
                        supervisor?.TryAdoptCurrentListener(snapshot, successorRequest) == true;
+            }
+        }
+
+        public bool TryDetachCurrentListener(NknTunaListenerAdoptionSnapshot snapshot, out Action<string>? stop)
+        {
+            lock (gate)
+            {
+                stop = null;
+                return !disposed && supervisor?.TryDetachCurrentListener(snapshot, out stop) == true;
             }
         }
 

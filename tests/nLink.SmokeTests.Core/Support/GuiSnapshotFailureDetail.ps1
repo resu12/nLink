@@ -171,8 +171,8 @@ function Test-FileTransferCoordinatorSnapshotFamilyAuthoritative {
     param($Evaluation, $Family)
     & $script:originalFamilyPredicate @PSBoundParameters
 }
-[IO.File]::WriteAllLines($inputPath, [string[]]@('unrelated record',
-    '[2026-01-01 00:00:00Z] [INFO] [FileTransferService] event=filetransfer_coordinator_transition_snapshot; log_writer_id=writer-fixture; log_writer_sequence=42;'))
+$malformedLine = '[2026-01-01 00:00:00Z] [INFO] [FileTransferService] event=filetransfer_coordinator_transition_snapshot; log_writer_id=writer-fixture; log_writer_sequence=42;'
+[IO.File]::WriteAllLines($inputPath, [string[]]@('unrelated record', $malformedLine))
 $script:evaluatorCalls=0
 Invoke-TunaGuiFailureClassificationRequest -RequestPath $requestPath
 $actual=(Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json).classification
@@ -184,5 +184,76 @@ if ($script:evaluatorCalls -ne 2 -or
     $actual.CoordinatorWriterSequence -ne 42) {
     throw "Real evaluator detail mismatch: $($actual | ConvertTo-Json -Depth 5 -Compress)"
 }
+
+# Blank rows are non-events, not authority, and must not hide malformed records.
+# Exercise the shared parser directly; the GUI integration below uses its local
+# parser and keeps the original two full/compact evaluations per classification.
+foreach ($line in @('', ' ', "`t", 'unrelated record')) {
+    if ((Get-FileTransferCoordinatorSnapshotEventName -Line $line) -cne '') {
+        throw 'Non-event input gained an event name'
+    }
+}
+foreach ($fixture in @(
+    [pscustomobject]@{ Name='empty'; Lines=[string[]]@() },
+    [pscustomobject]@{ Name='blank'; Lines=[string[]]@('', '', '') },
+    [pscustomobject]@{ Name='missing_snapshot'; Lines=[string[]]@('', 'unrelated record', "`t", '') }
+)) {
+    $evaluation = & $script:originalSnapshotEvaluator -Lines $fixture.Lines
+    if ($evaluation.Mode -cne 'LegacyV0' -or $evaluation.StreamComplete -or
+        $evaluation.ContractVersion -ne 0 -or $evaluation.TransitionCount -ne 0 -or
+        $evaluation.EffectCount -ne 0 -or $evaluation.BoundaryCount -ne 0 -or
+        $null -ne $evaluation.FirstUnresolvedBoundary) {
+        throw "Missing snapshot input gained authority: $($fixture.Name)"
+    }
+}
+
+$script:blankAppLines = [string[]]@('', 'unrelated record', "`t ")
+$script:blankProcessLines = [string[]]@($malformedLine, '')
+[string[]]$blankEvidenceLines = @($script:blankAppLines + $script:blankProcessLines)
+$full = & $script:originalSnapshotEvaluator -Lines $blankEvidenceLines
+$compact = & $script:originalSnapshotEvaluator -SnapshotRecords @(
+    [pscustomobject]@{ LineIndex=0L; Line='' },
+    [pscustomobject]@{ LineIndex=3L; Line=$malformedLine },
+    [pscustomobject]@{ LineIndex=4L; Line='' })
+foreach ($evaluation in @($full, $compact)) {
+    if ($evaluation.Mode -cne 'SnapshotV1Shadow' -or
+        $evaluation.ArtifactEvidenceVerdict -cne 'fail' -or
+        $evaluation.FirstUnresolvedBoundary.decisionReason -cne 'snapshot_instance_missing' -or
+        $evaluation.FirstUnresolvedBoundary.evidenceLineIndex -ne 3) {
+        throw 'Blank rows changed malformed snapshot validation or source location'
+    }
+}
+if ($full.BoundaryHash -cne $compact.BoundaryHash -or
+    $full.BoundaryCount -ne $compact.BoundaryCount) {
+    throw 'Blank rows changed full/compact boundary parity'
+}
+
+function Get-AppLogLinesAfterBookmark { return $script:blankAppLines }
+function Read-GuiSmokeProcessOutputLinesSnapshot { return $script:blankProcessLines }
+foreach ($source in @('immutable', 'live')) {
+    $script:evaluatorCalls=0
+    if ($source -ceq 'immutable') {
+        [IO.File]::WriteAllLines($inputPath, $blankEvidenceLines)
+        Invoke-TunaGuiFailureClassificationRequest -RequestPath $requestPath
+        $actual=(Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json).classification
+        $indexDomain='immutable_sorted_unique_paths_concatenated_zero_based'
+    }
+    else {
+        $actual=Get-TunaGuiFileTransferSetupFailureClassification -Bookmark 0 -ErrorMessage fixture -RouteMode $routeMode -RequireCompletedClassification
+        $indexDomain='app_log_then_process_output_zero_based'
+    }
+    if ($script:evaluatorCalls -ne 2 -or
+        $actual.FailureClass -cne 'filetransfer_coordinator_snapshot_evidence_invalid' -or
+        -not $actual.ClassificationComplete -or
+        $actual.CoordinatorSnapshotEvidenceDiagnostic.decisionReason -cne 'snapshot_instance_missing' -or
+        $actual.CoordinatorSnapshotEvidenceDiagnostic.eventName -cne 'filetransfer_coordinator_transition_snapshot' -or
+        $actual.CoordinatorSnapshotEvidenceDiagnostic.evidenceLineIndex -ne 3 -or
+        $actual.CoordinatorSnapshotEvidenceDiagnostic.evidenceLineIndexDomain -cne $indexDomain -or
+        $actual.CoordinatorSnapshotEvidenceDiagnostic.authorityEffect -cne 'none' -or
+        $actual.CoordinatorWriterSequence -ne 42) {
+        throw "Blank-row classification mismatch ($source): $($actual | ConvertTo-Json -Depth 5 -Compress)"
+    }
+}
 Write-Output "gui-snapshot-failure-detail-ok cases=$caseCount; original_gui_evaluations_per_case=2"
 Write-Output 'gui-snapshot-failure-detail-real-evaluator-ok'
+Write-Output 'gui-snapshot-failure-detail-blank-rows-ok'

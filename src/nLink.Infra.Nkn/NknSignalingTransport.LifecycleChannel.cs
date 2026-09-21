@@ -2698,6 +2698,9 @@ public sealed partial class NknSignalingTransport
             MsgType.TransportAccelerationOffer => false,
             MsgType.TransportAccelerationAnswer => false,
             MsgType.TransportAccelerationAnswerAck => false,
+            MsgType.SessionPreparationOffer => false,
+            MsgType.SessionPreparationAnswer => false,
+            MsgType.SessionPreparationAnswerAck => false,
             MsgType.TransportAccelerationDown => false,
             _ => true,
         };
@@ -2959,6 +2962,7 @@ public sealed partial class NknSignalingTransport
 
         if (Equals(currentSessionSecurityState, nextState))
         {
+            sessionPreparationLifecycle.ObserveSecurity(nextState);
             return;
         }
 
@@ -2969,6 +2973,7 @@ public sealed partial class NknSignalingTransport
 
         var previousSessionId = currentSessionSecurityState.SessionId?.Value;
         currentSessionSecurityState = nextState;
+        sessionPreparationLifecycle.ObserveSecurity(nextState);
         if (!string.Equals(
                 previousSessionId,
                 nextState.SessionId?.Value,

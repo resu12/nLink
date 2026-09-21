@@ -1329,6 +1329,7 @@ public sealed partial class SessionFileTransferService
 
     private void DetachTransportCore(bool markActiveTransfersFailed, string failureCode, string failureMessage)
     {
+        FileTransferSessionPreparationAttachment? previousPreparation;
         IFileTransferSignalingTransport? previousTransport;
         ISignalingTransport? previousLifecycle;
         OutboundTransferContext? outbound;
@@ -1336,6 +1337,7 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
+            previousPreparation = DetachPreparationTransportLocked();
             previousTransport = transport;
             previousLifecycle = transportLifecycle;
             outbound = markActiveTransfersFailed && outboundTransfer is { IsTerminal: false } ? outboundTransfer : null;
@@ -1366,6 +1368,7 @@ public sealed partial class SessionFileTransferService
             lastInboundRuntimeUnlockPostFallbackProbeFailureObservation = null;
         }
 
+        previousPreparation?.Dispose();
         if (previousTransport is not null)
         {
             previousTransport.FileTransferOfferReceived -= OnFileTransferOfferReceived;

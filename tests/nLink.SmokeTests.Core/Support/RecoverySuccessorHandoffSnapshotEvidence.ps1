@@ -53,7 +53,7 @@ function Assert-Consumers([string]$Name, [string[]]$Lines, [bool]$EvidenceValid,
         foreach ($evaluation in @($full, $compact)) {
             $index = New-FileTransferCoordinatorSnapshotAggregateIntervalIndex -Entries @(
                 $evaluation.Boundaries | ForEach-Object { [pscustomobject]@{ Boundary = $_ } })
-            $proofs = Get-FileTransferCoordinatorSnapshotInitialRegularPublications `
+            $proofs = Get-FileTransferCoordinatorSnapshotInitialPublications `
                 -AggregateIndex $index -Effects $evaluation.__RoutePublicationEffects
             if ($proofs.Count -ne 1 -or
                 @($proofs.Keys | Where-Object { $_ -clike "*|$($publications[0].transitionId)|*" }).Count -ne 1) {

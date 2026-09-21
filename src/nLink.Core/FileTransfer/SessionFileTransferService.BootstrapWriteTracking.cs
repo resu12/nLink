@@ -44,17 +44,11 @@ public sealed partial class SessionFileTransferService
             ingress is null || !ReferenceEquals(context.DataSession, ingress.Session) || context.DataSessionGeneration != ingress.ServiceGeneration ||
             ingress.Session is not IFileTransferDataSessionGenerationProvider provider || provider.Generation != ingress.ProviderGeneration ||
             context.WriteStream is not { } stream || context.ReceiverSparseChunksWritten is not { } written ||
-            state.CurrentRoutePublicationToken is not { } publication || state.CurrentRouteCommit is not { } commit || state.CurrentLeg is not { } leg ||
+            FileTransferCoordinator.CaptureFallbackBootstrapSourceScope(state) is not { } scope ||
             state.PersistentState.FileTransferRouteTransition.BootstrapAgreement is not { IsEnabled: true } agreement)
         {
             return false;
         }
-        var scope = new FileTransferBootstrapLocalStopScope(FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(state),
-            FileTransferCoordinator.CreateRoutePublicationAuthority(publication)!,
-            new(commit.RouteToken, commit.ProtocolVersion, commit.LiveRouteEpoch, publication.RuntimeGeneration,
-                publication.PublicationGeneration, commit.CommitGeneration, state.TerminalGeneration, leg.Generation,
-                leg.TransportEpochId, leg.BridgeRecoveryGeneration, leg.CheckpointRequestId ?? "(none)", leg.CheckpointGeneration));
-        if (!FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, scope)) { return false; }
         source = new(context, context.CoordinatorInstanceId, agreement, scope, ingress, stream, written,
             context.ChunkSizeBytes, context.ChunkCount, context.FileSizeBytes, context.PullTransportPaused, context.PullTransportPausedSinceUtc);
         return true;

@@ -3478,6 +3478,11 @@ public sealed partial class NknSignalingTransport
             case MsgType.TransportAccelerationPayerIntent:
                 HandleTransportAccelerationPayerIntent(source, env);
                 break;
+            case MsgType.SessionPreparationOffer:
+            case MsgType.SessionPreparationAnswer:
+            case MsgType.SessionPreparationAnswerAck:
+                HandleSessionPreparationEnvelope(source, env);
+                break;
             default:
                 throw new InvalidOperationException($"Control channel cannot route {env.Type}.");
         }
@@ -5445,6 +5450,9 @@ public sealed partial class NknSignalingTransport
             MsgType.TransportAccelerationOffer or
             MsgType.TransportAccelerationAnswer or
             MsgType.TransportAccelerationAnswerAck or
+            MsgType.SessionPreparationOffer or
+            MsgType.SessionPreparationAnswer or
+            MsgType.SessionPreparationAnswerAck or
             MsgType.TransportAccelerationDown or
             MsgType.TransportAccelerationPayerIntent;
 
@@ -5609,12 +5617,17 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        RaiseSessionLivenessProof(
-            securePayload.Metadata.SessionId.Value,
-            generation: 0,
-            securePayload.Metadata.Sequence,
-            MapSecureControlMessageType(messageType),
-            "control");
+        // Preparation authentication is evidence only. In particular, a stale
+        // or wrong-episode reply must not refresh transfer recovery liveness.
+        if (!IsSessionPreparationMessageType(messageType))
+        {
+            RaiseSessionLivenessProof(
+                securePayload.Metadata.SessionId.Value,
+                generation: 0,
+                securePayload.Metadata.Sequence,
+                MapSecureControlMessageType(messageType),
+                "control");
+        }
         return true;
     }
 
@@ -6292,6 +6305,7 @@ public sealed partial class NknSignalingTransport
 
         lock (controlSecureStateGate)
         {
+            sessionPreparationLifecycle.InstallKey(approvalBytes is { Length: > 0 } ? sessionId : null);
             RetireFileTransferSecurityContextLocked();
             if (controlSessionSharedKey is not null)
             {
@@ -6330,6 +6344,7 @@ public sealed partial class NknSignalingTransport
     {
         lock (controlSecureStateGate)
         {
+            sessionPreparationLifecycle.ResetKey();
             RetireFileTransferSecurityContextLocked();
             if (controlSessionSharedKey is not null)
             {
@@ -7309,6 +7324,9 @@ public sealed partial class NknSignalingTransport
             MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
             MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
             MsgType.TransportAccelerationAnswerAck => "transport_acceleration_answer_ack",
+            MsgType.SessionPreparationOffer => "session_preparation_offer",
+            MsgType.SessionPreparationAnswer => "session_preparation_answer",
+            MsgType.SessionPreparationAnswerAck => "session_preparation_answer_ack",
             MsgType.TransportAccelerationDown => "transport_acceleration_down",
             MsgType.TransportAccelerationPayerIntent => "transport_acceleration_payer_intent",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
