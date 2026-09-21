@@ -48,6 +48,7 @@ if ($result.records[0].sourcePath -cne $FixturePath -or
     $result.records[0].sourceLineNumber -le 0 -or $result.records[0].writerSequence -le 0) {
     throw 'Candidate provenance missing'
 }
+if ($null -ne $result.records[0].PSObject.Properties['explanation']) { throw 'Recovered candidate acquired explanation' }
 Assert-PrimaryUnchanged
 foreach ($change in @('missing','invalid','incomplete','boundary','parity','legacy','string_boolean','budget','path','stopped_clock')) {
     $context = New-TestContext
@@ -168,17 +169,19 @@ foreach ($inputKind in @('full','compact','split')) {
         $unresolved.unresolvedCandidateCount -ne 1 -or $unresolved.sharedMatcherRecoveredCount -ne 0 -or
         $unresolved.records[0].evidenceSequence -ne $reference.SharedDiagnostics[0].LineNumber -or
         $unresolved.records[0].variant -cne $reference.SharedDiagnostics[0].Variant -or
+        $unresolved.records[0].explanation -cne $reference.SharedDiagnostics[0].Explanation -or
         $unresolved.records[0].sourcePath -cne $expectedLocations[0].Path -or
         $unresolved.records[0].sourceLineNumber -ne $expectedLocations[0].Line) {
         throw "Missing-receive companion drift: $inputKind $($unresolved | ConvertTo-Json -Depth 8 -Compress)"
     }
     $json = ConvertTo-Json -InputObject @($unresolved.records | Select-Object evidenceSequence,sessionId,
-        transferId,writerId,writerSequence,sharedMatcherRecovered,rejectionChainMatched,receiveDisposition,reason,variant) -Compress
+        transferId,writerId,writerSequence,sharedMatcherRecovered,rejectionChainMatched,receiveDisposition,reason,variant,explanation) -Compress
     if ($null -ne $diagnosticJson -and $diagnosticJson -cne $json) { throw 'Full/compact diagnostic JSON drift' }
     $diagnosticJson = $json
     Assert-PrimaryUnchanged
 }
 Write-Output ('companion-parity-hash=' + (Get-GuiSmokeLogLedgerHash $diagnosticJson))
+$unresolvedContext = $context
 
 # A real subprocess exercises timeout/nonzero/malformed/late-output handling.
 # Only the test's launcher substitutes its worker; production has no test mode.
@@ -196,6 +199,16 @@ if ($Mode -eq 'late') { Start-Sleep -Seconds 10; exit 0 }
 $response = Get-Content -LiteralPath $request.responsePath -Raw | ConvertFrom-Json
 if ($Mode -eq 'identity') { $response.requestId='wrong-request' }
 if ($Mode -eq 'counts') { $response.nonAuthorityDataPathDiagnostics.candidateCount=999 }
+if ($Mode -eq 'omit_explanation') { $response.nonAuthorityDataPathDiagnostics.records[0].PSObject.Properties.Remove('explanation') }
+if ($Mode -in @('wrong_explanation','oversized_explanation','non_string_explanation','unexpected_explanation','cross_variant_explanation')) {
+    $text = switch ($Mode) {
+        'oversized_explanation' { 'x' * 769 }
+        'non_string_explanation' { $false }
+        'cross_variant_explanation' { $response.nonAuthorityDataPathDiagnostics.records[0].explanation.Replace('Tuna receive','Tuna send') }
+        default { 'Recovered safely and delivered durably.' }
+    }
+    $response.nonAuthorityDataPathDiagnostics.records[0] | Add-Member -NotePropertyName explanation -NotePropertyValue $text -Force
+}
 [IO.File]::WriteAllText($request.responsePath, ($response | ConvertTo-Json -Depth 12))
 '@
 [IO.File]::WriteAllText($worker, $workerSource)
@@ -214,14 +227,29 @@ function Start-Process {
     $script:lastChildId = $child.Id
     return $child
 }
-foreach ($mode in @('exit','missing','malformed','identity','counts','late')) {
+foreach ($mode in @('exit','missing','malformed','identity','counts','late',
+    'omit_explanation','wrong_explanation','oversized_explanation','non_string_explanation','unexpected_explanation','cross_variant_explanation')) {
     $script:childMode = $mode
     $context = New-TestContext
+    if ($mode -in @('omit_explanation','wrong_explanation','oversized_explanation','non_string_explanation','cross_variant_explanation')) {
+        $context.Eligibility = $unresolvedContext.Eligibility
+        $context.EvidencePaths = $unresolvedContext.EvidencePaths
+    }
     if ($mode -eq 'late') { $context.BudgetMilliseconds=2500L }
     $receipt = Invoke-TunaGuiDataPathDiagnosticCompanion -ArtifactDir $ArtifactRoot -Context $context
-    $expected = if ($mode -eq 'late') { 'timed_out' } else { 'failed' }
-    if ($receipt.status -cne $expected -or $null -ne $receipt.candidateCount) {
+    $expected = if ($mode -eq 'late') { 'timed_out' } elseif ($mode -eq 'omit_explanation') { 'completed' } else { 'failed' }
+    if ($receipt.status -cne $expected -or ($mode -cne 'omit_explanation' -and $null -ne $receipt.candidateCount)) {
         throw "Child isolation failed: $mode $($receipt | ConvertTo-Json -Compress)"
+    }
+    if ($mode -eq 'omit_explanation') {
+        $expectedRecords = @($unresolved.records | Select-Object * -ExcludeProperty explanation)
+        if ((ConvertTo-Json -InputObject @($receipt.records) -Compress) -cne
+            (ConvertTo-Json -InputObject $expectedRecords -Compress) -or
+            $receipt.candidateCount -ne $unresolved.candidateCount -or
+            $receipt.sharedMatcherRecoveredCount -ne $unresolved.sharedMatcherRecoveredCount -or
+            $receipt.unresolvedCandidateCount -ne $unresolved.unresolvedCandidateCount) {
+            throw 'Omitting explanation changed legacy diagnostics'
+        }
     }
     if ($null -ne (Get-Process -Id $script:lastChildId -ErrorAction SilentlyContinue)) {
         throw "Diagnostic child survived: $mode"
@@ -232,11 +260,14 @@ Remove-Item Function:Start-Process
 
 # Additive persistence preserves every primary field and never mutates its object.
 $before = $primary | ConvertTo-Json -Compress
-if (-not (Write-TunaGuiDataPathDiagnosticSummary -Path $primaryPath -PrimarySummary $primary -Diagnostics $result)) {
+if (-not (Write-TunaGuiDataPathDiagnosticSummary -Path $primaryPath -PrimarySummary $primary -Diagnostics $unresolved)) {
     throw 'Companion summary write failed'
 }
 $summary = Get-Content -LiteralPath $primaryPath -Raw | ConvertFrom-Json
 if ($summary.nonAuthorityDataPathDiagnostics.candidateCount -ne 1) { throw 'Companion dropped by projection' }
+if ($summary.nonAuthorityDataPathDiagnostics.records[0].explanation -cne $unresolved.records[0].explanation) {
+    throw 'Explanation dropped by additive persistence'
+}
 $summary.PSObject.Properties.Remove('nonAuthorityDataPathDiagnostics')
 if (($summary | ConvertTo-Json -Compress) -cne $before -or ($primary | ConvertTo-Json -Compress) -cne $before) {
     throw 'Primary fields changed during additive serialization'

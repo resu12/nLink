@@ -752,31 +752,32 @@ public sealed partial class SessionFileTransferV4SenderTests
     }
 
     private static (FileTransferFrontierRequestFrameV6 Frame, FileTransferFallbackV6ProofBootstrapEvaluation Evaluation)
-        CreateInitialPeerFirstBootstrapTrigger(object context, InitialBootstrapRecordingDataSession dataSession)
+        CreateInitialPeerFirstBootstrapTrigger(object context, InitialBootstrapRecordingDataSession dataSession, long fallbackEpoch = 1)
     {
         var state = CreateCoordinatorStateForTest(context);
+        var transportEpoch = state.CurrentLeg!.TransportEpochId + 1;
         var frame = new FileTransferFrontierRequestFrameV6
         {
             SessionId = dataSession.SessionId,
             TransferId = dataSession.TransferId,
-            TransportEpoch = 1,
-            RequestCorrelationId = FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(1),
+            TransportEpoch = transportEpoch,
+            RequestCorrelationId = FileTransferProtocol.CreateFallbackV6ProofBootstrapCorrelationId(fallbackEpoch),
             MissingRanges = [],
             Priority = FileTransferProtocol.FallbackV6ProofBootstrapPriority,
             RecoveryMode = FileTransferProtocol.FallbackV6ProofBootstrapRecoveryMode,
         };
         return (frame, new FileTransferFallbackV6ProofBootstrapEvaluation(
             dataSession.SessionId, FileTransferDirection.Inbound,
-            ObservationGeneration: 11, FallbackEpoch: 1,
+            ObservationGeneration: 10 + fallbackEpoch, FallbackEpoch: fallbackEpoch,
             Source: "unit_test_initial_peer_first_bootstrap",
             ProofKind: "file_transfer_v6_frontier_request_frame_received",
             ObservedUtcMilliseconds: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             TriggerTransferId: dataSession.TransferId,
-            TriggerTransportEpoch: 1,
+            TriggerTransportEpoch: transportEpoch,
             TriggerFrameFingerprint: PostTunaFallbackPeerProofFrameIdentity.Create(frame).Sha256,
             TriggerDataSession: dataSession, TriggerDataSessionGeneration: dataSession.Generation,
             TriggerSourceScope: CreateFallbackV6ProofBootstrapTriggerSourceScope(state),
-            TriggerBootstrapGeneration: 1));
+            TriggerBootstrapGeneration: fallbackEpoch));
     }
 
     private static Task ProcessInitialPeerFirstBootstrapEvaluationAsync(
@@ -807,6 +808,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         public bool IsAvailable => true;
         public IReadOnlyList<FileTransferDataFrame> SentFrames => recording.SentFrames;
         public Func<FileTransferDataFrame, CancellationToken, Task>? BeforeSendAsyncForTest { get; set; }
+        public Func<CancellationToken, ValueTask<FileTransferReceivedDataFrame>>? ReceiveWithMetadataForTest { get; init; }
         public Func<FileTransferDataFrame, CancellationToken, FileTransferPhysicalSendSubmission>? PhysicalSubmissionForTest { get; set; }
 
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged
@@ -819,7 +821,7 @@ public sealed partial class SessionFileTransferV4SenderTests
             => recording.ReceiveAsync(ct);
 
         public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
-            => recording.ReceiveWithMetadataAsync(ct);
+            => ReceiveWithMetadataForTest is { } receive ? receive(ct) : recording.ReceiveWithMetadataAsync(ct);
 
         public async Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
         {

@@ -67,6 +67,11 @@ public sealed partial class NknFileTransferTransportTests
         FakeNknClient.ResetNetwork();
         const string senderAddress = "sender.two-writer.address", receiverAddress = "receiver.two-writer.address";
         const string transferId = "transfer_two_writer_ingress";
+        var finalFallbackFixture = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_FINAL_FALLBACK_FIXTURE") == "1";
+        var serviceFixture = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE") == "1";
+        var serviceFallback = finalFallbackFixture && serviceFixture;
+        var startChunk = serviceFallback ? 100 : 12;
+        var chunkSize = serviceFallback ? 21 * 1024 : 1024;
         var tunaPayloadMode = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_TUNA_PAYLOAD_MODE") ?? "none";
         using var tunaLane = tunaPayloadMode == "none" ? null : new FakeNknAccelerationLane();
         var client = new FakeNknClient(sender ? senderAddress : receiverAddress);
@@ -107,14 +112,14 @@ public sealed partial class NknFileTransferTransportTests
         {
             await transport.SendFileTransferOfferAsync(new FileTransferOfferV2
             {
-                SessionId = sessionId, TransferId = transferId, FileName = "two-writer.bin", FileSizeBytes = 131072,
+                SessionId = sessionId, TransferId = transferId, FileName = "two-writer.bin", FileSizeBytes = serviceFallback ? 256L * chunkSize : 131072,
                 PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
             }, ct);
             await accepted.Task.WaitAsync(ct);
             await transport.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2
             {
                 SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8,
+                SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = chunkSize, InitialPipelineDepth = 8,
             }, ct);
         }
         else
@@ -127,7 +132,6 @@ public sealed partial class NknFileTransferTransportTests
             await opened.Task.WaitAsync(ct);
         }
         using var dataSession = await transport.OpenFileTransferDataSessionAsync(sessionId, transferId, ct);
-        var serviceFixture = Environment.GetEnvironmentVariable("NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE") == "1";
         if (serviceFixture && !sender)
         {
             await link.SignalAsync("regular-ready");
@@ -164,9 +168,21 @@ public sealed partial class NknFileTransferTransportTests
                         }
                         await link.SignalAsync("tuna-payload-checked");
                     }
-                    await CheckDelayedIngressAsync(transport, dataSession, publication, link, peerYieldReceived: true, receivedTunaStart);
+                    await CheckDelayedIngressAsync(transport, dataSession, publication, link, peerYieldReceived: true, receivedTunaStart,
+                        startChunk, chunkSize);
                 },
-                sendLocalYield: tunaLane is null ? null : frame => dataSession.SendAsync(frame, ct));
+                sendLocalYield: tunaLane is null && !serviceFallback ? null : frame => dataSession.SendAsync(frame, ct),
+                prepareFinalFallbackReceive: !serviceFallback ? null : async (hints, repairId) =>
+                {
+                    foreach (var hint in hints)
+                    {
+                        Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport).ObserveFileTransferRouteHint(hint);
+                    }
+                    await link.SignalAsync("final-fallback-ready", repairId ?? "");
+                    await link.WaitAsync("final-fallback-ready");
+                },
+                receiveData: !serviceFallback ? null : dataSession.ReceiveWithMetadataAsync);
+            if (serviceFallback) { await link.SignalAsync("final-fallback-delivered"); }
             await WriteProcessAsync();
             return;
         }
@@ -181,8 +197,8 @@ public sealed partial class NknFileTransferTransportTests
             link.HoldDataFrame = true;
             var frame = new FileTransferChunkBatchFrameV4
             {
-                SessionId = sessionId, TransferId = transferId, StartChunkIndex = 12, ChunkCount = 2,
-                DataSegments = [Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray()],
+                SessionId = sessionId, TransferId = transferId, StartChunkIndex = startChunk, ChunkCount = 2,
+                DataSegments = [Enumerable.Repeat((byte)17, chunkSize).ToArray(), Enumerable.Repeat((byte)34, chunkSize).ToArray()],
                 BatchProfile = "v4_default_21k",
             };
             var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
@@ -201,18 +217,22 @@ public sealed partial class NknFileTransferTransportTests
             await link.WaitAsync("fallback-ready");
             link.HoldDataFrame = false;
             await dataSession.SendAsync(history.FallbackYieldFrame!, ct);
-            if (tunaLane is not null)
+            if (tunaLane is not null || serviceFallback)
             {
                 var peerFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(await dataSession.ReceiveAsync(ct));
-                var tunaEvidence = history.ActivateFromPeerYield(peerFrame);
+                evidence = history.ActivateFromPeerYield(peerFrame);
                 var publication = history.Tokens[3];
-                PublishDataPathFixtureAuthority(transport, publication, tunaEvidence);
+                PublishDataPathFixtureAuthority(transport, publication, evidence);
+            }
+            if (tunaLane is not null)
+            {
+                var publication = history.Tokens[3];
                 transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
                 await link.WaitAsync("tuna-receiver-ready");
                 var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
                     .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
                     .Invoke(null, [publication, "two_writer_exact_tuna_payload_fixture"]));
-                FileTransferPublicationUseEvidence.CaptureSend(authority, tunaEvidence, FileTransferPublicationUseKind.V4PhysicalSubmission);
+                FileTransferPublicationUseEvidence.CaptureSend(authority, evidence, FileTransferPublicationUseKind.V4PhysicalSubmission);
                 await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession).SendAsync(new FileTransferChunkBatchFrameV4
                 {
                     SessionId = sessionId, TransferId = transferId, StartChunkIndex = tunaPayloadMode == "wrong_range" ? 13 : 12,
@@ -240,6 +260,51 @@ public sealed partial class NknFileTransferTransportTests
             await link.WaitAsync("rejection-checked");
         }
         else { await CheckDelayedIngressAsync(transport, dataSession, history.Tokens[3], link); }
+        if (finalFallbackFixture)
+        {
+            var beforeFallback = history.Tokens[3];
+            var fallbackEvidence = history.PublishFinalFallback(serviceFallback ? 1 : 2);
+            var fallback = history.Tokens[4];
+            PublishDataPathFixtureAuthority(transport, fallback, fallbackEvidence);
+            var states = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(transport, "fileTransferStates"));
+            var fallbackState = states[transferId];
+            Assert.NotNull(fallbackState);
+            // A stale publication cannot roll the adapter back to second Tuna.
+            PublishDataPathFixtureAuthority(transport, beforeFallback);
+            Assert.Equal(fallbackState, states[transferId]);
+            await link.SignalAsync("final-fallback-ready");
+            var repairId = await link.WaitAsync("final-fallback-ready");
+            if (sender)
+            {
+                link.HoldDataFrame = false;
+                var authority = Assert.IsType<FileTransferDataPathSendAuthority>(typeof(SessionFileTransferService)
+                    .GetMethod("CreateDataPathSendAuthority", BindingFlags.Static | BindingFlags.NonPublic)!
+                    .Invoke(null, [fallback, "independent_final_fallback_fixture"]));
+                await Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession).SendAsync(new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId, TransferId = transferId, TransportEpoch = serviceFallback ? 1 : 2,
+                    StartChunkIndex = startChunk, ChunkCount = 2, BatchProfile = "v4_default_21k",
+                    RepairRequestId = string.IsNullOrEmpty(repairId) ? null : repairId,
+                    DataSegments = [Enumerable.Repeat((byte)17, chunkSize).ToArray(), Enumerable.Repeat((byte)34, chunkSize).ToArray()],
+                }, authority, ct);
+                await link.WaitAsync("final-fallback-delivered");
+            }
+            else
+            {
+                var received = Assert.IsType<FileTransferChunkBatchFrameV6>(await dataSession.ReceiveAsync(ct));
+                Assert.Equal(12, received.StartChunkIndex);
+                Assert.Equal(2, received.ChunkCount);
+                Assert.Equal(2, received.TransportEpoch);
+                Assert.Equal(Enumerable.Repeat((byte)17, 1024), received.DataSegments[0]);
+                Assert.Equal(Enumerable.Repeat((byte)34, 1024), received.DataSegments[1]);
+                var receive = Assert.Single(FindOperationalLogLines(line => line.Contains("event=filetransfer_data_path_receive_result;", StringComparison.Ordinal) &&
+                    line.Contains("frame_type=filetransfer.chunk_batch.v6;", StringComparison.Ordinal)));
+                AssertDataPathPublication(receive, fallback);
+                var dispatched = Assert.Single(FindOperationalLogLines(line => line.Contains("event=filetransfer_data_frame_dispatched;", StringComparison.Ordinal)));
+                Assert.Contains("frame_type=filetransfer.chunk_batch.v6;", dispatched, StringComparison.Ordinal);
+                await link.SignalAsync("final-fallback-delivered");
+            }
+        }
         await WriteProcessAsync();
 
         async Task WriteProcessAsync()
@@ -251,7 +316,8 @@ public sealed partial class NknFileTransferTransportTests
     }
 
     private static async Task CheckDelayedIngressAsync(NknSignalingTransport transport, IFileTransferDataSession dataSession,
-        RoutePublicationToken publication, IngressPacketPipe link, bool peerYieldReceived = false, int receivedTunaStart = -1)
+        RoutePublicationToken publication, IngressPacketPipe link, bool peerYieldReceived = false, int receivedTunaStart = -1,
+        int startChunk = 12, int chunkSize = 1024)
     {
         var states = Assert.IsAssignableFrom<IDictionary>(GetPrivateField(transport, "fileTransferStates"));
         var before = states[publication.TransferId];
@@ -281,7 +347,7 @@ public sealed partial class NknFileTransferTransportTests
         {
             AssertDataPathPublication(line, publication);
             Assert.Contains("authority_effect=none;", line, StringComparison.Ordinal);
-            AssertDataPathFrame(line);
+            AssertDataPathFrame(line, startChunk, chunkSize);
         });
         Assert.Equal(before, states[publication.TransferId]);
         Assert.Equal(dispatchedBefore, FindOperationalLogLines(line => line.Contains("event=filetransfer_data_frame_dispatched;", StringComparison.Ordinal)));

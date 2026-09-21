@@ -13,11 +13,14 @@ public sealed class FileTransferRejectedIngressModuleTests : FileTransferOpsScri
         var root = FindRepoRoot();
         const string corePath = "tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1";
         const string shadowPath = "tools/FileTransferOps/GuiRejectedIngressShadow.ps1";
+        const string explanationPath = "tools/FileTransferSoak/DataPathRejectedIngressExplanation.ps1";
         Assert.Contains(corePath, ImplementationFiles);
         Assert.Contains(shadowPath, ImplementationFiles);
+        Assert.Contains(explanationPath, ImplementationFiles);
         var core = File.ReadAllText(Path.Combine(root, corePath));
         var writers = File.ReadAllText(Path.Combine(root, "tools/FileTransferSoak/ArtifactWriters.ps1"));
         var shadow = File.ReadAllText(Path.Combine(root, shadowPath));
+        var explanation = File.ReadAllText(Path.Combine(root, explanationPath));
         var names = Regex.Matches(core, @"(?m)^function ([\w-]+) \{")
             .Select(match => match.Groups[1].Value).ToArray();
         Assert.Equal(22, names.Length);
@@ -28,11 +31,14 @@ public sealed class FileTransferRejectedIngressModuleTests : FileTransferOpsScri
             Assert.DoesNotContain($"function {name} {{", shadow, StringComparison.Ordinal);
         }
         Assert.Contains("'DataPathRejectedIngressEvidence.ps1'", writers, StringComparison.Ordinal);
-        Assert.False(Regex.IsMatch(core, @"(?m)^\s*\.\s"), "Shared core must not import or reset parser dependencies.");
+        Assert.Equal(". (Join-Path $PSScriptRoot 'DataPathRejectedIngressExplanation.ps1')",
+            Assert.Single(Regex.Matches(core, @"(?m)^\s*\. [^\r\n]+").Select(match => match.Value.Trim())));
+        Assert.False(Regex.IsMatch(explanation, @"(?m)^\s*\.\s"), "Formatter must not import parser dependencies.");
         foreach (var broad in new[] { "ArtifactWriters.ps1", "AnalyzerOrchestration.ps1" })
         {
             Assert.DoesNotContain(broad, core, StringComparison.Ordinal);
             Assert.DoesNotContain(broad, shadow, StringComparison.Ordinal);
+            Assert.DoesNotContain(broad, explanation, StringComparison.Ordinal);
         }
         Assert.Contains("function Get-FileTransferFileTunaV4DataPathEventNames {", writers, StringComparison.Ordinal);
         Assert.Contains("function Get-FileTransferFileTunaV4DataPathMismatchProof {", writers, StringComparison.Ordinal);
@@ -47,10 +53,19 @@ public sealed class FileTransferRejectedIngressModuleTests : FileTransferOpsScri
             $ErrorActionPreference = 'Stop'
             Set-StrictMode -Version Latest
             $root = '{{root.Replace("'", "''", StringComparison.Ordinal)}}'
-            foreach ($path in @('{{corePath}}', '{{shadowPath}}', 'tools/FileTransferSoak/ArtifactWriters.ps1')) {
+            foreach ($path in @('{{corePath}}', '{{shadowPath}}', '{{explanationPath}}', 'tools/FileTransferSoak/ArtifactWriters.ps1')) {
                 $tokens = $null; $errors = $null
-                [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $root $path), [ref]$tokens, [ref]$errors)
+                $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root $path), [ref]$tokens, [ref]$errors)
                 if (@($errors).Count) { throw ($errors | Out-String) }
+                if ($path -ceq '{{explanationPath}}') {
+                    $body = $ast.Find({ param($node)
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst]
+                    }, $true).Body
+                    if (@($body.FindAll({ param($node)
+                        $node -is [Management.Automation.Language.CommandAst] -or
+                        $node -is [Management.Automation.Language.InvokeMemberExpressionAst]
+                    }, $true)).Count) { throw 'Formatter must not invoke I/O, evaluators or other functions.' }
+                }
             }
             . (Join-Path $root 'tools/FileTransferSoak/LogParsing.ps1')
             $marker = [pscustomobject]@{ Marker='existing-index' }

@@ -1,9 +1,9 @@
 param([string]$RepoRoot,[string]$Directory,[string]$RunId,[string]$ScenarioId,[switch]$TwoWriterFixture,[switch]$ServiceIngressFixture,
-    [string]$TunaPayloadMode='none')
+    [string]$TunaPayloadMode='none',[switch]$LiveScaleFixture,[switch]$LaterFallbackFixture)
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 $null=& (Join-Path $PSScriptRoot 'PublicationPositiveIntegrationGenerated.ps1') -RepoRoot $RepoRoot -Directory $Directory `
     -RunId $RunId -ScenarioId $ScenarioId -PersistenceMode write -ObservePrimary -ReceiveFixture -TwoWriterFixture:$TwoWriterFixture `
-    -LiveScaleFixture:($TunaPayloadMode -cne 'none')
+    -LiveScaleFixture:($TunaPayloadMode -cne 'none' -or $LiveScaleFixture)
 $output=Join-Path $Directory ('whole-wrapper-'+$PSVersionTable.PSVersion.Major+'-write')
 $facts=[IO.File]::ReadAllText((Join-Path $output 'live-primary-observation.json')) | ConvertFrom-Json
 if($facts.Evaluations -ne 3 -or ($facts.EvaluationCallers -join '|') -cne '<ScriptBlock>|<ScriptBlock>|Get-FileTransferRecoveryFailureClassification' -or
@@ -20,6 +20,12 @@ $expectedVariant=if($expectedEdge -ceq 'missing_tuna_resend') {
 } elseif($expectedEdge -ceq 'missing_exact_tuna_receive') {
     'second_tuna_rejected_regular_ingress_exact_tuna_receive_missing'
 } else { '(none)' }
+$expectedExplanation=$null
+if($expectedEdge -in @('missing_tuna_resend','missing_exact_tuna_receive')) {
+    $kind=if($expectedEdge -ceq 'missing_tuna_resend') {'send'} else {'receive'}
+    $expectedExplanation="The rejection chain matched, but the required pre-rejection exact Tuna $kind was not found. Later fallback delivery, if present, is a separate outcome and does not satisfy this recovery contract. Stale safety and durable delivery are not established by this diagnostic."
+}
+if($facts.SelectedRejectionExplanation -cne $expectedExplanation) { throw 'Original selected diagnostic explanation changed' }
 $compactSummary=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-retained-compact-summary.json')) | ConvertFrom-Json
 if($compactSummary.failure_variant -cne $expectedVariant -or
     $compactSummary.first_proof_chain_failure_class -cne 'file_tuna_data_path_mismatch') {
@@ -91,14 +97,15 @@ if($TwoWriterFixture) {
     }
     if($ServiceIngressFixture) {
         $transitions=@($lines | Where-Object { $_.Contains('event=filetransfer_route_transitioned;') })
-        if($transitions.Count -ne 3 -or (Field $transitions[-1] 'previous_route') -cne 'post_tuna_fallback_v6') {
-            throw 'Service did not emit its three actual committed transitions'
+        if($transitions.Count -ne $(if($LaterFallbackFixture) {4} else {3}) -or
+            (Field $transitions[2] 'previous_route') -cne 'post_tuna_fallback_v6') {
+            throw 'Service did not emit its expected committed transitions'
         }
         foreach($name in @('log_writer_id','session_id','transfer_id','route','protocol_version','live_route_epoch',
             'runtime_generation','terminal_generation','leg_generation','route_publication_generation','route_commit_generation')) {
-            if((Field $transitions[-1] $name) -cne (Field $receive $name)) { throw "Service transition/receive scope changed: $name" }
+            if((Field $transitions[2] $name) -cne (Field $receive $name)) { throw "Service transition/receive scope changed: $name" }
         }
-        if([long](Field $transitions[-1] 'log_writer_sequence') -ge [long](Field $receive 'log_writer_sequence')) {
+        if([long](Field $transitions[2] 'log_writer_sequence') -ge [long](Field $receive 'log_writer_sequence')) {
             throw 'Service transition did not precede the original delayed receive'
         }
         $yieldSends=@($lines | Where-Object { $_.Contains('event=filetransfer_data_path_send_result;') -and
@@ -113,7 +120,7 @@ if($TwoWriterFixture) {
             'security_establishment_fingerprint','data_path_session_id','data_path_transfer_id')) {
             if((Field $yieldSends[0] $name) -cne (Field $yieldReceives[0] $name)) { throw "Original peer yield provenance changed: $name" }
         }
-        if([long](Field $yieldReceives[0] 'log_writer_sequence') -ge [long](Field $transitions[-1] 'log_writer_sequence')) {
+        if([long](Field $yieldReceives[0] 'log_writer_sequence') -ge [long](Field $transitions[2] 'log_writer_sequence')) {
             throw 'Peer yield arrived after the service transition'
         }
     }

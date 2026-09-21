@@ -3,6 +3,39 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')
 
+$explanationTemplate = 'The rejection chain matched, but the required pre-rejection exact Tuna {0} was not found. Later fallback delivery, if present, is a separate outcome and does not satisfy this recovery contract. Stale safety and durable delivery are not established by this diagnostic.'
+$explanations = @{
+    missing_tuna_resend = $explanationTemplate -f 'send'
+    missing_exact_tuna_receive = $explanationTemplate -f 'receive'
+}
+foreach ($kind in @('send','receive')) {
+    $reason = if ($kind -ceq 'send') { 'missing_tuna_resend' } else { 'missing_exact_tuna_receive' }
+    $variantKind = if ($kind -ceq 'send') { 'resend' } else { 'receive' }
+    $arguments = @{Recovered=$false; RejectionChainMatched=$true; ReceiveDisposition='rejected_before_dispatch';
+        Reason=$reason; Variant="second_tuna_rejected_regular_ingress_exact_tuna_${variantKind}_missing"}
+    $explanation = Get-FileTransferRejectedIngressExplanation @arguments
+    if ($explanation -cne $explanations[$reason] -or $explanation.Length -gt 768) { throw 'Explanation text/bound changed' }
+    foreach ($field in @('Recovered','RejectionChainMatched','ReceiveDisposition','Reason','Variant')) {
+        foreach ($mode in @('missing','null','wrong','array')) {
+            $invalid = $arguments.Clone()
+            switch ($mode) {
+                'missing' { $invalid.Remove($field) }
+                'null' { $invalid[$field] = $null }
+                'wrong' { $invalid[$field] = if ($field -ceq 'Recovered') { $true } elseif ($field -ceq 'RejectionChainMatched') { $false } else { 'unknown' } }
+                'array' { $invalid[$field] = @($arguments[$field],$arguments[$field]) }
+            }
+            if ($null -ne (Get-FileTransferRejectedIngressExplanation @invalid)) { throw "Explanation accepted $field/$mode" }
+        }
+    }
+    foreach ($field in @('Recovered','RejectionChainMatched')) {
+        $invalid = $arguments.Clone(); $invalid[$field] = [string]$arguments[$field]
+        if ($null -ne (Get-FileTransferRejectedIngressExplanation @invalid)) { throw 'Explanation coerced a string boolean' }
+    }
+    $invalid = $arguments.Clone()
+    $invalid.Reason = if ($kind -ceq 'send') { 'missing_exact_tuna_receive' } else { 'missing_tuna_resend' }
+    if ($null -ne (Get-FileTransferRejectedIngressExplanation @invalid)) { throw 'Explanation accepted contradictory reason/variant' }
+}
+
 function Get-SecondTunaProofProjection {
     param($Proof, [switch]$ExcludeRawLine)
     $records = @(foreach ($kind in @('CandidateRecords', 'EffectiveCandidateRecords')) {
@@ -145,6 +178,8 @@ $cases = @(
     @{ Name='wrong_transition_publication'; Reason='missing_receiver_route_transition' },
     @{ Name='ambiguous_transition'; Reason='ambiguous_receiver_route_transition' },
     @{ Name='missing_resend'; Reason='missing_tuna_resend'; Variant='second_tuna_rejected_regular_ingress_exact_tuna_resend_missing' },
+    @{ Name='later_fallback_only'; Reason='missing_tuna_resend'; Variant='second_tuna_rejected_regular_ingress_exact_tuna_resend_missing' },
+    @{ Name='later_fallback_after_tuna_send'; Reason='missing_exact_tuna_receive'; Variant=$variant },
     @{ Name='wrong_resend_bytes'; Reason='missing_tuna_resend'; Variant='second_tuna_rejected_regular_ingress_exact_tuna_resend_missing' },
     @{ Name='borrowed_receive_session'; Reason='missing_exact_tuna_receive'; Variant=$variant },
     @{ Name='borrowed_receive_transfer'; Reason='missing_exact_tuna_receive'; Variant=$variant },
@@ -164,7 +199,7 @@ foreach ($case in $cases) {
             ($case.Name -ceq 'missing_mismatch' -and $line -ceq $mismatch) -or
             ($case.Name -ceq 'missing_source' -and $line -ceq $source) -or
             ($case.Name -ceq 'missing_transition' -and $line -ceq $transition) -or
-            ($case.Name -ceq 'missing_resend' -and $line -ceq $resend)) { continue }
+            ($case.Name -in @('missing_resend','later_fallback_only') -and $line -ceq $resend)) { continue }
         if ($case.Name -ceq 'first_cycle') { $line = $line.Replace('previous_route=post_tuna_fallback_v6', 'previous_route=regular_nkn_v4_fast') }
         if ($line -ceq $ignore) {
             switch ($case.Name) {
@@ -202,6 +237,21 @@ foreach ($case in $cases) {
             $lines.Add($ignore.Replace('log_writer_sequence=21', 'log_writer_sequence=32'))
         }
     }
+    if ($case.Name -in @('later_fallback_only','later_fallback_after_tuna_send')) {
+        # Explicit synthetic matcher controls, not generated transport receipts:
+        # even exact range/bytes delivered under the fifth fallback publication
+        # after rejection cannot discharge the second-Tuna pre-rejection proof.
+        foreach ($template in @($resend, $tunaReceive)) {
+            $later = $template.Replace('file_tuna_v4', 'post_tuna_fallback_v6').Replace('protocol_version=4', 'protocol_version=6')
+            $later = $later.Replace('actual_transport=tuna', 'actual_transport=regular_nkn').Replace('delivery_transport=tuna', 'delivery_transport=regular_nkn')
+            $later = $later.Replace('target_transport=tuna', 'target_transport=regular_nkn')
+            $later = $later.Replace('filetransfer.chunk_batch.v4', 'filetransfer.chunk_batch.v6')
+            $later = $later -replace 'live_route_epoch=\d+', 'live_route_epoch=4' -replace 'runtime_generation=\d+', 'runtime_generation=5'
+            $later = $later -replace 'leg_generation=\d+', 'leg_generation=5' -replace 'route_commit_generation=\d+', 'route_commit_generation=0'
+            $later = $later -replace 'route_publication_generation=\d+', 'route_publication_generation=5' -replace 'log_writer_sequence=\d+', 'log_writer_sequence=40'
+            $lines.Add($later)
+        }
+    }
     $events = @(for ($index=0; $index -lt $lines.Count; $index++) {
         $parsed = ConvertFrom-FileTransferLogLine -Line $lines[$index] -FilePath 'second-tuna-memory.log' -LineNumber ($index+1) -Sequence ($index+1)
         if ($null -ne $parsed) { $parsed }
@@ -223,6 +273,22 @@ foreach ($case in $cases) {
     $candidates = if ($case.ContainsKey('Candidates')) { $case.Candidates } else { 1 }
     $recoveredCount = if ($case.ContainsKey('RecoveredCount')) { $case.RecoveredCount } elseif ($recovered) { 1 } else { 0 }
     $effectiveCount = if ($case.ContainsKey('EffectiveCount')) { $case.EffectiveCount } elseif ($recovered) { 0 } else { 2 }
+    $explanationProperty = $diagnostic.PSObject.Properties['Explanation']
+    if ($explanations.ContainsKey($case.Reason)) {
+        if ($null -eq $explanationProperty -or $explanationProperty.Value -cne $explanations[$case.Reason]) {
+            throw "$($case.Name): missing or incorrect explanation"
+        }
+    }
+    elseif ($null -ne $explanationProperty) { throw "$($case.Name): unexpected explanation" }
+    $withoutExplanation = $diagnostic | Select-Object * -ExcludeProperty Explanation
+    $expectedLegacy = [pscustomobject][ordered]@{
+        Recovered=[bool]$recovered; RejectionChainMatched=[bool]$chainMatched
+        ReceiveDisposition=$(if ($chainMatched) { 'rejected_before_dispatch' } else { '(unproven)' })
+        Reason=$case.Reason; Variant=$expectedVariant
+    }
+    if (($withoutExplanation | ConvertTo-Json -Compress) -cne ($expectedLegacy | ConvertTo-Json -Compress)) {
+        throw "$($case.Name): removing explanation did not preserve the legacy result"
+    }
     if ($diagnostic.Recovered -ne $recovered -or $legacy -ne $recovered -or
         $diagnostic.RejectionChainMatched -ne $chainMatched -or $diagnostic.Reason -cne $case.Reason -or
         [string]$diagnostic.Variant -cne $expectedVariant -or

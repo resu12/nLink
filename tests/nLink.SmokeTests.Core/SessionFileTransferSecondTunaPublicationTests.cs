@@ -21,13 +21,23 @@ public sealed partial class SessionFileTransferV4SenderTests
         string? sessionId = null, string? suppliedTransferId = null,
         Func<IReadOnlyList<FileTransferRouteHintNotification>, Task<FileTransferFallbackTailYieldFrameV6>>? receivePeerYield = null,
         Func<RoutePublicationToken, IReadOnlyList<FileTransferRouteHintNotification>, Task>? afterSecondTuna = null,
-        Func<FileTransferFallbackTailYieldFrameV6, Task>? sendLocalYield = null)
+        Func<FileTransferFallbackTailYieldFrameV6, Task>? sendLocalYield = null,
+        Func<IReadOnlyList<FileTransferRouteHintNotification>, string?, Task>? prepareFinalFallbackReceive = null,
+        Func<CancellationToken, ValueTask<FileTransferReceivedDataFrame>>? receiveData = null)
     {
         var transferId = suppliedTransferId ?? "second_tuna_service_publication_" + control;
         const string reason = "second_tuna_service_fixture";
         using var receiver = new SessionFileTransferService();
-        using var receiverData = new InitialBootstrapRecordingDataSession(sessionId ?? "session_" + transferId, transferId);
+        using var receiverData = new InitialBootstrapRecordingDataSession(sessionId ?? "session_" + transferId, transferId)
+        {
+            ReceiveWithMetadataForTest = receiveData,
+        };
         using var receiverBridge = new InitialBootstrapCheckpointTransport(receiverData);
+        var destinationPath = prepareFinalFallbackReceive is null ? null : Path.Combine(
+            Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR")!, "durable-receiver.bin");
+        using var destination = destinationPath is null ? null : new FileStream(destinationPath,
+            FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        destination?.SetLength(256L * 21 * 1024);
         var logStart = GetOperationalLogLength();
         var inbound = await CreateCommittedInitialInboundTunaForBootstrapTestAsync(
             receiver, receiverBridge, receiverData, receiverBarrier: true,
@@ -40,6 +50,14 @@ public sealed partial class SessionFileTransferV4SenderTests
                         method.GetParameters()[0].ParameterType.Name == "InboundTransferContext");
                 SetPrivateProperty(context, "RoutePublicationAuthorityForwarder",
                     new Action<RoutePublicationToken, string>((token, source) => forward.Invoke(receiver, [context, token, source])));
+                if (destination is not null)
+                {
+                    SetPrivateProperty(context, "WriteStream", destination);
+                    SetPrivateProperty(context, "BytesTransferred", 100L * 21 * 1024);
+                    SetPrivateProperty(context, "ReceiverSparseBytesWritten", 100L * 21 * 1024);
+                    SetPrivateProperty(context, "V6DestinationMode", Enum.Parse(
+                        GetPrivatePropertyValue(context, "V6DestinationMode")!.GetType(), "SparseSeekable"));
+                }
             });
         var (frame, evaluation) = CreateInitialPeerFirstBootstrapTrigger(inbound, receiverData);
         AssertInitialPeerFirstBootstrapFrameReceived(receiver, inbound, frame);
@@ -143,12 +161,18 @@ public sealed partial class SessionFileTransferV4SenderTests
                 var beforeIngress = SecondTunaStateFingerprint(inbound);
                 var beforeFrames = receiverData.SentFrames.Count;
                 var beforeHints = receiverBridge.ObservedRouteHints.Count;
+                var beforeBytes = GetPrivateProperty<long>(inbound, "BytesTransferred");
+                var beforeFrontier = GetPrivateProperty<int>(inbound, "NextChunkIndex");
+                var beforeFile = destinationPath is null ? null : HashDurableFixtureFile(destinationPath);
                 await afterSecondTuna(GetPrivateProperty<RoutePublicationToken>(inbound, "CurrentRoutePublicationToken"),
                     receiverBridge.ObservedRouteHints.ToArray());
                 Assert.Equal(beforeIngress, SecondTunaStateFingerprint(inbound));
                 Assert.Equal(beforeFrames, receiverData.SentFrames.Count);
                 Assert.Equal(beforeHints, receiverBridge.ObservedRouteHints.Count);
                 Assert.Equal(transitions, TransitionRows());
+                Assert.Equal(beforeBytes, GetPrivateProperty<long>(inbound, "BytesTransferred"));
+                Assert.Equal(beforeFrontier, GetPrivateProperty<int>(inbound, "NextChunkIndex"));
+                if (beforeFile is not null) { Assert.Equal(beforeFile, HashDurableFixtureFile(destinationPath!)); }
             }
             if (replayPostCommitCallbacks)
             {
@@ -173,6 +197,12 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.Equal(beforeLateDrain, SecondTunaStateFingerprint(inbound));
                 Assert.Equal(transitions, TransitionRows());
                 Assert.DoesNotContain("effect_kind=", ReadOperationalLogTail(lateStart), StringComparison.Ordinal);
+            }
+
+            if (prepareFinalFallbackReceive is not null)
+            {
+                await ContinueSecondTunaToDurableFallbackAsync(receiver, inbound, receiverBridge, receiverData,
+                    destination!, destinationPath!, prepareFinalFallbackReceive, execution);
             }
 
             [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

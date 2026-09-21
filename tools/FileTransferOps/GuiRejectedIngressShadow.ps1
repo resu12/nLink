@@ -77,7 +77,7 @@ function Get-TunaGuiRejectedIngressShadowDiagnostics {
         if (-not $seenReceives.Add($record)) { continue }
         $shared = Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult `
             -Mismatch $event -Events $index.OrderedEvents -DataPathIndex $index
-        $diagnostics.Add([pscustomobject][ordered]@{
+        $diagnostic = [pscustomobject][ordered]@{
             LineNumber = [long]$event.LineNumber
             SourcePath = [string]$event.FilePath
             SourceLineNumber = [long]$event.InputLineNumber
@@ -91,7 +91,11 @@ function Get-TunaGuiRejectedIngressShadowDiagnostics {
             ReceiveDisposition = [string]$shared.ReceiveDisposition
             Reason = [string]$shared.Reason
             Variant = [string]$shared.Variant
-        }) | Out-Null
+        }
+        if ($null -ne $shared.PSObject.Properties['Explanation']) {
+            $diagnostic | Add-Member -NotePropertyName Explanation -NotePropertyValue $shared.Explanation
+        }
+        $diagnostics.Add($diagnostic) | Out-Null
     }
 
     # No arbitration or GUI authority is granted by this diagnostic result.

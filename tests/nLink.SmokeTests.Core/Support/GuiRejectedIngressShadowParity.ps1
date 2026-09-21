@@ -39,7 +39,7 @@ function Get-ShadowFixtureDiagnostics {
              (Get-FileTransferEventField $event 'delivery_transport') -cne 'regular_nkn')) { continue }
         if (-not $seen.Add(($event.RawLine -replace '; gui_evidence_sequence=\d+$', ''))) { continue }
         $diagnostic = Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult -Mismatch $event -Events $Events -DataPathIndex $Index
-        [pscustomobject][ordered]@{
+        $record = [pscustomobject][ordered]@{
             LineNumber=[int]$event.LineNumber
             WriterId=Get-FileTransferEventField $event 'log_writer_id'
             WriterSequence=Get-FileTransferEventInt64Field $event 'log_writer_sequence'
@@ -49,12 +49,16 @@ function Get-ShadowFixtureDiagnostics {
             Reason=[string]$diagnostic.Reason
             Variant=[string]$diagnostic.Variant
         }
+        if ($null -ne $diagnostic.PSObject.Properties['Explanation']) {
+            $record | Add-Member -NotePropertyName Explanation -NotePropertyValue $diagnostic.Explanation
+        }
+        $record
     }
 }
 function Convert-ShadowDiagnosticJson {
     param([object[]]$Records)
     return (ConvertTo-Json -InputObject @($Records | Select-Object LineNumber, WriterId, WriterSequence,
-        Recovered, RejectionChainMatched, ReceiveDisposition, Reason, Variant) -Depth 5 -Compress)
+        Recovered, RejectionChainMatched, ReceiveDisposition, Reason, Variant, Explanation) -Depth 5 -Compress)
 }
 
 # Reuse the existing retained initial-activation fixture, not a historical live log.
@@ -83,6 +87,7 @@ $caseNames = @('initial', 'multiple_sources', 'source_after_transition', 'route_
     'missing_mismatch', 'missing_ignore', 'conflicting_receive', 'exact_duplicate_receive',
     'unrelated_telemetry', 'empty', 'singleton')
 $observations = [Collections.Generic.List[object]]::new()
+if (-not $CharacterizationOnly) { $caseNames += 'second_missing_send' }
 foreach ($case in $caseNames) {
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($original in $base) {
@@ -93,7 +98,7 @@ foreach ($case in $caseNames) {
         $line = $original
         if ($original -ceq $transition) {
             if ($case -ceq 'tuna_before_transition') { $lines.Add($tunaSend); $lines.Add($tunaReceive) }
-            if ($case -in @('second_complete', 'second_missing_receive', 'tuna_before_transition', 'tuna_other_publication')) {
+            if ($case -in @('second_complete', 'second_missing_receive', 'second_missing_send', 'tuna_before_transition', 'tuna_other_publication')) {
                 $line = $line.Replace('previous_route=regular_nkn_v4_fast', 'previous_route=post_tuna_fallback_v6')
             }
         }
@@ -135,9 +140,10 @@ foreach ($case in $caseNames) {
     $observation = [pscustomobject][ordered]@{
         Case=$case; PrimaryQuartet=@($primary.RawCount, $primary.DistinctCount, $primary.RecoveredCount, $primary.UnresolvedCount)
         RetainedQuartet=@($fullProof.RawCandidateCount, $fullProof.DistinctCount, $fullProof.RecoveredCount, $fullProof.UnresolvedCount)
-        Scalar=$fullProof.EffectiveCount; Diagnostics=$fullDiagnostics
+        Scalar=$fullProof.EffectiveCount; Diagnostics=@($fullDiagnostics | Select-Object * -ExcludeProperty Explanation)
     }
-    $observations.Add($observation)
+    # The added reporting case is not part of the immutable pre-extraction baseline.
+    if ($case -cne 'second_missing_send') { $observations.Add($observation) }
     if ($CharacterizationOnly) { continue }
 
     # Regenerate compact input from its production catalog, retaining original locations.
@@ -157,6 +163,13 @@ foreach ($case in $caseNames) {
     $compactProof = Get-FileTransferFileTunaV4DataPathMismatchProof -Events $compactEvents -DataPathIndex $compactIndex
     $primaryBefore = $primary | ConvertTo-Json -Depth 6 -Compress
     $shadow = Get-TunaGuiRejectedIngressShadowDiagnostics -Lines $guiLines -PrimaryGuiDecision $primary
+    if ($case -in @('second_missing_receive','second_missing_send')) {
+        $kind = if ($case -ceq 'second_missing_send') { 'send' } else { 'receive' }
+        if ($fullDiagnostics.Count -ne 1 -or
+            $fullDiagnostics[0].Explanation -cnotlike "The rejection chain matched, but the required pre-rejection exact Tuna $kind was not found.*") {
+            throw "${case}: missing reporting explanation"
+        }
+    }
     if (-not [object]::ReferenceEquals($primary, $shadow.PrimaryGuiDecision) -or
         ($primary | ConvertTo-Json -Depth 6 -Compress) -cne $primaryBefore) { throw "${case}: primary GUI decision changed" }
     $fullJson = Convert-ShadowDiagnosticJson $fullDiagnostics

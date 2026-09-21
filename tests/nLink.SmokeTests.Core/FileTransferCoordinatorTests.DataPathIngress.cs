@@ -13,7 +13,8 @@ public sealed partial class FileTransferCoordinatorTests
         Action<FileTransferCoordinatorTransitionEnvelope>? capture = null,
         bool initializeDataSession = false,
         Action<FileTransferFallbackTailYieldFrameV6>? captureFallbackYield = null,
-        Action<FileTransferCoordinatorState>? captureFallbackState = null)
+        Action<FileTransferCoordinatorState>? captureFallbackState = null,
+        Action<FileTransferCoordinatorState>? captureSecondTunaState = null)
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var initialState = EmptyState(regular, direction) with { SessionId = sessionId, TransferId = transferId };
@@ -109,12 +110,29 @@ public sealed partial class FileTransferCoordinatorTests
             Assert.Equal(transferId, publication.TransferId);
             Assert.Equal(direction, publication.Direction);
         });
+        captureSecondTunaState?.Invoke(state);
         return publications;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static FileTransferCoordinatorState EnterIngressFinalFallback(FileTransferCoordinatorState state,
+        Action<FileTransferCoordinatorTransitionEnvelope> capture, long transportEpoch = 2)
+    {
+        Assert.Equal("file_tuna_v4", state.CurrentRoutePublicationToken!.Value.RouteToken);
+        Assert.Equal(3, state.CurrentRoutePublicationToken.Value.LiveRouteEpoch);
+        var fallback = EnterCheckpointResponderFallback(state, transportEpoch, capture);
+        var publication = fallback.CurrentRoutePublicationToken!.Value;
+        Assert.Equal("post_tuna_fallback_v6", publication.RouteToken);
+        Assert.Equal(6, publication.ProtocolVersion);
+        Assert.Equal(4, publication.LiveRouteEpoch);
+        Assert.Equal(5, publication.PublicationGeneration);
+        return fallback;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
     internal static RoutePublicationToken CompleteIngressSecondTunaFromPeerYield(FileTransferCoordinatorState state,
-        FileTransferFallbackTailYieldFrameV6 peerFrame, Action<FileTransferCoordinatorTransitionEnvelope> capture)
+        FileTransferFallbackTailYieldFrameV6 peerFrame, Action<FileTransferCoordinatorTransitionEnvelope> capture,
+        Action<FileTransferCoordinatorState>? captureCommitted = null)
     {
         var paired = ApplyPairedProofFrame(state, peerFrame);
         capture(paired.SnapshotEnvelope!);
@@ -138,6 +156,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(FileTransferRoute.FileTunaV4, publication.Route);
         Assert.Equal(3, publication.LiveRouteEpoch);
         Assert.Equal(4, publication.ProtocolVersion);
+        captureCommitted?.Invoke(committed.State);
         return publication;
     }
 }

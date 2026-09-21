@@ -231,11 +231,11 @@ public sealed partial class NknFileTransferTransportTests
         }
     }
 
-    private static void AssertDataPathFrame(string line)
+    private static void AssertDataPathFrame(string line, int startChunk = 12, int chunkSize = 1024)
     {
         foreach (var expected in new[]
         {
-            "actual_transport=regular_nkn", "frame_type=filetransfer.chunk_batch.v4", "chunk_index=12-13",
+            "actual_transport=regular_nkn", "frame_type=filetransfer.chunk_batch.v4", $"chunk_index={startChunk}-{startChunk + 1}",
         })
         {
             Assert.Contains("; " + expected + ";", line, StringComparison.Ordinal);
@@ -244,10 +244,10 @@ public sealed partial class NknFileTransferTransportTests
         // the expanded batch fields carried by send/receive/mismatch records.
         if (!line.Contains("event=filetransfer_data_frame_ignored;", StringComparison.Ordinal))
         {
-            Assert.Contains("; start_chunk_index=12;", line, StringComparison.Ordinal);
-            Assert.Contains("; last_end_chunk_exclusive=14;", line, StringComparison.Ordinal);
+            Assert.Contains($"; start_chunk_index={startChunk};", line, StringComparison.Ordinal);
+            Assert.Contains($"; last_end_chunk_exclusive={startChunk + 2};", line, StringComparison.Ordinal);
             Assert.Contains("; frame_chunk_count=2;", line, StringComparison.Ordinal);
-            Assert.Contains("; raw_payload_bytes=2048;", line, StringComparison.Ordinal);
+            Assert.Contains($"; raw_payload_bytes={2 * chunkSize};", line, StringComparison.Ordinal);
             Assert.Contains("; batch_chunk_count=2;", line, StringComparison.Ordinal);
         }
     }

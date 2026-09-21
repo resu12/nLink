@@ -2,6 +2,7 @@ param([string]$RequestPath = '')
 
 Set-StrictMode -Version Latest
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'GuiSmokeContentHash.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferSoak\DataPathRejectedIngressExplanation.ps1')
 
 # Safe to load in the GUI parent: parser/shadow initialization occurs only in
 # the separate request process, never in an active retained analyzer.
@@ -59,12 +60,16 @@ function Invoke-TunaGuiDataPathDiagnosticRequest {
     $receipt = New-TunaGuiDataPathDiagnosticReceipt -Status 'completed' -Reason '(none)'
     $receipt.evidenceInputs = @($Request.evidenceInputs)
     $receipt.records = @($shadow.SharedDiagnostics | ForEach-Object {
-        [pscustomobject][ordered]@{
+        $record = [pscustomobject][ordered]@{
             sourcePath=$_.SourcePath; sourceLineNumber=$_.SourceLineNumber; evidenceSequence=$_.OriginalEvidenceSequence
             sessionId=$_.SessionId; transferId=$_.TransferId; writerId=$_.WriterId; writerSequence=$_.WriterSequence
             sharedMatcherRecovered=$_.Recovered; rejectionChainMatched=$_.RejectionChainMatched
             receiveDisposition=$_.ReceiveDisposition; reason=$_.Reason; variant=$_.Variant
         }
+        if ($null -ne $_.PSObject.Properties['Explanation']) {
+            $record | Add-Member -NotePropertyName explanation -NotePropertyValue $_.Explanation
+        }
+        $record
     })
     $receipt.candidateCount = $receipt.records.Count
     $receipt.sharedMatcherRecoveredCount = @($receipt.records | Where-Object { $_.sharedMatcherRecovered }).Count
@@ -159,6 +164,14 @@ function Invoke-TunaGuiDataPathDiagnosticCompanion {
                 -not $sourceMatched -or $record.sourceLineNumber -le 0 -or
                 $record.sourceLineNumber -gt $source.lineCount -or
                 ($null -ne $record.evidenceSequence -and $record.evidenceSequence -le 0)) { throw 'diagnostic_response_invalid' }
+            $explanation = $record.PSObject.Properties['explanation']
+            if ($null -ne $explanation) {
+                $expected = Get-FileTransferRejectedIngressExplanation -Recovered $record.sharedMatcherRecovered `
+                    -RejectionChainMatched $record.rejectionChainMatched -ReceiveDisposition $record.receiveDisposition `
+                    -Reason $record.reason -Variant $record.variant
+                if ($explanation.Value -isnot [string] -or $null -eq $expected -or
+                    $explanation.Value -cne $expected) { throw 'diagnostic_response_invalid' }
+            }
             if ($record.sharedMatcherRecovered) { $recovered++ }
         }
         foreach ($name in @('candidateCount','sharedMatcherRecoveredCount','unresolvedCandidateCount')) {

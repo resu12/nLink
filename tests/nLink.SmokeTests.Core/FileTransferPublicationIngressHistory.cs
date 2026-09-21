@@ -18,6 +18,7 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
     private int next;
     private bool completed;
     private FileTransferCoordinatorState? fallbackState;
+    private FileTransferCoordinatorState? secondTunaState;
 
     internal IReadOnlyList<RoutePublicationToken> Tokens { get; private set; }
     internal FileTransferFallbackTailYieldFrameV6? FallbackYieldFrame { get; private set; }
@@ -28,7 +29,8 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
         this.direction = direction;
         Tokens = FileTransferCoordinatorTests.CreateDataPathIngressRouteCycle(sessionId, transferId, direction, history.Add,
             initializeDataSession: true, captureFallbackYield: stopAtFallbackYield ? frame => FallbackYieldFrame = frame : null,
-            captureFallbackState: stopAtFallbackYield ? state => fallbackState = state : null);
+            captureFallbackState: stopAtFallbackYield ? state => fallbackState = state : null,
+            captureSecondTunaState: state => secondTunaState = state);
         emitter = Activator.CreateInstance(type, nonPublic: true)!;
         type.GetField("drainScheduled", Flags)!.SetValue(emitter, 1);
         pending = (ConcurrentQueue<string>)type.GetField("pending", Flags)!.GetValue(emitter)!;
@@ -60,6 +62,17 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
         throw new InvalidOperationException($"Missing emitted publication for epoch {token.LiveRouteEpoch}");
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    internal FileTransferRoutePublicationEvidence PublishFinalFallback(long transportEpoch = 2)
+    {
+        Assert.NotNull(secondTunaState);
+        Assert.Equal(4, Tokens.Count);
+        var state = FileTransferCoordinatorTests.EnterIngressFinalFallback(secondTunaState!, history.Add, transportEpoch);
+        Tokens = Tokens.Append(state.CurrentRoutePublicationToken!.Value).ToArray();
+        secondTunaState = null;
+        return Publish(4);
+    }
+
     public void Dispose()
     {
         if (completed) { return; }
@@ -82,7 +95,8 @@ internal sealed class FileTransferPublicationIngressHistory : IDisposable
     {
         Assert.NotNull(fallbackState);
         Assert.Equal(3, Tokens.Count);
-        var publication = FileTransferCoordinatorTests.CompleteIngressSecondTunaFromPeerYield(fallbackState!, peerFrame, history.Add);
+        var publication = FileTransferCoordinatorTests.CompleteIngressSecondTunaFromPeerYield(fallbackState!, peerFrame, history.Add,
+            state => secondTunaState = state);
         fallbackState = null;
         Tokens = [.. Tokens, publication];
         return Publish(3);

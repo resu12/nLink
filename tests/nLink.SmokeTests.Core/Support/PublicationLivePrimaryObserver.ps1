@@ -35,6 +35,8 @@ if($null -ne $firstCompactProofChainFailure -and $firstCompactProofChainFailure.
         $facts.SelectedRejectionReason=[string]$diagnostic.Reason
         $facts.SelectedRejectionChainMatched=[bool]$diagnostic.RejectionChainMatched
         $facts.SelectedRejectionRecovered=[bool]$diagnostic.Recovered
+        $explanation=$diagnostic.PSObject.Properties['Explanation']
+        $facts.SelectedRejectionExplanation=if($null -ne $explanation) {[string]$explanation.Value} else {$null}
     }
 }
 if($null -ne $private:localPrimaryInputs) {

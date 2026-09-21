@@ -85,6 +85,7 @@ public abstract class FileTransferOpsScriptsTestBase
         "tools/GuiSmokeContentHash.ps1",
         "tools/FileTransferSoak/LogParsing.ps1",
         "tools/FileTransferSoak/DataPathRejectedIngressEvidence.ps1",
+        "tools/FileTransferSoak/DataPathRejectedIngressExplanation.ps1",
         "tools/FileTransferSoak/SoakSummaryExtraction.ps1",
         "tools/FileTransferSoak/StabilizationGates.ps1",
         "tools/FileTransferSoak/ArtifactWriters.ps1",

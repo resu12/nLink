@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'DataPathRejectedIngressExplanation.ps1')
 
 # Exact retained rejected-ingress evidence rules. Callers initialize the existing
 # LogParsing.ps1 field helpers before use; this module never imports or resets it.
@@ -959,6 +960,12 @@ function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
     elseif ($sourceSendBeforeTerminal) { 'missing_receiver_route_transition' }
     elseif ($sourceSendMatched) { 'terminal_boundary' }
     else { 'missing_earlier_source_send' }
+    $explanation = Get-FileTransferRejectedIngressExplanation -Recovered $result.Recovered `
+        -RejectionChainMatched $result.RejectionChainMatched -ReceiveDisposition $result.ReceiveDisposition `
+        -Reason $result.Reason -Variant $result.Variant
+    if ($null -ne $explanation) {
+        $result | Add-Member -NotePropertyName Explanation -NotePropertyValue $explanation
+    }
     return $result
 }
 

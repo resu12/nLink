@@ -105,6 +105,18 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
             twoWriterFixture: true);
 
     [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationLaterFallbackIntegration")]
+    public async Task PublicationLaterFallbackIntegration_DeliveryCannotRecoverEarlierTunaRejection()
+        => await RunGeneratedConsumerAsync("PublicationLaterFallbackIntegrationGenerated", "later-fallback-integration=",
+            "publication-later-fallback-integration-20260921", twoWriterFixture: true, finalFallbackFixture: true);
+
+    [Fact]
+    [Trait("FileTransferAnalyzerSuite", "PublicationServiceDurableFallback")]
+    public async Task PublicationServiceDurableFallback_CommittedBytesDoNotReplaceExactTunaProof()
+        => await RunGeneratedConsumerAsync("PublicationServiceDurableFallbackGenerated", "later-fallback-integration=",
+            "publication-service-durable-fallback-20260921", twoWriterFixture: true, serviceIngressFixture: true, finalFallbackFixture: true);
+
+    [Fact]
     [Trait("FileTransferAnalyzerSuite", "PublicationServiceIngressIntegration")]
     public async Task PublicationServiceIngressIntegration_PrimaryRequiresExactTunaPayloadAfterServiceCommit()
         => await RunGeneratedConsumerAsync("PublicationServiceIngressIntegrationGenerated", "receive-integration=", "publication-service-ingress-integration-20260915",
@@ -142,7 +154,8 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
 
     private static async Task RunGeneratedConsumerAsync(string supportScript, string resultPrefix, string artifactName,
         bool failureFixture = false, bool liveScaleFixture = false, string observationBudgetFixture = "none", bool receiveFixture = false,
-        bool twoWriterFixture = false, bool serviceIngressFixture = false, string tunaPayloadMode = "none")
+        bool twoWriterFixture = false, bool serviceIngressFixture = false, string tunaPayloadMode = "none",
+        bool finalFallbackFixture = false)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         if (Environment.GetEnvironmentVariable("NLINK_PUBLICATION_CONSUMER_FIXTURE") == "1")
@@ -193,6 +206,7 @@ public sealed class FileTransferPublicationUseConsumerTests : FileTransferOpsScr
         child.StartInfo.Environment["NLINK_PUBLICATION_TWO_WRITER_FIXTURE"] = twoWriterFixture ? "1" : "0";
         child.StartInfo.Environment["NLINK_PUBLICATION_SERVICE_INGRESS_FIXTURE"] = serviceIngressFixture ? "1" : "0";
         child.StartInfo.Environment["NLINK_PUBLICATION_TUNA_PAYLOAD_MODE"] = tunaPayloadMode;
+        child.StartInfo.Environment["NLINK_PUBLICATION_FINAL_FALLBACK_FIXTURE"] = finalFallbackFixture ? "1" : "0";
         child.StartInfo.Environment["NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR"] = directory;
         child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH"] = Path.Combine(directory, "nlink.log");
         child.StartInfo.Environment["NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID"] = runId;
