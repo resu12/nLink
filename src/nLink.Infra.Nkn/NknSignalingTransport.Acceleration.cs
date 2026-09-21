@@ -3705,7 +3705,8 @@ public sealed partial class NknSignalingTransport
     private void RecordFileTransferTunaFallbackEvidence(
         string reason,
         string? sessionId,
-        NknAccelerationLaneKind lanes)
+        NknAccelerationLaneKind lanes,
+        bool bootstrapLocalStopAlreadyPublished = false)
     {
         if ((lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
             string.IsNullOrWhiteSpace(sessionId))
@@ -3731,7 +3732,10 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_fallback_filetransfer_evidence_requested; session_id={sessionId}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");
-        MarkFileTransferFallbackNknProofPending(normalizedReason, sessionId, lanes);
+        if (!bootstrapLocalStopAlreadyPublished)
+        {
+            MarkFileTransferFallbackNknProofPending(normalizedReason, sessionId, lanes);
+        }
 
         if (ShouldStartImmediateFileTransferFallbackProbe(normalizedReason))
         {
@@ -40708,20 +40712,29 @@ public sealed partial class NknSignalingTransport
 
     public async Task StopAccelerationAsync(string reason, CancellationToken ct)
     {
-        RetireSessionPreparationExecution();
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : SanitizeLogToken(reason);
         var bootstrapLocalStops = CaptureFallbackBootstrapLocalStopSources(normalizedReason);
         var shouldNotifyRemoteDown = TryCaptureAccelerationNegotiation(out var downSessionId, out var downLanes);
-        if (!ResetAccelerationNegotiation(
-                normalizedReason,
-                invalidationKind:
-                    RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
-                        .UserCancellation))
+        if (bootstrapLocalStops.Length == 0) { RetireSessionPreparationExecution(); }
+        try
         {
-            return;
+            if (!ResetAccelerationNegotiation(
+                    normalizedReason,
+                    invalidationKind:
+                        RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
+                            .UserCancellation,
+                    bootstrapLocalStops: bootstrapLocalStops))
+            {
+                return;
+            }
+        }
+        finally
+        {
+            // The exact Core source hold must capture in-flight callbacks before
+            // retiring the admitted lane can expose their failed completions.
+            if (bootstrapLocalStops.Length > 0) { RetireSessionPreparationExecution(); }
         }
 
-        PublishFallbackBootstrapLocalStops(bootstrapLocalStops);
         if (shouldNotifyRemoteDown && IsUserRequestedAccelerationStopReason(normalizedReason))
         {
             MarkAccelerationUserStoppedForCurrentSession(downSessionId);
@@ -40955,7 +40968,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
             invalidationKind =
                 RuntimeUnlockInitialActivationReceiveRecoveryHoldInvalidationKind
-                    .GenericReset)
+                    .GenericReset,
+        FileTransferBootstrapLocalStopSource[]? bootstrapLocalStops = null)
     {
         var normalizedReason = SanitizeLogToken(reason);
         if (initialActivationHoldAlreadyInvalidated &&
@@ -40983,6 +40997,8 @@ public sealed partial class NknSignalingTransport
                 $"event=runtime_unlock_initial_activation_receive_recovery_hold_reset_deferred; reset_reason={normalizedReason}; decision_reason=exact_coordinator_hold_disposition_required");
             return false;
         }
+        var bootstrapLocalStopAlreadyPublished =
+            PublishFallbackBootstrapLocalStopsBeforeReset(bootstrapLocalStops, normalizedReason);
         string? fallbackSessionId;
         NknAccelerationLaneKind fallbackLanes;
         bool preserveRuntimeUnlockPendingAnswer;
@@ -41089,8 +41105,12 @@ public sealed partial class NknSignalingTransport
              (!suppressFallbackProof && ShouldStartTunaFallbackProofForResetReason(normalizedReason)));
         if (shouldStartFallbackProof)
         {
-            StartTunaFallbackProofIfNeeded(normalizedReason, fallbackSessionId, effectiveFallbackLanes);
-            RecordFileTransferTunaFallbackEvidence(normalizedReason, fallbackSessionId, effectiveFallbackLanes);
+            if (!bootstrapLocalStopAlreadyPublished)
+            {
+                StartTunaFallbackProofIfNeeded(normalizedReason, fallbackSessionId, effectiveFallbackLanes);
+            }
+            RecordFileTransferTunaFallbackEvidence(normalizedReason, fallbackSessionId, effectiveFallbackLanes,
+                bootstrapLocalStopAlreadyPublished);
             RebindScreenShareDataSessionsForTunaFallback(normalizedReason, fallbackSessionId, effectiveFallbackLanes);
         }
         else if (TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId))
@@ -41162,6 +41182,10 @@ public sealed partial class NknSignalingTransport
                 retryInterruptedRuntimeUnlockInstallReceipt);
         }
 
+        if (!bootstrapLocalStopAlreadyPublished && bootstrapLocalStops is not null)
+        {
+            PublishFallbackBootstrapLocalStops(bootstrapLocalStops);
+        }
         return true;
     }
 

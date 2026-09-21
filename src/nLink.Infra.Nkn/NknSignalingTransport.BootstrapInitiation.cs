@@ -4,6 +4,21 @@ namespace NLink.Infra.Nkn;
 
 public sealed partial class NknSignalingTransport
 {
+    private bool PublishFallbackBootstrapLocalStopsBeforeReset(FileTransferBootstrapLocalStopSource[]? sources, string reason)
+    {
+        if (sources is not { Length: > 0 } ||
+            !TryCaptureAccelerationNegotiation(out var sessionId, out var lanes) ||
+            (lanes & NknAccelerationLaneKind.File) == 0 ||
+            sources.Any(source => source.Scope.Publication.SessionId != sessionId)) { return false; }
+        StartTunaFallbackProofIfNeeded(reason, sessionId, lanes & NknAccelerationLaneKind.File);
+        if (ShouldSuppressDuplicateRecoveredFileTransferFallback(sessionId, reason)) { return false; }
+        // Reserve observation identity without disabling the source lane. Core synchronously
+        // validates the copied source and installs its hold before reset changes send eligibility.
+        MarkFileTransferFallbackNknProofPending(reason, sessionId, lanes & NknAccelerationLaneKind.File);
+        PublishFallbackBootstrapLocalStops(sources);
+        return true;
+    }
+
     private FileTransferBootstrapLocalStopSource[] CaptureFallbackBootstrapLocalStopSources(string reason)
     {
         if (reason is not ("runtime_disabled" or "header_switch_off") ||

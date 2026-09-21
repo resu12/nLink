@@ -41,7 +41,22 @@ public sealed partial class NknAccelerationTransportTests
     public Task PreparedInitialTuna_PendingWriteWakeRequiresExactSource(string writeSource)
         => RunPreparedInitialTunaFallbackAsync(false, true, stopMode: 1, writeSource);
 
-    private Task RunPreparedInitialTunaFallbackAsync(bool helperPays, bool payerSends, int stopMode = -1, string? writeSource = null)
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
+    public Task PreparedInitialTuna_StopCapturesCallbacksBeforeRetiringLane(bool payerSends)
+        => RunPreparedInitialTunaFallbackAsync(false, payerSends, stopMode: 0, pendingCallbacks: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferInfraSuite", "InitialTunaFallbackBoundary")]
+    public Task PreparedInitialTuna_LocalStopAfterNegotiationResetPreservesSource(bool payerSends)
+        => RunPreparedInitialTunaFallbackAsync(false, payerSends, stopMode: 0, resetBeforeStop: true);
+
+    private Task RunPreparedInitialTunaFallbackAsync(bool helperPays, bool payerSends, int stopMode = -1,
+        string? writeSource = null, bool pendingCallbacks = false, bool resetBeforeStop = false)
         => WithPublicPreparationPairAsync(helperPays, async pair =>
         {
             pair.PayerLane.FilePeer = pair.DialerLane;
@@ -82,10 +97,20 @@ public sealed partial class NknAccelerationTransportTests
                 {
                     var outbound = GetPrivateField(sender, "outboundTransfer")!;
                     var inbound = GetPrivateField(receiver, "inboundTransfer")!;
+                    using var callbacks = pendingCallbacks ? new InitialFallbackPendingCallbacks(sender,
+                        payerSends ? pair.Payer : pair.Dialer, outbound) : null;
                     var writing = writeSource is null ? null : StartInitialFallbackOwnedWrite(receiver, inbound);
                     if (writing is not null) { await destination.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3)); }
+                    if (resetBeforeStop)
+                    {
+                        Assert.True(Assert.IsType<bool>(InvokePrivateMethod(payerSends ? pair.Payer : pair.Dialer,
+                            "ResetAccelerationNegotiation", "header_switch_off")));
+                        Assert.False(Assert.IsType<bool>(InvokePrivateMethod(payerSends ? pair.Payer : pair.Dialer,
+                            "IsAccelerationNegotiatedAndHealthy")));
+                    }
                     if (stopMode != 1) { await (payerSends ? pair.Payer : pair.Dialer).StopAccelerationAsync("header_switch_off", pair.Token); }
                     if (stopMode != 0) { await (payerSends ? pair.Dialer : pair.Payer).StopAccelerationAsync("runtime_disabled", pair.Token); }
+                    callbacks?.AssertCapturedThenSettle();
                     release.TrySetResult();
                     if (writing is not null)
                     {
@@ -122,6 +147,7 @@ public sealed partial class NknAccelerationTransportTests
                     AssertJoinedBootstrapFallbackPublished(sender, outbound, receiver, inbound);
                     AssertInitialFallbackSourcePreserved(sender, outbound);
                     AssertInitialFallbackSourcePreserved(receiver, inbound);
+                    callbacks?.AssertRetiredByExactDispositionAndStaleDrainIsInert();
                     AssertRejectedInitialStop(sender, payerSends ? pair.Payer : pair.Dialer, outbound, senderStop);
                     AssertRejectedInitialStop(receiver, payerSends ? pair.Dialer : pair.Payer, inbound, receiverStop);
                     // The write fixture injects a receive batch without the sender's send ledger;

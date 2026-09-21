@@ -2745,7 +2745,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task FileTransferRouteStatus_PendingPostTunaFallbackSurvivesUserStopCleanupUntilConsumed()
+    public async Task FileTransferRouteStatus_PendingPostTunaFallbackSurvivesUnscopedCompletionNotifications()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -2797,6 +2797,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.Contains("pending_file_route=1", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_fallback_summary;", logTail, StringComparison.Ordinal);
 
+            var proofGeneration = GetPrivateField(host, "fileTransferFallbackProofGeneration");
+            Assert.Equal(true, GetPrivateField(host, "fileTransferFallbackProofPending"));
             host.ObserveFileTransferRouteCompleted(
                 new FileTransferRouteCompletedNotification(
                     sessionId,
@@ -2804,9 +2806,21 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                     FileTransferRouteResolver.PostTunaFallbackV6Token,
                     FileTransferProtocol.ProtocolVersionV6));
 
+            Assert.Equal(true, GetPrivateField(host, "fileTransferFallbackProofPending"));
+            Assert.Equal(proofGeneration, GetPrivateField(host, "fileTransferFallbackProofGeneration"));
+            // Even the matching transfer's generic completion is not a Coordinator receipt.
+            host.ObserveFileTransferRouteCompleted(
+                new FileTransferRouteCompletedNotification(
+                    sessionId,
+                    "transfer_phase4_tuna_route_pending_fallback_cleanup",
+                    FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    FileTransferProtocol.ProtocolVersionV6));
+
+            Assert.Equal(true, GetPrivateField(host, "fileTransferFallbackProofPending"));
+            Assert.Equal(proofGeneration, GetPrivateField(host, "fileTransferFallbackProofGeneration"));
             Assert.False(host.IsFileTunaActiveForRouteSelection);
-            Assert.False(host.IsPostTunaFileFallbackActiveForRouteSelection);
-            AssertNknRoute(host, FileTransferRoute.RegularNknV4Fast, FileTransferProtocol.ProtocolVersionV4);
+            Assert.True(host.IsPostTunaFileFallbackActiveForRouteSelection);
+            AssertNknRoute(host, FileTransferRoute.PostTunaFallbackV6, FileTransferProtocol.ProtocolVersionV6);
         }
         finally
         {
@@ -28240,7 +28254,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationStop_FreshPeerRuntimeUnlockClearsUserStoppedSessionGuard()
+    public async Task TransportAccelerationStop_UnboundPeerRuntimeUnlockCannotClearLocalStop()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -28270,7 +28284,8 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 host,
                 helper,
                 cts.Token,
-                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare,
+                suppressAutomaticAccelerationNegotiation: true);
             await WaitUntilAsync(
                 () =>
                     Convert.ToInt32(GetPrivateField(host, "accelerationNegotiationScheduled"), CultureInfo.InvariantCulture) == 0 &&
@@ -28285,27 +28300,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
                 TimeSpan.FromSeconds(3));
             Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
             var logStart = GetOperationalLogLength();
+            var dialerCalls = hostLane.StartDialerCalls;
 
             await ((ITransportAccelerationControl)helper).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
 
-            var matchedClearTail = string.Empty;
-            await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    if (!host.IsAccelerationUserStoppedForCurrentSessionForTests &&
-                        tail.Contains("event=tuna_acceleration_user_stop_cleared; trigger=peer_payer_intent", StringComparison.Ordinal))
-                    {
-                        matchedClearTail = tail;
-                        return true;
-                    }
-
-                    return false;
-                },
-                TimeSpan.FromSeconds(3));
-            var logTail = matchedClearTail + Environment.NewLine + ReadOperationalLogTail(logStart);
-            Assert.False(host.IsAccelerationUserStoppedForCurrentSessionForTests);
-            Assert.Contains("event=tuna_acceleration_user_stop_cleared; trigger=peer_payer_intent", logTail, StringComparison.Ordinal);
+            Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
+            Assert.Equal(dialerCalls, hostLane.StartDialerCalls);
+            AssertUnboundUnlockRejected(logStart, host, helper);
         }
         finally
         {
@@ -28316,7 +28317,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationStop_RemoteDownDoesNotBlockPeerPaidReunlock()
+    public async Task TransportAccelerationStop_RemoteDownCannotAuthorizeUnboundPeerPaidReunlock()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -28358,15 +28359,13 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
             Assert.False(host.IsAccelerationUserStoppedForCurrentSessionForTests);
             Assert.True(helper.IsAccelerationUserStoppedForCurrentSessionForTests);
             var hostDialerCallsBeforeReunlock = hostLane.StartDialerCalls;
+            var logStart = GetOperationalLogLength();
 
             await ((ITransportAccelerationControl)helper).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
 
-            await WaitUntilAsync(
-                () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
-                TimeSpan.FromSeconds(60));
-            Assert.True(hostLane.StartDialerCalls > hostDialerCallsBeforeReunlock);
-            Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, host.AccelerationNegotiatedLanesForTests);
-            Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, helper.AccelerationNegotiatedLanesForTests);
+            Assert.False(helper.IsAccelerationUserStoppedForCurrentSessionForTests);
+            Assert.Equal(hostDialerCallsBeforeReunlock, hostLane.StartDialerCalls);
+            AssertUnboundUnlockRejected(logStart, host, helper);
         }
         finally
         {
@@ -28377,7 +28376,7 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationStop_RuntimeUnlockClearsUserStoppedSessionGuard()
+    public async Task TransportAccelerationStop_RuntimeUnlockClearsStopFlagButCannotActivateWithoutSource()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -28414,28 +28413,19 @@ public sealed partial class NknAccelerationTransportTests : CoreSmokeTestsBase, 
 
             await ((ITransportAccelerationControl)host).StopAccelerationAsync("header_switch_off", cts.Token);
             await WaitUntilAsync(
-                () => !host.IsAccelerationAvailableForTests && host.IsAccelerationUserStoppedForCurrentSessionForTests,
+                () => !host.IsAccelerationAvailableForTests && !helper.IsAccelerationAvailableForTests &&
+                    host.IsAccelerationUserStoppedForCurrentSessionForTests,
                 TimeSpan.FromSeconds(10));
             var hostDialerCallsBeforeReunlock = hostLane.StartDialerCalls;
+            var logStart = GetOperationalLogLength();
 
             await ((ITransportAccelerationControl)host).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
             Assert.False(host.IsAccelerationUserStoppedForCurrentSessionForTests);
-            var settleUntil = DateTimeOffset.UtcNow.AddSeconds(2);
-            while (DateTimeOffset.UtcNow < settleUntil &&
-                   hostLane.StartDialerCalls <= hostDialerCallsBeforeReunlock &&
-                   Convert.ToInt32(GetPrivateField(host, "accelerationNegotiationRetryAttempts"), CultureInfo.InvariantCulture) <= 0)
-            {
-                await Task.Delay(50, cts.Token);
-            }
 
             await ((ITransportAccelerationControl)helper).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
 
-            await WaitUntilAsync(
-                () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
-                TimeSpan.FromSeconds(45));
-            Assert.True(hostLane.StartDialerCalls > hostDialerCallsBeforeReunlock);
-            Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, host.AccelerationNegotiatedLanesForTests);
-            Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, helper.AccelerationNegotiatedLanesForTests);
+            Assert.Equal(hostDialerCallsBeforeReunlock, hostLane.StartDialerCalls);
+            AssertUnboundUnlockRejected(logStart, host, helper);
         }
         finally
         {
