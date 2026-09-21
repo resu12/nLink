@@ -1079,15 +1079,19 @@ internal sealed record FileTransferFallbackTransitionProofBoundary(
     FileTransferAuthorityId? PredecessorTransitionAuthorityId = null)
     : FileTransferRouteTransitionProofBoundary
 {
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public FileTransferInitialTunaFallbackSource? InitialSource { get; init; }
+
     public override bool IsDefault =>
         PeerProofEvidence is not { IsComplete: true, IsExactFrameBound: true } ||
         RetainedFrameIdentity is not { IsComplete: true } ||
         PeerProofEvidence.FrameIdentity != RetainedFrameIdentity ||
         TargetTransportEpoch <= 0 ||
         TargetBridgeRecoveryGeneration <= 0 ||
-        (SourceRouteCommit is null &&
-         (PredecessorTransitionAuthorityId is null ||
-          PredecessorTransitionAuthorityId.Value.IsDefault));
+        (InitialSource is { } initial
+            ? initial.IsDefault || SourceRouteCommit is not null || PredecessorTransitionAuthorityId is not null
+            : SourceRouteCommit is null &&
+              (PredecessorTransitionAuthorityId is null || PredecessorTransitionAuthorityId.Value.IsDefault));
 }
 
 internal readonly record struct FileTransferRouteTransitionDurableCheckpoint(
@@ -1344,7 +1348,7 @@ internal sealed record FileTransferFallbackV6ProofBootstrapCommand(
     FileTransferFallbackV6ProofBootstrapObservation Observation,
     RuntimeOwnerToken SourceRuntimeOwner,
     RoutePublicationToken SourceRoutePublication,
-    RouteCommitToken SourceRouteCommit,
+    RouteCommitToken? SourceRouteCommit,
     int SourceTerminalGeneration,
     int SourceLiveRouteEpoch,
     int SourceLegGeneration,
@@ -1356,11 +1360,18 @@ internal sealed record FileTransferFallbackV6ProofBootstrapCommand(
     long BootstrapGeneration,
     FileTransferAuthorityId AuthorityId)
 {
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public FileTransferInitialTunaFallbackSource? InitialSource { get; init; }
+
     public bool IsDefault =>
         Observation.IsDefault ||
         SourceRuntimeOwner.IsDefault ||
         SourceRoutePublication.IsDefault ||
-        SourceRouteCommit.IsDefault ||
+        (SourceRouteCommit is { } commit
+            ? commit.IsDefault || InitialSource is not null
+            : InitialSource is not { IsDefault: false } initial || initial.Publication != SourceRoutePublication ||
+              initial.Publication.RuntimeOwner != SourceRuntimeOwner || initial.DataSessionGeneration != SourceDataSessionGeneration ||
+              SourceLiveRouteEpoch != 0 || SourceTerminalGeneration != 0) ||
         SourceLegGeneration <= 0 ||
         SourceTransportEpoch < 0 ||
         SourceBridgeRecoveryGeneration < 0 ||
@@ -6408,6 +6419,7 @@ internal static partial class FileTransferCoordinator
             };
         }
 
+        var initialSource = CanStartInitialTunaFallbackExchange(state) ? CaptureInitialTunaFallbackSource(state) : null;
         if (observation.IsDefault ||
             !string.Equals(state.SessionId, observation.SessionId, StringComparison.Ordinal) ||
             !string.Equals(state.TransferId, observation.TransferId, StringComparison.Ordinal) ||
@@ -6417,9 +6429,9 @@ internal static partial class FileTransferCoordinator
             state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             state.CurrentRuntimeOwner is not { IsDefault: false } owner ||
             state.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
-            state.CurrentRouteCommit is not { IsDefault: false } routeCommit ||
+            state.CurrentRouteCommit is not { IsDefault: false } && initialSource is null ||
             state.CurrentLeg is not { } leg ||
-            state.CurrentLiveRouteEpoch is not { } liveEpoch ||
+            state.CurrentLiveRouteEpoch is null && initialSource is null ||
             state.CurrentDataSessionGeneration <= 0 ||
             observation.DurableCheckpoint.SourceRuntimeOwner != owner ||
             observation.DurableCheckpoint.SourceRoutePublication != publication ||
@@ -6443,9 +6455,9 @@ internal static partial class FileTransferCoordinator
             observation,
             owner,
             publication,
-            routeCommit,
+            state.CurrentRouteCommit,
             state.TerminalGeneration,
-            liveEpoch.EpochId,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
             leg.Generation,
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
@@ -6458,7 +6470,10 @@ internal static partial class FileTransferCoordinator
             IssueAuthorityId(
                 "filetransfer_fallback_v6_proof_bootstrap",
                 state,
-                checked((int)Math.Min(int.MaxValue, generation))));
+                checked((int)Math.Min(int.MaxValue, generation))))
+        {
+            InitialSource = initialSource,
+        };
         var nextState = state with
         {
             PersistentState = state.PersistentState with
@@ -6840,6 +6855,7 @@ internal static partial class FileTransferCoordinator
                authority.ProofBoundary is
                    FileTransferFallbackTransitionProofBoundary fallback &&
                fallback.SourceRouteCommit == command.SourceRouteCommit &&
+               fallback.InitialSource == command.InitialSource &&
                fallback.TargetTransportEpoch == command.TargetTransportEpoch;
     }
 
@@ -6857,7 +6873,9 @@ internal static partial class FileTransferCoordinator
            state.CurrentRoutePublicationToken == command.SourceRoutePublication &&
            state.CurrentRouteCommit == command.SourceRouteCommit &&
            state.TerminalGeneration == command.SourceTerminalGeneration &&
-           state.CurrentLiveRouteEpoch?.EpochId == command.SourceLiveRouteEpoch &&
+           (command.InitialSource is not null
+               ? IsInitialTunaFallbackCommandSourceCurrent(state, command)
+               : state.CurrentLiveRouteEpoch?.EpochId == command.SourceLiveRouteEpoch) &&
            state.CurrentLeg?.Generation == command.SourceLegGeneration &&
            state.CurrentLeg?.TransportEpochId == command.SourceTransportEpoch &&
            state.CurrentLeg?.BridgeRecoveryGeneration == command.SourceBridgeRecoveryGeneration &&
@@ -29677,8 +29695,8 @@ internal static partial class FileTransferCoordinator
                 return false;
             }
         }
-        else if (request.Kind ==
-                 FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
+        else if (request.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
+                 request.ProofBoundary is not FileTransferFallbackTransitionProofBoundary { InitialSource: { IsDefault: false } })
         {
             rejectionReason = "filetransfer_route_transition_source_commit_missing";
             return false;
@@ -29892,7 +29910,8 @@ internal static partial class FileTransferCoordinator
                 request.SourceRoute == FileTransferRoute.FileTunaV4 &&
                 request.SourceProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
                 request.SourceTransport == FileTransferTransportKind.Tuna &&
-                request.SourceRouteCommit is not null &&
+                (request.SourceRouteCommit is not null ||
+                 request.ProofBoundary is FileTransferFallbackTransitionProofBoundary { InitialSource: { IsDefault: false } }) &&
                 request.TargetRoute == FileTransferRoute.PostTunaFallbackV6 &&
                 request.TargetProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
                 request.TargetTransport == FileTransferTransportKind.RegularNkn &&
@@ -29933,7 +29952,7 @@ internal static partial class FileTransferCoordinator
         rejectionReason = "accepted";
         var evidence = fallback.PeerProofEvidence;
         if (request.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
-            IsFallbackBootstrapCorrelationSelected(state) &&
+            (fallback.InitialSource is not null || IsFallbackBootstrapCorrelationSelected(state)) &&
             !IsFallbackBootstrapProofCurrent(state, fallback, request.DurableCheckpoint))
         {
             rejectionReason = "bootstrap_correlated_exchange_incomplete";
@@ -29959,8 +29978,9 @@ internal static partial class FileTransferCoordinator
         if (request.Kind ==
             FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
         {
-            if (fallback.SourceRouteCommit is not { } sourceCommit ||
-                state.CurrentRouteCommit != sourceCommit ||
+            if ((fallback.InitialSource is not null
+                    ? request.SourceRouteCommit is not null || state.CurrentRouteCommit is not null
+                    : fallback.SourceRouteCommit is not { } sourceCommit || state.CurrentRouteCommit != sourceCommit) ||
                 fallback.PredecessorTransitionAuthorityId is not null ||
                 request.PredecessorTransitionAuthorityId is not null)
             {
@@ -29976,6 +29996,7 @@ internal static partial class FileTransferCoordinator
                 FileTransferRouteTransitionKind
                     .UncommittedTunaToPostTunaFallbackV6 ||
             fallback.SourceRouteCommit is not null ||
+            fallback.InitialSource is not null ||
             request.PredecessorTransitionAuthorityId is not
                 { IsDefault: false } predecessor ||
             fallback.PredecessorTransitionAuthorityId != predecessor ||
@@ -30616,6 +30637,13 @@ internal static partial class FileTransferCoordinator
             return false;
         }
 
+        if (authority.ProofBoundary is FileTransferFallbackTransitionProofBoundary { InitialSource: not null } &&
+            !IsInitialTunaFallbackTransitionSourceCurrent(state, authority))
+        {
+            rejectionReason = "filetransfer_route_transition_initial_source_stale";
+            return false;
+        }
+
         if (state.RouteSelection.Route != authority.SourceRoute ||
             state.RouteSelection.ProtocolVersion != authority.SourceProtocolVersion ||
             ExpectedRoutePublicationTransport(state.RouteSelection.Route) !=
@@ -30754,7 +30782,8 @@ internal static partial class FileTransferCoordinator
         if (authority.TargetRoute == FileTransferRoute.PostTunaFallbackV6)
         {
             if (authority.Kind == FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6 &&
-                IsFallbackBootstrapCorrelationSelected(state) &&
+                (authority.ProofBoundary is FileTransferFallbackTransitionProofBoundary { InitialSource: not null } ||
+                 IsFallbackBootstrapCorrelationSelected(state)) &&
                 (authority.ProofBoundary is not FileTransferFallbackTransitionProofBoundary correlatedFallback ||
                  !IsFallbackBootstrapProofCurrent(state, correlatedFallback, authority.DurableCheckpoint)))
             {
@@ -30778,10 +30807,12 @@ internal static partial class FileTransferCoordinator
             if (authority.Kind ==
                 FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6)
             {
-                if (fallback.SourceRouteCommit is not { } sourceCommit ||
-                    authority.SourceRouteCommit != sourceCommit ||
-                    state.CurrentRouteCommit != sourceCommit ||
-                    !IsRouteCommitTokenCurrent(state, sourceCommit, out rejectionReason))
+                if (fallback.InitialSource is not null
+                    ? !IsInitialTunaFallbackTransitionSourceCurrent(state, authority)
+                    : fallback.SourceRouteCommit is not { } sourceCommit ||
+                      authority.SourceRouteCommit != sourceCommit ||
+                      state.CurrentRouteCommit != sourceCommit ||
+                      !IsRouteCommitTokenCurrent(state, sourceCommit, out rejectionReason))
                 {
                     if (string.Equals(
                             rejectionReason,

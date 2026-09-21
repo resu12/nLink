@@ -84,7 +84,7 @@ internal static partial class FileTransferCoordinator
         if (substate.BootstrapExchange is not { } exchange) { return; }
         var command = exchange.Bootstrap;
         var boundary = new FileTransferCoordinatorStateBoundarySnapshot(command.SourceRuntimeOwner.RouteToken, 4,
-            command.SourceLiveRouteEpoch, command.SourceRoutePublication.PublicationGeneration, command.SourceRouteCommit.CommitGeneration,
+            command.SourceLiveRouteEpoch, command.SourceRoutePublication.PublicationGeneration, command.SourceRouteCommit?.CommitGeneration ?? 0,
             command.SourceRuntimeOwner.RuntimeGeneration, command.SourceTerminalGeneration, command.SourceLegGeneration,
             command.SourceTransportEpoch, command.SourceBridgeRecoveryGeneration, exchange.LegCheckpointGeneration,
             exchange.CheckpointRequestId ?? "(none)", exchange.DataSessionIdentity, command.SourceDataSessionGeneration);

@@ -47,14 +47,23 @@ public sealed partial class SessionFileTransferV4SenderTests
                 Assert.Equal(FileTransferTransportKind.Unknown,
                     GetPrivateProperty<FileTransferTransportKind>(context, "LastRecoveredV6TransportTargetTransport"));
             });
+        await CheckOutboundBootstrapSuccessorAdmissionAsync(service, bridge, dataSession, context,
+            history.PriorCommand, history.OldReceiverState, stageBeforeEvaluation);
+    }
+
+    private static async Task CheckOutboundBootstrapSuccessorAdmissionAsync(SessionFileTransferService service,
+        LoopbackFileTransferTransport bridge, InitialBootstrapRecordingDataSession dataSession, object context,
+        FileTransferFallbackV6ProofBootstrapCommand prior, FileTransferReceiverStateFrameV6 oldReceiverState,
+        bool stageBeforeEvaluation)
+    {
+        var transferId = dataSession.TransferId;
         var state = CreateCoordinatorStateForTest(context);
-        var prior = history.PriorCommand;
         Assert.True(FileTransferCoordinator.IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(
             state, prior, out var successorReason), successorReason);
         Assert.Equal(prior, state.PersistentState.FileTransferRouteTransition
             .LastFallbackV6ProofBootstrapReceipt!.Command);
         Assert.Same(dataSession, GetPrivatePropertyValue(context, "DataSession"));
-        var frame = history.OldReceiverState with { Epoch = 10 };
+        var frame = oldReceiverState with { Epoch = 10 };
         var evaluation = new FileTransferFallbackV6ProofBootstrapEvaluation(
             state.SessionId, FileTransferDirection.Outbound, ObservationGeneration: 3,
             FallbackEpoch: 2, Source: "test_final_off_peer_first",
@@ -78,7 +87,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.True(Predicate("MatchesFallbackV6ProofBootstrapPhysicalTrigger", evaluation, checkpoint));
         Assert.True(Predicate("MatchesFallbackV6ProofBootstrapTriggerSourceScope",
             evaluation, checkpoint, state.CurrentRouteCommit!.Value,
-            state.CurrentLeg!.CheckpointRequestId, state.CurrentLeg.CheckpointGeneration));
+            state.CurrentLeg!.CheckpointRequestId, state.CurrentLeg.CheckpointGeneration, null));
         Assert.False(Predicate("IsPostRecoveryFileTunaV4LiveActivationEpoch",
             state.CurrentLiveRouteEpoch, 0));
         var stale = typeof(SessionFileTransferService).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)

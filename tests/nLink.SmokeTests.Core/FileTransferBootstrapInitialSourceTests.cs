@@ -21,7 +21,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Equal(independentGenerations ? 13 : 1, source.Source.LegGeneration);
         Assert.True(FileTransferCoordinator.IsFallbackBootstrapLocalStopScopeCurrent(state, source));
         Assert.Null(state.CurrentRouteCommit);
-        Assert.False(FileTransferCoordinator.CanStartFallbackBootstrapExchange(state)); // A data binding is not fallback admission.
+        Assert.True(FileTransferCoordinator.CanStartFallbackBootstrapExchange(state)); // Eligibility is not a hold receipt or exchange authority.
         var publication = state.CurrentRoutePublicationToken!.Value;
         var owner = state.CurrentRuntimeOwner!.Value;
         foreach (var invalid in new[]
@@ -108,7 +108,7 @@ public sealed partial class FileTransferCoordinatorTests
     }
 
     private static FileTransferCoordinatorState CreateInitialTunaBootstrapSourceFixture(FileTransferDirection direction, bool independentGenerations,
-        List<FileTransferCoordinatorTransitionEnvelope>? envelopes = null)
+        List<FileTransferCoordinatorTransitionEnvelope>? envelopes = null, bool pairedIssuers = false)
     {
         var preparation = CreateSessionPreparationFixture(ready: true);
         var reserved = FileTransferCoordinator.ReserveSessionPreparationAdmission(preparation.State, preparation.Permit.Scope,
@@ -125,7 +125,8 @@ public sealed partial class FileTransferCoordinatorTests
         };
         var state = empty;
         string Issuer(FileTransferDirection role) => role == direction ? FileTransferCoordinator.CreateLocalFallbackBootstrapIssuer(state)
-            : FileTransferBootstrapCorrelation.CreateIssuer("other-peer", state.SessionId, state.TransferId, role);
+            : FileTransferBootstrapCorrelation.CreateIssuer(pairedIssuers ? "initial-source-" + role : "other-peer",
+                state.SessionId, state.TransferId, role);
         var offer = new FileTransferOfferV2
         {
             SessionId = state.SessionId, TransferId = state.TransferId, FileName = "file.bin", FileSizeBytes = 4,

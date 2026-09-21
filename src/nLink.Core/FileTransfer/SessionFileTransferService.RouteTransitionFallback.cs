@@ -928,8 +928,13 @@ public sealed partial class SessionFileTransferService
         var sourceCommit = supersedeUncommittedTuna
             ? null
             : context.RuntimeUnlockRouteCommitToken;
+        var initialSource = sourceCommit is null && !supersedeUncommittedTuna &&
+            FileTransferCoordinator.TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                state, evidenceShadow.RetainedPeerFrame!, out var bootstrapBoundary, out _) &&
+            bootstrapBoundary.PeerProofEvidence == proof && bootstrapBoundary.PeerFrameIdentity == identity
+                ? bootstrapBoundary.Command.InitialSource : null;
         if (!supersedeUncommittedTuna &&
-            sourceCommit is not { IsDefault: false })
+            sourceCommit is not { IsDefault: false } && initialSource is null)
         {
             return false;
         }
@@ -945,7 +950,7 @@ public sealed partial class SessionFileTransferService
             identity,
             proof.TransportEpoch,
             Math.Max(1, leg.BridgeRecoveryGeneration + 1),
-            predecessorId);
+            predecessorId) { InitialSource = initialSource };
         var request = new FileTransferRouteTransitionPrepareRequest(
             kind,
             owner,
@@ -1364,8 +1369,13 @@ public sealed partial class SessionFileTransferService
         var sourceCommit = supersedeUncommittedTuna
             ? null
             : context.RuntimeUnlockRouteCommitToken;
+        var initialSource = sourceCommit is null && !supersedeUncommittedTuna &&
+            FileTransferCoordinator.TryGetCurrentFileTransferFallbackV6ProofBootstrapPeerProofBoundary(
+                state, evidenceShadow.RetainedPeerFrame!, out var bootstrapBoundary, out _) &&
+            bootstrapBoundary.PeerProofEvidence == proof && bootstrapBoundary.PeerFrameIdentity == identity
+                ? bootstrapBoundary.Command.InitialSource : null;
         if (!supersedeUncommittedTuna &&
-            sourceCommit is not { IsDefault: false })
+            sourceCommit is not { IsDefault: false } && initialSource is null)
         {
             return false;
         }
@@ -1389,7 +1399,7 @@ public sealed partial class SessionFileTransferService
                 identity,
                 proof.TransportEpoch,
                 Math.Max(1, leg.BridgeRecoveryGeneration + 1),
-                predecessorId),
+                predecessorId) { InitialSource = initialSource },
             checkpoint,
             FileTransferRoute.PostTunaFallbackV6,
             FileTransferProtocol.ProtocolVersionV6,

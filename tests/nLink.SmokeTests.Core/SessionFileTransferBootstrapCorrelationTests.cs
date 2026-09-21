@@ -85,16 +85,23 @@ public sealed partial class SessionFileTransferV4SenderTests
             .Single(method => method.Name == "ApplyCoordinatorDecisionToContextLocked" && method.GetParameters().Length == 4 &&
                 method.GetParameters()[0].ParameterType == context.GetType()).Invoke(null, [context, history, false, false]);
         typeof(SessionFileTransferService).GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(service, context);
+        await CompleteServiceBootstrapSuccessorAsync(service, dataSession, bridge, context, logStart);
+    }
+
+    private async Task CompleteServiceBootstrapSuccessorAsync(SessionFileTransferService service,
+        InitialBootstrapRecordingDataSession dataSession, BootstrapPhaseTestBridge bridge, object context, int logStart)
+    {
+        var transferId = dataSession.TransferId;
         StartCoordinatorSnapshotStreamForTest(context);
         var state = CreateCoordinatorStateForTest(context);
-        var prior = state.PersistentState.FileTransferRouteTransition.BootstrapExchange!;
+        var prior = CaptureServiceBootstrapExchange(context)!;
         Assert.True(prior.Completed);
         Assert.Equal(3, state.CurrentLiveRouteEpoch!.EpochId);
         Assert.Equal(0L, GetPrivateProperty<long>(context, "LastRecoveredV6TransportEpoch"));
         Assert.Equal(0, GetPrivateProperty<int>(context, "LastRecoveredV6TransportLiveRouteEpochId"));
         Assert.Same(dataSession, GetPrivatePropertyValue(context, "DataSession"));
         var oldResponse = Assert.IsType<FileTransferFallbackBootstrapStateFrameV6>(prior.RetainedPeerFrame);
-        var issuer = state.PersistentState.FileTransferRouteTransition.BootstrapAgreement!.Accept!.FallbackBootstrapIssuerId;
+        var issuer = CaptureServiceBootstrapReceiverIssuer(state);
         var announce = oldResponse with { SenderRequestId = null, ReceiverChallengeId = $"fbc1:{issuer}:2:{new string('c', 64)}" };
         bool Receive(FileTransferFallbackBootstrapStateFrameV6 frame) => Assert.IsType<bool>(typeof(SessionFileTransferService).GetMethod(
             "TryHandleBootstrapCorrelationFrame", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service,
@@ -123,7 +130,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         confirm.Delivery.TrySetResult(ServiceBootstrapReceipt(confirm.Command, settled: false));
         confirm.Settlement.TrySetResult(ServiceBootstrapReceipt(confirm.Command, settled: true));
         await WaitUntilAsync(() => CreateCoordinatorStateForTest(context).CurrentLiveRouteEpoch?.EpochId == 4, timeoutMs: 5000);
-        var committed = CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+        var committed = CaptureServiceBootstrapTerminal(CreateCoordinatorStateForTest(context));
         Assert.NotNull(committed.RetainedFrameApplyCommand);
         Assert.Null(committed.RetainedFrameApplyReceipt);
         Assert.Null(committed.DispositionReceipt);
@@ -151,26 +158,21 @@ public sealed partial class SessionFileTransferV4SenderTests
         catch (OperationCanceledException)
         {
             var failed = CreateCoordinatorStateForTest(context);
-            Assert.Fail(System.Text.Json.JsonSerializer.Serialize(new
-            {
-                failed.RouteSelection, Exchange = failed.PersistentState.FileTransferRouteTransition.BootstrapExchange,
-                Transition = failed.PersistentState.FileTransferRouteTransition.CurrentOperation,
-            }) + Environment.NewLine + string.Join(Environment.NewLine, ReadOperationalLogTail(logStart).Split('\n')
+            Assert.Fail(DescribeServiceBootstrapState(failed) + Environment.NewLine + string.Join(Environment.NewLine, ReadOperationalLogTail(logStart).Split('\n')
                 .Where(line => line.Contains("transfer_id=" + transferId, StringComparison.Ordinal) && !line.Contains("coordinator_snapshot", StringComparison.Ordinal))));
         }
         var final = CreateCoordinatorStateForTest(context);
         Assert.Equal(4, final.CurrentLiveRouteEpoch!.EpochId);
-        Assert.True(final.PersistentState.FileTransferRouteTransition.BootstrapExchange!.Completed);
-        Assert.Equal(2, final.PersistentState.FileTransferRouteTransition.LastFallbackV6ProofBootstrapGeneration);
+        AssertServiceBootstrapSuccessorGeneration(final);
         Assert.Equal(FileTransferRoute.PostTunaFallbackV6, final.RouteSelection.Route);
-        var terminal = final.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+        var terminal = CaptureServiceBootstrapTerminal(final);
         Assert.Equal(FileTransferRouteTransitionRetainedFrameApplyStatus.Applied, terminal.RetainedFrameApplyReceipt!.Value.Status);
         Assert.Equal(committed.RetainedFrameApplyCommand, terminal.RetainedFrameApplyReceipt.Value.Command);
         Assert.Null(GetPrivatePropertyValue(context, "FileTransferRouteTransitionExecution"));
         var sentCount = dataSession.SentFrames.Count;
         await Assert.IsAssignableFrom<Task>(replay.Invoke(service, [context, install, dataSession]));
         Assert.Equal(sentCount, dataSession.SentFrames.Count);
-        Assert.Equal(terminal, CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.LastTerminalOperation);
+        Assert.Equal(terminal, CaptureServiceBootstrapTerminal(CreateCoordinatorStateForTest(context)));
     }
 
     [Fact]
@@ -247,7 +249,7 @@ public sealed partial class SessionFileTransferV4SenderTests
         if (pendingWrite)
         {
             Assert.Empty(bridge.Executions);
-            Assert.Null(CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange);
+            Assert.Null(CaptureServiceBootstrapExchange(context));
             fixture.Stream.CompleteWrite();
             await writing!.WaitAsync(TimeSpan.FromSeconds(3));
         }
@@ -258,18 +260,17 @@ public sealed partial class SessionFileTransferV4SenderTests
         var response = Assert.IsType<FileTransferFallbackBootstrapStateFrameV6>(execution.Command.Frame);
         Assert.Equal(solicit.SenderRequestId, response.SenderRequestId);
         execution.Delivery.TrySetResult(ServiceBootstrapReceipt(execution.Command, settled: false));
-        await WaitUntilAsync(() => CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange?.First.Delivery is not null, timeoutMs: 3000);
+        await WaitUntilAsync(() => CaptureServiceBootstrapExchange(context)?.First.Delivery is not null, timeoutMs: 3000);
         Assert.True(Receive(solicit with { ReceiverChallengeId = response.ReceiverChallengeId }));
-        Assert.False(CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange!.Completed);
-        Assert.Equal(before.PersistentState.FileTransferRouteTransition.LastTerminalOperation,
-            CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.LastTerminalOperation);
+        Assert.False(CaptureServiceBootstrapExchange(context)!.Completed);
+        AssertServiceBootstrapTerminalUnchanged(before, CreateCoordinatorStateForTest(context));
         Assert.Single(bridge.Executions);
         if (pauseBeforeSettlement)
         {
             Assert.NotNull(await service.PauseTransferAsync(transferId, "test_pause", CancellationToken.None));
-            Assert.True(CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange!.Invalidated);
+            Assert.True(CaptureServiceBootstrapExchange(context)!.Invalidated);
         }
-        var priorDelivery = CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange!.First.Delivery;
+        var priorDelivery = CaptureServiceBootstrapExchange(context)!.First.Delivery;
         var settlementLogStart = GetOperationalLogLength();
         execution.Settlement.TrySetResult(ServiceBootstrapReceipt(execution.Command, settled: true));
         if (pauseBeforeSettlement)
@@ -277,10 +278,11 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.True(Receive(solicit with { ReceiverChallengeId = response.ReceiverChallengeId }));
             await WaitUntilAsync(() => ReadOperationalLogTail(settlementLogStart).Contains("decision_reason=bootstrap_phase_callback_scope_stale", StringComparison.Ordinal), timeoutMs: 3000);
             var after = CreateCoordinatorStateForTest(context);
-            Assert.True(after.PersistentState.FileTransferRouteTransition.BootstrapExchange!.Invalidated);
-            Assert.Null(after.PersistentState.FileTransferRouteTransition.BootstrapExchange!.First.Settlement);
-            Assert.Same(priorDelivery, after.PersistentState.FileTransferRouteTransition.BootstrapExchange!.First.Delivery);
-            Assert.Equal(before.PersistentState.FileTransferRouteTransition.LastTerminalOperation, after.PersistentState.FileTransferRouteTransition.LastTerminalOperation);
+            var exchange = CaptureServiceBootstrapExchange(context)!;
+            Assert.True(exchange.Invalidated);
+            Assert.Null(exchange.First.Settlement);
+            Assert.Same(priorDelivery, exchange.First.Delivery);
+            AssertServiceBootstrapTerminalUnchanged(before, after);
         }
         else
         {
@@ -288,12 +290,52 @@ public sealed partial class SessionFileTransferV4SenderTests
                 { Authority.Kind: FileTransferRouteTransitionKind.TunaV4ToPostTunaFallbackV6,
                   DispositionReceipt.Status: FileTransferRouteTransitionDispositionApplyStatus.Applied }, timeoutMs: 5000);
             var after = CreateCoordinatorStateForTest(context);
-            Assert.True(after.PersistentState.FileTransferRouteTransition.BootstrapExchange!.Completed);
-            Assert.Equal(PostTunaFallbackPeerProofFrameIdentity.Create(solicit with { ReceiverChallengeId = response.ReceiverChallengeId }),
-                after.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value.RetainedFrameApplyReceipt!.Value.Command.FrameIdentity);
+            AssertServiceBootstrapCompleted(after, PostTunaFallbackPeerProofFrameIdentity.Create(
+                solicit with { ReceiverChallengeId = response.ReceiverChallengeId }));
             Assert.Equal(FileTransferRoute.PostTunaFallbackV6, after.RouteSelection.Route);
         }
         Assert.Single(bridge.Executions);
+    }
+
+    // Keep large persistent-state value copies off the async driver's stack
+    // while its synchronous Receive call enters the actual service workflow.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferBootstrapExchange? CaptureServiceBootstrapExchange(object context)
+        => CreateCoordinatorStateForTest(context).PersistentState.FileTransferRouteTransition.BootstrapExchange;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static string? CaptureServiceBootstrapReceiverIssuer(FileTransferCoordinatorState state)
+        => state.PersistentState.FileTransferRouteTransition.BootstrapAgreement!.Accept!.FallbackBootstrapIssuerId;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferRouteTransitionOperation CaptureServiceBootstrapTerminal(FileTransferCoordinatorState state)
+        => state.PersistentState.FileTransferRouteTransition.LastTerminalOperation!.Value;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertServiceBootstrapSuccessorGeneration(FileTransferCoordinatorState state)
+    {
+        var transition = state.PersistentState.FileTransferRouteTransition;
+        Assert.True(transition.BootstrapExchange!.Completed);
+        Assert.Equal(2, transition.LastFallbackV6ProofBootstrapGeneration);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static string DescribeServiceBootstrapState(FileTransferCoordinatorState state)
+        => System.Text.Json.JsonSerializer.Serialize(new { state.RouteSelection,
+            Exchange = state.PersistentState.FileTransferRouteTransition.BootstrapExchange,
+            Transition = state.PersistentState.FileTransferRouteTransition.CurrentOperation });
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertServiceBootstrapTerminalUnchanged(FileTransferCoordinatorState before, FileTransferCoordinatorState after)
+        => Assert.Equal(before.PersistentState.FileTransferRouteTransition.LastTerminalOperation,
+            after.PersistentState.FileTransferRouteTransition.LastTerminalOperation);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void AssertServiceBootstrapCompleted(FileTransferCoordinatorState state, PostTunaFallbackPeerProofFrameIdentity identity)
+    {
+        var transition = state.PersistentState.FileTransferRouteTransition;
+        Assert.True(transition.BootstrapExchange!.Completed);
+        Assert.Equal(identity, transition.LastTerminalOperation!.Value.RetainedFrameApplyReceipt!.Value.Command.FrameIdentity);
     }
 
     private static void PinBootstrapServiceAgreement(object context, string senderIssuer)

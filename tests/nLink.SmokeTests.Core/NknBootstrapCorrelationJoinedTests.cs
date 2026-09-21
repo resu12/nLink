@@ -112,11 +112,12 @@ public sealed partial class NknAccelerationTransportTests
                 }
                 if (stopMode != 1) { await host.StopAccelerationAsync(stopReason, timeout.Token); }
                 if (stopMode != 0) { await helper.StopAccelerationAsync(stopReason, timeout.Token); }
-                // Resume the real source after activation/stop; fallback discovery needs ordinary traffic.
-                releaseReads.TrySetResult();
+                // Local-stop correlation uses its control pumps, not ordinary data traffic.
+                // Keep the source read held so synchronous mock send failures cannot starve peer receive.
                 await WaitFor("correlated fallback publication", () => Published(sender, outbound, FileTransferRoute.PostTunaFallbackV6) &&
                     Published(receiver, inbound, FileTransferRoute.PostTunaFallbackV6));
                 AssertJoinedBootstrapFallbackPublished(sender, outbound, receiver, inbound);
+                releaseReads.TrySetResult();
             }
             SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(outbound);
             SessionFileTransferV4SenderTests.CancelJoinedNknContextForTest(inbound);

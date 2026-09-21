@@ -15964,11 +15964,20 @@ function Get-FileTransferCoordinatorSnapshotRouteConsistency {
                         [string]$routeCommits[0].authorityId
             }
             else {
+                # An exact first Tuna publication has no commit to retire. Its
+                # already-validated predecessor publication and the same exact
+                # transition retirement/receipt checks remain mandatory.
+                $expectedRetiredCommits = if ($index -eq 1 -and $previous.Valid -and
+                    $null -eq $previous.RouteCommit -and $null -eq $previous.LastTransition -and
+                    (Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary -Boundary $previous.RouteBoundary)) {
+                    0
+                }
+                else { 1 }
                 [string]$entry.RouteBoundary.route -ceq
                     'post_tuna_fallback_v6' -and
                     $routeCommits.Count -eq 0 -and
-                    $retiredRouteCommits.Count -eq 1 -and
-                    $allRouteCommitOperations.Count -eq 1 -and
+                    $retiredRouteCommits.Count -eq $expectedRetiredCommits -and
+                    $allRouteCommitOperations.Count -eq $expectedRetiredCommits -and
                     [long]$entry.RouteBoundary.routeCommitGeneration -eq 0L -and
                     [string]$entry.Operation.operationKind -ceq
                         'RoutePublication' -and

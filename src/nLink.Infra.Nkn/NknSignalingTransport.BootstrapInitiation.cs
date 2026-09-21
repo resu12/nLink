@@ -24,7 +24,10 @@ public sealed partial class NknSignalingTransport
                 if (!fileTransferDataSessions.TryGetValue(transferId, out var session) || session.IsDisposed || session.SessionId != sessionId ||
                     !fileTransferRoutePublicationAuthorities.TryGetValue(key, out var publication) ||
                     !fileTransferRouteHints.TryGetValue(key, out var hint) || hint.Route != FileTransferRoute.FileTunaV4 || hint.ProtocolVersion != 4 ||
-                    publication.RouteToken != FileTransferRouteResolver.FileTunaV4Token || publication.RouteCommitGeneration is not > 0)
+                    publication.RouteToken != FileTransferRouteResolver.FileTunaV4Token ||
+                    (publication.RouteCommitGeneration is not > 0 &&
+                     (publication.RouteCommitGeneration is not null || publication.RoutePublicationGeneration != 1 ||
+                      publication.LiveRouteEpoch != 0 || publication.TerminalGeneration != 0)))
                 {
                     continue;
                 }

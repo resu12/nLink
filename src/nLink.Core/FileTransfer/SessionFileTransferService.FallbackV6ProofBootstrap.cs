@@ -12,10 +12,13 @@ internal sealed record FileTransferFallbackV6ProofBootstrapPeerFrameBinding(
     long DataSessionGeneration,
     long BootstrapGeneration,
     FileTransferRouteTransitionDurableCheckpoint DurableCheckpoint,
-    RouteCommitToken SourceRouteCommit,
+    RouteCommitToken? SourceRouteCommit,
     FallbackCheckpointLease? FallbackCheckpointLease,
     string CheckpointRequestId,
-    int CheckpointGeneration);
+    int CheckpointGeneration)
+{
+    public FileTransferInitialTunaFallbackSource? InitialSource { get; init; }
+}
 
 public sealed partial class SessionFileTransferService
 {
@@ -25,10 +28,21 @@ public sealed partial class SessionFileTransferService
         FileTransferFallbackV6ProofBootstrapEvaluation Evaluation,
         IFileTransferDataSession DataSession,
         long DataSessionGeneration,
-        RouteCommitToken RouteCommit,
+        RouteCommitToken? RouteCommit,
         int PendingSparseWriteCount,
         int PendingContiguousChunkCount,
-        bool RecheckClaimed);
+        bool RecheckClaimed)
+    {
+        public FileTransferInitialTunaFallbackSource? InitialSource { get; init; }
+    }
+
+    private static bool TryCaptureFallbackBootstrapServiceSource(FileTransferCoordinatorState state,
+        out RouteCommitToken? commit, out FileTransferInitialTunaFallbackSource? initial)
+    {
+        commit = state.CurrentRouteCommit;
+        initial = commit is null ? FileTransferCoordinator.CaptureInitialTunaFallbackSource(state) : null;
+        return commit is { IsDefault: false } || initial is not null;
+    }
 
     private void OnFallbackV6ProofBootstrapEvaluationRequested(
         object? sender,
@@ -340,8 +354,8 @@ public sealed partial class SessionFileTransferService
                 context.DataSession is not { } currentDataSession ||
                 context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
                 context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
-                context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } ||
-                context.CurrentTransferLeg is not { } leg)
+                context.CurrentTransferLeg is not { } leg ||
+                !TryCaptureFallbackBootstrapServiceSource(CreateCoordinatorStateLocked(context), out var sourceCommit, out var initialSource))
             {
                 return false;
             }
@@ -366,9 +380,9 @@ public sealed partial class SessionFileTransferService
                   !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
                       evaluation,
                       checkpoint,
-                      context.RuntimeUnlockRouteCommitToken.Value,
+                      sourceCommit,
                       context.CurrentTransferLeg.CheckpointRequestId,
-                      context.CurrentTransferLeg.CheckpointGeneration))))
+                      context.CurrentTransferLeg.CheckpointGeneration, initialSource))))
             {
                 return false;
             }
@@ -462,8 +476,8 @@ public sealed partial class SessionFileTransferService
             inbound.DataSession is not { } inboundDataSession ||
             inbound.CurrentRuntimeOwner is not { IsDefault: false } inboundOwner ||
             inbound.CurrentRoutePublicationToken is not { IsDefault: false } inboundPublication ||
-            inbound.RuntimeUnlockRouteCommitToken is not { IsDefault: false } ||
-            inbound.CurrentTransferLeg is not { } inboundLeg)
+            inbound.CurrentTransferLeg is not { } inboundLeg ||
+            !TryCaptureFallbackBootstrapServiceSource(CreateCoordinatorStateLocked(inbound), out var inboundCommit, out var inboundInitial))
         {
             return false;
         }
@@ -483,9 +497,9 @@ public sealed partial class SessionFileTransferService
               !MatchesFallbackV6ProofBootstrapTriggerSourceScope(
                   evaluation,
                   inboundCheckpoint,
-                  inbound.RuntimeUnlockRouteCommitToken.Value,
+                  inboundCommit,
                   inbound.CurrentTransferLeg.CheckpointRequestId,
-                  inbound.CurrentTransferLeg.CheckpointGeneration))))
+                  inbound.CurrentTransferLeg.CheckpointGeneration, inboundInitial))))
         {
             return false;
         }
@@ -725,12 +739,18 @@ public sealed partial class SessionFileTransferService
             out string status)
     {
         replacedWake = null;
+        if (!TryCaptureFallbackBootstrapServiceSource(CreateCoordinatorStateLocked(context), out var commit, out var initial))
+        {
+            status = "Stale";
+            return null;
+        }
         var current = context.CurrentFallbackV6ProofBootstrapPendingWriteWake;
         if (current is not null &&
             ReferenceEquals(current.Bridge, bridge) &&
             current.Evaluation == evaluation &&
             ReferenceEquals(current.DataSession, context.DataSession) &&
-            current.DataSessionGeneration == context.DataSessionGeneration)
+            current.DataSessionGeneration == context.DataSessionGeneration &&
+            current.RouteCommit == commit && current.InitialSource == initial)
         {
             status = "Coalesced";
             return current;
@@ -791,10 +811,10 @@ public sealed partial class SessionFileTransferService
             evaluation,
             context.DataSession!,
             context.DataSessionGeneration,
-            context.RuntimeUnlockRouteCommitToken!.Value,
+            commit,
             context.ReceiverSparseChunksPendingWrite.Count,
             context.PendingChunks.Count,
-            RecheckClaimed: false);
+            RecheckClaimed: false) { InitialSource = initial };
         context.CurrentFallbackV6ProofBootstrapPendingWriteWake = wake;
         return wake;
     }
@@ -975,10 +995,9 @@ public sealed partial class SessionFileTransferService
             context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
             context.CurrentRoutePublicationToken is not
                 { IsDefault: false } publication ||
-            context.RuntimeUnlockRouteCommitToken is not
-                { IsDefault: false } routeCommit ||
+            !TryCaptureFallbackBootstrapServiceSource(CreateCoordinatorStateLocked(context), out var routeCommit, out var initial) ||
             context.CurrentTransferLeg is not { } leg ||
-            routeCommit != wake.RouteCommit)
+            routeCommit != wake.RouteCommit || initial != wake.InitialSource)
         {
             reason = "route_scope_changed";
             return false;
@@ -1008,7 +1027,7 @@ public sealed partial class SessionFileTransferService
                 checkpoint,
                 routeCommit,
                 leg.CheckpointRequestId,
-                leg.CheckpointGeneration))
+                leg.CheckpointGeneration, initial))
         {
             reason = "bootstrap_trigger_scope_changed";
             return false;
@@ -1383,8 +1402,9 @@ public sealed partial class SessionFileTransferService
             context.DataSessionGeneration <= 0 ||
             context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
             context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
-            context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
             context.CurrentTransferLeg is not { } leg ||
+            !TryCaptureFallbackBootstrapServiceSource(CreateCoordinatorStateLocked(context), out var routeCommit, out var initial) ||
+            (initial is not null && frame is not FileTransferFallbackBootstrapFrameV6) ||
             !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
                 frame,
                 out var frameIdentity))
@@ -1409,7 +1429,7 @@ public sealed partial class SessionFileTransferService
             routeCommit,
             context.CurrentFallbackCheckpointLease,
             leg.CheckpointRequestId ?? "(none)",
-            leg.CheckpointGeneration);
+            leg.CheckpointGeneration) { InitialSource = initial };
         return true;
     }
 
@@ -1434,8 +1454,9 @@ public sealed partial class SessionFileTransferService
             context.DataSessionGeneration <= 0 ||
             context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
             context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
-            context.RuntimeUnlockRouteCommitToken is not { IsDefault: false } routeCommit ||
             context.CurrentTransferLeg is not { } leg ||
+            !TryCaptureFallbackBootstrapServiceSource(CreateCoordinatorStateLocked(context), out var routeCommit, out var initial) ||
+            (initial is not null && frame is not FileTransferFallbackBootstrapFrameV6) ||
             !PostTunaFallbackPeerProofFrameIdentity.TryCreate(
                 frame,
                 out var frameIdentity))
@@ -1460,7 +1481,7 @@ public sealed partial class SessionFileTransferService
             routeCommit,
             context.CurrentFallbackCheckpointLease,
             leg.CheckpointRequestId ?? "(none)",
-            leg.CheckpointGeneration);
+            leg.CheckpointGeneration) { InitialSource = initial };
         return true;
     }
 
@@ -1477,6 +1498,7 @@ public sealed partial class SessionFileTransferService
            left.BootstrapGeneration == right.BootstrapGeneration &&
            left.DurableCheckpoint == right.DurableCheckpoint &&
            left.SourceRouteCommit == right.SourceRouteCommit &&
+           left.InitialSource == right.InitialSource &&
            left.FallbackCheckpointLease == right.FallbackCheckpointLease &&
            string.Equals(
                left.CheckpointRequestId,
@@ -1503,6 +1525,7 @@ public sealed partial class SessionFileTransferService
                after.DataSessionReferenceGeneration &&
            before.DataSessionGeneration == after.DataSessionGeneration &&
            before.SourceRouteCommit == after.SourceRouteCommit &&
+           before.InitialSource == after.InitialSource &&
            before.FallbackCheckpointLease == after.FallbackCheckpointLease &&
            string.Equals(
                before.CheckpointRequestId,
@@ -1563,7 +1586,7 @@ public sealed partial class SessionFileTransferService
                binding.DurableCheckpoint,
                binding.SourceRouteCommit,
                binding.CheckpointRequestId,
-               binding.CheckpointGeneration);
+               binding.CheckpointGeneration, binding.InitialSource);
 
     private static bool MatchesFallbackV6ProofBootstrapPeerFrameEvaluation(
         FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding,
@@ -1574,6 +1597,7 @@ public sealed partial class SessionFileTransferService
                evaluation) &&
            binding.DurableCheckpoint == command.Observation.DurableCheckpoint &&
            binding.SourceRouteCommit == command.SourceRouteCommit &&
+           binding.InitialSource == command.InitialSource &&
            binding.DataSessionGeneration == command.SourceDataSessionGeneration;
 
     private static void
@@ -1799,23 +1823,28 @@ public sealed partial class SessionFileTransferService
     private static bool MatchesFallbackV6ProofBootstrapTriggerSourceScope(
         FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
         FileTransferRouteTransitionDurableCheckpoint checkpoint,
-        RouteCommitToken routeCommit,
+        RouteCommitToken? routeCommit,
         string? checkpointRequestId,
-        int checkpointGeneration)
+        int checkpointGeneration,
+        FileTransferInitialTunaFallbackSource? initial = null)
     {
         var source = evaluation.TriggerSourceScope;
+        if (initial is not null ? initial.IsDefault || routeCommit is not null ||
+                initial.Publication != checkpoint.SourceRoutePublication || initial.DataSessionGeneration != checkpoint.DataSessionGeneration
+            : routeCommit is not { IsDefault: false }) { return false; }
+        var publication = checkpoint.SourceRoutePublication;
         return source is not null &&
                string.Equals(
                    source.RouteToken,
-                   routeCommit.RouteToken,
+                   routeCommit?.RouteToken ?? publication.RouteToken,
                    StringComparison.Ordinal) &&
-               source.ProtocolVersion == routeCommit.ProtocolVersion &&
-               source.LiveRouteEpoch == routeCommit.LiveRouteEpoch &&
+               source.ProtocolVersion == (routeCommit?.ProtocolVersion ?? publication.ProtocolVersion) &&
+               source.LiveRouteEpoch == (routeCommit?.LiveRouteEpoch ?? publication.LiveRouteEpoch) &&
                source.RuntimeGeneration ==
                    checkpoint.SourceRuntimeOwner.RuntimeGeneration &&
                source.RoutePublicationGeneration ==
                    checkpoint.SourceRoutePublication.PublicationGeneration &&
-               source.RouteCommitGeneration == routeCommit.CommitGeneration &&
+               source.RouteCommitGeneration == (routeCommit?.CommitGeneration ?? 0) &&
                source.TerminalGeneration == checkpoint.SourceTerminalGeneration &&
                source.LegGeneration == checkpoint.SourceLegGeneration &&
                source.TransportEpoch == checkpoint.SourceTransportEpoch &&
@@ -1848,7 +1877,7 @@ public sealed partial class SessionFileTransferService
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_bootstrap_generation={evaluation.TriggerBootstrapGeneration}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={command?.Observation.DurableCheckpoint.CheckpointGeneration ?? 0}; source_state_epoch={command?.Observation.DurableCheckpoint.StateEpoch ?? 0}; source_contiguous_frontier={command?.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={command?.Observation.DurableCheckpoint.DurableHighestChunkIndex ?? -1}; source_chunk_count={command?.Observation.DurableCheckpoint.ChunkCount ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_v6_proof_bootstrap_decided; session_id={FormatProtocolLogValue(evaluation.SessionId)}; transfer_id={FormatProtocolLogValue(transferId)}; direction={evaluation.Direction.ToString().ToLowerInvariant()}; observation_generation={evaluation.ObservationGeneration}; fallback_epoch={evaluation.FallbackEpoch}; trigger_transfer_id={FormatProtocolLogValue(evaluation.TriggerTransferId ?? "(none)")}; trigger_transport_epoch={evaluation.TriggerTransportEpoch}; trigger_bootstrap_generation={evaluation.TriggerBootstrapGeneration}; trigger_frame_fingerprint={FormatProtocolLogValue(evaluation.TriggerFrameFingerprint ?? "(none)")}; trigger_data_session_generation={evaluation.TriggerDataSessionGeneration}; authority_id={FormatProtocolLogValue(command?.AuthorityId.ToString() ?? "(none)")}; bootstrap_generation={command?.BootstrapGeneration ?? 0}; source_route=file_tuna_v4; source_protocol_version=4; source_live_route_epoch={command?.SourceLiveRouteEpoch ?? 0}; source_runtime_generation={command?.SourceRuntimeOwner.RuntimeGeneration ?? 0}; source_route_publication_generation={command?.SourceRoutePublication.PublicationGeneration ?? 0}; source_route_commit_generation={command?.SourceRouteCommit?.CommitGeneration ?? 0}; source_terminal_generation={command?.SourceTerminalGeneration ?? 0}; source_leg_generation={command?.SourceLegGeneration ?? 0}; source_transport_epoch={command?.SourceTransportEpoch ?? 0}; source_bridge_recovery_generation={command?.SourceBridgeRecoveryGeneration ?? 0}; source_data_session_generation={command?.SourceDataSessionGeneration ?? 0}; source_checkpoint_request_id={FormatProtocolLogValue(evaluation.TriggerSourceScope?.CheckpointRequestId ?? "(none)")}; source_checkpoint_generation={evaluation.TriggerSourceScope?.CheckpointGeneration ?? 0}; source_durable_checkpoint_generation={command?.Observation.DurableCheckpoint.CheckpointGeneration ?? 0}; source_state_epoch={command?.Observation.DurableCheckpoint.StateEpoch ?? 0}; source_contiguous_frontier={command?.Observation.DurableCheckpoint.ContiguousCommittedChunkIndex ?? 0}; source_durable_highest={command?.Observation.DurableCheckpoint.DurableHighestChunkIndex ?? -1}; source_chunk_count={command?.Observation.DurableCheckpoint.ChunkCount ?? 0}; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; target_transport_epoch={command?.TargetTransportEpoch ?? 0}; frame_kind={FormatProtocolLogValue(command?.FrameKind.ToString() ?? "(none)")}; decision_status={FormatProtocolLogValue(status)}; decision_reason={FormatProtocolLogValue(reason)}");
 
     private static void LogInboundFallbackV6ProofBootstrapPendingWriteDeferred(
         InboundFallbackV6ProofBootstrapPendingWriteWake wake,

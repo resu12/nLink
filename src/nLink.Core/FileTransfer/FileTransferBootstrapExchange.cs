@@ -112,7 +112,7 @@ internal static partial class FileTransferCoordinator
             return new(state, false, "bootstrap_source_hold_receipt_required");
         }
         if (prior is null
-            ? !IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(state, out _)
+            ? !IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(state, out _) && !CanStartInitialTunaFallbackExchange(state)
             : !prior.Completed || prior.Invalidated ||
               transition.LastFallbackV6ProofBootstrapReceipt?.Command != prior.Bootstrap ||
               !IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(state, prior.Bootstrap, out _))
@@ -339,15 +339,15 @@ internal static partial class FileTransferCoordinator
 
     internal static bool CanStartFallbackBootstrapExchange(FileTransferCoordinatorState state)
     {
-        var substate = state.PersistentState.FileTransferRouteTransition;
-        if (substate.BootstrapAgreement is not { IsEnabled: true } agreement || !IsBootstrapAgreementCurrent(state, agreement) ||
+        var (agreement, prior, receipt) = CaptureFallbackBootstrapExchangeContext(state);
+        if (agreement is not { IsEnabled: true } || !IsBootstrapAgreementCurrent(state, agreement) ||
             string.IsNullOrWhiteSpace(state.CurrentDataSessionIdentity)) { return false; }
-        if (substate.BootstrapExchange is not { } prior)
+        if (prior is null)
         {
-            return IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(state, out _);
+            return IsCommittedInitialRegularV4ToTunaV4ActivationCurrent(state, out _) || CanStartInitialTunaFallbackExchange(state);
         }
         return IsFallbackBootstrapExchangeCurrent(state, prior) || prior.Completed && !prior.Invalidated &&
-            substate.LastFallbackV6ProofBootstrapReceipt?.Command == prior.Bootstrap &&
+            receipt?.Command == prior.Bootstrap &&
             IsCommittedPostFallbackV6ToTunaV4ReactivationCurrent(state, prior.Bootstrap, out _);
     }
 
@@ -356,6 +356,11 @@ internal static partial class FileTransferCoordinator
         if (!CanStartFallbackBootstrapExchange(state) || !FileTransferBootstrapCorrelation.IsValidFrame(frame) ||
             frame.SessionId != state.SessionId || frame.TransferId != state.TransferId ||
             frame.TransportEpoch != Math.Max(1, state.CurrentLeg!.TransportEpochId + 1)) { return false; }
+        return IsFallbackBootstrapWakePeerIdCurrent(state, frame);
+    }
+
+    private static bool IsFallbackBootstrapWakePeerIdCurrent(FileTransferCoordinatorState state, FileTransferFallbackBootstrapFrameV6 frame)
+    {
         var substate = state.PersistentState.FileTransferRouteTransition;
         var peerId = state.Direction == FileTransferDirection.Outbound ? frame.ReceiverChallengeId : frame.SenderRequestId;
         return IsFreshBootstrapPeerId(substate.BootstrapAgreement!, peerId, substate.BootstrapExchange?.LastCompletedPeerId) &&
@@ -373,21 +378,39 @@ internal static partial class FileTransferCoordinator
     private static bool IsFallbackBootstrapProofCurrent(FileTransferCoordinatorState state,
         FileTransferFallbackTransitionProofBoundary proof, FileTransferRouteTransitionDurableCheckpoint checkpoint)
     {
-        var exchange = state.PersistentState.FileTransferRouteTransition.BootstrapExchange;
-        if (exchange is not { Completed: true, RetainedPeerFrame: { } frame } ||
-            !IsFallbackBootstrapExchangeCurrent(state, exchange) ||
-            state.PersistentState.FileTransferRouteTransition.LastFallbackV6ProofBootstrapReceipt is not
+        var (_, exchange, receipt) = CaptureFallbackBootstrapExchangeContext(state);
+        return exchange is not null && IsFallbackBootstrapExchangeCurrent(state, exchange) &&
+            IsFallbackBootstrapProofBoundToExchange(exchange, receipt, proof, checkpoint);
+    }
+
+    // Copy persistent value state outside the nested source-validation call chain.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (FileTransferBootstrapAgreement? Agreement, FileTransferBootstrapExchange? Exchange, FileTransferFallbackV6ProofBootstrapReceipt? Receipt)
+        CaptureFallbackBootstrapExchangeContext(FileTransferCoordinatorState state)
+    {
+        var transition = state.PersistentState.FileTransferRouteTransition;
+        return (transition.BootstrapAgreement, transition.BootstrapExchange, transition.LastFallbackV6ProofBootstrapReceipt);
+    }
+
+    private static bool IsFallbackBootstrapProofBoundToExchange(FileTransferBootstrapExchange? exchange,
+        FileTransferFallbackV6ProofBootstrapReceipt? receipt,
+        FileTransferFallbackTransitionProofBoundary proof, in FileTransferRouteTransitionDurableCheckpoint checkpoint)
+    {
+        if (exchange is not { Completed: true, Invalidated: false, RetainedPeerFrame: { } frame } ||
+            receipt is not
                 { Status: FileTransferFallbackV6ProofBootstrapReceiptStatus.Delivered } delivered ||
             delivered.Command != exchange.Bootstrap || delivered.FrameIdentity != exchange.First.Command.FrameIdentity ||
             checkpoint != exchange.Bootstrap.Observation.DurableCheckpoint ||
             proof.SourceRouteCommit != exchange.Bootstrap.SourceRouteCommit ||
+            proof.InitialSource != exchange.Bootstrap.InitialSource ||
             proof.TargetTransportEpoch != exchange.Bootstrap.TargetTransportEpoch)
         {
             return false;
         }
         var identity = PostTunaFallbackPeerProofFrameIdentity.Create(frame);
+        var observation = exchange.Bootstrap.Observation;
         return proof.RetainedFrameIdentity == identity && proof.PeerProofEvidence == new PostTunaFallbackPeerProofEvidence(
-            state.SessionId, state.TransferId, state.Direction, exchange.Bootstrap.BootstrapGeneration,
+            observation.SessionId, observation.TransferId, observation.Direction, exchange.Bootstrap.BootstrapGeneration,
             exchange.Bootstrap.TargetTransportEpoch, "fallback_v6_proof_bootstrap_peer_frame",
             "coordinator_fallback_v6_proof_bootstrap_peer_frame", identity);
     }

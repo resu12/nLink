@@ -45,7 +45,8 @@ internal static partial class FileTransferCoordinator
     {
         var transition = state.PersistentState.FileTransferRouteTransition;
         if (!IsFallbackBootstrapInitiationCurrent(state, initiation) || !CanStartFallbackBootstrapExchange(state) ||
-            state.CurrentRoutePublicationToken is null || state.CurrentRouteCommit is null ||
+            state.CurrentRoutePublicationToken is null ||
+            state.CurrentRouteCommit is null && CaptureInitialTunaFallbackSource(state) is null ||
             state.CurrentRuntimeOwner is null || state.CurrentLeg is null ||
             state.CurrentDataSessionIdentity is not { Length: > 0 } sessionIdentity || state.CurrentDataSessionGeneration <= 0 ||
             transition.BootstrapAgreement is not { IsEnabled: true } agreement ||
@@ -75,7 +76,8 @@ internal static partial class FileTransferCoordinator
             operation.Command == command && state.PersistentState.CoordinatorInstanceId == command.CoordinatorInstanceId &&
             state.PersistentState.FileTransferRouteTransition.BootstrapAgreement == command.Agreement &&
             state.CurrentDataSessionIdentity == command.DataSessionIdentity && state.CurrentDataSessionGeneration == command.DataSessionGeneration &&
-            IsFallbackBootstrapLocalStopScopeCurrent(state, command.Source);
+            IsFallbackBootstrapLocalStopScopeCurrent(state, command.Source) &&
+            (command.Source.Publication.RouteCommitGeneration is not null || CaptureInitialTunaFallbackSource(state) is not null);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static FileTransferBootstrapSourceHoldDecision ApplyFallbackBootstrapSourceHoldCapture(

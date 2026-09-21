@@ -79,7 +79,7 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.Null(PressureState(installed.State).PendingBinding);
         Assert.Equal(source.CurrentRoutePublicationToken, installed.State.CurrentRoutePublicationToken);
         Assert.Null(installed.State.CurrentRouteCommit);
-        Assert.False(FileTransferCoordinator.CanStartFallbackBootstrapExchange(installed.State));
+        Assert.True(FileTransferCoordinator.CanStartFallbackBootstrapExchange(installed.State));
 
         var prepared = FileTransferCoordinator.PrepareRegularV4FrontierRepairPressureSettlement(
             installed.State, RegularV4PressureSettlement(authority,

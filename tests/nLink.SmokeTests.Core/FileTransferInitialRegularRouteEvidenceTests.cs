@@ -53,7 +53,8 @@ public sealed class FileTransferInitialRegularRouteEvidenceTests : FileTransferO
         finally { TryDeleteDirectory(tempRoot); }
     }
 
-    internal static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes)
+    internal static string[] Emit(IReadOnlyList<FileTransferCoordinatorTransitionEnvelope> envelopes,
+        Action<Type, object, FileTransferCoordinatorTransitionEnvelope>? additionalModeledEffects = null)
     {
         var emitterType = typeof(SessionFileTransferService).GetNestedType("CoordinatorSnapshotStreamEmitter", BindingFlags.NonPublic)!;
         var emitter = Activator.CreateInstance(emitterType, nonPublic: true)!;
@@ -69,6 +70,7 @@ public sealed class FileTransferInitialRegularRouteEvidenceTests : FileTransferO
         foreach (var envelope in envelopes)
         {
             emitterType.GetMethod("Enqueue", flags)!.Invoke(emitter, [envelope]);
+            additionalModeledEffects?.Invoke(emitterType, emitter, envelope);
             if (envelope.DecisionKind != nameof(FileTransferCoordinatorActionKind.RoutePublication) ||
                 envelope.DecisionStatus != "Accepted") { continue; }
             var publication = Assert.Single(envelope.Aggregate.Operations, operation =>

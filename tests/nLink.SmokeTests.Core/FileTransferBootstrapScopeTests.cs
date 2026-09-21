@@ -29,6 +29,7 @@ public sealed class FileTransferBootstrapScopeTests
     {
         var command = CreateCommand();
         var checkpoint = command.Observation.DurableCheckpoint;
+        var commit = command.SourceRouteCommit!.Value;
         var original = Id(command);
         foreach (var changed in new[]
         {
@@ -40,12 +41,12 @@ public sealed class FileTransferBootstrapScopeTests
             command with { SourceRoutePublication = command.SourceRoutePublication with { PublicationGeneration = 30 } },
             command with { SourceRoutePublication = command.SourceRoutePublication with { RuntimeOwner = command.SourceRuntimeOwner with { RuntimeGeneration = 8 } } },
             command with { SourceRoutePublication = command.SourceRoutePublication with { RouteCommitGeneration = null } },
-            command with { SourceRouteCommit = command.SourceRouteCommit with { CommitGeneration = 24 } },
-            command with { SourceRouteCommit = command.SourceRouteCommit with { TunaPathLeaseGeneration = 20 } },
-            command with { SourceRouteCommit = command.SourceRouteCommit with { TunaPathLeaseListenerRunId = null } },
-            command with { SourceRouteCommit = command.SourceRouteCommit with { SamePathTunaProbeAckId = "another-probe" } },
-            command with { SourceRouteCommit = command.SourceRouteCommit with { RuntimeUnlockAdmission = command.SourceRouteCommit.RuntimeUnlockAdmission with { AdmissionGeneration = 12 } } },
-            command with { SourceRouteCommit = command.SourceRouteCommit with { RuntimeUnlockAdmission = command.SourceRouteCommit.RuntimeUnlockAdmission with { FallbackSurvivalState = command.SourceRouteCommit.RuntimeUnlockAdmission.FallbackSurvivalState with { PairedFallbackYieldGranted = false } } } },
+            command with { SourceRouteCommit = commit with { CommitGeneration = 24 } },
+            command with { SourceRouteCommit = commit with { TunaPathLeaseGeneration = 20 } },
+            command with { SourceRouteCommit = commit with { TunaPathLeaseListenerRunId = null } },
+            command with { SourceRouteCommit = commit with { SamePathTunaProbeAckId = "another-probe" } },
+            command with { SourceRouteCommit = commit with { RuntimeUnlockAdmission = commit.RuntimeUnlockAdmission with { AdmissionGeneration = 12 } } },
+            command with { SourceRouteCommit = commit with { RuntimeUnlockAdmission = commit.RuntimeUnlockAdmission with { FallbackSurvivalState = commit.RuntimeUnlockAdmission.FallbackSurvivalState with { PairedFallbackYieldGranted = false } } } },
             command with { SourceTerminalGeneration = 3 }, command with { SourceLiveRouteEpoch = 4 },
             command with { SourceLegGeneration = 5 }, command with { SourceTransportEpoch = 4 },
             command with { TargetTransportEpoch = 6 }, command with { SourceBridgeRecoveryGeneration = 32 },

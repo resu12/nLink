@@ -24,7 +24,12 @@ internal static partial class FileTransferCoordinator
         };
         AddOwner(command.SourceRuntimeOwner);
         AddPublication(command.SourceRoutePublication);
-        AddCommit(command.SourceRouteCommit);
+        if (command.SourceRouteCommit is { } commit) { AddCommit(commit); }
+        else
+        {
+            fields.AddRange(["initial-publication-source-v1", "commit-absent", command.InitialSource!.DataSessionIdentity,
+                Number(command.InitialSource.DataSessionGeneration)]);
+        }
         fields.AddRange([
             Number(command.SourceTerminalGeneration), Number(command.SourceLiveRouteEpoch), Number(command.SourceLegGeneration),
             Number(command.SourceTransportEpoch), Number(command.TargetTransportEpoch), Number(command.SourceBridgeRecoveryGeneration),

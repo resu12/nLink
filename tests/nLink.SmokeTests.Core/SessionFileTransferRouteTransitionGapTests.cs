@@ -795,6 +795,15 @@ public sealed partial class SessionFileTransferV4SenderTests
         var sessionId = $"session_{transferId}";
         using var service = new SessionFileTransferService();
         using var bridge = new LoopbackFileTransferTransport(sessionId);
+        var (context, evaluation) = PrepareInboundPeerFirstSuccessor(service, bridge, sessionId, transferId);
+        await CompleteInboundPeerFirstSuccessorAsync(service, bridge, context, evaluation, deferForPendingWrite);
+    }
+
+    // Unwind fixture-only persistent-state copies before entering synchronous service callbacks.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (object Context, FileTransferFallbackV6ProofBootstrapEvaluation Evaluation) PrepareInboundPeerFirstSuccessor(
+        SessionFileTransferService service, LoopbackFileTransferTransport bridge, string sessionId, string transferId)
+    {
         service.AttachTransport(bridge);
         var dataSession = new GenerationBoundDataSession(
             sessionId,
@@ -1049,7 +1058,14 @@ public sealed partial class SessionFileTransferV4SenderTests
              currentCheckpoint,
              currentState.CurrentRouteCommit!.Value,
              currentState.CurrentLeg!.CheckpointRequestId,
-             currentState.CurrentLeg.CheckpointGeneration])));
+             currentState.CurrentLeg.CheckpointGeneration, null])));
+        return (context, evaluation);
+    }
+
+    private static async Task CompleteInboundPeerFirstSuccessorAsync(SessionFileTransferService service,
+        LoopbackFileTransferTransport bridge, object context, FileTransferFallbackV6ProofBootstrapEvaluation evaluation,
+        bool deferForPendingWrite)
+    {
         var process = typeof(SessionFileTransferService).GetMethod(
             "ProcessFallbackV6ProofBootstrapEvaluationAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -2316,7 +2332,7 @@ public sealed partial class SessionFileTransferV4SenderTests
              checkpoint,
              routeCommit,
              leg.CheckpointRequestId,
-             leg.CheckpointGeneration])));
+             leg.CheckpointGeneration, null])));
     }
 
     [Fact]

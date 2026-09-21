@@ -229,7 +229,7 @@ public sealed partial class SessionFileTransferService
                     wakeEvaluation = CreateBootstrapCorrelationWakeEvaluation(state, binding);
                 }
             }
-            else if (state.PersistentState.FileTransferRouteTransition.BootstrapExchange is { } exchange &&
+            else if (CaptureBootstrapCorrelationExchange(state) is { } exchange &&
                 FileTransferCoordinator.IsFallbackBootstrapExchangeCurrent(state, exchange))
             {
                 if (binding.DurableCheckpoint != exchange.Bootstrap.Observation.DurableCheckpoint) { return true; }
@@ -265,11 +265,17 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    // Do not retain a persistent-state value copy across synchronous wake dispatch.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferBootstrapExchange? CaptureBootstrapCorrelationExchange(FileTransferCoordinatorState state)
+        => state.PersistentState.FileTransferRouteTransition.BootstrapExchange;
+
     private static bool TryStageBootstrapCorrelationFrame(InboundTransferContext context,
         FileTransferFallbackBootstrapFrameV6 frame, FileTransferFallbackV6ProofBootstrapPeerFrameBinding binding)
     {
         if (context.PendingFallbackV6ProofBootstrapPeerFrameBinding is { } prior &&
             prior.SourceRouteCommit == binding.SourceRouteCommit &&
+            prior.InitialSource == binding.InitialSource &&
             (prior.FrameIdentity != binding.FrameIdentity || !MatchesFallbackV6ProofBootstrapPeerFrameBinding(prior, binding))) { return false; }
         context.PendingFallbackV6ProofBootstrapPeerFrameEvidence = frame;
         context.PendingFallbackV6ProofBootstrapPeerFrameBinding = binding;
@@ -323,9 +329,9 @@ public sealed partial class SessionFileTransferService
             state.Direction == FileTransferDirection.Outbound ? "file_transfer_v6_state_frame_received" : "file_transfer_v6_frontier_request_frame_received",
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), state.TransferId, binding.FrameIdentity.TransportEpoch,
             binding.FrameIdentity.Sha256, binding.DataSession, binding.DataSessionReferenceGeneration,
-            new(binding.SourceRouteCommit.RouteToken, 4, binding.SourceRouteCommit.LiveRouteEpoch,
+            new(checkpoint.SourceRoutePublication.RouteToken, 4, checkpoint.SourceRoutePublication.LiveRouteEpoch,
                 checkpoint.SourceRuntimeOwner.RuntimeGeneration, checkpoint.SourceRoutePublication.PublicationGeneration,
-                binding.SourceRouteCommit.CommitGeneration, checkpoint.SourceTerminalGeneration, checkpoint.SourceLegGeneration,
+                binding.SourceRouteCommit?.CommitGeneration ?? 0, checkpoint.SourceTerminalGeneration, checkpoint.SourceLegGeneration,
                 checkpoint.SourceTransportEpoch, checkpoint.SourceBridgeRecoveryGeneration, binding.CheckpointRequestId, binding.CheckpointGeneration));
     }
 
