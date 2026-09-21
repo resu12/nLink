@@ -14212,7 +14212,6 @@ public sealed partial class SessionFileTransferService :
             ClearOutboundFallbackCheckpointRetryStateLocked(context, retiredRequestId, reason);
             RememberRetiredFallbackCheckpointRequest(
                 context.RetiredFallbackCheckpointRequestKeys,
-                retiredLeg!,
                 retiredOwner.Value.TransportEpoch,
                 retiredRequestId);
             retiredLeg!.CheckpointRequestId = null;
@@ -14256,7 +14255,6 @@ public sealed partial class SessionFileTransferService :
         {
             RememberRetiredFallbackCheckpointRequest(
                 context.RetiredFallbackCheckpointRequestKeys,
-                retiredLeg!,
                 retiredOwner.Value.TransportEpoch,
                 retiredRequestId);
             retiredLeg!.CheckpointRequestId = null;
@@ -21557,7 +21555,6 @@ public sealed partial class SessionFileTransferService :
             request.TransportEpoch <= 0 ||
             !string.IsNullOrWhiteSpace(currentLeg!.CheckpointRequestId) ||
             IsRetiredFallbackCheckpointRequest(
-                currentLeg,
                 request.TransportEpoch,
                 request.RepairRequestId,
                 context.RetiredFallbackCheckpointRequestKeys))
@@ -21975,7 +21972,7 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        if (IsRetiredFallbackCheckpointRequest(leg, request.TransportEpoch, request.RepairRequestId, retiredCheckpointRequestKeys))
+        if (IsRetiredFallbackCheckpointRequest(request.TransportEpoch, request.RepairRequestId, retiredCheckpointRequestKeys))
         {
             LogFileTransferFallbackCheckpointExchangeRetired(
                 direction,
@@ -22008,15 +22005,13 @@ public sealed partial class SessionFileTransferService :
     }
 
     private static bool IsRetiredFallbackCheckpointRequest(
-        FileTransferLeg leg,
         long transportEpoch,
         string? requestId,
         HashSet<string> retiredCheckpointRequestKeys)
-        => retiredCheckpointRequestKeys.Contains(CreateFallbackCheckpointRequestOwnerKey(leg, transportEpoch, requestId));
+        => retiredCheckpointRequestKeys.Contains(CreateFallbackCheckpointRequestKey(transportEpoch, requestId));
 
     private static void RememberRetiredFallbackCheckpointRequest(
         HashSet<string> retiredCheckpointRequestKeys,
-        FileTransferLeg leg,
         long transportEpoch,
         string? requestId)
     {
@@ -22026,16 +22021,17 @@ public sealed partial class SessionFileTransferService :
             return;
         }
 
-        retiredCheckpointRequestKeys.Add(CreateFallbackCheckpointRequestOwnerKey(leg, transportEpoch, requestId));
+        retiredCheckpointRequestKeys.Add(CreateFallbackCheckpointRequestKey(transportEpoch, requestId));
     }
 
-    private static string CreateFallbackCheckpointRequestOwnerKey(
-        FileTransferLeg leg,
+    // The owning context scopes this deny-only set to one session/transfer and
+    // direction. Local owner replacement cannot make a retired wire request new.
+    private static string CreateFallbackCheckpointRequestKey(
         long transportEpoch,
         string? requestId)
         => string.Create(
             CultureInfo.InvariantCulture,
-            $"{leg.Generation}|{leg.BridgeRecoveryGeneration}|{leg.LiveRouteEpochId}|{transportEpoch}|{requestId ?? "(none)"}");
+            $"{transportEpoch}|{requestId ?? "(none)"}");
 
     private bool TryRetireOutboundFallbackCheckpointRequestLocked(
         OutboundTransferContext context,
@@ -22123,7 +22119,7 @@ public sealed partial class SessionFileTransferService :
         }
 
         ClearOutboundFallbackCheckpointRetryStateLocked(context, retiredRequestId, reason);
-        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, leg, retiredTransportEpoch, retiredRequestId);
+        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, retiredTransportEpoch, retiredRequestId);
         LogFileTransferFallbackCheckpointRetired(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -22517,7 +22513,7 @@ public sealed partial class SessionFileTransferService :
             return false;
         }
 
-        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, currentLeg, acceptedTransportEpoch, acceptedCheckpointRequestId);
+        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, acceptedTransportEpoch, acceptedCheckpointRequestId);
         ClearOutboundFallbackCheckpointRetryStateLocked(context, acceptedCheckpointRequestId, "checkpoint_accepted");
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(context, "checkpoint_accepted");
         MarkOutboundFallbackCheckpointRepairAuthorityAcceptedLocked(
@@ -22714,7 +22710,6 @@ public sealed partial class SessionFileTransferService :
 
         RememberRetiredFallbackCheckpointRequest(
             context.RetiredFallbackCheckpointRequestKeys,
-            leg,
             retiredTransportEpoch,
             retiredCheckpointRequestId);
         ClearOutboundFallbackCheckpointRetryStateLocked(context, retiredCheckpointRequestId, acceptedReason);
@@ -23081,7 +23076,7 @@ public sealed partial class SessionFileTransferService :
             return;
         }
 
-        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, currentLeg, transportEpoch, requestId);
+        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, transportEpoch, requestId);
         ClearStaleInboundFallbackTransportEpochAfterCheckpointLocked(context, currentLeg, transportEpoch, reason);
         LogFileTransferFallbackCheckpointAccepted(
             FileTransferDirection.Inbound,

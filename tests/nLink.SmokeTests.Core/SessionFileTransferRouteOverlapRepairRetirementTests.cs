@@ -11,6 +11,71 @@ public sealed partial class SessionFileTransferV4SenderTests
     public async Task FallbackRouteOverlap_StalledPredecessorRemainsSettledWhenCurrentSuccessorRetiresForTuna()
         => await RunInboundResponderHandoffWithFallbackRepairAsync(stalledSuccessor: true);
 
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackRouteOverlap")]
+    public async Task FallbackRepublication_StalledRepairRemainsSettledWhenCurrentOwnerRetires()
+    {
+        const string transferId = "transfer_stalled_fallback_republication";
+        var sessionId = $"session_{transferId}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(sessionId);
+        service.AttachTransport(transport);
+        var context = CreatePostTunaFallbackV6InboundContext(transferId);
+        var dataSession = new MutableAvailabilityDataSession(sessionId, transferId, isAvailable: true);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        SetPrivateProperty(context, "V4LastStateDurableHighestChunkIndex", 255);
+        typeof(SessionFileTransferService).GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var lineage = await CreateStalledInboundRepairSuccessorForHandoffAsync(service, context);
+        var source = CreateCoordinatorStateForTest(context);
+        var logStart = GetOperationalLogLength();
+
+        // Exercise the service's real Coordinator StartTransfer/retirement path.
+        // This is a local ownership fixture, not a simulated peer checkpoint or
+        // permission to classify the old progress obligation as recovered.
+        var leg = Assert.IsType<FileTransferLeg>(typeof(SessionFileTransferService)
+            .GetMethod("StartInboundTransferLegLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, source.RouteSelection, "state_refresh_received",
+                FileTransferLegState.Active, true, true, source.CurrentLeg!.TransportEpochId,
+                source.CurrentLeg.BridgeRecoveryGeneration + 1, null, null]));
+        var target = CreateCoordinatorStateForTest(context);
+        Assert.Equal(source.CurrentRuntimeOwner!.Value.RuntimeGeneration + 1,
+            target.CurrentRuntimeOwner!.Value.RuntimeGeneration);
+        Assert.Equal(source.CurrentRoutePublicationToken!.Value.PublicationGeneration + 1,
+            target.CurrentRoutePublicationToken!.Value.PublicationGeneration);
+        Assert.Equal(source.CurrentLeg.Generation + 1, leg.Generation);
+        Assert.Equal(source.CurrentLeg.BridgeRecoveryGeneration + 1, leg.BridgeRecoveryGeneration);
+        Assert.Equal(source.RouteSelection, target.RouteSelection);
+        Assert.Equal(source.CurrentDataSessionIdentity, target.CurrentDataSessionIdentity);
+        Assert.Equal(source.CurrentDataSessionGeneration, target.CurrentDataSessionGeneration);
+        Assert.Same(dataSession, GetPrivatePropertyValue(context, "DataSession"));
+        Assert.Equal(100, GetPrivateProperty<int>(context, "NextChunkIndex"));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentFallbackFrontierRepairContract"));
+        Assert.Null(target.CurrentRepairReplayDecision);
+
+        var firstLifecycle = GetPrivatePropertyValue(lineage[0], "Lifecycle")!;
+        var successorLifecycle = GetPrivatePropertyValue(lineage[1], "Lifecycle")!;
+        Assert.Equal("SettledStalled", GetPrivatePropertyValue(firstLifecycle, "SettlementOutcome")?.ToString());
+        Assert.Equal("StaleRejected", GetPrivatePropertyValue(successorLifecycle, "SettlementOutcome")?.ToString());
+        Assert.Equal("runtime_owner_retired_state_refresh_received",
+            GetPrivatePropertyValue(successorLifecycle, "SettlementReason"));
+        var settle = typeof(SessionFileTransferService).GetMethod("TrySettleFallbackFrontierRepairContract",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        foreach (var contract in lineage)
+        {
+            var lifecycle = GetPrivatePropertyValue(contract, "Lifecycle")!;
+            var outcome = GetPrivatePropertyValue(lifecycle, "SettlementOutcome");
+            var progress = Enum.Parse(lifecycle.GetType().GetGenericArguments()[0], "ProgressObserved");
+            Assert.False(Assert.IsType<bool>(settle.Invoke(null, [contract, progress, "late_old_source_progress", null])));
+            Assert.Equal(outcome, GetPrivatePropertyValue(lifecycle, "SettlementOutcome"));
+        }
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("decision_reason=runtime_owner_retired_state_refresh_received", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_progress_observed;", log, StringComparison.Ordinal);
+        Assert.Equal(target.CurrentRuntimeOwner, CreateCoordinatorStateForTest(context).CurrentRuntimeOwner);
+        Assert.Equal(100, GetPrivateProperty<int>(context, "NextChunkIndex"));
+    }
+
     private static async Task<object[]> CreateStalledInboundRepairSuccessorForHandoffAsync(
         SessionFileTransferService service, object context, bool configureDestination = true)
     {

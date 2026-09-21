@@ -6673,6 +6673,26 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         }
     }
 
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailCoordinatorAggregate")]
+    public async Task AnalyzeRetained_FallbackTailCoordinatorAggregate_PendingReceiptUsesExactLocalScope()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var repoRoot = FindRepoRoot();
+        var lines = BuildFallbackTailCoordinatorAggregateFixture(peerFirst: true, includeConsumption: false)
+            .Select(line => line + "; log_writer_id=writer-pending-scope");
+        var fixture = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(
+            System.Text.Json.JsonSerializer.Serialize(lines)));
+        var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
+            "Support", "FallbackPendingReceiptScope.ps1"));
+        foreach (var host in new[] { "powershell", "pwsh" })
+        {
+            var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixture], host);
+            Assert.True(result.ExitCode == 0,
+                $"{host}: STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
+        }
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]

@@ -3680,6 +3680,7 @@ function Get-FileTransferFallbackTailCoordinatorAggregateCorrelation {
         [object[]]$matches = @($pendingPeerReceiptEvents | Where-Object {
             (Test-FallbackTailAggregateBefore -Earlier $_ -Later $BoundReceipt) -and
             (Test-FallbackTailAggregateAccepted -Event $_) -and
+            (Test-FallbackTailAggregateLocalScope -Anchor $BoundReceipt -Candidate $_) -and
             (Test-FallbackTailAggregateProofIdentity -Event $_ -Peer) -and
             (Test-FallbackTailAggregatePairingReceiptIdentity `
                 -Pairing $Pairing `

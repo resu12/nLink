@@ -951,7 +951,10 @@ function Get-FileTransferFileTunaV4DataPathMismatchRejectedFailClosedResult {
         $result.Variant = 'second_tuna_rejected_regular_ingress_exact_tuna_receive_missing'
         'missing_exact_tuna_receive'
     }
-    elseif ($tunaResendMissing) { 'missing_tuna_resend' }
+    elseif ($tunaResendMissing) {
+        $result.Variant = 'second_tuna_rejected_regular_ingress_exact_tuna_resend_missing'
+        'missing_tuna_resend'
+    }
     elseif ($receiverTransitionAmbiguous) { 'ambiguous_receiver_route_transition' }
     elseif ($sourceSendBeforeTerminal) { 'missing_receiver_route_transition' }
     elseif ($sourceSendMatched) { 'terminal_boundary' }

@@ -7234,7 +7234,6 @@ public sealed partial class SessionFileTransferService
         {
             RememberRetiredFallbackCheckpointRequest(
                 context.RetiredFallbackCheckpointRequestKeys,
-                leg,
                 epoch.EpochId,
                 checkpointRequestId);
         }
@@ -7290,7 +7289,6 @@ public sealed partial class SessionFileTransferService
         {
             RememberRetiredFallbackCheckpointRequest(
                 context.RetiredFallbackCheckpointRequestKeys,
-                leg,
                 epoch.EpochId,
                 checkpointRequestId);
         }

@@ -15,6 +15,16 @@ if($facts.SelectedRejectionReason -cne $expectedEdge -or
     -not $facts.SelectedRejectionChainMatched -or $facts.SelectedRejectionRecovered) {
     throw ('Original selected rejection edge changed: '+$facts.SelectedRejectionReason)
 }
+$expectedVariant=if($expectedEdge -ceq 'missing_tuna_resend') {
+    'second_tuna_rejected_regular_ingress_exact_tuna_resend_missing'
+} elseif($expectedEdge -ceq 'missing_exact_tuna_receive') {
+    'second_tuna_rejected_regular_ingress_exact_tuna_receive_missing'
+} else { '(none)' }
+$compactSummary=[IO.File]::ReadAllText((Join-Path $output 'filetransfer-retained-compact-summary.json')) | ConvertFrom-Json
+if($compactSummary.failure_variant -cne $expectedVariant -or
+    $compactSummary.first_proof_chain_failure_class -cne 'file_tuna_data_path_mismatch') {
+    throw 'Original primary lost the exact rejected-ingress diagnostic variant'
+}
 # Post-run provenance assertions, not another capture or authority evaluation.
 foreach($view in @('full','compact')) {
     $snapshot=[IO.File]::ReadAllText((Join-Path $output ('filetransfer-coordinator-snapshot-'+$view+'-summary.json'))) | ConvertFrom-Json

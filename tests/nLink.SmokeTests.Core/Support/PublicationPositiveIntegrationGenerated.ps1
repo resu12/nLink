@@ -52,7 +52,9 @@ foreach($name in @('unused-app.txt','unused-wallet.txt','unused-sidecar.txt','tu
 }
 $settings=Join-Path $output 'offline-settings.json'
 $generatedName=if($TwoWriterFixture) { 'two-writer-source.log' } else { 'nlink.log' }
-[IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot;Directory=$output;Output=$output;Mode='valid';GeneratedSource=(Join-Path $Directory $generatedName);LiveScaleFixture=$LiveScaleFixture.IsPresent} | ConvertTo-Json))
+# The current explicit persistence opt-in also requests the owned frontier relay.
+# Let the worker validate that real native attachment; keep the default guard.
+[IO.File]::WriteAllText($settings,(@{RepoRoot=$RepoRoot;Directory=$output;Output=$output;Mode='valid';GeneratedSource=(Join-Path $Directory $generatedName);LiveScaleFixture=$LiveScaleFixture.IsPresent;FrontierLaunch=($PersistenceMode -cin @('write','existing','write-error'))} | ConvertTo-Json))
 $env:NLINK_PUBLICATION_INTEGRATION_SETTINGS=$settings
 $script:atomic=(Get-Command Write-FileTransferEvidenceAtomicJson).ScriptBlock
 $script:hash=(Get-Command Get-FileTransferEvidenceSha256).ScriptBlock
