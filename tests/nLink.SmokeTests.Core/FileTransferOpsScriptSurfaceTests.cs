@@ -6472,16 +6472,21 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound)]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, true)]
     [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, true)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Outbound, false, true)]
+    [InlineData(NLink.Core.FileTransfer.FileTransferDirection.Inbound, false, true)]
     public async Task FileTransferOps_FileTunaPressureSettlementUsesSharedSnapshotEvaluation(
-        NLink.Core.FileTransfer.FileTransferDirection direction, bool crossRoute = false)
+        NLink.Core.FileTransfer.FileTransferDirection direction, bool crossRoute = false, bool initialTuna = false)
     {
         if (!OperatingSystem.IsWindows()) { return; }
         var repoRoot = FindRepoRoot();
-        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-tuna-settlement", Guid.NewGuid().ToString("N"));
+        var artifactRoot = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR");
+        var tempRoot = Path.Combine(artifactRoot ?? Path.GetTempPath(), "nlink-tuna-settlement", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         try
         {
-            var envelopes = (crossRoute
+            var envelopes = (initialTuna
+                    ? FileTransferCoordinatorTests.CreateInitialTunaRepairSettlementSnapshotFixture(direction)
+                    : crossRoute
                     ? FileTransferCoordinatorTests.CreateCrossRoutePressureSettlementSnapshotFixture(direction)
                     : FileTransferCoordinatorTests.CreateFileTunaPressureSettlementSnapshotFixture(direction))
                 .Select(NLink.Core.FileTransfer.SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting);
@@ -6491,9 +6496,10 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             var script = File.ReadAllText(Path.Combine(repoRoot, "tests", "nLink.SmokeTests.Core",
                 "Support", "FileTunaPressureSettlementSnapshotEvidence.ps1"));
             var result = await RunPowerShellScriptTextAsync(script, [repoRoot, fixturePath, tempRoot]);
+            await File.WriteAllTextAsync(Path.Combine(tempRoot, "result.txt"), result.Stdout + result.Stderr);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
         }
-        finally { TryDeleteDirectory(tempRoot); }
+        finally { if (artifactRoot is null) { TryDeleteDirectory(tempRoot); } }
     }
 
     [Fact]

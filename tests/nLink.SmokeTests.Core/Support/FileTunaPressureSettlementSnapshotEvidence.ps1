@@ -5,6 +5,9 @@ $ErrorActionPreference = 'Stop'
 $catalog = Get-FileTransferCoordinatorEvidenceCatalog
 if ($catalog.Hash -cne '17b5e4a90a18a5f4173ebd1b2081aeee1db48773b0213f1bb45549e0a0f057e2') { throw 'Frozen catalog changed.' }
 $envelopes = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
+$bootstrapOperations = @($envelopes.aggregate.operations | Where-Object {
+    $_.operationRole -ceq 'fallback_bootstrap_agreement'
+})
 $continuityOperations = @($envelopes.aggregate.operations | Where-Object {
     Test-FileTransferCoordinatorCheckpointRepairContinuityMarker $_
 })
@@ -18,6 +21,33 @@ if ($continuityOperations.Count -gt 0) {
     }
     $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion
     if ($catalog.Hash -cne 'e6c3b5ff7cf8b44bcde0782ec325d2623cb96ba8ff362edca1902f9a1929059d') { throw 'Frozen continuity catalog changed.' }
+}
+if ($bootstrapOperations.Count -gt 0) {
+    $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion
+    if ($catalog.Hash -cne 'ebbaf19d291129caa47b34e69395de2b38985661560791c7c762c437ed6e679b') { throw 'Frozen bootstrap catalog changed.' }
+    $initial = @($envelopes.aggregate.operations | Where-Object {
+        $_.operationRole -ceq 'repair_authority_current' -and $_.afterState -ceq 'Authorized'
+    })[0].regularV4FrontierRepairPressure.sourceBoundary
+    if (-not (Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary -Boundary $initial)) { throw 'Initial repair boundary missing.' }
+    foreach ($mutation in @(@('routePublicationGeneration', 2), @('routeCommitGeneration', 1),
+        @('liveRouteEpoch', 1), @('terminalGeneration', 1), @('protocolVersion', 6),
+        @('runtimeGeneration', 0), @('legGeneration', 0), @('route', 'post_tuna_fallback_v6'))) {
+        $invalid = $initial | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+        $invalid.($mutation[0]) = $mutation[1]
+        if (Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary -Boundary $invalid) { throw "Altered initial repair boundary accepted: $($mutation[0])" }
+    }
+}
+$activationRetryOperations = @($envelopes.aggregate.operations | Where-Object {
+    $null -ne (Get-FileTransferCoordinatorSnapshotObjectProperty $_.routeTransition 'activationRetryBinding')
+})
+if ($activationRetryOperations.Count -gt 0) {
+    foreach ($operation in $activationRetryOperations) {
+        if (Test-FileTransferActivationRetryOperation $operation $catalog) {
+            throw 'The parent catalog accepted an unsupported activation-retry binding.'
+        }
+    }
+    $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $script:FileTransferCoordinatorActivationRetryCatalogVersion
+    if ($catalog.Hash -cne '6f8667e92dae781e679bbe6f59fbd4f3d6284cd893ad2f643a9e47a21d451b00') { throw 'Frozen activation-retry catalog changed.' }
 }
 $first = $envelopes[0]
 $prefix = "snapshot_contract_version=1; snapshot_selection_mode=SnapshotV1Authoritative; snapshot_catalog_version=$($catalog.Version); snapshot_catalog_hash=$($catalog.Hash); coordinator_instance_id=$($first.coordinatorInstanceId); session_id=$($first.sessionId); transfer_id=$($first.transferId); direction=$($first.direction)"

@@ -999,7 +999,7 @@ public sealed partial class SessionFileTransferV4SenderTests
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4FrontierRepairPressure_ControllerFailureInvalidatesIssuedRecoveryWithoutReapplyingPressure()
     {
-        const string transferId = "transfer_regular_v4_pressure_recovery_handoff_controller_throw";
+        const string transferId = "pressure_controller_throw";
         var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport($"session_{transferId}")
@@ -1044,7 +1044,8 @@ public sealed partial class SessionFileTransferV4SenderTests
             Assert.IsType<FileTransferReceiveRecoveryOperation>(
                 receiveRecovery.LastTerminalOperation).ExecutionState);
         Assert.Empty(transport.ReceiveRecoveryRequests);
-        var log = ReadOperationalLogTail(logStart);
+        var log = string.Join('\n', ReadOperationalLogTail(logStart).Split('\n')
+            .Where(line => line.Contains($"transfer_id={transferId};", StringComparison.Ordinal)));
         Assert.Contains(
             "event=filetransfer_receive_recovery_operation_invalidation_decided;",
             log,

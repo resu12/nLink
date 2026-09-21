@@ -15473,6 +15473,7 @@ internal static partial class FileTransferCoordinator
     }
 
     internal static bool TryIssueRegularV4FrontierRepairAuthority(
+        FileTransferCoordinatorState state,
         RepairReplayDecision repairDecision,
         RegularV4FrontierRepairAuthorityRequest request,
         out FileTransferRegularV4FrontierRepairAuthority? authority,
@@ -15480,9 +15481,8 @@ internal static partial class FileTransferCoordinator
     {
         authority = null;
         rejectionReason = "accepted";
-        if (repairDecision.IsDefault || repairDecision.AuthorityId.IsDefault)
+        if (!IsRepairReplayDecisionCurrent(state, repairDecision, out rejectionReason))
         {
-            rejectionReason = "repair_replay_decision_missing";
             return false;
         }
 
@@ -15519,7 +15519,8 @@ internal static partial class FileTransferCoordinator
             expectedTransport == FileTransferTransportKind.Unknown ||
             publication.TargetTransport != expectedTransport ||
             (repairDecision.CurrentRoute == FileTransferRoute.FileTunaV4 &&
-             publication.RouteCommitGeneration is not > 0))
+             publication.RouteCommitGeneration is not > 0 &&
+             !IsCurrentInitialTunaFrontierRepairPublication(state, publication)))
         {
             rejectionReason = "regular_v4_repair_route_invariant_mismatch";
             return false;
@@ -15562,6 +15563,22 @@ internal static partial class FileTransferCoordinator
         return true;
     }
 
+    // Only the exact initial Tuna publication legitimately has no transition
+    // commit. Issuance and settlement must not admit a retired commit or republication.
+    private static bool IsCurrentInitialTunaFrontierRepairPublication(
+        FileTransferCoordinatorState state, RoutePublicationToken publication)
+        => publication == state.CurrentRoutePublicationToken &&
+           publication.RuntimeOwner == state.CurrentRuntimeOwner &&
+           publication.ActionKind == FileTransferCoordinatorActionKind.RoutePublication &&
+           publication.PublicationGeneration == 1 && state.LastRoutePublicationGeneration == 1 &&
+           publication.RouteCommitGeneration is null && state.CurrentRouteCommit is null &&
+           publication.LiveRouteEpoch == 0 && state.CurrentLiveRouteEpoch is null &&
+           state.LastLiveRouteEpochId == 0 && state.LastRouteCommitGeneration == 0 &&
+           state.TerminalGeneration == 0 &&
+           state.CurrentLeg is { RouteSelection.Route: FileTransferRoute.FileTunaV4,
+               ProtocolVersion: FileTransferProtocol.ProtocolVersionV4, LiveRouteEpochId: 0 } &&
+           IsRoutePublicationTokenCurrent(state, publication, out _);
+
     internal static RegularV4FrontierRepairPressureBindingDecision
         StageRegularV4FrontierRepairPressureBinding(
             FileTransferCoordinatorState state,
@@ -15595,15 +15612,8 @@ internal static partial class FileTransferCoordinator
                 "terminal_state");
         }
 
-        if (!IsRepairReplayDecisionCurrent(state, repairDecision, out var currentnessReason))
-        {
-            return RegularV4PressureBindingDecision(
-                state,
-                RegularV4FrontierRepairPressureBindingDecisionStatus.Rejected,
-                currentnessReason);
-        }
-
         if (!TryIssueRegularV4FrontierRepairAuthority(
+                state,
                 repairDecision,
                 authorityRequest,
                 out var issuedAuthority,
@@ -17904,25 +17914,72 @@ internal static partial class FileTransferCoordinator
         BridgeRecoveryKind recoveryKind,
         string? checkpointRequestId)
     {
+        var decision = PrepareReceiveRecoveryOperationIssuance(
+            state,
+            observation,
+            recoveryKind,
+            checkpointRequestId,
+            out var completedPredecessor);
+        if (decision.Status != FileTransferReceiveRecoveryTransitionStatus.Accepted)
+        {
+            return decision;
+        }
+
+        return ApplyPreparedReceiveRecoveryOperationIssuance(state, decision, completedPredecessor);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision ApplyPreparedReceiveRecoveryOperationIssuance(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryDecision decision,
+        FileTransferReceiveRecoveryOperation? completedPredecessor)
+    {
+        var authority = decision.Authority!.Value;
+        var issuanceState = completedPredecessor is { } predecessor
+            ? ApplyCompletedReceiveRecoverySupersession(
+                state,
+                predecessor)
+            : state;
+        var issuedState = ApplyIssuedReceiveRecoveryOperation(
+            issuanceState,
+            authority);
+        var holdReconciliation =
+            ReconcileRuntimeUnlockInitialActivationHold(
+                issuedState,
+                completedPredecessor?.Authority,
+                decision.Reason);
+        return decision with
+        {
+            State = holdReconciliation.State,
+            InitialActivationHoldDecision = holdReconciliation.Decision,
+        };
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static FileTransferReceiveRecoveryDecision PrepareReceiveRecoveryOperationIssuance(
+        FileTransferCoordinatorState state,
+        FileTransferReceiveRecoveryObservation observation,
+        BridgeRecoveryKind recoveryKind,
+        string? checkpointRequestId,
+        out FileTransferReceiveRecoveryOperation? completedPredecessor)
+    {
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
-            FileTransferReceiveRecoveryOperationAuthority? authority = null,
-            FileTransferCoordinatorState? nextState = null)
+            FileTransferReceiveRecoveryOperationAuthority? authority = null)
         {
             var decision = new FileTransferReceiveRecoveryDecision(
                 status,
                 reason,
                 authority)
             {
-                State = nextState ?? state,
+                State = state,
             };
             return decision;
         }
 
         var recoveryState = state.PersistentState.FileTransferReceiveRecovery;
-        FileTransferReceiveRecoveryOperation? completedPredecessor =
-            null;
+        completedPredecessor = null;
         if (recoveryState.CurrentOperation is { } current)
         {
             if (current.Authority.Observation == observation &&
@@ -18090,32 +18147,12 @@ internal static partial class FileTransferCoordinator
                 completedPredecessor?.Authority.OperationGeneration ??
                 0,
         };
-        var issuanceState = completedPredecessor is { } predecessor
-            ? ApplyCompletedReceiveRecoverySupersession(
-                state,
-                predecessor)
-            : state;
-        var issuedState = ApplyIssuedReceiveRecoveryOperation(
-            issuanceState,
-            authority);
-        var holdReconciliation =
-            ReconcileRuntimeUnlockInitialActivationHold(
-                issuedState,
-                completedPredecessor?.Authority,
-                completedPredecessor is null
-                    ? "filetransfer_receive_recovery_operation_issued"
-                    : "filetransfer_receive_recovery_operation_successor_issued");
         return Decision(
             FileTransferReceiveRecoveryTransitionStatus.Accepted,
             completedPredecessor is null
                 ? "filetransfer_receive_recovery_operation_issued"
                 : "filetransfer_receive_recovery_operation_successor_issued",
-            authority,
-            holdReconciliation.State) with
-        {
-            InitialActivationHoldDecision =
-                holdReconciliation.Decision,
-        };
+            authority);
     }
 
     private static bool CanSupersedeCompletedReceiveRecoveryOperation(
@@ -20393,6 +20430,13 @@ internal static partial class FileTransferCoordinator
             long observedUtcMs = 0)
     {
         var decision = ObserveReceiveRecoveryExecutionReceiptCore(state, receipt, observedUtcMs);
+        if (decision.Status == FileTransferReceiveRecoveryTransitionStatus.Accepted)
+        {
+            decision = decision with
+            {
+                RetryDispatchDecision = AuthorizeHeldReceiveRecoveryClosureRetry(decision.State),
+            };
+        }
         return FinalizeReceiveRecoverySnapshot(
             state,
             decision,
@@ -20617,8 +20661,6 @@ internal static partial class FileTransferCoordinator
                     ? "filetransfer_receive_recovery_execution_completed"
                     : "filetransfer_receive_recovery_execution_terminal");
         nextState = holdReconciliation.State;
-        var retryDecision =
-            AuthorizeHeldReceiveRecoveryClosureRetry(nextState);
 
         return Decision(
             FileTransferReceiveRecoveryTransitionStatus.Accepted,
@@ -20626,7 +20668,6 @@ internal static partial class FileTransferCoordinator
             current.Authority,
             nextState) with
         {
-            RetryDispatchDecision = retryDecision,
             InitialActivationHoldDecision =
                 holdReconciliation.Decision,
             ProofStatePublicationCommand =
@@ -21345,7 +21386,14 @@ internal static partial class FileTransferCoordinator
             FileTransferCoordinatorState state,
             FileTransferReceiveRecoveryProof proof)
     {
-        var decision = ObserveReceiveRecoveryProofCore(state, proof);
+        var decision = ObserveReceiveRecoveryProofCore(state, proof, out var authorizeHeldRetry);
+        if (authorizeHeldRetry)
+        {
+            decision = decision with
+            {
+                RetryDispatchDecision = AuthorizeHeldReceiveRecoveryClosureRetry(decision.State),
+            };
+        }
         return FinalizeReceiveRecoverySnapshot(
             state,
             decision,
@@ -21358,8 +21406,10 @@ internal static partial class FileTransferCoordinator
     private static FileTransferReceiveRecoveryDecision
         ObserveReceiveRecoveryProofCore(
             FileTransferCoordinatorState state,
-            FileTransferReceiveRecoveryProof proof)
+            FileTransferReceiveRecoveryProof proof,
+            out bool authorizeHeldRetry)
     {
+        authorizeHeldRetry = false;
         FileTransferReceiveRecoveryDecision Decision(
             FileTransferReceiveRecoveryTransitionStatus status,
             string reason,
@@ -21555,15 +21605,13 @@ internal static partial class FileTransferCoordinator
                 current.Authority,
                 "filetransfer_receive_recovery_proof_observed");
         nextState = holdReconciliation.State;
-        var retryDecision =
-            AuthorizeHeldReceiveRecoveryClosureRetry(nextState);
+        authorizeHeldRetry = true;
 
         return Decision(
             FileTransferReceiveRecoveryTransitionStatus.Accepted,
             "filetransfer_receive_recovery_proof_observed",
             nextState) with
         {
-            RetryDispatchDecision = retryDecision,
             InitialActivationHoldDecision =
                 holdReconciliation.Decision,
         };
@@ -24169,7 +24217,9 @@ internal static partial class FileTransferCoordinator
         var expectedTransport = repairDecision.CurrentRoute switch
         {
             FileTransferRoute.RegularNknV4Fast => FileTransferTransportKind.RegularNkn,
-            FileTransferRoute.FileTunaV4 when publication?.RouteCommitGeneration > 0
+            FileTransferRoute.FileTunaV4 when publication?.RouteCommitGeneration > 0 ||
+                (publication is { } initialPublication &&
+                 IsCurrentInitialTunaFrontierRepairPublication(state, initialPublication))
                 => FileTransferTransportKind.Tuna,
             _ => FileTransferTransportKind.Unknown,
         };

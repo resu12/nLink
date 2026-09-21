@@ -3751,7 +3751,8 @@ internal static partial class FileTransferCoordinator
                    FileTransferProtocol.ProtocolVersionV4 &&
                exactPublication.TargetTransport == expectedTransport &&
                (route != FileTransferRoute.FileTunaV4 ||
-                exactPublication.RouteCommitGeneration is > 0);
+                exactPublication.RouteCommitGeneration is > 0 ||
+                IsCurrentInitialTunaFrontierRepairPublication(state, exactPublication));
     }
 
     private static bool IsCurrentV4FrontierRepairReplaySnapshotCandidate(
@@ -3783,7 +3784,8 @@ internal static partial class FileTransferCoordinator
                    FileTransferProtocol.ProtocolVersionV4 &&
                publication.TargetTransport == expectedTransport &&
                (repair.CurrentRoute != FileTransferRoute.FileTunaV4 ||
-                publication.RouteCommitGeneration is > 0);
+                publication.RouteCommitGeneration is > 0 ||
+                IsCurrentInitialTunaFrontierRepairPublication(state, publication));
     }
 
     private static CoordinatorOperationDescriptor

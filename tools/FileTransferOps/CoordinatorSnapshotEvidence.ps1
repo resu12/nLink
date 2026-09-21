@@ -6106,6 +6106,22 @@ function Get-FileTransferCoordinatorSnapshotRecoveryHandoffReceiptSignature {
     } | ConvertTo-Json -Depth 8 -Compress
 }
 
+function Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary {
+    param([Parameter(Mandatory = $true)]$Boundary)
+
+    # This shape is evidence only. Route consistency must separately prove the
+    # first coordinator publication; it cannot stand in for publication history.
+    return (Test-FileTransferCoordinatorSnapshotBoundaryComplete -Boundary $Boundary) -and
+        [string]$Boundary.route -ceq 'file_tuna_v4' -and
+        [int]$Boundary.protocolVersion -eq 4 -and
+        [long]$Boundary.routePublicationGeneration -eq 1 -and
+        [long]$Boundary.routeCommitGeneration -eq 0 -and
+        [long]$Boundary.liveRouteEpoch -eq 0 -and
+        [long]$Boundary.terminalGeneration -eq 0 -and
+        [long]$Boundary.runtimeGeneration -gt 0 -and
+        [long]$Boundary.legGeneration -gt 0
+}
+
 function Test-FileTransferCoordinatorSnapshotFamily5RepairReplayScope {
     param([Parameter(Mandatory = $true)]$Operation)
 
@@ -6131,7 +6147,8 @@ function Test-FileTransferCoordinatorSnapshotFamily5RepairReplayScope {
             return [string]$payload.targetTransport -ceq 'RegularNkn'
         }
         'file_tuna_v4' {
-            return [long]$source.routeCommitGeneration -gt 0 -and
+            return ([long]$source.routeCommitGeneration -gt 0 -or
+                (Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary -Boundary $source)) -and
                 [string]$payload.targetTransport -ceq 'Tuna'
         }
         default {
@@ -6165,7 +6182,10 @@ function Get-FileTransferCoordinatorSnapshotFamily5RepairReplayFailure {
             'regular_nkn_v4_fast', 'file_tuna_v4') -and
         [long]$afterBoundary.routePublicationGeneration -gt 0 -and
         ([string]$afterBoundary.route -cne 'file_tuna_v4' -or
-         [long]$afterBoundary.routeCommitGeneration -gt 0)
+         [long]$afterBoundary.routeCommitGeneration -gt 0 -or
+         ((Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary -Boundary $beforeBoundary) -and
+          (Test-FileTransferCoordinatorSnapshotInitialTunaRepairBoundary -Boundary $afterBoundary) -and
+          (Test-FileTransferCoordinatorSnapshotBoundaryEqual -Left $beforeBoundary -Right $afterBoundary)))
     if (-not $v4Boundary -and $operations.Count -eq 0) {
         return ''
     }
