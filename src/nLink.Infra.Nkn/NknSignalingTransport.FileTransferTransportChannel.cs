@@ -3041,7 +3041,24 @@ public sealed partial class NknSignalingTransport
     {
         if (actualTransport == FileTransferTransportKind.Tuna ||
             !TryGetFileTransferDataPathRouteAuthorityWithEvidence(frame.SessionId, frame.TransferId, FileTransferDirection.Inbound,
-                out var routeHint, out var publication) ||
+                out var routeHint, out var publication))
+        {
+            return false;
+        }
+
+        return ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
+            frame, channel, actualTransport, envelopeEvidence, routeHint, publication);
+    }
+
+    private bool ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
+        FileTransferDataFrame frame,
+        NknBridgeChannel channel,
+        FileTransferTransportKind actualTransport,
+        FileTransferDataPathEnvelopeEvidence envelopeEvidence,
+        FileTransferRouteHint routeHint,
+        FileTransferRoutePublicationEvidence? publication)
+    {
+        if (actualTransport == FileTransferTransportKind.Tuna ||
             routeHint.Route != FileTransferRoute.FileTunaV4 ||
             routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             routeHint.TargetTransport != FileTransferTransportKind.Tuna)
@@ -4509,6 +4526,16 @@ public sealed partial class NknSignalingTransport
             frame.TransferId,
             () =>
             {
+                // A queued frame may outlive its ingress publication. Use the
+                // same dispatch-time capture for the guard and its diagnostics.
+                var hasRouteAuthority = TryGetFileTransferDataPathRouteAuthorityWithEvidence(
+                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint, out var publication);
+                if (hasRouteAuthority && ShouldRejectFileTunaV4PayloadReceiveWithAuthority(
+                        frame, channel, receivedTransportKind, envelopeEvidence, routeHint, publication))
+                {
+                    return;
+                }
+
                 if (receivedTransportKind != FileTransferTransportKind.Tuna && !IsBootstrapEvidenceOnlyDataFrame(frame))
                 {
                     RecordTunaFallbackFileTransferDataFrameReceived(
@@ -4518,8 +4545,6 @@ public sealed partial class NknSignalingTransport
                         frame.SessionId);
                 }
 
-                var hasRouteAuthority = TryGetFileTransferDataPathRouteAuthorityWithEvidence(
-                    frame.SessionId, frame.TransferId, FileTransferDirection.Inbound, out var routeHint, out var publication);
                 var dispatchEvidence = envelopeEvidence with
                 {
                     PublicationUse = publication is null ? null : new(publication, FileTransferPublicationUseKind.ReceiveDispatch),
