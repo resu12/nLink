@@ -373,6 +373,60 @@ public sealed class RollingFileLoggerIntegrityTests
 
     [Fact]
     [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
+    public async Task LocalOperationalLog_InfoErrorWarnPreservesPerEntryMetadataUnderContention()
+    {
+        var marker = Guid.NewGuid().ToString("D");
+        var start = $"event=log_group_started; marker={marker}";
+        var end = $"event=log_group_ended; marker={marker}";
+        const string secret = "0123456789abcdef0123456789abcdef0123456789abcdef";
+        LocalOperationalLog.Info("GroupEvidenceTests", start);
+        using var ready = new Barrier(2);
+        await Task.WhenAll(Task.Run(() =>
+        {
+            Assert.True(ready.SignalAndWait(TimeSpan.FromSeconds(5)));
+            for (var i = 0; i < 32; i++)
+            {
+                var suffix = $"; marker={marker}; group_index={i}; sharedKey={secret}";
+                LocalOperationalLog.InfoErrorWarn("GroupEvidenceTests",
+                    "event=log_group_info" + suffix, "event=log_group_error" + suffix, "event=log_group_warn" + suffix);
+            }
+        }), Task.Run(() =>
+        {
+            Assert.True(ready.SignalAndWait(TimeSpan.FromSeconds(5)));
+            for (var i = 0; i < 32; i++) { LocalOperationalLog.Info("GroupEvidenceTests", $"event=log_group_competitor; marker={marker}"); }
+        }));
+        LocalOperationalLog.Info("GroupEvidenceTests", end);
+        Assert.True(LocalOperationalLog.TryReadRetainedSlice(start, end, out var slice));
+        var lines = slice.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var groups = lines.Where(line => line.Contains("; group_index=", StringComparison.Ordinal))
+            .GroupBy(line => Field(line, "group_index")).ToArray();
+        Assert.Equal(32, groups.Length);
+        Assert.Equal(32, lines.Count(line => line.Contains("event=log_group_competitor;", StringComparison.Ordinal)));
+        Assert.DoesNotContain(secret, slice, StringComparison.Ordinal);
+        foreach (var group in groups)
+        {
+            var rows = group.ToArray();
+            Assert.Equal(3, rows.Length);
+            var first = Field(rows[0], "log_writer_sequence");
+            var batch = Field(rows[0], "log_writer_batch_generation");
+            for (var i = 0; i < rows.Length; i++)
+            {
+                var level = new[] { "INFO", "ERROR", "WARN" }[i];
+                Assert.Contains($"[{level}] [GroupEvidenceTests]", rows[i], StringComparison.Ordinal);
+                Assert.Contains("; [redacted];", rows[i], StringComparison.Ordinal);
+                Assert.Contains($"log_writer_id={LocalOperationalLog.WriterIdForTests};", rows[i], StringComparison.Ordinal);
+                Assert.Equal(first + i, Field(rows[i], "log_writer_sequence"));
+                Assert.Equal(first + i, Field(rows[i], "log_writer_batch_first_sequence"));
+                Assert.Equal(first + i, Field(rows[i], "log_writer_batch_last_sequence"));
+                Assert.Equal(batch + i, Field(rows[i], "log_writer_batch_generation"));
+                if (i > 0) { Assert.True(Field(rows[i], "log_writer_attempt_utc_ticks") > Field(rows[i - 1], "log_writer_attempt_utc_ticks")); }
+            }
+        }
+        static long Field(string line, string name) => long.Parse(Regex.Match(line, @"\b" + name + @"=(\d+)").Groups[1].Value);
+    }
+
+    [Fact]
+    [Trait("FileTransferEvidenceSuite", "OperationalLogIntegrity")]
     public void LocalOperationalLog_WriteFailureMarkerCarriesExactAttemptIdentity()
     {
         var marker = LocalOperationalLog.FormatWriteFailureMarker(

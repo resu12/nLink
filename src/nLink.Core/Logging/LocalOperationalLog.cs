@@ -30,6 +30,18 @@ public static partial class LocalOperationalLog
 
     public static void Error(string source, string message) => Write("ERROR", source, message);
 
+    // One diagnostic decision, three ordinary write attempts. This does not
+    // combine persistence receipts or make a failed entry successful.
+    internal static void InfoErrorWarn(string source, string info, string error, string warning)
+    {
+        lock (Gate)
+        {
+            Info(source, info);
+            Error(source, error);
+            Warn(source, warning);
+        }
+    }
+
     public static void LogAppStart(string? appVersion = null)
     {
         var version = string.IsNullOrWhiteSpace(appVersion) ? ResolveInformationalVersion() : appVersion!;
