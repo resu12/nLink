@@ -13,6 +13,104 @@ public sealed class FileTransferGuiTerminalObserverTests : FileTransferOpsScript
             yield return new object[] { host, file };
     }
 
+    [Fact]
+    public void TerminalObserver_ClassifiesSummaryInlineWithoutPerRecordHelperDispatch()
+    {
+        var script = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var body = ExtractPowerShellFunctionBody(script, "Update-TunaGuiTerminalEvidenceTracker", "Get-TopLevelWindowElementsByProcessId");
+        Assert.DoesNotContain("Test-TunaGuiEvidenceSummaryRelevantLine", script, StringComparison.Ordinal);
+        Assert.Contains("if ([string]::IsNullOrEmpty($line))", body, StringComparison.Ordinal);
+        Assert.Contains("Assert-TunaGuiTerminalEvidenceLine -Line $line", body, StringComparison.Ordinal);
+        Assert.Contains("$summaryRelevant = if ($eventName -in @(", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public async Task TerminalObserver_PreservesSummaryClassificationAndOrdering(string host, bool file)
+    {
+        await Check(Fixture(file) + """
+            $names = @(
+                'transfer_terminal', 'file_transfer_inbound_terminal', 'file_transfer_outbound_terminal',
+                'tuna_acceleration_negotiated', 'runtime_unlock_transaction_answer_received', 'filetransfer_route_selected',
+                'filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied',
+                'filetransfer_tuna_gui_live_switch_off_completed_before_fault', 'filetransfer_tuna_gui_live_switch_off_fault_injected',
+                'filetransfer_tuna_gui_fault_window', 'filetransfer_v6_epoch_started', 'filetransfer_v6_epoch_recovered',
+                'filetransfer_v6_epoch_observed', 'filetransfer_v6_epoch_waiting', 'tuna_fallback_started',
+                'tuna_fallback_filetransfer_rebind_requested', 'tuna_acceleration_user_stop_filetransfer_fallback_forced',
+                'filetransfer_post_tuna_recovery_started', 'filetransfer_post_tuna_fallback_nkn_proved',
+                'filetransfer_live_v4_fallback_nkn_proved', 'filetransfer_post_tuna_fallback_cleanup_completed',
+                'filetransfer_live_v4_fallback_cleanup_completed', 'tuna_disable_handoff_completed',
+                'tuna_fallback_nkn_frame_sent', 'tuna_fallback_nkn_frame_received', 'filetransfer_v6_sender_started',
+                'filetransfer_lifecycle_priority_sent', 'filetransfer_lifecycle_priority_received', 'filetransfer_v6_heartbeat_timeout',
+                'filetransfer_tuna_data_path_peer_visible', 'filetransfer_binary_frame_sent', 'filetransfer_binary_frame_received',
+                'filetransfer_v6_sparse_write_committed', 'filetransfer_v6_contiguous_write_committed')
+            $excluded = @('filetransfer_tuna_data_path_peer_visible', 'filetransfer_binary_frame_sent',
+                'filetransfer_binary_frame_received', 'filetransfer_v6_sparse_write_committed', 'filetransfer_v6_contiguous_write_committed')
+            $lines = [Collections.Generic.List[string]]::new()
+            $expected = [Collections.Generic.List[string]]::new()
+            foreach ($name in $names) {
+                foreach ($line in @(('event='+$name), ('EVENT='+$name.ToUpperInvariant()), ('event= '+$name+' ; tag=padded'))) {
+                    $lines.Add($line)
+                    if ($name -notin $excluded) { $expected.Add($line) }
+                }
+                $lines.Add('event='+$name+'_not_exact')
+            }
+            foreach ($line in @('note=peer_disconnected', 'note=PEER_DISCONNECTED', 'transport_state_changed; to=Failed',
+                'prefixTRANSPORT_STATE_CHANGEDsuffix; to=fAiLeDlater', 'event=; note=peer_disconnected',
+                'note=event=filetransfer_route_selected; event=noise', 'event=filetransfer_route_selected; event=noise')) {
+                $lines.Add($line); $expected.Add($line)
+            }
+            foreach ($line in @('transport_state_changed; to=Ready', 'to=Failed', 'event=noise; event=filetransfer_route_selected',
+                'event=peer_disconnected; event=filetransfer_binary_frame_sent', '   ', ('unicode='+[char]0x03bb))) {
+                $lines.Add($line)
+                if ($line -like 'event=peer_disconnected;*') { $expected.Add($line) }
+            }
+            $failed = $outbound.Replace('Transfer complete.', 'Transfer failed.')
+            foreach ($line in @($inbound, $outbound, $failed)) { $lines.Add($line); $expected.Add($line) }
+            $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+            try {
+                foreach ($name in @('en-US','tr-TR')) {
+                    [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($name)
+                    $r = Invoke-Case -Lines $lines.ToArray()
+                    $t = $r.Tracker
+                    if ($r.Error -or $t.Cursor -ne $lines.Count -or $t.LineVisitCount -ne $lines.Count -or
+                        ($t.SummaryLines -join "`n") -cne ($expected -join "`n")) { throw 'summary classification/order changed' }
+                    if ($t.ByTransfer.Count -ne 1 -or $t.ByTransfer['t']['OutboundLine'] -cne $failed -or
+                        $t.ByTransfer['t']['Outbound']['state'] -ne 'Failed' -or
+                        $t.ByTransfer['t']['OutboundLineIndex'] -ne $lines.Count-1) { throw 'terminal replacement changed' }
+                    if ($script:IsFile -and ($r.ReadIndices.Count -ne $lines.Count -or
+                        $r.ReadIndices[$lines.Count-1] -ne $lines.Count-1)) { throw 'classification skipped physical reads' }
+                }
+            } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $culture }
+            'observer-ok'
+            """, host);
+    }
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public async Task TerminalObserver_EmptyTailPreservesBindingFailureAndPartialState(string host, bool file)
+    {
+        await Check(Fixture(file) + """
+            function Test-OriginalLineBinding {
+                param([Parameter(Mandatory=$true)][string]$Line, [Parameter(Mandatory=$true)][AllowEmptyString()][string]$EventName)
+            }
+            $expectedError=''; $expectedTypes=[Collections.Generic.List[string]]::new()
+            try { Test-OriginalLineBinding -Line '' -EventName '' } catch {
+                $expectedError=$_.Exception.Message
+                $e=$_.Exception; while($e) { $expectedTypes.Add($e.GetType().FullName); $e=$e.InnerException }
+            }
+            $r=Invoke-Case -Lines @($inbound,$outbound,'','event=filetransfer_binary_frame_sent; raw_chunk_bytes=99')
+            $t=$r.Tracker
+            if (-not $expectedError -or $r.Error -cne $expectedError -or
+                ($r.ErrorTypes -join '|') -cne ($expectedTypes -join '|')) { throw 'empty-line binding failure changed' }
+            if ($t.Cursor -ne 2 -or $t.LineVisitCount -ne 2 -or $t.ParsedEventCount -ne 2 -or $t.SummaryLines.Count -ne 2 -or
+                $t.SenderChunkBytes -ne 0 -or $t.ProjectionElapsedTicks -ne 0 -or
+                $t.ByTransfer['t']['OutboundLine'] -cne $outbound) { throw 'empty-tail partial state changed' }
+            if ($script:IsFile -and ($r.ReadIndices -join ',') -cne '0,1,2') { throw 'read past rejected empty tail' }
+            'observer-ok'
+            """, host);
+    }
+
     [Theory]
     [MemberData(nameof(Modes))]
     public async Task TerminalObserver_ReadsWholeHorizonWithoutCallbacksOrReplay(string host, bool file)
@@ -218,7 +316,7 @@ public sealed class FileTransferGuiTerminalObserverTests : FileTransferOpsScript
             foreach($name in @('ConvertFrom-GuiSmokeSemicolonFields','Get-GuiSmokeFieldValue','ConvertTo-GuiSmokeInt',
                 'Get-GuiSmokeInt64FieldValue','Test-GuiSmokeFieldEquals','Get-GuiSmokeFileTransferTerminalDirection',
                 'Set-GuiSmokeFileTransferTerminalDefaults','Test-TunaGuiPeerVisibleFileTunaV4DataPathLine',
-                'Get-FileTransferLiveProgressScore','Test-TunaGuiEvidenceSummaryRelevantLine',
+                'Get-FileTransferLiveProgressScore','Assert-TunaGuiTerminalEvidenceLine',
                 'New-TunaGuiTerminalEvidenceTracker','Update-TunaGuiTerminalEvidenceTracker')) {
                 $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
                 . ([scriptblock]::Create($node.Extent.Text.Replace('$reader.ReadLine()', '$script:Reads.Add($lineIndex); $reader.ReadLine()').Replace('[Diagnostics.Stopwatch]::GetTimestamp()', '(Get-ProbeTimestamp)')))

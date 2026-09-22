@@ -189,7 +189,7 @@ public sealed class FileTransferGuiProgressGateTests : FileTransferOpsScriptsTes
                 'Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes', 'Get-TunaGuiCompletedTerminalFromLogLine',
                 'Add-TunaGuiCompletedTerminalToTracker', 'New-TunaGuiLiveSwitchOffProgressGateResult',
                 'Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault', 'Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault',
-                'Wait-TunaGuiAcceleratedFilePayloadBeforeFault', 'Test-TunaGuiEvidenceSummaryRelevantLine',
+                'Wait-TunaGuiAcceleratedFilePayloadBeforeFault', 'Assert-TunaGuiTerminalEvidenceLine',
                 'New-TunaGuiTerminalEvidenceTracker', 'Update-TunaGuiTerminalEvidenceTracker', 'Get-TunaGuiEvidenceSummary',
                 'Test-TunaGuiAuthorizedFileTunaV4PublicationLine')) {
                 $node = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true)

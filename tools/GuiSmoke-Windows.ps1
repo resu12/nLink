@@ -169,53 +169,9 @@ function Wait-Until {
     throw $OnTimeoutMessage
 }
 
-function Test-TunaGuiEvidenceSummaryRelevantLine {
-    param(
-        [Parameter(Mandatory = $true)][string]$Line,
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$EventName
-    )
-
-    if ($EventName -in @(
-            'transfer_terminal',
-            'file_transfer_inbound_terminal',
-            'file_transfer_outbound_terminal',
-            'tuna_acceleration_negotiated',
-            'runtime_unlock_transaction_answer_received',
-            'filetransfer_route_selected',
-            'filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied',
-            'filetransfer_tuna_gui_live_switch_off_completed_before_fault',
-            'filetransfer_tuna_gui_live_switch_off_fault_injected',
-            'filetransfer_tuna_gui_fault_window',
-            'filetransfer_v6_epoch_started',
-            'filetransfer_v6_epoch_recovered',
-            'filetransfer_v6_epoch_observed',
-            'filetransfer_v6_epoch_waiting',
-            'tuna_fallback_started',
-            'tuna_fallback_filetransfer_rebind_requested',
-            'tuna_acceleration_user_stop_filetransfer_fallback_forced',
-            'filetransfer_post_tuna_recovery_started',
-            'filetransfer_post_tuna_fallback_nkn_proved',
-            'filetransfer_live_v4_fallback_nkn_proved',
-            'filetransfer_post_tuna_fallback_cleanup_completed',
-            'filetransfer_live_v4_fallback_cleanup_completed',
-            'tuna_disable_handoff_completed',
-            'tuna_fallback_nkn_frame_sent',
-            'tuna_fallback_nkn_frame_received',
-            'filetransfer_v6_sender_started',
-            'filetransfer_lifecycle_priority_sent',
-            'filetransfer_lifecycle_priority_received',
-            'filetransfer_v6_heartbeat_timeout',
-            'filetransfer_tuna_data_path_peer_visible',
-            'filetransfer_binary_frame_sent',
-            'filetransfer_binary_frame_received',
-            'filetransfer_v6_sparse_write_committed',
-            'filetransfer_v6_contiguous_write_committed')) {
-        return $true
-    }
-
-    return $Line.IndexOf('peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        ($Line.IndexOf('transport_state_changed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-            $Line.IndexOf('to=Failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+function Assert-TunaGuiTerminalEvidenceLine {
+    # Keep empty-record parameter-binding failures on the cold path.
+    param([Parameter(Mandatory = $true)][string]$Line)
 }
 
 function New-TunaGuiTerminalEvidenceTracker {
@@ -370,7 +326,51 @@ function Update-TunaGuiTerminalEvidenceTracker {
                 else {
                     ''
                 }
-                $summaryRelevant = Test-TunaGuiEvidenceSummaryRelevantLine -Line $line -EventName $eventName
+                if ([string]::IsNullOrEmpty($line)) {
+                    Assert-TunaGuiTerminalEvidenceLine -Line $line
+                }
+                $summaryRelevant = if ($eventName -in @(
+                        'transfer_terminal',
+                        'file_transfer_inbound_terminal',
+                        'file_transfer_outbound_terminal',
+                        'tuna_acceleration_negotiated',
+                        'runtime_unlock_transaction_answer_received',
+                        'filetransfer_route_selected',
+                        'filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied',
+                        'filetransfer_tuna_gui_live_switch_off_completed_before_fault',
+                        'filetransfer_tuna_gui_live_switch_off_fault_injected',
+                        'filetransfer_tuna_gui_fault_window',
+                        'filetransfer_v6_epoch_started',
+                        'filetransfer_v6_epoch_recovered',
+                        'filetransfer_v6_epoch_observed',
+                        'filetransfer_v6_epoch_waiting',
+                        'tuna_fallback_started',
+                        'tuna_fallback_filetransfer_rebind_requested',
+                        'tuna_acceleration_user_stop_filetransfer_fallback_forced',
+                        'filetransfer_post_tuna_recovery_started',
+                        'filetransfer_post_tuna_fallback_nkn_proved',
+                        'filetransfer_live_v4_fallback_nkn_proved',
+                        'filetransfer_post_tuna_fallback_cleanup_completed',
+                        'filetransfer_live_v4_fallback_cleanup_completed',
+                        'tuna_disable_handoff_completed',
+                        'tuna_fallback_nkn_frame_sent',
+                        'tuna_fallback_nkn_frame_received',
+                        'filetransfer_v6_sender_started',
+                        'filetransfer_lifecycle_priority_sent',
+                        'filetransfer_lifecycle_priority_received',
+                        'filetransfer_v6_heartbeat_timeout',
+                        'filetransfer_tuna_data_path_peer_visible',
+                        'filetransfer_binary_frame_sent',
+                        'filetransfer_binary_frame_received',
+                        'filetransfer_v6_sparse_write_committed',
+                        'filetransfer_v6_contiguous_write_committed')) {
+                    $true
+                }
+                else {
+                    $line.IndexOf('peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        ($line.IndexOf('transport_state_changed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                            $line.IndexOf('to=Failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+                }
                 $aggregateEvidenceEvent = $eventName -in @(
                     'filetransfer_tuna_data_path_peer_visible',
                     'filetransfer_v6_sparse_write_committed',

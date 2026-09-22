@@ -12199,9 +12199,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     public async Task GuiSmokeWindows_TerminalEvidenceProjectionVisitsProductionWidthLedgerOnlyOnce()
     {
         var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
-        var relevantBody = ExtractPowerShellFunctionBody(
+        var lineValidationBody = ExtractPowerShellFunctionBody(
             scriptText,
-            "Test-TunaGuiEvidenceSummaryRelevantLine",
+            "Assert-TunaGuiTerminalEvidenceLine",
             "New-TunaGuiTerminalEvidenceTracker");
         var newTrackerBody = ExtractPowerShellFunctionBody(
             scriptText,
@@ -12249,7 +12249,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Get-FileTransferLiveProgressScore { return 0L }
             function Get-GuiSmokeInt64FieldValue { return 0L }
             function Test-TunaGuiPeerVisibleFileTunaV4DataPathLine { return $false }
-            function Test-TunaGuiEvidenceSummaryRelevantLine { {{relevantBody}} }
+            function Assert-TunaGuiTerminalEvidenceLine { {{lineValidationBody}} }
             function New-TunaGuiTerminalEvidenceTracker { {{newTrackerBody}} }
             function Update-TunaGuiTerminalEvidenceTracker { {{updateBody}} }
             $tracker = New-TunaGuiTerminalEvidenceTracker -Bookmark 0 -ExpectedInboundRole helper -ExpectedOutboundRole helpee
@@ -12277,7 +12277,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     public async Task GuiSmokeWindows_TerminalEvidenceProjectionPreservesSummarySemanticsWithoutReplay()
     {
         var scriptText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
-        var relevantBody = ExtractPowerShellFunctionBody(scriptText, "Test-TunaGuiEvidenceSummaryRelevantLine", "New-TunaGuiTerminalEvidenceTracker");
+        var lineValidationBody = ExtractPowerShellFunctionBody(scriptText, "Assert-TunaGuiTerminalEvidenceLine", "New-TunaGuiTerminalEvidenceTracker");
         var newTrackerBody = ExtractPowerShellFunctionBody(scriptText, "New-TunaGuiTerminalEvidenceTracker", "Assert-TunaGuiTerminalEvidenceTrackerScope");
         var updateBody = ExtractPowerShellFunctionBody(scriptText, "Update-TunaGuiTerminalEvidenceTracker", "Get-TopLevelWindowElementsByProcessId");
         var summaryBody = ExtractPowerShellFunctionBody(scriptText, "Get-TunaGuiEvidenceSummary", "Invoke-FileTransferTunaPostFallbackPrecondition");
@@ -12333,7 +12333,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Get-FileTransferLiveProgressScore { return 0L }
             function Test-TunaGuiPeerVisibleFileTunaV4DataPathLine { return $true }
             function Test-TunaGuiAuthorizedFileTunaV4PublicationLine { param([string]$Line) return $Line -like '*event=filetransfer_route_selected*' }
-            function Test-TunaGuiEvidenceSummaryRelevantLine { {{relevantBody}} }
+            function Assert-TunaGuiTerminalEvidenceLine { {{lineValidationBody}} }
             function New-TunaGuiTerminalEvidenceTracker { {{newTrackerBody}} }
             function Update-TunaGuiTerminalEvidenceTracker { {{updateBody}} }
             function Get-TunaGuiEvidenceSummary { {{summaryBody}} }
