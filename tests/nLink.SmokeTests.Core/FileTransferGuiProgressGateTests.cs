@@ -216,6 +216,10 @@ public sealed class FileTransferGuiProgressGateTests : FileTransferOpsScriptsTes
                 if ($script:SourceFailure) { throw 'synthetic_cursor_failure' }
                 return $script:Snapshots[[Math]::Min($script:Polls - 1, $script:Snapshots.Count - 1)].Lines
             }
+            function Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark {
+                param($State, [int]$Bookmark)
+                Get-AppLogLinesAfterBookmark -Bookmark $Bookmark
+            }
             function Invoke-Gate {
                 param([string]$Gate, [object[]]$Snapshots, [long]$InitialMs = 5000, [bool]$SourceFailure = $false, [switch]$Baseline)
                 $definition = if ($Baseline) { $baselinePredicate } else { $currentPredicate }

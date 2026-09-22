@@ -1149,6 +1149,51 @@ function Get-GuiSmokeLogLedgerLinesAfterBookmark {
     return @($State.Lines.GetRange($Bookmark, $lineCount - $Bookmark).ToArray())
 }
 
+function Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$Bookmark
+    )
+
+    Assert-GuiSmokeLogLedgerHealthy -State $State
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    if ($Bookmark -lt 0 -or $Bookmark -gt $lineCount) {
+        Set-GuiSmokeLogLedgerFailure `
+            -State $State `
+            -Code 'gui_smoke_log_cursor_invalid_bookmark' `
+            -Detail ("bookmark={0}; line_count={1}" -f $Bookmark, $lineCount)
+        Assert-GuiSmokeLogLedgerHealthy -State $State
+    }
+    if ($Bookmark -eq $lineCount) { return @() }
+    if ([string]$State.StorageMode -ne 'AppendOnlyFile') {
+        return @($State.Lines.GetRange($Bookmark, $lineCount - $Bookmark).ToArray())
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $stream = $null
+    $reader = $null
+    try {
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.FileStream]::new([string]$State.AppendOnlyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share, 65536, [IO.FileOptions]::SequentialScan)
+        $stream.Position = [long]$State.AppendOnlyLineStartOffsets[$Bookmark]
+        $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true, 65536, $true)
+        # Preserve the whole snapshot before the gate evaluates progress or terminal precedence.
+        for ($lineIndex = $Bookmark; $lineIndex -lt $lineCount; $lineIndex++) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) {
+                Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_gap' -Detail ("path={0}; line_index={1}; reason=append_only_range_short_read" -f $State.AppendOnlyPath, $lineIndex)
+                Assert-GuiSmokeLogLedgerHealthy -State $State
+            }
+            $lines.Add([string]$line)
+        }
+        return @($lines.ToArray())
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 function Find-GuiSmokeLogLedgerAnyAllAfterBookmark {
     param(
         [Parameter(Mandatory = $true)]$State,

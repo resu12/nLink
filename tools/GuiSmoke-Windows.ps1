@@ -35733,7 +35733,8 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
     $terminalPairCompleted = $false
     $terminalTransferId = '(unknown)'
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        Sync-GuiSmokeAppLogLedger
+        $lines = @(Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark)
         if ($lines.Count -lt $processedLineCount) {
             $processedLineCount = 0
         }
@@ -35815,7 +35816,8 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault {
     $terminalPairCompleted = $false
     $terminalTransferId = '(unknown)'
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        Sync-GuiSmokeAppLogLedger
+        $lines = @(Get-GuiSmokeLogLedgerProgressSnapshotAfterBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark)
         if ($lines.Count -lt $processedLineCount) {
             $processedLineCount = 0
         }
