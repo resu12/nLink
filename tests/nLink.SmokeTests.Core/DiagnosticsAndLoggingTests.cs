@@ -659,6 +659,50 @@ public void TunaStatusPresentationMapper_PassiveRouteProjectionDoesNotPulseWitho
 }
 
 [Theory]
+[InlineData("listener_starting")]
+[InlineData("listener_paths_starting")]
+[InlineData("listener_retrying")]
+[InlineData("provider_paths_ready")]
+[InlineData("listener_ready")]
+[InlineData("waiting_for_peer_dial")]
+[InlineData("peer_connected")]
+public void TunaStatusPresentationMapper_ListenerProgressSupersedesProvisionalPreflightFailure(string runtimeStatus)
+{
+    var presentation = TunaStatusPresentationMapper.FromState(false, "preflight_listener_unavailable", runtimeStatus, true);
+    var expected = TunaStatusPresentationMapper.FromState(false, null, runtimeStatus, true);
+
+    Assert.Equal(expected, presentation);
+    Assert.True(presentation.IsConnecting);
+    Assert.True(presentation.IsLocalPayer);
+}
+
+[Theory]
+[InlineData("preflight_listener_unavailable", "locked", false)]
+[InlineData("preflight_listener_unavailable", "off", false)]
+[InlineData("preflight_listener_unavailable", "listener_ready", false)]
+[InlineData("preflight_listener_unavailable", "waiting_for_approved_session", true)]
+[InlineData("preflight_listener_unavailable", "provider_paths_wait_timeout", true)]
+[InlineData("preflight_listener_unavailable", "dialer_starting", true)]
+[InlineData("header_switch_off", "listener_ready", true)]
+[InlineData("remote_header_switch_off", "listener_ready", true)]
+[InlineData("provider_paths_wait_timeout", "listener_ready", true)]
+[InlineData("listener_failed", "listener_ready", true)]
+[InlineData("handoff_rejected", "listener_ready", true)]
+public void TunaStatusPresentationMapper_ProvisionalOverrideDoesNotOverrideStopsOrInventAnAttempt(
+    string reason, string runtimeStatus, bool unlocked)
+{
+    Assert.False(TunaStatusPresentationMapper.FromState(false, reason, runtimeStatus, unlocked).IsConnecting);
+}
+
+[Fact]
+public void TunaStatusPresentationMapper_ActiveStateStillWinsOverProvisionalPreflightFailure()
+{
+    var presentation = TunaStatusPresentationMapper.FromState(true, "preflight_listener_unavailable", "listener_ready", true);
+    Assert.Equal("Tuna acceleration is active.", presentation.Text);
+    Assert.False(presentation.IsConnecting);
+}
+
+[Theory]
 [InlineData("regular_nkn_v4_fast", 4, false)]
 [InlineData("post_tuna_fallback_v6", 6, false)]
 [InlineData("file_tuna_v4", 4, true)]

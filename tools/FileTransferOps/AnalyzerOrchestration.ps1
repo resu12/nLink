@@ -12450,10 +12450,17 @@ function Invoke-FileTransferRetainedAnalysis {
             }
             catch { } # Missing/stale optional ownership preserves ordinary parsing.
         }
+        $sourceRequired = [string]$env:NLINK_RETAINED_SOURCE_REQUIRED -ceq '1'
+        if ($sourceRequired -and ($null -eq $retainedSourceOwner -or $null -eq $retainedSourceReader)) {
+            throw 'failed_gui_diagnostic_source_owner_unavailable'
+        }
         $stageDiagnostics['log_file_count'] = $logFiles.Count
 
         $parseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $events = @(Read-FileTransferLogEvents -LogFiles $logFiles -TailMinutes $TailMinutes -OwnedSource $retainedSourceReader)
+        if ($sourceRequired -and -not $retainedSourceOwner.OwnsCompletedSource($retainedSourceReader)) {
+            throw 'failed_gui_diagnostic_source_read_incomplete'
+        }
         $sourceEventCount = $events.Count
         $events = @(Add-FileTransferLiveHarnessEvidence -Events $events -LogFiles $logFiles -ArtifactDir $resolvedArtifactDir -TransferId $TransferId -AllTransfers:$AllTransfers)
         [object[]]$eventsForArtifacts = @($events)

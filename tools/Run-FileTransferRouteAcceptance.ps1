@@ -6922,7 +6922,8 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         [AllowNull()]$LocalWriterContext = $null,
         [AllowNull()]$LocalPublication = $null,
         [AllowNull()]$FrontierParentCustody = $null,
-        [AllowNull()]$FrontierRelayCustody = $null
+        [AllowNull()]$FrontierRelayCustody = $null,
+        [AllowNull()]$FailedGuiCapture = $null
     )
 
     $logPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
@@ -6939,6 +6940,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
     Set-Variable -Name LocalWriterContext -Option Private -Value $LocalWriterContext
     Set-Variable -Name FrontierParentCustody -Option Private -Value $FrontierParentCustody
     Set-Variable -Name FrontierRelayCustody -Option Private -Value $FrontierRelayCustody
+    Set-Variable -Name FailedGuiCapture -Option Private -Value $FailedGuiCapture
     $private:frontierPreparation = $null
     $private:frontierReports = $null
     $private:frontierTerminal = $null
@@ -6949,7 +6951,20 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
     $process = $null
     try {
         $attemptId = [guid]::NewGuid().ToString('N')
-        if ($CaptureFrontierReports -and $CaptureLocalSourceOwnership) {
+        if ($null -ne $FailedGuiCapture) {
+            $private:failedType = 'NLink.Tools.LocalGuiWriterRequest+FailedCapture' -as [type]
+            if ($null -eq $private:failedType -or -not $private:failedType.IsInstanceOfType($FailedGuiCapture) -or
+                $CaptureFrontierReports -or $CaptureLocalSourceOwnership -or $null -ne $LocalPublication) {
+                throw 'failed_gui_diagnostic_capture_invalid'
+            }
+            $sourceRequest = $FailedGuiCapture.TryPreparePrimary([guid]$attemptId,
+                [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID, [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID,
+                [IO.Path]::GetFullPath($ArtifactDir))
+            if ($null -eq $sourceRequest) { throw 'failed_gui_diagnostic_claim_unavailable' }
+            $inputSha256Before = $FailedGuiCapture.SourceSha256
+            $inputLineCountBefore = $FailedGuiCapture.SourceLines
+        }
+        elseif ($CaptureFrontierReports -and $CaptureLocalSourceOwnership) {
             $private:frontierParentType = 'NLink.Tools.LocalGuiWriterRequest+FrontierParentCustody' -as [type]
             $private:frontierCompletionType = 'NLink.Tools.LocalGuiWriterRequest+Completion' -as [type]
             if ($null -ne $private:frontierParentType -and $private:frontierParentType.IsInstanceOfType($FrontierParentCustody) -and
@@ -6964,7 +6979,7 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
             $inputSha256Before = $private:frontierPreparation.InputSha256
             $inputLineCountBefore = $private:frontierPreparation.InputLineCount
         }
-        else {
+        elseif ($null -eq $FailedGuiCapture) {
             # A failed/missing native preparation still requires the ordinary file.
             if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
                 throw "Retained log slice missing: $logPath"
@@ -7023,6 +7038,15 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         $startInfo.Environment['NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT'] = '1'
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
+        $startInfo.CreateNoWindow = $true
+        [void]$startInfo.Environment.Remove('NLINK_RETAINED_SOURCE_REQUIRED')
+        if ($null -ne $FailedGuiCapture) {
+            [void]$startInfo.Environment.Remove('PSModulePath')
+            [void]$startInfo.Environment.Remove('NLINK_RETAINED_FRONTIER_START_V1')
+            $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUIRED'] = '1'
+            $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUEST'] = $sourceRequest.Name
+            $startInfo.Environment['NLINK_RETAINED_SOURCE_REQUEST_ID'] = $sourceRequest.RequestId.ToString('D')
+        }
 
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
@@ -7056,7 +7080,13 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
                 throw "Failed to start FileTransfer-Ops retained analysis for $ArtifactDir"
             }
             if ($null -ne $sourceRequest) {
-                if (-not $sourceRequest.BindWorker($process)) { $sourceRequest.Dispose(); $sourceRequest = $null }
+                if (-not $sourceRequest.BindWorker($process)) {
+                    $sourceRequest.Dispose(); $sourceRequest = $null
+                    if ($null -ne $FailedGuiCapture) {
+                        Stop-RouteAcceptanceRetainedAnalysisProcess -Process $process
+                        throw 'failed_gui_diagnostic_source_bind_failed'
+                    }
+                }
             }
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -7744,11 +7774,13 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [AllowNull()]$LocalWriterRelay = $null,
         [string]$LocalWriterArtifactDir = '',
-        [AllowNull()]$FrontierRelayCustody = $null
+        [AllowNull()]$FrontierRelayCustody = $null,
+        [AllowNull()]$FailedGuiCapture = $null
     )
 
     Set-Variable -Name LocalWriterRelay -Option Private -Value $LocalWriterRelay
     Set-Variable -Name FrontierRelayCustody -Option Private -Value $FrontierRelayCustody
+    Set-Variable -Name FailedGuiCapture -Option Private -Value $FailedGuiCapture
     $private:relayRequest = $null
     $private:relayProcess = $null
     $private:relayOutputCaptured = $false
@@ -7862,6 +7894,18 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
                 }
             }
             catch { } # Optional relay cannot reclassify the original child exit.
+        }
+        if ($null -ne $private:relayRequest -and $private:relayOutputCaptured -and $exitCode -ne 0 -and
+            $FailedGuiCapture -is [ref] -and $null -eq $FailedGuiCapture.Value) {
+            $private:failedCapture = $null
+            try {
+                $private:failedCapture = $private:relayRequest.TakeFailedRelayAfterExit()
+                $FailedGuiCapture.Value = $private:failedCapture
+                if ([object]::ReferenceEquals($FailedGuiCapture.Value, $private:failedCapture)) { $private:failedCapture = $null }
+                else { $FailedGuiCapture.Value = $null }
+            }
+            catch { }
+            finally { if ($null -ne $private:failedCapture) { $private:failedCapture.Dispose() } }
         }
         return $exitCode
     }
@@ -9117,6 +9161,7 @@ function Invoke-TunaRouteAcceptanceRun {
     Set-Variable -Name LocalPublication -Option Private -Value $LocalPublication
     $private:localRelayedWriter = $null
     $private:localFrontierRelayCustody = $null
+    $private:failedGuiCapture = $null
     $private:localRelayArguments = @{}
     $scriptPath = Join-Path $RepoRoot 'tools\Run-FileTransferTunaGuiSmoke.ps1'
     $retainedAnalysisOwner = 'RouteAcceptance'
@@ -9243,11 +9288,37 @@ function Invoke-TunaRouteAcceptanceRun {
             $private:localRelayArguments.FrontierRelayCustody = [ref]$private:localFrontierRelayCustody
         }
     }
+    $failedDiagnosticScope = $Fault -ceq 'switch-off' -and $PayerMode -ceq 'helpee' -and (
+        ($RouteMode -ceq 'live-regular-activation-cycle' -and $LiveProofMode -ceq 'RegularActivationCycle' -and
+            $PayloadSize -ceq '256MiB' -and $LiveToggleSequence -ceq 'on,off,on,off') -or
+        ($RouteMode -ceq 'live-reactivation-second-transfer' -and $LiveProofMode -ceq 'None' -and
+            $PayloadSize -ceq '128MiB' -and $LiveToggleSequence -ceq 'off,on'))
+    if ($failedDiagnosticScope -and $script:RouteAcceptanceExecutionMode -ceq 'live') {
+        $private:localRelayArguments.LocalWriterRelay = [ref]$private:localRelayedWriter
+        $private:localRelayArguments.LocalWriterArtifactDir = $ArtifactDir
+        $private:localRelayArguments.FailedGuiCapture = [ref]$private:failedGuiCapture
+    }
     $childExitCode = Invoke-RouteAcceptanceChildScriptNoThrow `
         -ScriptPath $scriptPath `
         -Arguments $arguments @localRelayArguments
 
     if ($childExitCode -ne 0) {
+        if ($failedDiagnosticScope -and $script:RouteAcceptanceExecutionMode -ceq 'live') {
+            $diagnosticError = 'failed_gui_diagnostic_capture_unavailable'
+            try {
+                if ($null -ne $private:failedGuiCapture) {
+                    Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode -FailedGuiCapture $private:failedGuiCapture
+                    $diagnosticError = ''
+                }
+            }
+            catch { $diagnosticError = $_.Exception.Message }
+            try {
+                Update-FileTransferFailedGuiDiagnosticManifest -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode `
+                    -FailedCapture $private:failedGuiCapture -DiagnosticError $diagnosticError | Out-Null
+            }
+            catch { Write-Warning 'Failed GUI diagnostic reporting was unavailable; preserving the original GUI failure.' }
+            throw ("Tuna GUI wrapper {0} failed with exit code {1}; diagnostic outcome does not change the failed attempt." -f $RouteMode, $childExitCode)
+        }
         throw ("Tuna GUI wrapper {0} failed with exit code {1}; retained analysis was not started." -f $RouteMode, $childExitCode)
     }
 
@@ -9297,6 +9368,7 @@ function Invoke-TunaRouteAcceptanceRun {
         catch { }
         $private:localPersistentPublication = $null
         if ($null -ne $private:localFrontierRelayCustody) { $private:localFrontierRelayCustody.Dispose() }
+        if ($null -ne $private:failedGuiCapture) { $private:failedGuiCapture.Dispose() }
     }
 }
 

@@ -500,6 +500,10 @@ public partial class SessionHeaderView : UserControl
         SetAndRaise(TunaGillOpacityProperty, ref tunaGillOpacity, nextGillOpacity);
         SetAndRaise(TunaPulseScaleProperty, ref tunaPulseScale, 1d);
         SetAndRaise(TunaPictogramTipProperty, ref tunaPictogramTip, nextTip);
+        if (tunaRuntimeStatus != "service_unavailable")
+        {
+            SetAndRaise(TunaUnlockTipProperty, ref tunaUnlockTip, GetPendingTunaUnlockMessage() ?? presentation.Text);
+        }
 
         if (pulsing)
         {

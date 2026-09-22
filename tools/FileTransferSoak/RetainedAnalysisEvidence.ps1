@@ -227,6 +227,7 @@ function Write-FileTransferTunaDirectEvidenceManifestProjection {
         'retainedAnalysisReceiptValid',
         'retainedAnalysisCompleted',
         'retainedAnalysisStatus',
+        'retainedAnalysisDiagnosticError',
         'retainedAnalysisExitCodeAvailable',
         'retainedAnalysisExitCode',
         'coordinatorSnapshotMode',
@@ -539,6 +540,77 @@ function Test-FileTransferRetainedAnalysisAttemptReceipt {
     catch {
         return $false
     }
+}
+
+function Update-FileTransferFailedGuiDiagnosticManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$LiveRouteProofMode,
+        [AllowNull()]$FailedCapture = $null,
+        [AllowEmptyString()][string]$DiagnosticError = ''
+    )
+
+    $manifestPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-evidence-manifest.json'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    $run = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+    $scenario = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+    if ([string]$manifest.acceptanceRunId -cne $run -or [string]$manifest.scenarioRunId -cne $scenario -or
+        [string]$manifest.retainedAnalysisOwner -cne 'RouteAcceptance' -or
+        -not [bool]$manifest.guiExitCodeAvailable -or [int]$manifest.guiExitCode -eq 0) {
+        throw 'failed_gui_diagnostic_manifest_scope_invalid'
+    }
+    $updates = [ordered]@{ currentRuntimeProof=$false; retainedAnalysisDiagnosticError=$DiagnosticError }
+    $receiptPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-attempt-receipt.json'
+    $captureType = 'NLink.Tools.LocalGuiWriterRequest+FailedCapture' -as [type]
+    $captureMatches = $null -ne $captureType -and $captureType.IsInstanceOfType($FailedCapture) -and
+        $FailedCapture.Matches($run, $scenario, [IO.Path]::GetFullPath($ArtifactDir)) -and
+        $FailedCapture.GuiExitCode -eq [int]$manifest.guiExitCode
+    if ($captureMatches -and -not [string]::IsNullOrWhiteSpace($FailedCapture.AnalysisAttemptId)) {
+        # A consumed claim includes a launch failure, even without a receipt.
+        $updates.retainedAnalysisStatus = 'failed'
+        $updates.retainedAnalysisReceiptPaths = @()
+        $updates.retainedAnalysisReceiptSha256 = ''
+        $updates.retainedAnalysisReceiptValid = $false
+        $updates.retainedAnalysisCompleted = $false
+        $updates.retainedAnalysisExitCodeAvailable = $false
+        $updates.retainedAnalysisExitCode = -1
+    }
+    if ($captureMatches -and (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        $receipt = $null
+        try { $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { }
+        $exactAttempt = $null -ne $receipt -and -not [string]::IsNullOrWhiteSpace($FailedCapture.AnalysisAttemptId) -and
+            $null -ne $receipt.PSObject.Properties['attemptId'] -and
+            [string]$receipt.attemptId -ceq $FailedCapture.AnalysisAttemptId
+        $valid = $exactAttempt -and (Test-FileTransferRetainedAnalysisAttemptReceipt -Receipt $receipt `
+            -ArtifactDir $ArtifactDir -ExpectedOwner RouteAcceptance -AcceptanceRunId $run -ScenarioRunId $scenario `
+            -LogPath $FailedCapture.SourcePath -LiveRouteProofMode $LiveRouteProofMode -CompactRequired $true)
+        $updates.retainedAnalysisReceiptPaths = @($receiptPath)
+        $updates.retainedAnalysisReceiptSha256 = Get-FileTransferEvidenceSha256 -Path $receiptPath
+        $updates.retainedAnalysisReceiptValid = $valid
+        $updates.retainedAnalysisCompleted = $valid
+        $updates.retainedAnalysisStatus = 'failed'
+        $updates.retainedAnalysisExitCodeAvailable = $false
+        $updates.retainedAnalysisExitCode = -1
+        if ($valid) {
+            $updates.retainedAnalysisStatus = 'completed'
+            $updates.retainedAnalysisExitCodeAvailable = $true
+            $updates.retainedAnalysisExitCode = 0
+        }
+        elseif ($exactAttempt -and @('owner','acceptanceRunId','scenarioRunId','timedOut','exitCodeAvailable','exitCode' |
+            Where-Object { $null -eq $receipt.PSObject.Properties[$_] }).Count -eq 0 -and [string]$receipt.owner -ceq 'RouteAcceptance' -and
+            [string]$receipt.acceptanceRunId -ceq $run -and [string]$receipt.scenarioRunId -ceq $scenario) {
+            if ([bool]$receipt.timedOut) { $updates.retainedAnalysisStatus = 'timed_out' }
+            $updates.retainedAnalysisExitCodeAvailable = [bool]$receipt.exitCodeAvailable
+            $updates.retainedAnalysisExitCode = [int]$receipt.exitCode
+        }
+    }
+    # Preserve capture finalization, GUI failure, source/configuration and all
+    # verdict fields. A completed diagnostic is never current-runtime proof.
+    $projection = [ordered]@{}
+    foreach ($property in $manifest.PSObject.Properties) { $projection[$property.Name] = $property.Value }
+    foreach ($key in $updates.Keys) { $projection[$key] = $updates[$key] }
+    Write-FileTransferEvidenceAtomicJson -Path $manifestPath -Value $projection
+    return [pscustomobject]$projection
 }
 
 function Update-FileTransferTunaDirectEvidenceManifestFromReceipt {

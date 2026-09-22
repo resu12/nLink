@@ -16,6 +16,7 @@ if ($null -eq ('NLink.Tools.LocalInputReadLease' -as [type])) {
         (Join-Path $PSScriptRoot 'LocalInputReadLease.cs'),
         (Join-Path $PSScriptRoot 'LocalRetainedSourceRequest.cs'),
         (Join-Path $PSScriptRoot 'LocalGuiWriterRequest.cs'),
+        (Join-Path $PSScriptRoot 'LocalGuiWriterFailedCapture.cs'),
         (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierLaunch.cs'),
         (Join-Path $PSScriptRoot 'LocalGuiWriterFrontierStart.cs'),
         (Join-Path $PSScriptRoot 'LocalGuiWriterLedgerOrigin.cs'),

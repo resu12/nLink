@@ -160,7 +160,7 @@ namespace NLink.Tools
             finally { FinishFrontierCustody(body, result); }
         }
 
-        private byte[] TakeBodyAfterExit(bool relay)
+        private byte[] TakeBodyAfterExit(bool relay, bool failedDiagnostic = false)
         {
             if (!Object.ReferenceEquals(original, this)) return null;
             if (Interlocked.Exchange(ref sealedState, 1) != 0) return null;
@@ -172,7 +172,8 @@ namespace NLink.Tools
             {
                 closed.Set();
                 int code;
-                if (relayMode != relay || workerExit == null || !workerExit.WaitOne(0) || !GetExitCodeProcess(workerExit.SafeWaitHandle, out code) || code != 0) return null;
+                if (relayMode != relay || workerExit == null || !workerExit.WaitOne(0) || !GetExitCodeProcess(workerExit.SafeWaitHandle, out code) ||
+                    (failedDiagnostic ? code == 0 : code != 0)) return null;
                 held = gate.WaitOne(0);
                 if (!held || view.ReadInt32(0) != (relay ? RelayMagic : Magic) || ReadId(view) != RequestId || view.ReadInt32(48) != 2 ||
                     view.ReadInt32(16) != workerId || view.ReadInt64(40) != workerCreation) return null;

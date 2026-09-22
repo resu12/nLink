@@ -860,6 +860,16 @@ function Invoke-TunaGuiSmokeWithHardDeadline {
             }
             catch { } # Diagnostic JSON is not a completion issuer.
         }
+        if ($null -ne $localWriterRequest -and $null -ne $LocalWriterRelay -and
+            $exitCodeAvailable -and $exitCode -ne 0 -and $outputCapture.Completed) {
+            $private:failedCapture = $null
+            try {
+                $private:failedCapture = $localWriterRequest.TakeFailedAfterExit()
+                if ($null -ne $private:failedCapture) { [void]$LocalWriterRelay.ForwardFailed($private:failedCapture) }
+            }
+            catch { } # Diagnostics never replace the original failed GUI result.
+            finally { if ($null -ne $private:failedCapture) { $private:failedCapture.Dispose() } }
+        }
         return [pscustomobject]@{
             ExitCode = $exitCode
             ExitCodeAvailable = $exitCodeAvailable

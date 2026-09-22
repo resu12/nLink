@@ -248,6 +248,81 @@ public sealed class Beta3SessionShellLayoutSmokeTests : Beta3DefaultUiSmokeTestB
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task SessionHeader_TunaEstablishmentRefreshesBothTipsAndPulse_WithoutRuntimeRefresh()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var header = new SessionHeaderView { RoleText = "Helpee" };
+            var window = new Window { Content = header };
+            window.Show();
+            try
+            {
+                await FlushUiAsync();
+                SetPrivateField(header, "tunaUnlockToggleOn", true);
+                SetPrivateField(header, "tunaRuntimeStatus", "listener_paths_starting");
+                var timer = Assert.IsType<DispatcherTimer>(typeof(SessionHeaderView)
+                    .GetField("tunaPulseTimer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(header));
+
+                header.TunaStatusReason = "preflight_listener_unavailable";
+                Assert.StartsWith("Starting Tuna relay paths.", header.TunaPictogramTip);
+                Assert.StartsWith("Starting Tuna relay paths.", header.TunaUnlockTip);
+                Assert.True(timer.IsEnabled);
+                SetPrivateField(header, "tunaPulseStartedUtc", DateTime.UtcNow.AddMilliseconds(-350));
+                InvokePrivate(header, "OnTunaPulseTimerTick", null, EventArgs.Empty);
+                Assert.NotEqual(1d, header.TunaPulseScale);
+
+                header.TunaStatusReason = "waiting_for_answer";
+                Assert.StartsWith("Negotiating Tuna acceleration.", header.TunaPictogramTip);
+                Assert.Equal("Negotiating Tuna acceleration.", header.TunaUnlockTip);
+                Assert.True(timer.IsEnabled);
+
+                InvokePrivate(header, "SetTunaUnlockMessage", "Temporary user feedback");
+                header.TunaStatusReason = "runtime_unlock_pending_route_commit";
+                Assert.Equal("Temporary user feedback", header.TunaUnlockTip);
+                SetPrivateField(header, "tunaUnlockMessageUntilUtc", DateTimeOffset.UtcNow.AddSeconds(-1));
+
+                header.TunaActive = true;
+                Assert.Contains("active", header.TunaUnlockTip);
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+                header.TunaActive = false;
+                Assert.True(timer.IsEnabled);
+
+                foreach (var reason in new[] { "header_switch_off", "remote_header_switch_off", "provider_paths_wait_timeout", "handoff_rejected" })
+                {
+                    header.TunaStatusReason = reason;
+                    Assert.False(timer.IsEnabled);
+                    Assert.Equal(1d, header.TunaPulseScale);
+                    Assert.Equal(header.TunaPictogramTip, header.TunaUnlockTip);
+                }
+
+                SetPrivateField(header, "tunaUnlockToggleOn", false);
+                SetPrivateField(header, "tunaRuntimeStatus", "off");
+                header.TunaStatusReason = "preflight_listener_unavailable";
+                Assert.False(timer.IsEnabled);
+                Assert.Contains("off", header.TunaUnlockTip);
+
+                SetPrivateField(header, "tunaUnlockToggleOn", true);
+                SetPrivateField(header, "tunaRuntimeStatus", "listener_ready");
+                InvokePrivate(header, "UpdateTunaVisualState");
+                Assert.True(timer.IsEnabled);
+                window.Content = null;
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(1d, header.TunaPulseScale);
+            }
+            finally
+            {
+                InvokePrivate(header, "StopTunaPulse");
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WhenConnected_ShowsVisibleChatImmediately()
     {
         await fixture.Session.Dispatch(async () =>
