@@ -28,6 +28,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'FileTransferRouteAcceptanceEvidence.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferSoak\RetainedAnalysisEvidence.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferOps\StallGraceAccounting.ps1')
+. (Join-Path $PSScriptRoot 'PackagedNknRuntime.ps1')
 
 $script:RegularNknGoodputFloorBytesPerSecond = 1500000D
 $script:TunaGoodputFloorBytesPerSecond = 4000000D
@@ -1367,18 +1368,7 @@ function Assert-RouteAcceptanceBridgeBundleRuntime {
         [Parameter(Mandatory = $true)][string]$BridgeDir
     )
 
-    $indexJs = Join-Path $BridgeDir 'index.js'
-    $nodeExe = Join-Path $BridgeDir 'node.exe'
-    $manifest = Join-Path $BridgeDir 'bridge-manifest.json'
-    $dependencies = Join-Path $BridgeDir 'bridge-dependencies.json'
-    $packageJson = Join-Path $BridgeDir 'package.json'
-    $packageLock = Join-Path $BridgeDir 'package-lock.json'
-
-    foreach ($requiredPath in @($indexJs, $nodeExe, $manifest, $dependencies, $packageJson, $packageLock)) {
-        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-            throw ("NKN bridge runtime is incomplete; missing '{0}'." -f $requiredPath)
-        }
-    }
+    Assert-PackagedNknBridgeRuntime -BridgeDir $BridgeDir
 }
 
 function Write-RouteAcceptanceBridgeRuntimeArtifact {
@@ -1442,6 +1432,8 @@ function Ensure-RouteAcceptancePackagedBridgeRuntime {
     $exePath = (Resolve-Path -LiteralPath $ResolvedExePath).Path
     $exeDir = [System.IO.Path]::GetDirectoryName($exePath)
     $bridgeDir = Join-Path (Join-Path $exeDir 'bridge') $Runtime
+    Assert-PackagedNknOutputPath -ResolvedExePath $exePath -OutputPath $ArtifactDir
+    Assert-PackagedNknPathNoReparsePoint -Path $ArtifactDir -Recurse
 
     try {
         Assert-RouteAcceptanceBridgeBundleRuntime -BridgeDir $bridgeDir
@@ -1449,35 +1441,9 @@ function Ensure-RouteAcceptancePackagedBridgeRuntime {
         return $bridgeDir
     }
     catch {
-        $candidateBridgeDirs = @(
-            (Join-Path (Join-Path $RepoRoot 'artifacts\bridge') $Runtime),
-            (Join-Path (Join-Path $RepoRoot 'artifacts\portable\nLink\win-x64\bridge') $Runtime)
-        )
-
-        foreach ($candidateBridgeDir in $candidateBridgeDirs) {
-            try {
-                Assert-RouteAcceptanceBridgeBundleRuntime -BridgeDir $candidateBridgeDir
-
-                $bridgeRoot = Join-Path $exeDir 'bridge'
-                if (Test-Path -LiteralPath $bridgeRoot) {
-                    Remove-Item -Recurse -Force -LiteralPath $bridgeRoot
-                }
-
-                New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
-                Get-ChildItem -LiteralPath $candidateBridgeDir -Force | Copy-Item -Recurse -Force -Destination $bridgeDir
-                Assert-RouteAcceptanceBridgeBundleRuntime -BridgeDir $bridgeDir
-                Write-RouteAcceptanceBridgeRuntimeArtifact -ArtifactDir $ArtifactDir -Reason 'staged_from_repo_artifact' -ExeDir $exeDir -BridgeDir $bridgeDir -SourceBridgeDir $candidateBridgeDir
-                Write-Host ("[FileTransfer Acceptance] Staged NKN bridge runtime into app folder: {0}" -f $bridgeDir) -ForegroundColor DarkCyan
-                return $bridgeDir
-            }
-            catch {
-                continue
-            }
-        }
-
         $failure = $_.Exception.Message
         Write-RouteAcceptanceBridgeRuntimeArtifact -ArtifactDir $ArtifactDir -Reason 'missing_bridge_runtime' -ExeDir $exeDir -BridgeDir $bridgeDir -Failure $failure
-        throw ("Route acceptance app is missing the packaged NKN bridge runtime for {0}. Build portable/installer first or stage artifacts\\bridge\\{0}; app_dir={1}; last_error={2}" -f $Runtime, $exeDir, $failure)
+        throw ("Route acceptance app is missing the packaged NKN bridge runtime for {0}. Supply a complete portable/installer package; no repair was attempted; app_dir={1}; last_error={2}" -f $Runtime, $exeDir, $failure)
     }
 }
 
@@ -1918,7 +1884,8 @@ function New-RouteAcceptanceRunResult {
         fileTransferFallbackFrontierStallGraceRecheckMissingRawCount = 0
         fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = 0
         fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = 0
-        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = 1
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = 0
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = 'unavailable'
         fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = 0
         fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = 0
         fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'none'
@@ -3789,6 +3756,11 @@ function Assert-Phase4OperatorVerdict {
         [Parameter(Mandatory = $true)][bool]$RequireWarningFree
     )
 
+    foreach ($name in @('AccountingVersion','RawCount','DistinctCount','RecoveredCount','SupersededCount','UnresolvedCount')) {
+        $Result.('fileTransferFallbackFrontierStallGraceRecheckMissing' + $name) = 0
+    }
+    $Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = 'unavailable'
+    $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'none'
     if (-not (Assert-RouteAcceptanceFileExists -Result $Result -RelativePath 'filetransfer-operator-verdict.txt')) {
         return
     }
@@ -4068,18 +4040,34 @@ function Assert-Phase4OperatorVerdict {
     $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_recovered_count' -DefaultValue '0')
     $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_unresolved_count' -DefaultValue '0')
     $Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_checkpoint_acceptance_recheck_missing_verdict' -DefaultValue 'none'
-    $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict' -DefaultValue 'none'
     try {
-        $stallAccounting = ConvertFrom-FileTransferStallGraceAccountingReport -Report $operator
-        foreach ($name in @('AccountingVersion','RawCount','DistinctCount','RecoveredCount','SupersededCount','UnresolvedCount')) {
-            $Result.('fileTransferFallbackFrontierStallGraceRecheckMissing' + $name) = $stallAccounting.$name
+        $envelopeHardFailureCount = 0
+        if ([string]::IsNullOrWhiteSpace([string]$operator['verdict']) -or
+            [string]$operator['hard_failure_count'] -cnotmatch '^[0-9]+$' -or
+            -not [int]::TryParse([string]$operator['hard_failure_count'], [ref]$envelopeHardFailureCount)) {
+            throw 'stall_grace_accounting_report_envelope_invalid'
         }
-        if ($stallAccounting.UnresolvedCount -gt 0 -and $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict -ne 'fail') {
-            throw 'stall_grace_accounting_unresolved_verdict_mismatch'
+        $stallAccountingPrefix = 'filetransfer_fallback_frontier_stall_grace_recheck_missing_'
+        $hasStallAccounting = @('accounting_version','raw_count','distinct_count','recovered_count','superseded_count','unresolved_count','verdict' |
+            Where-Object { $operator.Contains($stallAccountingPrefix + $_) }).Count -gt 0
+        if ($hasStallAccounting) {
+            if ([string]$operator['retained_analysis_completed'] -eq '0' -or [string]$operator['semantic_failure_domain'] -eq 'unavailable') {
+                throw 'stall_grace_accounting_unavailable_report_contradiction'
+            }
+            $stallAccounting = ConvertFrom-FileTransferStallGraceAccountingReport -Report $operator
+            $stallVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name ($stallAccountingPrefix + 'verdict') -DefaultValue 'none'
+            if ($stallAccounting.UnresolvedCount -gt 0 -and $stallVerdict -ne 'fail') {
+                throw 'stall_grace_accounting_unresolved_verdict_mismatch'
+            }
+            foreach ($name in @('AccountingVersion','RawCount','DistinctCount','RecoveredCount','SupersededCount','UnresolvedCount')) {
+                $Result.('fileTransferFallbackFrontierStallGraceRecheckMissing' + $name) = $stallAccounting.$name
+            }
+            $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $stallVerdict
+            $Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = 'valid'
         }
     }
     catch {
-        $Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = 0
+        $Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = 'invalid'
         $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'fail'
         Add-RouteAcceptanceFailure -Result $Result -Message ('invalid stall-grace accounting: ' + $_.Exception.Message)
     }
@@ -5510,6 +5498,10 @@ function Write-RouteAcceptanceFakePhase4Run {
     Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $liveMode
 
     if ($terminalBeforeFallbackSwitchOff -and $Scenario.Name -eq 'regular-v4-live-activation-off-on-off-256mb') {
+        $operatorPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
+        $stallAccountingLines = @(if (Test-Path -LiteralPath $operatorPath -PathType Leaf) {
+            Get-Content -LiteralPath $operatorPath | Where-Object { $_.StartsWith('filetransfer_fallback_frontier_stall_grace_recheck_missing_', [StringComparison]::Ordinal) }
+        })
         $routeSummaryPath = Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt'
         if (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) {
             $routeSummaryText = Get-Content -LiteralPath $routeSummaryPath -Raw
@@ -5522,17 +5514,21 @@ function Write-RouteAcceptanceFakePhase4Run {
             Set-Content -LiteralPath $routeSummaryPath -Value $routeSummaryText -Encoding UTF8
         }
 
-        @(
+        (@(
             'verdict=PASS',
             'hard_failure_count=0',
             'warning_count=0',
             'warning_kinds=(none)',
             'warning_cap_exceeded_kinds=(none)'
-        ) | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Encoding UTF8
+        ) + $stallAccountingLines) | Set-Content -LiteralPath $operatorPath -Encoding UTF8
     }
 
     if ($Scenario.Name -eq 'second-transfer-after-reactivation' -and
         (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'COMBINED_ROUTE_ANALYSIS_CONTAMINATED')) {
+        $operatorPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
+        $stallAccountingLines = @(if (Test-Path -LiteralPath $operatorPath -PathType Leaf) {
+            Get-Content -LiteralPath $operatorPath | Where-Object { $_.StartsWith('filetransfer_fallback_frontier_stall_grace_recheck_missing_', [StringComparison]::Ordinal) }
+        })
         @(
             'route_consistency_verdict=fail',
             'route_consistency_failure_count=2',
@@ -5560,13 +5556,13 @@ function Write-RouteAcceptanceFakePhase4Run {
             'fallback_leg_authority_proof_verdict=fail',
             'bridge_liveness_integration_verdict=none'
         ) | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt') -Encoding UTF8
-        @(
+        (@(
             'verdict=FAIL',
             'hard_failure_count=3',
             'warning_count=0',
             'warning_kinds=(none)',
             'warning_cap_exceeded_kinds=(none)'
-        ) | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Encoding UTF8
+        ) + $stallAccountingLines) | Set-Content -LiteralPath $operatorPath -Encoding UTF8
     }
 
     if ($Scenario.Name -eq 'second-transfer-after-reactivation' -and
@@ -9079,7 +9075,8 @@ function Invoke-RegularNknRouteAcceptanceRun {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][string]$PayloadSize,
-        [Parameter(Mandatory = $true)][string]$ResolvedExePath
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath,
+        [ValidateSet('Development', 'Packaged')][string]$RuntimeIntent = 'Development'
     )
 
     $scriptPath = Join-Path $RepoRoot 'tools\Run-FileTransferNknSoak.ps1'
@@ -9091,6 +9088,7 @@ function Invoke-RegularNknRouteAcceptanceRun {
         '-Direction', 'helpee-to-helper',
         '-ArtifactDir', $ArtifactDir,
         '-ExePath', $ResolvedExePath,
+        '-RuntimeIntent', $RuntimeIntent,
         '-TimeoutSeconds', ([string]$TimeoutSeconds),
         '-CycleTimeoutSeconds', ([string]$cycleTimeoutSeconds),
         '-ProgressTimeoutSeconds', ([string]$ProgressTimeoutSeconds),
@@ -10625,7 +10623,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                     }
                 }
                 elseif ($Scenario.Kind -eq 'regular') {
-                    Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $artifactDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
+                    Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $artifactDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath -RuntimeIntent Packaged
                 }
                 else {
                     Invoke-TunaRouteAcceptanceRun `
@@ -10805,7 +10803,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                             }
                         }
                         elseif ($Scenario.Kind -eq 'regular') {
-                            Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $rerunDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
+                            Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $rerunDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath -RuntimeIntent Packaged
                         }
                         else {
                             Invoke-TunaRouteAcceptanceRun `
@@ -11006,6 +11004,15 @@ function New-RouteAcceptanceSummaryRunDto {
     )
 
     $allResultFailureLines = @($Result.failures | ForEach-Object { [string]$_ })
+    $stallAvailabilityProperty = $Result.PSObject.Properties['fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability']
+    $stallVersionProperty = $Result.PSObject.Properties['fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion']
+    $stallAvailability = if ($null -eq $stallAvailabilityProperty) { 'unavailable' } else { [string]$stallAvailabilityProperty.Value }
+    if ($stallAvailability -cnotin @('valid','invalid','unavailable') -or
+        ($stallAvailability -ceq 'valid' -and ($null -eq $stallVersionProperty -or [string]$stallVersionProperty.Value -cnotin @('1','2')))) {
+        $allResultFailureLines += 'invalid stall-grace accounting: unsupported availability or policy version in result'
+        $stallAvailability = 'invalid'
+    }
+    $stallAccountingValid = $stallAvailability -ceq 'valid'
     $resultFailureLines = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $allResultFailureLines -Limit 128)
     $efficiencyFailureLine = @($allResultFailureLines | Where-Object {
         $_.IndexOf('efficiency_verdict=fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
@@ -11364,13 +11371,14 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount = [int]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingRecoveredCount
         fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount = [int]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingUnresolvedCount
         fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict = [string]$Result.fileTransferFallbackFrontierCheckpointAcceptanceRecheckMissingVerdict
-        fileTransferFallbackFrontierStallGraceRecheckMissingRawCount = [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingRawCount
-        fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount
-        fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount
-        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion
-        fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount
-        fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount
-        fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = [string]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict
+        fileTransferFallbackFrontierStallGraceRecheckMissingRawCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingRawCount } else { 0 })
+        fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount } else { 0 })
+        fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount } else { 0 })
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion } else { 0 })
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = $stallAvailability
+        fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount } else { 0 })
+        fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount } else { 0 })
+        fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $(if ($stallAccountingValid) { [string]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict } elseif ($stallAvailability -eq 'invalid') { 'fail' } else { 'none' })
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount
@@ -11920,7 +11928,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferFallbackFrontierStallGraceRecheckMissingRawCount = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = 0
-    $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = 1
+    $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = 0
     $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = 0
@@ -12559,12 +12567,26 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         }
     }
 
-    $stallAccountingVersions = @($runDtos | ForEach-Object { [int]$_.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion } | Select-Object -Unique)
-    $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = if ($stallAccountingVersions.Count -eq 1 -and $stallAccountingVersions[0] -in @(1,2)) {
-        $stallAccountingVersions[0]
-    } else { 0 }
-    if ($fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion -eq 0 -and $runDtos.Count -gt 0) {
+    $stallValidRuns = @($runDtos | Where-Object { $_.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability -eq 'valid' })
+    $stallUnavailableRuns = @($runDtos | Where-Object { $_.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability -eq 'unavailable' })
+    $stallInvalidRuns = @($runDtos | Where-Object { $_.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability -eq 'invalid' })
+    $stallAccountingVersions = @($stallValidRuns | ForEach-Object { [int]$_.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion } | Select-Object -Unique)
+    $stallAccountingAvailability = if ($stallInvalidRuns.Count -gt 0 -or $stallAccountingVersions.Count -gt 1) { 'invalid' }
+        elseif ($stallValidRuns.Count -eq 0) { 'unavailable' }
+        elseif ($stallUnavailableRuns.Count -gt 0 -or $runDtos.Count -ne $ExpectedRunCount) { 'partial' }
+        else { 'complete' }
+    $stallAccountingCounterScope = if ($stallAccountingAvailability -eq 'complete') { 'complete' }
+        elseif ($stallValidRuns.Count -gt 0) { 'partial' } else { 'none' }
+    $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = if ($stallAccountingAvailability -eq 'complete') { $stallAccountingVersions[0] } else { 0 }
+    foreach ($result in @($stallUnavailableRuns) + @($stallInvalidRuns)) {
+        $failureLines += ("{0}: {1} stall-grace accounting; per-run accounting excluded from subtotal" -f $result.name, $result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability)
+    }
+    if ($stallAccountingVersions.Count -gt 1) {
         $failureLines += 'invalid stall-grace accounting aggregation: mixed or unsupported policy versions; per-run results retained'
+    }
+    if ($stallAccountingAvailability -ne 'complete' -and ($ExpectedRunCount -gt 0 -or $runDtos.Count -gt 0)) {
+        $failureLines += ("incomplete stall-grace accounting aggregation: availability={0}; valid={1}; unavailable={2}; invalid={3}; expected={4}; observed={5}" -f
+            $stallAccountingAvailability, $stallValidRuns.Count, $stallUnavailableRuns.Count, $stallInvalidRuns.Count, $ExpectedRunCount, $runDtos.Count)
         $fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'fail'
     }
 
@@ -12902,6 +12924,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_availability={0}" -f $stallAccountingAvailability),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_counter_scope={0}" -f $stallAccountingCounterScope),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_valid_run_count={0}" -f $stallValidRuns.Count),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_unavailable_run_count={0}" -f $stallUnavailableRuns.Count),
+        ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_invalid_run_count={0}" -f $stallInvalidRuns.Count),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingVerdict),
@@ -13372,6 +13399,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion)
+        $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_availability={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict)
@@ -13826,6 +13854,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount
         fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = $stallAccountingAvailability
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingCounterScope = $stallAccountingCounterScope
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingValidRunCount = $stallValidRuns.Count
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingUnavailableRunCount = $stallUnavailableRuns.Count
+        fileTransferFallbackFrontierStallGraceRecheckMissingAccountingInvalidRunCount = $stallInvalidRuns.Count
         fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount
         fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount
         fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $fileTransferFallbackFrontierStallGraceRecheckMissingVerdict
@@ -14218,6 +14251,14 @@ $repoRoot = Resolve-RepoRoot
 $runRoot = $null
 Push-Location $repoRoot
 try {
+    if ($MatrixMode -in @('phase4-ab-acceptance', 'phase5-analyzer-gui-acceptance') -and
+        -not $EvidenceDryRun -and
+        -not (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_EVIDENCE_DRY_RUN') -and
+        -not (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_GUI')) {
+        Assert-PackagedNknOutputPath `
+            -ResolvedExePath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $ExePath) `
+            -OutputPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $ArtifactRoot)
+    }
     $runRoot = New-RouteAcceptanceTimestampedRoot -RepoRoot $repoRoot -RequestedRoot $ArtifactRoot
     $script:RouteAcceptanceStartedUtc = [DateTime]::UtcNow
     $script:RouteAcceptanceInitialGitState = Get-RouteAcceptanceEvidenceGitState -RepoRoot $repoRoot

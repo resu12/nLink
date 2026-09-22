@@ -22,6 +22,7 @@ function New-Result([string]$Name,[int]$Version) {
     [void][IO.Directory]::CreateDirectory($dir)
     $r=New-RouteAcceptanceRunResult -Name $Name -ArtifactDir $dir -ExpectedRoute 'file_tuna_v4' -ExpectedProtocol 4
     $r.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion=$Version
+    $r.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability='valid'
     $r.fileTransferFallbackFrontierStallGraceRecheckMissingRawCount=1
     $r.fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount=1
     $r.fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount=0

@@ -1,3 +1,5 @@
+. (Join-Path $PSScriptRoot '..\PackagedNknRuntime.ps1')
+
 function Stop-NLinkProcesses {
     param([string]$ResolvedExePath = "")
 
@@ -226,8 +228,19 @@ function Resolve-NLinkRepoRootForPath {
 function Ensure-NknBridgeRuntimeForExe {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][string]$ResolvedExePath
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath,
+        [ValidateSet('Development', 'Packaged')][string]$RuntimeIntent = 'Development'
     )
+
+    if ($RuntimeIntent -eq 'Packaged') {
+        if (-not (Test-Path -LiteralPath $ResolvedExePath -PathType Leaf)) {
+            throw "Packaged runtime executable was not found: $ResolvedExePath"
+        }
+        $appDir = Split-Path -Parent ([System.IO.Path]::GetFullPath($ResolvedExePath))
+        Assert-PackagedNknPathNoReparsePoint -Path $appDir -Recurse
+        Assert-PackagedNknBridgeRuntime -BridgeDir (Join-Path $appDir 'bridge\win-x64')
+        return
+    }
 
     $appDir = Split-Path -Parent $ResolvedExePath
     if ([string]::IsNullOrWhiteSpace($appDir) -or -not (Test-Path $appDir)) {

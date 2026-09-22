@@ -11229,9 +11229,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var wrapperMain = wrapperText[wrapperText.IndexOf("$guiSmokeResult = Invoke-TunaGuiSmokeWithHardDeadline", StringComparison.Ordinal)..];
         var minimalSummaryCheckpoint = wrapperMain.IndexOf("$summaryMissingFromChild", StringComparison.Ordinal);
         var directManifestCheckpoint = wrapperMain.IndexOf("Write-TunaGuiDirectEvidenceManifest", StringComparison.Ordinal);
-        var retainedAnalysis = wrapperMain.IndexOf("Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort", StringComparison.Ordinal);
-        Assert.True(minimalSummaryCheckpoint >= 0 && minimalSummaryCheckpoint < retainedAnalysis);
-        Assert.True(directManifestCheckpoint >= 0 && directManifestCheckpoint < retainedAnalysis);
+        var retainedAnalysisCalls = new[]
+        {
+            "Invoke-TunaGuiRetainedAnalysisBestEffort -",
+            "Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -",
+            "Invoke-TunaGuiRetainedAnalysis -"
+        }.Select(call => wrapperMain.IndexOf(call, StringComparison.Ordinal)).ToArray();
+        Assert.All(retainedAnalysisCalls, index => Assert.True(index >= 0));
+        Assert.True(minimalSummaryCheckpoint >= 0 && minimalSummaryCheckpoint < retainedAnalysisCalls.Min());
+        Assert.True(directManifestCheckpoint >= 0 && directManifestCheckpoint < retainedAnalysisCalls.Min());
         Assert.Contains("$summaryCurrentValid", wrapperMain, StringComparison.Ordinal);
         Assert.DoesNotContain("$summaryMissingAfterGuiChild", wrapperMain, StringComparison.Ordinal);
         Assert.Contains("guiExitCodeAvailable", wrapperText, StringComparison.Ordinal);

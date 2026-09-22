@@ -2363,7 +2363,11 @@ function Write-TunaGuiDirectEvidenceManifest {
             $analysisReceiptPaths += $receiptPath
             if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
                 $analysisReceiptValid = $false
-                $(if ($RetainedAnalysisOwner -eq 'RouteAcceptance') { 'delegated_pending' } else { 'not_started' })
+                if ($RetainedAnalysisOwner -eq 'RouteAcceptance' -and $GuiExitCodeAvailable -and $GuiExitCode -ne 0) {
+                    'not_started_due_to_gui_failure'
+                }
+                elseif ($RetainedAnalysisOwner -eq 'RouteAcceptance') { 'delegated_pending' }
+                else { 'not_started' }
                 continue
             }
 
@@ -2399,6 +2403,9 @@ function Write-TunaGuiDirectEvidenceManifest {
     }
     elseif ($analysisStatuses.Count -gt 0 -and @($analysisStatuses | Where-Object { $_ -ne 'completed' }).Count -eq 0) {
         'completed'
+    }
+    elseif ($analysisStatuses -contains 'not_started_due_to_gui_failure') {
+        'not_started_due_to_gui_failure'
     }
     elseif ($analysisStatuses -contains 'delegated_pending') {
         'delegated_pending'

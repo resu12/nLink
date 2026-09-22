@@ -2,6 +2,8 @@ param(
     [ValidateSet("nkn-fast", "nkn-mixed")]
     [string]$Mode = "nkn-fast",
     [string]$ExePath = "",
+    [ValidateSet('Development', 'Packaged')]
+    [string]$RuntimeIntent = 'Development',
     [string]$PayloadSizes = "",
     [int]$Cycles = 0,
     [int]$Seed = 1313625684,
@@ -403,8 +405,21 @@ function Resolve-FileTransferArtifactDir {
 function Resolve-FileTransferLiveExePath {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [string]$RequestedPath = ''
+        [string]$RequestedPath = '',
+        [ValidateSet('Development', 'Packaged')][string]$RuntimeIntent = 'Development'
     )
+
+    if ($RuntimeIntent -eq 'Packaged') {
+        if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
+            throw 'Packaged runtime requires an explicit -ExePath.'
+        }
+        $candidate = if ([System.IO.Path]::IsPathRooted($RequestedPath)) { $RequestedPath } else { Join-Path $RepoRoot $RequestedPath }
+        $candidate = [System.IO.Path]::GetFullPath($candidate)
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            throw "Packaged runtime executable was not found: $candidate"
+        }
+        return $candidate
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
         return (Resolve-ExePath -RepoRoot $RepoRoot -RequestedPath $RequestedPath)
@@ -488,7 +503,8 @@ function Test-FileTransferRegularNknStagingExcludedItem {
 function Copy-FileTransferRegularNknOnlyPortable {
     param(
         [Parameter(Mandatory = $true)][string]$ResolvedExePath,
-        [Parameter(Mandatory = $true)][string]$ArtifactDir
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [ValidateSet('Development', 'Packaged')][string]$RuntimeIntent = 'Development'
     )
 
     $sourceExePath = [System.IO.Path]::GetFullPath($ResolvedExePath)
@@ -501,6 +517,11 @@ function Copy-FileTransferRegularNknOnlyPortable {
     $stageDir = Join-Path $artifactRoot 'regular-nkn-app\sidecar-isolated\a\b\c\d\e\f\app'
     $stageDir = [System.IO.Path]::GetFullPath($stageDir)
     Assert-FileTransferPathUnderRoot -Path $stageDir -Root $artifactRoot
+
+    if ($RuntimeIntent -eq 'Packaged') {
+        Assert-PackagedNknOutputPath -ResolvedExePath $sourceExePath -OutputPath $artifactRoot
+        Assert-PackagedNknOutputPath -ResolvedExePath $sourceExePath -OutputPath $stageDir -Disjoint
+    }
 
     if (Test-Path -LiteralPath $stageDir) {
         Remove-Item -LiteralPath $stageDir -Recurse -Force
@@ -1186,6 +1207,13 @@ function Clear-FileTransferNknRunArtifacts {
 $repoRoot = Resolve-RepoRoot
 Assert-PayloadEfficiencyProfileIsSafeForMode
 $resolvedArtifactDir = Resolve-FileTransferArtifactDir -RepoRoot $repoRoot -RequestedArtifactDir $ArtifactDir
+if ($RuntimeIntent -eq 'Packaged' -and -not (Test-FileTransferNknSoakFakeGuiMode)) {
+    if ($Build.IsPresent) { throw '-Build is not allowed with Packaged runtime intent.' }
+    $resolvedExePath = Resolve-FileTransferLiveExePath -RepoRoot $repoRoot -RequestedPath $ExePath -RuntimeIntent Packaged
+    Assert-PackagedNknOutputPath -ResolvedExePath $resolvedExePath -OutputPath $resolvedArtifactDir
+    Assert-PackagedNknPathNoReparsePoint -Path $resolvedArtifactDir -Recurse
+    Ensure-NknBridgeRuntimeForExe -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -RuntimeIntent Packaged
+}
 New-Item -ItemType Directory -Force -Path $resolvedArtifactDir | Out-Null
 Clear-FileTransferNknRunArtifacts -ArtifactDir $resolvedArtifactDir
 $regularNknTunaStateRoot = Join-Path $resolvedArtifactDir 'regular-nkn-tuna-state'
@@ -1197,7 +1225,7 @@ if (-not (Test-Path -LiteralPath $guiSmokeScript -PathType Leaf)) {
     throw "GUI smoke harness not found: $guiSmokeScript"
 }
 
-$resolvedExePath = Resolve-FileTransferLiveExePath -RepoRoot $repoRoot -RequestedPath $ExePath
+$resolvedExePath = Resolve-FileTransferLiveExePath -RepoRoot $repoRoot -RequestedPath $ExePath -RuntimeIntent $(if (Test-FileTransferNknSoakFakeGuiMode) { 'Development' } else { $RuntimeIntent })
 $autopickPath = Join-Path $resolvedArtifactDir 'filetransfer-live-autopick-payload.bin'
 [System.IO.File]::WriteAllBytes($autopickPath, [byte[]]@())
 $effectiveResolvedExePath = $resolvedExePath
@@ -1252,10 +1280,12 @@ $fakeGuiMode = Test-FileTransferNknSoakFakeGuiMode
 try {
     if (-not $fakeGuiMode) {
         Stop-NLinkProcesses -ResolvedExePath $resolvedExePath
-        Build-FileTransferPortableIfNeeded -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -ForceBuild:$Build.IsPresent
-        Ensure-NknBridgeRuntimeForExe -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath
+        if ($RuntimeIntent -eq 'Development') {
+            Build-FileTransferPortableIfNeeded -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -ForceBuild:$Build.IsPresent
+        }
+        Ensure-NknBridgeRuntimeForExe -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -RuntimeIntent $RuntimeIntent
         if ([string]::Equals($Mode, 'nkn-fast', [System.StringComparison]::OrdinalIgnoreCase)) {
-            $effectiveResolvedExePath = Copy-FileTransferRegularNknOnlyPortable -ResolvedExePath $resolvedExePath -ArtifactDir $resolvedArtifactDir
+            $effectiveResolvedExePath = Copy-FileTransferRegularNknOnlyPortable -ResolvedExePath $resolvedExePath -ArtifactDir $resolvedArtifactDir -RuntimeIntent $RuntimeIntent
             Stop-NLinkProcesses -ResolvedExePath $effectiveResolvedExePath
         }
     }

@@ -6,6 +6,22 @@ public sealed class FileTransferStallGraceCompactReportTests : FileTransferOpsSc
     [InlineData("powershell")]
     [InlineData("pwsh")]
     [Trait("OpsSuite", "SupersededSourceAccounting")]
+    public async Task CompactReportExports_PreserveOnlySelectedStallDiagnostic(string host)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        const string script = """
+            param([string]$RepoRoot)
+            & (Join-Path $RepoRoot 'tests/nLink.SmokeTests.Core/TestData/CompactStallDiagnostic.ps1') -RepoRoot $RepoRoot
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot()], host);
+        Assert.True(result.ExitCode == 0, $"{host}: {result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("compact-stall-diagnostic-exports-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    [Trait("OpsSuite", "SupersededSourceAccounting")]
     public async Task CompactReportExports_PreserveVersionedStallGraceAccounting(string host)
     {
         if (!OperatingSystem.IsWindows()) { return; }

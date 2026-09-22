@@ -6043,6 +6043,9 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Event = $candidateRecord.Event
             Reason = $candidateRecord.Reason
             Variant = $candidateRecord.Variant
+            UnresolvedDiagnostic = if ($null -ne $candidateRecord.PSObject.Properties['UnresolvedDiagnostic']) {
+                $candidateRecord.UnresolvedDiagnostic
+            } else { $null }
         }) | Out-Null
     }
     foreach ($candidateRecord in @($fileTransferFallbackFrontierRecentProgressGraceRecheckProof.UnresolvedCandidateRecords)) {
@@ -6417,6 +6420,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     else {
         '(none)'
     }
+    $fallbackFrontierStallDiagnostic = if ($null -ne $firstCompactProofChainFailure -and
+        [string]$firstCompactProofChainFailure.Class -eq 'filetransfer_fallback_frontier_stall_grace_recheck_missing' -and
+        $null -ne $firstCompactProofChainFailure.PSObject.Properties['UnresolvedDiagnostic']) {
+        $firstCompactProofChainFailure.UnresolvedDiagnostic
+    } else { $null }
+    $fallbackFrontierStallDiagnosticJson = if ($null -ne $fallbackFrontierStallDiagnostic) {
+        ConvertTo-Json -InputObject $fallbackFrontierStallDiagnostic -Depth 4 -Compress
+    } else { 'null' }
     $firstProofChainFailureSequence = if ($null -ne $firstProofChainFailure) { [int64]$firstProofChainFailure.Sequence } else { -1L }
     $firstProofChainFailureSourcePath = if ($null -ne $firstProofChainFailure) { [string]$firstProofChainFailure.FilePath } else { '(none)' }
     $firstProofChainFailureLineNumber = if ($null -ne $firstProofChainFailure) { [int]$firstProofChainFailure.LineNumber } else { 0 }
@@ -6607,6 +6618,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("warning_cap_exempted_kinds={0}" -f $warningCapExemptedKinds),
         ("recovery_failure_class={0}" -f $recoveryFailureClass),
         ("failure_variant={0}" -f $failureVariant),
+        ("fallback_frontier_stall_diagnostic={0}" -f $fallbackFrontierStallDiagnosticJson),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -7194,6 +7206,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProofVerdict),
         ("recovery_failure_class={0}" -f $recoveryFailureClass),
         ("failure_variant={0}" -f $failureVariant),
+        ("fallback_frontier_stall_diagnostic={0}" -f $fallbackFrontierStallDiagnosticJson),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -7673,6 +7686,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("hard_failure_count={0}" -f $hardFailureCount),
         ("recovery_failure_class={0}" -f $recoveryFailureClass),
         ("failure_variant={0}" -f $failureVariant),
+        ("fallback_frontier_stall_diagnostic={0}" -f $fallbackFrontierStallDiagnosticJson),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -8101,6 +8115,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("goodput_bytes_per_second={0}" -f $goodput),
         ("recovery_failure_class={0}" -f $recoveryFailureClass),
         ("failure_variant={0}" -f $failureVariant),
+        ("fallback_frontier_stall_diagnostic={0}" -f $fallbackFrontierStallDiagnosticJson),
         ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
         ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
         ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
@@ -8587,6 +8602,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         liveness_timeout_after_terminal_count = $postTerminalLivenessTimeoutCount
         recovery_failure_class = $recoveryFailureClass
         failure_variant = $failureVariant
+        fallback_frontier_stall_diagnostic = $fallbackFrontierStallDiagnosticJson
         first_proof_chain_failure_class = $firstProofChainFailureClass
         first_proof_chain_failure_event = $firstProofChainFailureEvent
         first_proof_chain_failure_reason = $firstProofChainFailureReason

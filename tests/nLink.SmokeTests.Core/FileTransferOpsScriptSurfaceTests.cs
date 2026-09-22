@@ -7236,6 +7236,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             {
                 "Mode",
                 "ExePath",
+                "RuntimeIntent",
                 "PayloadSizes",
                 "Cycles",
                 "Seed",
@@ -7254,6 +7255,7 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
             },
             ExtractTopLevelPowerShellParameterNames(scriptText));
         Assert.Equal(new[] { "nkn-fast", "nkn-mixed" }, ExtractPowerShellValidateSetValues(scriptText, "Mode"));
+        Assert.Equal(new[] { "Development", "Packaged" }, ExtractPowerShellValidateSetValues(scriptText, "RuntimeIntent"));
         Assert.Equal(ExpectedExternalTopologyProfiles, ExtractPowerShellValidateSetValues(scriptText, "ExternalTopologyProfile"));
         Assert.Equal(ExpectedPayloadEfficiencyProfiles, ExtractPowerShellValidateSetValues(scriptText, "PayloadEfficiencyProfile"));
         Assert.Contains("FILETRANSFER_NKN_SOAK", scriptText, StringComparison.Ordinal);
@@ -7302,13 +7304,15 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
                 "GoodputRegressionTolerancePercent",
                 "GoodputOnlyRerunLimit",
                 "SetupOnlyRerunLimit",
+                "StrictCampaignPreflight",
                 "TimeoutSeconds",
                 "ProgressTimeoutSeconds",
                 "FallbackMaxAttempts",
                 "AllowExternalTransportWarnings",
                 "ScenarioName",
                 "EvidenceDryRun",
-                "EvidenceDryRunFixtureRoot"
+                "EvidenceDryRunFixtureRoot",
+                "CaptureLocalPublicationDiagnostics"
             },
             ExtractTopLevelPowerShellParameterNames(scriptText));
 
