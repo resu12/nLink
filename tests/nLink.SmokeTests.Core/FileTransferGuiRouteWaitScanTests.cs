@@ -7,6 +7,141 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferGuiRouteWaitScanTests : FileTransferOpsScriptsTestBase
 {
     [Theory]
+    [InlineData("powershell", false)]
+    [InlineData("powershell", true)]
+    [InlineData("pwsh", false)]
+    [InlineData("pwsh", true)]
+    public async Task RouteWait_PriorRoutePayloadAvoidsParsingWithoutSkippingRecords(string host, bool appendOnly)
+    {
+        var script = Fixture(appendOnly, payloadBaseline: true) + """
+            $lines = [Collections.Generic.List[string]]::new()
+            $events = @('filetransfer_data_path_send_result', 'filetransfer_data_path_receive_result', 'filetransfer_tuna_data_path_peer_visible')
+            $fields = 'session_id=s1; transfer_id=t1; direction=outbound; route=file_tuna_v4; protocol_version=4; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=1; route_commit_generation=0'
+            $width = '; diagnostic=' + ('x' * 600)
+            for ($i = 0; $i -lt 6000; $i++) {
+                $lines.Add("event=$($events[$i % 3]); $fields$width")
+                $lines.Add('event=unrelated_telemetry' + $width)
+                $lines.Add('event=unrelated_telemetry' + $width)
+            }
+            $direct = 'event=filetransfer_live_route_epoch_started; route=post_tuna_fallback_v6; protocol_version=6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; live_route_epoch=2'
+            $lines.Add($direct)
+            $options = @{ Route='post_tuna_fallback_v6'; ProtocolVersion=6; HandoffKind='tuna_to_normal_fallback'; TargetTransport='regular_nkn' }
+            $before = Invoke-ScanCase -Lines $lines.ToArray() -Options $options -Baseline
+            $after = Invoke-ScanCase -Lines $lines.ToArray() -Options $options
+            Assert-ScanParity $before $after
+            if ($after.Result -cne $direct -or $after.Error -or $after.Polls -ne 1 -or
+                $after.VisitCount -ne 18001 -or $after.Ranges -cne '0:18001') { throw 'payload scan behavior changed' }
+            if ($before.ParseCount -ne 6001 -or $after.ParseCount -ne 1) {
+                throw "prior-route payload parsed: baseline=$($before.ParseCount) current=$($after.ParseCount)"
+            }
+            'prior-route-payload-work-count-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("prior-route-payload-work-count-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    public static IEnumerable<object[]> PayloadProjectionCases()
+    {
+        foreach (var host in new[] { "powershell", "pwsh" })
+        foreach (var shape in new[] { "send", "receive", "peer-visible", "target-alias", "spaced", "upper", "duplicate-control-event",
+                     "overwritten-event", "false-positive-route", "overwritten-route", "wrong-scope", "missing-frame", "stale-epoch",
+                     "wrong-exact-epoch", "direct-preferred", "direct-prefix", "required-ignores-direct", "commit-overwrite", "recovered" })
+            yield return new object[] { host, shape };
+    }
+
+    [Theory]
+    [MemberData(nameof(PayloadProjectionCases))]
+    public async Task RouteWait_PayloadFilterPreservesControlAndProjectionSemantics(string host, string shape)
+    {
+        var script = Fixture(appendOnly: true, payloadBaseline: true) + $$"""
+            $scope = 'session_id=s1; transfer_id=t1; direction=outbound'
+            $target = "$scope; route=post_tuna_fallback_v6; protocol_version=6; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1"
+            $commit = "event=filetransfer_route_transition_committed; $scope; authority_id=a1; transition_generation=1; decision_status=Committed; projected_target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; handoff_kind=tuna_to_normal_fallback; target_runtime_generation=2; target_terminal_generation=0; target_leg_generation=2; target_route_publication_generation=2; target_route_commit_generation=1"
+            $publication = "event=filetransfer_route_hint_authorized_publication_accepted; $target; live_route_epoch=2"
+            $disposition = "event=filetransfer_route_transition_disposition_applied; $scope; authority_id=a1; transition_generation=1; disposition=committed"
+            $frame = "event=filetransfer_route_transition_retained_frame_applied; $scope; authority_id=a1; transition_generation=1"
+            $payload = "event=filetransfer_data_path_send_result; $target"
+            $priorPayload = $payload.Replace('post_tuna_fallback_v6', 'file_tuna_v4').Replace('protocol_version=6', 'protocol_version=4')
+            $direct = 'event=filetransfer_live_route_epoch_started; route=post_tuna_fallback_v6; protocol_version=6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; live_route_epoch=2'
+            $options = @{ Route='post_tuna_fallback_v6'; ProtocolVersion=6; HandoffKind='tuna_to_normal_fallback'; TargetTransport='regular_nkn'; RequireAuthoritativeProjection=$true }
+            $expected = 'projection'
+            switch ('{{shape}}') {
+                'receive' { $payload=$payload.Replace('data_path_send_result','data_path_receive_result') }
+                'peer-visible' { $payload=$payload.Replace('filetransfer_data_path_send_result','filetransfer_tuna_data_path_peer_visible') }
+                'target-alias' { $payload=$payload.Replace('; route=', '; target_route='); $publication=$publication.Replace('; route=', '; target_route=') }
+                'spaced' { $payload=$payload.Replace('event=', 'EVENT = ').Replace('; route=', '; ROUTE = ') }
+                'upper' { $payload=$payload.ToUpperInvariant() }
+                'duplicate-control-event' { $disposition='event=filetransfer_data_path_send_result; ' + $disposition; $frame='event=filetransfer_data_path_receive_result; ' + $frame }
+                'overwritten-event' { $payload+='; event=unrelated'; $expected='error' }
+                'false-positive-route' { $payload=$priorPayload + '; detail=post_tuna_fallback_v6'; $expected='error' }
+                'overwritten-route' { $payload+='; route=file_tuna_v4'; $expected='error' }
+                'wrong-scope' { $payload=$payload.Replace('transfer_id=t1','transfer_id=other'); $expected='error' }
+                'missing-frame' { $frame='event=noise'; $expected='error' }
+                'stale-epoch' { $options.AfterLiveRouteEpoch=2; $expected='error' }
+                'wrong-exact-epoch' { $options.LiveRouteEpoch=3; $expected='error' }
+                'direct-preferred' { $options.RequireAuthoritativeProjection=$false; $expected='direct' }
+                'direct-prefix' { $options.RequireAuthoritativeProjection=$false; $direct=$direct.Replace('epoch_started;', 'epoch_started_suffix;'); $expected='direct' }
+                'commit-overwrite' { $expected='error' }
+                'recovered' { $options.RequireAuthoritativeProjection=$false; $options.EventName='filetransfer_live_route_epoch_recovered'; $options.AfterLine=$direct; $expected='recovered' }
+            }
+            $lines=@($priorPayload,$commit,$publication,$disposition,$frame,$payload)
+            if ('{{shape}}' -eq 'commit-overwrite') { $lines=@($commit,$commit.Replace('post_tuna_fallback_v6','file_tuna_v4'),$publication,$disposition,$frame,$payload) }
+            if ('{{shape}}' -in @('direct-preferred','direct-prefix','required-ignores-direct','recovered')) { $lines=@($direct)+$lines }
+            if ('{{shape}}' -eq 'recovered') { $direct=$direct.Replace('epoch_started','epoch_recovered'); $lines+=@($direct) }
+            $before = Invoke-ScanCase -Lines $lines -Options $options -Baseline
+            $after = Invoke-ScanCase -Lines $lines -Options $options
+            Assert-ScanParity $before $after
+            if ($expected -eq 'error') {
+                if ($after.Error -notlike 'Timed out waiting*' -or $null -ne $after.Result) { throw 'invalid projection admitted' }
+            }
+            elseif ($after.Error) { throw $after.Error }
+            elseif ($expected -eq 'projection') {
+                if ($after.Result -notlike '*gui_authoritative_projection=1*') { throw 'valid projection lost' }
+            }
+            elseif ($after.Result -cne $direct) { throw 'direct result changed' }
+            'payload-projection-parity-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("payload-projection-parity-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("powershell", false)]
+    [InlineData("powershell", true)]
+    [InlineData("pwsh", false)]
+    [InlineData("pwsh", true)]
+    public async Task RouteWait_PayloadFilterPreservesBoundariesAppendAndFailures(string host, bool appendOnly)
+    {
+        var script = Fixture(appendOnly, payloadBaseline: true) + """
+            $payload = 'event=filetransfer_data_path_receive_result; route=post_tuna_fallback_v6; protocol_version=6; session_id=s1; transfer_id=t1; direction=outbound; runtime_generation=2; terminal_generation=0; leg_generation=2; route_publication_generation=2; route_commit_generation=1'
+            $direct = 'event=filetransfer_live_route_epoch_started; route=file_tuna_v4; protocol_version=4; handoff_kind=NormalToTunaActivation; target_transport=tuna; live_route_epoch=2'
+            $lines = @('boundary', $payload, $payload, $payload)
+            $onPoll = { if ($script:PollCount -eq 2) { [IO.File]::AppendAllText($script:SourcePath, $direct + [Environment]::NewLine, $utf8) } }
+            $options = @{ Bookmark=1; FallbackBookmark=0; AfterLine='boundary' }
+            $before = Invoke-ScanCase $lines $options $onPoll -Baseline
+            $after = Invoke-ScanCase $lines $options $onPoll
+            Assert-ScanParity $before $after
+            if ($after.Result -cne $direct -or $after.Polls -ne 2 -or $after.Ranges -cne '1:4|0:4|4:5|4:5' -or $after.VisitCount -ne 9) { throw 'boundary/append changed' }
+            if ($before.ParseCount -ne 4 -or $after.ParseCount -ne 1) { throw 'boundary payload parse counts changed' }
+            foreach ($failure in @('timeout','cancel')) {
+                $script:InjectedFailure=$failure
+                $before=Invoke-ScanCase @($payload,$payload,$payload,$direct) @{} -Baseline
+                $after=Invoke-ScanCase @($payload,$payload,$payload,$direct) @{}
+                Assert-ScanParity $before $after
+                if ($after.VisitCount -ne 3 -or $null -ne $after.Result) { throw 'skipped deadline/cancellation check' }
+                if ($failure -eq 'timeout' -and $after.Error -notlike 'Timed out waiting*') { throw 'timeout changed' }
+                if ($failure -eq 'cancel' -and $after.Error -cne 'injected cancellation') { throw 'cancellation changed' }
+            }
+            'payload-boundary-parity-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>(), host);
+        Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("payload-boundary-parity-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -155,7 +290,7 @@ public sealed class FileTransferGuiRouteWaitScanTests : FileTransferOpsScriptsTe
         Assert.Contains("failure-scan-parity-ok", result.Stdout, StringComparison.Ordinal);
     }
 
-    private static string Fixture(bool appendOnly)
+    private static string Fixture(bool appendOnly, bool payloadBaseline = false)
     {
         var root = FindRepoRoot().Replace("'", "''", StringComparison.Ordinal);
         return $$"""
@@ -172,10 +307,11 @@ public sealed class FileTransferGuiRouteWaitScanTests : FileTransferOpsScriptsTe
                 $definition = $node.Extent.Text.Replace('[System.Diagnostics.Stopwatch]::StartNew()', '$script:Clock')
                 . ([scriptblock]::Create($definition))
                 if ($name -eq 'Wait-TunaGuiLiveRouteEpochEvidence') {
-                    $guard = $node.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
-                        $n.Clauses[0].Item1.Extent.Text.Contains('$projectionEventPattern.IsMatch($line)') }, $true)
+                    $guards = $node.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+                        ($n.Clauses[0].Item1.Extent.Text.Contains('$line.IndexOf($Route,') -or
+                         (-not {{(payloadBaseline ? "$true" : "$false")}} -and $n.Clauses[0].Item1.Extent.Text.Contains('$projectionEventPattern.IsMatch($line)'))) }, $true)
                     $baseline = $definition.Replace('function Wait-TunaGuiLiveRouteEpochEvidence', 'function Wait-UnfilteredRouteEvidence')
-                    if ($null -ne $guard) { $baseline = $baseline.Replace($guard.Extent.Text, '') }
+                    foreach ($guard in $guards) { $baseline = $baseline.Replace($guard.Extent.Text, '') }
                     . ([scriptblock]::Create($baseline))
                 }
             }

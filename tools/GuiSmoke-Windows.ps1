@@ -35463,6 +35463,16 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
                     return $null
                 }
 
+                # Control records must remain eligible: a wrong-route commit can replace an earlier authority key.
+                # Exclude only payload candidates that cannot contain the requested route; keep every cursor visit.
+                if ($line.IndexOf($needles[0], [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                    $line.IndexOf($Route, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                    -not [regex]::IsMatch($line,
+                        'event\s*=\s*(?:filetransfer_route_transition_(?:committed|disposition_applied|retained_frame_applied)|filetransfer_route_hint_authorized_publication_accepted)\s*(?:;|$)',
+                        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+                    return $null
+                }
+
                 $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
                 $event =
                     Get-GuiSmokeFieldValue -Fields $fields -Name 'event' -Default ''
