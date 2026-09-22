@@ -1,4 +1,50 @@
 # Reporting only: callers supply their already-selected evidence. Do not scan logs or evaluate authority here.
+function Get-GuiSmokeTerminalWaitTimingDiagnostic {
+    param(
+        [long]$ElapsedTicks,
+        [long]$SynchronizationTicks,
+        [long]$ProjectionTicks,
+        [long]$PathResolutionTicks,
+        [long]$PollSleepTicks,
+        [long]$PollCount,
+        [long]$LineVisitCount,
+        [long]$ParsedEventCount
+    )
+
+    $result = [ordered]@{
+        reportingOnly = $true
+        scope = 'terminal_wait_exclusive_wall_time'
+        measurementEnd = 'before_timing_diagnostic_construction'
+        status = 'unavailable'
+        reason = 'invalid_timing_counters'
+        elapsedMs = $null
+        synchronizationMs = $null
+        projectionMs = $null
+        pathResolutionMs = $null
+        pollSleepMs = $null
+        otherMs = $null
+        pollCount = $PollCount
+        lineVisitCount = $LineVisitCount
+        parsedEventCount = $ParsedEventCount
+    }
+    $accountedTicks = [double]$SynchronizationTicks + $ProjectionTicks + $PathResolutionTicks + $PollSleepTicks
+    if ($ElapsedTicks -lt 0 -or $SynchronizationTicks -lt 0 -or $ProjectionTicks -lt 0 -or
+        $PathResolutionTicks -lt 0 -or $PollSleepTicks -lt 0 -or $PollCount -lt 0 -or
+        $LineVisitCount -lt 0 -or $ParsedEventCount -lt 0 -or $accountedTicks -gt $ElapsedTicks) {
+        return $result
+    }
+    $millisecondsPerTick = 1000.0 / [Diagnostics.Stopwatch]::Frequency
+    $result.status = 'available'
+    $result.reason = 'exclusive_intervals_recorded'
+    $result.elapsedMs = [Math]::Round($ElapsedTicks * $millisecondsPerTick, 3)
+    $result.synchronizationMs = [Math]::Round($SynchronizationTicks * $millisecondsPerTick, 3)
+    $result.projectionMs = [Math]::Round($ProjectionTicks * $millisecondsPerTick, 3)
+    $result.pathResolutionMs = [Math]::Round($PathResolutionTicks * $millisecondsPerTick, 3)
+    $result.pollSleepMs = [Math]::Round($PollSleepTicks * $millisecondsPerTick, 3)
+    $result.otherMs = [Math]::Round(($ElapsedTicks - $accountedTicks) * $millisecondsPerTick, 3)
+    return $result
+}
+
 function Get-GuiSmokeRouteToTerminalTimingDiagnostic {
     param(
         [AllowEmptyString()][string]$RouteLine = '',

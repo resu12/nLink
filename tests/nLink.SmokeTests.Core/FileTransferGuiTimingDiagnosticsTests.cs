@@ -216,7 +216,8 @@ public sealed class FileTransferGuiTimingDiagnosticsTests : FileTransferOpsScrip
             $timingFallbackRecoveredWaitEnteredMs = 2430D
             $timingFallbackRecoveredWaitReturnedMs = 2737D
             $timingSelectedRouteLine = $arguments.RouteLine
-            $terminal = [pscustomobject]@{ OutboundLine = $arguments.OutboundTerminalLine; TransferId = 't' }
+            $observerTiming = [ordered]@{reportingOnly=$true;status='available';projectionMs=123}
+            $terminal = [pscustomobject]@{ OutboundLine = $arguments.OutboundTerminalLine; TransferId = 't'; TimingDiagnostics = $observerTiming }
             $PayloadSizeBytes = $arguments.PayloadBytes
             $cycleStartedUtc = $arguments.NotBeforeUtc
             $timingTerminalObservedUtc = $arguments.NotAfterUtc
@@ -229,6 +230,7 @@ public sealed class FileTransferGuiTimingDiagnosticsTests : FileTransferOpsScrip
                 throw 'harness observations did not include additional delay'
             }
             foreach ($result in @($first, $second)) {
+                if (-not [object]::ReferenceEquals($result.terminalObserver,$observerTiming)) { throw 'observer timing was recomputed or replaced' }
                 if ($result.setupBeforeMeasurementMs -ne 300 -or $result.sendAcceptObservedElapsedMs -ne 200 -or
                     $result.selectedRouteObservedElapsedMs -ne 2000 -or $result.routeToTerminal.durationMs -ne 2000 -or
                     $result.routeToTerminal.payloadBytesPerSecond -ne 500000) { throw ($result | ConvertTo-Json) }

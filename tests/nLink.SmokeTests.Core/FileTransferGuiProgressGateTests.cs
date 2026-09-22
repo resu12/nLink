@@ -152,6 +152,7 @@ public sealed class FileTransferGuiProgressGateTests : FileTransferOpsScriptsTes
                 $line = Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark 97 -MinimumTotalPayloadBytes 1048576 -TimeoutMs 7000
                 if ($line -cne $peer) { throw 'accelerated payload selection changed' }
                 $script:GuiSmokeTerminalEvidenceGeneration = 0L
+                $script:GuiSmokeAppLogLedger = [pscustomobject]@{StorageMode='RollingMemory';Lines=$script:RawLines}
                 $tracker = New-TunaGuiTerminalEvidenceTracker -Bookmark 0
                 [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $tracker)
                 $summary = Get-TunaGuiEvidenceSummary -Bookmark 0 -EvidenceTracker $tracker
@@ -245,11 +246,9 @@ public sealed class FileTransferGuiProgressGateTests : FileTransferOpsScriptsTes
             $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
             function Assert-GuiSmokeScenarioDeadline {}
             function Sync-GuiSmokeAppLogLedger {}
+            function Assert-GuiSmokeLogLedgerHealthy {}
+            function Get-GuiSmokeLogLedgerLineCount { return $script:RawLines.Count }
             function Get-GuiSmokeLogLedgerBookmark { return $script:RawLines.Count }
-            function Invoke-GuiSmokeLogLedgerRangeVisitor {
-                param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
-                for ($i = $StartIndex; $i -lt $EndIndex; $i++) { [void](& $Visitor $script:RawLines[$i] $i) }
-            }
             $peer = 'event=filetransfer_tuna_data_path_peer_visible; route=file_tuna_v4; target_route=file_tuna_v4; target_transport=tuna; actual_transport=tuna; protocol_version=4; target_protocol_version=4; route_publication_generation=1; runtime_generation=1; terminal_generation=0; leg_generation=1; payload_bytes=524288'
             $inbound = 'event=file_transfer_inbound_terminal; transfer_id=t1; state=Completed; error_code=(none)'
             $outbound = 'event=transfer_terminal; direction=outbound; transfer_id=t1; reason=Transfer complete.; error_code=(none)'

@@ -254,6 +254,8 @@ function New-TunaGuiTerminalEvidenceTracker {
         LineVisitCount = 0L
         ParsedEventCount = 0L
         SynchronizationCount = 0L
+        SynchronizationElapsedTicks = 0L
+        ProjectionElapsedTicks = 0L
         MaxBatchLineCount = 0
         CompletionDiagnosticEmitted = $false
     }
@@ -292,10 +294,13 @@ function Update-TunaGuiTerminalEvidenceTracker {
 
     Assert-GuiSmokeScenarioDeadline
     if (-not $SkipSynchronization) {
+        $synchronizationStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         Sync-GuiSmokeAppLogLedger
+        $Tracker.SynchronizationElapsedTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $synchronizationStartedTicks
         $Tracker.SynchronizationCount++
     }
     Assert-GuiSmokeScenarioDeadline
+    $projectionStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
     $endIndex = if ($EndBookmark -ge 0) {
         $EndBookmark
     }
@@ -315,12 +320,28 @@ function Update-TunaGuiTerminalEvidenceTracker {
         if ($batchLineCount -gt [int]$Tracker.MaxBatchLineCount) {
             $Tracker.MaxBatchLineCount = $batchLineCount
         }
-        [void](Invoke-GuiSmokeLogLedgerRangeVisitor `
-            -State $script:GuiSmokeAppLogLedger `
-            -StartIndex $batchStart `
-            -EndIndex $batchEnd `
-            -Visitor {
-                param([string]$line, [int]$lineIndex)
+        $state = $script:GuiSmokeAppLogLedger
+        Assert-GuiSmokeLogLedgerHealthy -State $state
+        $lineCount = Get-GuiSmokeLogLedgerLineCount -State $state
+        if ($batchStart -lt 0 -or $batchEnd -lt $batchStart -or $batchEnd -gt $lineCount) {
+            Set-GuiSmokeLogLedgerFailure -State $state -Code 'gui_smoke_log_cursor_invalid_range' -Detail ("start_index={0}; end_index={1}; line_count={2}" -f $batchStart, $batchEnd, $lineCount)
+            Assert-GuiSmokeLogLedgerHealthy -State $state
+        }
+        $stream = $null
+        $reader = $null
+        try {
+            if ([string]$state.StorageMode -eq 'AppendOnlyFile') {
+                $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+                $stream = [IO.FileStream]::new([string]$state.AppendOnlyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share, 65536, [IO.FileOptions]::SequentialScan)
+                $stream.Position = [long]$state.AppendOnlyLineStartOffsets[$batchStart]
+                $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true, 65536, $true)
+            }
+            for ($lineIndex = $batchStart; $lineIndex -lt $batchEnd; $lineIndex++) {
+                $line = if ($null -ne $reader) { $reader.ReadLine() } else { [string]$state.Lines[$lineIndex] }
+                if ($null -eq $line) {
+                    Set-GuiSmokeLogLedgerFailure -State $state -Code 'gui_smoke_log_cursor_gap' -Detail ("path={0}; line_index={1}; reason=append_only_range_short_read" -f $state.AppendOnlyPath, $lineIndex)
+                    Assert-GuiSmokeLogLedgerHealthy -State $state
+                }
 
                 $eventName = ''
                 $eventStart = $line.IndexOf('event=', [System.StringComparison]::OrdinalIgnoreCase)
@@ -435,10 +456,15 @@ function Update-TunaGuiTerminalEvidenceTracker {
 
                 $Tracker.Cursor = $lineIndex + 1
                 $Tracker.LineVisitCount++
-                return $null
-            })
+            }
+        }
+        finally {
+            if ($reader) { $reader.Dispose() }
+            if ($stream) { $stream.Dispose() }
+        }
         Assert-GuiSmokeScenarioDeadline
     }
+    $Tracker.ProjectionElapsedTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $projectionStartedTicks
     return $Tracker
 }
 
@@ -2908,9 +2934,17 @@ function Wait-FileTransferTerminalPairAfterBookmark {
     $terminalPathResolveTransferId = ''
     $terminalQuietGraceStartedMs = -1L
     $terminalTailGraceStartedMs = -1L
+    $synchronizationTicksAtStart = [long]$EvidenceTracker.SynchronizationElapsedTicks
+    $projectionTicksAtStart = [long]$EvidenceTracker.ProjectionElapsedTicks
+    $lineVisitsAtStart = [long]$EvidenceTracker.LineVisitCount
+    $parsedEventsAtStart = [long]$EvidenceTracker.ParsedEventCount
+    $pathResolutionTicks = 0L
+    $pollSleepTicks = 0L
+    $pollCount = 0L
 
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         Assert-GuiSmokeScenarioDeadline
+        $pollCount++
         [void](Update-TunaGuiTerminalEvidenceTracker -Tracker $EvidenceTracker)
         Assert-GuiSmokeScenarioDeadline
         $progressEventCount = [long]$EvidenceTracker.ProgressEventCount
@@ -2928,12 +2962,14 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                 $resolvedCandidatePath = [string]$transferState['ResolvedSavedPath']
                 if ([string]::IsNullOrWhiteSpace($resolvedCandidatePath)) {
                     $loggedSavedPath = Get-GuiSmokeFieldValue -Fields $inboundCandidate -Name 'saved_path' -Default '(none)'
+                    $pathResolutionStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
                     $resolvedCandidatePath = Resolve-FileTransferLiveReceivedFilePath `
                         -LoggedPath $loggedSavedPath `
                         -ArtifactDir $ArtifactDir `
                         -ExpectedFileName $ExpectedFileName `
                         -ExpectedSizeBytes $ExpectedSizeBytes `
                         -NotBeforeUtc $NotBeforeUtc
+                    $pathResolutionTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $pathResolutionStartedTicks
                     if (-not [string]::IsNullOrWhiteSpace($resolvedCandidatePath)) {
                         $transferState['ResolvedSavedPath'] = $resolvedCandidatePath
                     }
@@ -3005,6 +3041,13 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                 OutboundLine = $transferState['OutboundLine']
                 ResolvedSavedPath = $transferState['ResolvedSavedPath']
                 EvidenceTracker = $EvidenceTracker
+                TimingDiagnostics = Get-GuiSmokeTerminalWaitTimingDiagnostic `
+                    -ElapsedTicks $sw.ElapsedTicks `
+                    -SynchronizationTicks ($EvidenceTracker.SynchronizationElapsedTicks - $synchronizationTicksAtStart) `
+                    -ProjectionTicks ($EvidenceTracker.ProjectionElapsedTicks - $projectionTicksAtStart) `
+                    -PathResolutionTicks $pathResolutionTicks -PollSleepTicks $pollSleepTicks -PollCount $pollCount `
+                    -LineVisitCount ($EvidenceTracker.LineVisitCount - $lineVisitsAtStart) `
+                    -ParsedEventCount ($EvidenceTracker.ParsedEventCount - $parsedEventsAtStart)
             }
         }
 
@@ -3034,12 +3077,16 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                         })
                 }
 
+                $pollSleepStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
                 Start-Sleep -Milliseconds 500
+                $pollSleepTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $pollSleepStartedTicks
                 continue
             }
 
             if (($sw.ElapsedMilliseconds - $terminalQuietGraceStartedMs) -lt $terminalQuietGraceMs) {
+                $pollSleepStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
                 Start-Sleep -Milliseconds 500
+                $pollSleepTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $pollSleepStartedTicks
                 continue
             }
 
@@ -3077,12 +3124,16 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                             })
                     }
 
+                    $pollSleepStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
                     Start-Sleep -Milliseconds 500
+                    $pollSleepTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $pollSleepStartedTicks
                     continue
                 }
 
                 if (($sw.ElapsedMilliseconds - $terminalTailGraceStartedMs) -lt $terminalTailGraceMs) {
+                    $pollSleepStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
                     Start-Sleep -Milliseconds 500
+                    $pollSleepTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $pollSleepStartedTicks
                     continue
                 }
             }
@@ -3095,7 +3146,9 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                 $lastProgressEventCount)
         }
 
+        $pollSleepStartedTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         Start-Sleep -Milliseconds 500
+        $pollSleepTicks += [Diagnostics.Stopwatch]::GetTimestamp() - $pollSleepStartedTicks
     }
 
     throw 'Timed out waiting for live file-transfer terminal evidence.'
@@ -37678,6 +37731,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             terminalObservedElapsedMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
             # This wait can overlap the transfer; it is not parsing CPU time or pure harness overhead.
             terminalObservationWaitMs = [Math]::Round($sw.Elapsed.TotalMilliseconds - $timingTerminalWaitStartedElapsedMs, 3)
+            # Exclusive observer intervals can overlap actual transfer work; they are not transport-only timing.
+            terminalObserver = $terminal.TimingDiagnostics
             # Same monotonic stopwatch and existing wait calls; absent switch-off stages stay null.
             # These wall-clock intervals include synchronization, scanning and waiting, not just parsing.
             switchOffFallbackWaits = [ordered]@{

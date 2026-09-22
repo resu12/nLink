@@ -12179,7 +12179,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             "Invoke-FileTransferTunaHandoffFallbackCycle",
             "Wait-FileTransferTerminalOrProgressBeforeAction");
 
-        Assert.Contains("Invoke-GuiSmokeLogLedgerRangeVisitor", trackerBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Invoke-GuiSmokeLogLedgerRangeVisitor", trackerBody, StringComparison.Ordinal);
+        Assert.Contains("$reader.ReadLine()", trackerBody, StringComparison.Ordinal);
         Assert.Contains("MaximumBatchLineCount = 4096", trackerBody, StringComparison.Ordinal);
         Assert.Contains("$Tracker.Cursor = $lineIndex + 1", trackerBody, StringComparison.Ordinal);
         Assert.Contains("Assert-GuiSmokeScenarioDeadline", trackerBody, StringComparison.Ordinal);
@@ -12214,21 +12215,16 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             Set-StrictMode -Version Latest
             $script:GuiSmokeTerminalEvidenceGeneration = 0L
-            $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
             $script:lines = [System.Collections.Generic.List[string]]::new(250002)
             for ($i = 0; $i -lt 250000; $i++) { $script:lines.Add('event=noise; value=1') }
             $script:lines.Add('event=file_transfer_inbound_terminal; transfer_id=t; direction=inbound; role=helper; state=Completed; error_code=(none); saved_path=(none)')
             $script:lines.Add('event=file_transfer_outbound_terminal; transfer_id=t; direction=outbound; role=helpee; state=Completed; error_code=(none)')
+            $script:GuiSmokeAppLogLedger = [pscustomobject]@{StorageMode='RollingMemory';Lines=$script:lines}
+            function Assert-GuiSmokeLogLedgerHealthy {}
+            function Get-GuiSmokeLogLedgerLineCount { return $script:lines.Count }
             function Assert-GuiSmokeScenarioDeadline {}
             function Sync-GuiSmokeAppLogLedger {}
             function Get-GuiSmokeLogLedgerBookmark { return $script:lines.Count }
-            function Invoke-GuiSmokeLogLedgerRangeVisitor {
-                param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
-                for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
-                    $result = & $Visitor $script:lines[$lineIndex] $lineIndex
-                    if ($null -ne $result) { return $result }
-                }
-            }
             function ConvertFrom-GuiSmokeSemicolonFields {
                 param([string]$Message)
                 $fields = @{}
@@ -12289,7 +12285,6 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             $ErrorActionPreference = 'Stop'
             Set-StrictMode -Version Latest
             $script:GuiSmokeTerminalEvidenceGeneration = 0L
-            $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
             $script:lines = @(
                 'event=tuna_acceleration_negotiated',
                 'event=runtime_unlock_transaction_answer_received; peer_visible_proof=1; answer_received=1; tuna_path_lease_current=1; tuna_path_lease_state=listenerready',
@@ -12303,16 +12298,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 'event=file_transfer_outbound_terminal; transfer_id=t; direction=outbound; state=Completed; error_code=(none)',
                 'event=peer_disconnected',
                 'event=transport_state_changed; to=Failed')
+            $script:GuiSmokeAppLogLedger = [pscustomobject]@{StorageMode='RollingMemory';Lines=$script:lines}
+            function Assert-GuiSmokeLogLedgerHealthy {}
+            function Get-GuiSmokeLogLedgerLineCount { return $script:lines.Count }
             function Assert-GuiSmokeScenarioDeadline {}
             function Sync-GuiSmokeAppLogLedger {}
             function Get-GuiSmokeLogLedgerBookmark { return $script:lines.Count }
-            function Invoke-GuiSmokeLogLedgerRangeVisitor {
-                param($State, [int]$StartIndex, [int]$EndIndex, [scriptblock]$Visitor)
-                for ($lineIndex = $StartIndex; $lineIndex -lt $EndIndex; $lineIndex++) {
-                    $result = & $Visitor $script:lines[$lineIndex] $lineIndex
-                    if ($null -ne $result) { return $result }
-                }
-            }
             function ConvertFrom-GuiSmokeSemicolonFields {
                 param([string]$Message)
                 $fields = @{}
