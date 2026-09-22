@@ -1,0 +1,98 @@
+# Reporting only: callers supply their already-selected evidence. Do not scan logs or evaluate authority here.
+function Get-GuiSmokeRouteToTerminalTimingDiagnostic {
+    param(
+        [AllowEmptyString()][string]$RouteLine = '',
+        [AllowEmptyString()][string]$OutboundTerminalLine = '',
+        [AllowEmptyString()][string]$ExpectedTransferId = '',
+        [long]$PayloadBytes,
+        [datetime]$NotBeforeUtc,
+        [datetime]$NotAfterUtc
+    )
+
+    $result = [ordered]@{
+        scope = 'same_writer_route_to_outbound_terminal'
+        reportingOnly = $true
+        timestampSource = 'log_writer_attempt_utc_ticks'
+        status = 'unavailable'
+        reason = 'missing_selected_evidence'
+        durationMs = $null
+        payloadBytesPerSecond = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($RouteLine) -or [string]::IsNullOrWhiteSpace($OutboundTerminalLine)) { return $result }
+
+    $records = @()
+    foreach ($line in @($RouteLine, $OutboundTerminalLine)) {
+        $fields = @{}
+        $message = $line -replace '^\s*(?:\[[^\]]*\]\s*)+', ''
+        foreach ($part in @($message -split ';')) {
+            $pair = $part.Trim() -split '=', 2
+            if ($pair.Count -ne 2) { continue }
+            $name = $pair[0].Trim()
+            if ($fields.ContainsKey($name)) {
+                $result.reason = 'ambiguous_fields'
+                return $result
+            }
+            $fields[$name] = $pair[1].Trim()
+        }
+        $records += $fields
+    }
+    $route = $records[0]
+    $terminal = $records[1]
+    if ($route['event'] -ne 'filetransfer_route_selected' -or $route['direction'] -ne 'outbound' -or
+        ($terminal['event'] -ne 'file_transfer_outbound_terminal' -and
+            ($terminal['event'] -ne 'transfer_terminal' -or $terminal['direction'] -ne 'outbound')) -or
+        ($terminal.ContainsKey('direction') -and $terminal['direction'] -ne 'outbound') -or
+        $terminal['state'] -ne 'Completed' -or $terminal['error_code'] -ne '(none)') {
+        $result.reason = 'unsupported_selected_evidence'
+        return $result
+    }
+
+    foreach ($value in @($ExpectedTransferId, $route['transfer_id'], $terminal['transfer_id'],
+            $route['session_id'], $terminal['session_id'], $route['log_writer_id'], $terminal['log_writer_id'])) {
+        if ([string]::IsNullOrWhiteSpace([string]$value) -or $value -match '(?i)redacted|^\((none|unknown)\)$') {
+            $result.reason = 'missing_or_redacted_identity'
+            return $result
+        }
+    }
+    foreach ($name in @('transfer_id', 'session_id', 'log_writer_id')) {
+        if (-not [string]::Equals($route[$name], $terminal[$name], [StringComparison]::Ordinal)) {
+            $result.reason = 'identity_mismatch'
+            return $result
+        }
+    }
+    if (-not [string]::Equals($terminal['transfer_id'], $ExpectedTransferId, [StringComparison]::Ordinal)) {
+        $result.reason = 'selected_transfer_mismatch'
+        return $result
+    }
+
+    $routeTicks = 0L
+    $terminalTicks = 0L
+    $routeSequence = 0L
+    $terminalSequence = 0L
+    if (-not [long]::TryParse($route['log_writer_attempt_utc_ticks'], [ref]$routeTicks) -or
+        -not [long]::TryParse($terminal['log_writer_attempt_utc_ticks'], [ref]$terminalTicks) -or
+        -not [long]::TryParse($route['log_writer_sequence'], [ref]$routeSequence) -or
+        -not [long]::TryParse($terminal['log_writer_sequence'], [ref]$terminalSequence) -or
+        $routeTicks -le 0 -or $terminalTicks -gt [datetime]::MaxValue.Ticks -or
+        $terminalTicks -le $routeTicks -or $routeSequence -le 0 -or $terminalSequence -le $routeSequence) {
+        $result.reason = 'missing_or_invalid_writer_timing'
+        return $result
+    }
+    if ($NotBeforeUtc -eq [datetime]::MinValue -or $NotAfterUtc -eq [datetime]::MinValue -or
+        $routeTicks -lt $NotBeforeUtc.ToUniversalTime().Ticks -or
+        $terminalTicks -gt $NotAfterUtc.ToUniversalTime().Ticks) {
+        $result.reason = 'outside_measurement_window'
+        return $result
+    }
+    if ($PayloadBytes -le 0) {
+        $result.reason = 'invalid_payload_size'
+        return $result
+    }
+
+    $durationTicks = $terminalTicks - $routeTicks
+    $result.status = 'available'
+    $result.reason = 'selected_evidence_matched'
+    $result.durationMs = [Math]::Round($durationTicks / [double][TimeSpan]::TicksPerMillisecond, 3)
+    $result.payloadBytesPerSecond = [Math]::Round($PayloadBytes / ($durationTicks / [double][TimeSpan]::TicksPerSecond), 3)
+    return $result
+}

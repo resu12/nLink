@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'FileTransferFrontierGraceHandoff.ps1')
 . (Join-Path $PSScriptRoot 'GuiSmokeLogLedger.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferOps\GuiDataPathDiagnosticCompanion.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferOps\GuiTimingDiagnostics.ps1')
 
 $script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
 $script:GuiSmokeScenarioDeadlineUtc = [DateTimeOffset]::MaxValue
@@ -416,6 +417,7 @@ function Update-TunaGuiTerminalEvidenceTracker {
                                 Outbound = $null
                                 InboundLineIndex = -1
                                 OutboundLineIndex = -1
+                                OutboundLine = ''
                                 ResolvedSavedPath = ''
                             }
                         }
@@ -426,6 +428,7 @@ function Update-TunaGuiTerminalEvidenceTracker {
                         elseif ($direction -eq 'outbound') {
                             $Tracker.ByTransfer[$transferId]['Outbound'] = $fields
                             $Tracker.ByTransfer[$transferId]['OutboundLineIndex'] = $lineIndex
+                            $Tracker.ByTransfer[$transferId]['OutboundLine'] = $line
                         }
                     }
                 }
@@ -2999,6 +3002,7 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                 TransferId = $transferId
                 Inbound = $transferState['Inbound']
                 Outbound = $transferState['Outbound']
+                OutboundLine = $transferState['OutboundLine']
                 ResolvedSavedPath = $transferState['ResolvedSavedPath']
                 EvidenceTracker = $EvidenceTracker
             }
@@ -36650,6 +36654,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         [Parameter(Mandatory = $true)][string]$WalletPassword
     )
 
+    $setupTimingWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $timingSelectedRouteLine = ''
+    $timingRouteObservedElapsedMs = $null
     $senderWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelperWindow } else { $Context.HelpeeWindow }
     $receiverWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelpeeWindow } else { $Context.HelperWindow }
     $observedEvidenceLines = New-Object System.Collections.Generic.List[string]
@@ -36756,6 +36763,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         -NotBeforeUtc $cycleStartedUtc `
         -ArtifactDir $ArtifactDir
     $faultAdmissionTracker = New-TunaGuiFaultAdmissionTracker -Bookmark $bookmark
+    $setupTimingWatch.Stop()
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     if ($RouteMode -eq 'v4-restart-v6-fallback') {
         $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')))) | Out-Null
@@ -36766,6 +36774,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
     $acceptButton = Wait-TunaGuiFileTransferAcceptOrThrow -Window $receiverWindow -Bookmark $bookmark -TimeoutMs $StartupTimeoutMs -RouteMode $RouteMode
     Click-Element $acceptButton
+    $timingSendAcceptObservedElapsedMs = $sw.Elapsed.TotalMilliseconds
 
     [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=filetransfer_v4_sender_started'),
@@ -36787,6 +36796,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
 
         $routeLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $bookmark -TimeoutMs 90000 -Description 'live V4 switch-off coordinator-authorized file Tuna V4 publication' -ActionKind 'RoutePublication' -RequireZeroRouteCommitGeneration $true)
+        $timingSelectedRouteLine = $routeLine
+        $timingRouteObservedElapsedMs = $sw.Elapsed.TotalMilliseconds
         $observedEvidenceLines.Add($routeLine) | Out-Null
         $fileTunaV4PublicationObserved = $true
         $liveSwitchOffRoutePublicationObserved = $true
@@ -36874,6 +36885,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
         $routeObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
 
+        $timingSelectedRouteLine = $routeLine
+        $timingRouteObservedElapsedMs = $sw.Elapsed.TotalMilliseconds
         $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
         $liveSwitchOffMinimumOverride = [string][Environment]::GetEnvironmentVariable('NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_COMMITTED_BYTES')
         if ([string]::IsNullOrWhiteSpace($liveSwitchOffMinimumOverride)) {
@@ -37464,6 +37477,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 @('event=filetransfer_v4_sender_started', ("route={0}" -f $expectedRouteToken))
             ) -TimeoutMs 90000 -Description ("preconditioned Tuna route selected: {0}" -f $expectedRouteToken))
         }
+        $timingSelectedRouteLine = $routeLine
+        $timingRouteObservedElapsedMs = $sw.Elapsed.TotalMilliseconds
         $observedEvidenceLines.Add($routeLine) | Out-Null
         if ($RouteMode -eq 'preactivated') {
             $activationEpochStartedObserved = $true
@@ -37483,6 +37498,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
     $expectedInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
     $expectedOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
+    $timingTerminalWaitStartedElapsedMs = $sw.Elapsed.TotalMilliseconds
     $terminal = Wait-FileTransferTerminalPairAfterBookmark `
         -Bookmark $bookmark `
         -TimeoutMs $TimeoutMs `
@@ -37495,6 +37511,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         -ArtifactDir $ArtifactDir `
         -EvidenceTracker $terminalEvidenceTracker
     $sw.Stop()
+    $timingTerminalObservedUtc = [datetime]::UtcNow
 
     $inbound = $terminal.Inbound
     $outbound = $terminal.Outbound
@@ -37625,6 +37642,23 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         payloadBytes = $PayloadSizeBytes
         durationMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
         goodputBytesPerSecond = $goodputBytesPerSecond
+        goodputMeasurementScope = 'gui_end_to_end'
+        timingDiagnostics = [ordered]@{
+            reportingOnly = $true
+            measurementStart = 'before_send_button_wait'
+            measurementEnd = 'terminal_pair_wait_returned'
+            setupBeforeMeasurementMs = [Math]::Round($setupTimingWatch.Elapsed.TotalMilliseconds, 3)
+            sendAcceptObservedElapsedMs = [Math]::Round($timingSendAcceptObservedElapsedMs, 3)
+            selectedRouteObservedElapsedMs = if ($null -ne $timingRouteObservedElapsedMs) { [Math]::Round($timingRouteObservedElapsedMs, 3) } else { $null }
+            terminalObservationWaitStartedElapsedMs = [Math]::Round($timingTerminalWaitStartedElapsedMs, 3)
+            terminalObservedElapsedMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
+            # This wait can overlap the transfer; it is not parsing CPU time or pure harness overhead.
+            terminalObservationWaitMs = [Math]::Round($sw.Elapsed.TotalMilliseconds - $timingTerminalWaitStartedElapsedMs, 3)
+            routeToTerminal = Get-GuiSmokeRouteToTerminalTimingDiagnostic `
+                -RouteLine $timingSelectedRouteLine -OutboundTerminalLine $terminal.OutboundLine `
+                -ExpectedTransferId $terminal.TransferId -PayloadBytes $PayloadSizeBytes `
+                -NotBeforeUtc $cycleStartedUtc -NotAfterUtc $timingTerminalObservedUtc
+        }
         completed = $completed
         integrityOk = $integrityOk
         failurePhase = if ($liveSwitchOffTerminalCompletedBeforeFault) { 'completed_before_fault_injection' } else { 'none' }

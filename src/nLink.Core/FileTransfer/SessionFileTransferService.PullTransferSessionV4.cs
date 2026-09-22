@@ -15510,16 +15510,26 @@ public sealed partial class SessionFileTransferService
         RuntimeOwnerToken? requiredReceiveRuntimeOwner,
         IFileTransferDataSession? requiredReceiveDataSession,
         long requiredReceiveDataSessionGeneration)
-        => EnqueueAuthorizedV4RepairsFromState(
-            context,
-            state,
-            fallbackFrontierContract: null,
-            fallbackFrontierContractNewlyIssued: false,
-            dispatchScheduled: out _,
-            requiredReceiveInstall: requiredReceiveInstall,
-            requiredReceiveRuntimeOwner: requiredReceiveRuntimeOwner,
-            requiredReceiveDataSession: requiredReceiveDataSession,
-            requiredReceiveDataSessionGeneration: requiredReceiveDataSessionGeneration);
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+            {
+                return;
+            }
+
+            EnqueueAuthorizedV4RepairsFromState(
+                context,
+                state,
+                fallbackFrontierContract: null,
+                fallbackFrontierContractNewlyIssued: false,
+                dispatchScheduled: out _,
+                requiredReceiveInstall: requiredReceiveInstall,
+                requiredReceiveRuntimeOwner: requiredReceiveRuntimeOwner,
+                requiredReceiveDataSession: requiredReceiveDataSession,
+                requiredReceiveDataSessionGeneration: requiredReceiveDataSessionGeneration);
+        }
+    }
 
     private static bool HasExactOutstandingOutboundRegularV4RepairLocked(
         OutboundTransferContext context,
@@ -15838,8 +15848,44 @@ public sealed partial class SessionFileTransferService
                 scheduleRepairReplayKind,
                 out _,
                 out pendingInitialPressureContract);
+        RegularV4FrontierRepairContract? predecessorRegularContract = null;
+        RegularV4FrontierRepairContract? retainedReceiverStateSuccessor = null;
+        if (fallbackFrontierContract is null &&
+            shouldLogRegularV4FrontierRepairProof &&
+            scheduleRepairReplayKind == RepairReplayKind.V4Repair &&
+            frontierRepair &&
+            chunkIndices.Count > 0 &&
+            context.CurrentRegularV4FrontierRepairContract is { Lifecycle.IsSettled: false } currentRegularContract &&
+            currentRegularContract.RepairDecision.RepairKind == RepairReplayKind.V4Repair &&
+            currentRegularContract.Authority.FrontierChunkIndex == stats.RemoteNextExpectedChunkIndex &&
+            IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(context, currentRegularContract, out _))
+        {
+            if (!currentRegularContract.Lifecycle.DispatchObserved &&
+                currentRegularContract.PredecessorLifecycleContract is { } retainedPredecessor &&
+                currentRegularContract.Authority.PredecessorAuthorityId == retainedPredecessor.Authority.AuthorityId &&
+                currentRegularContract.Authority.PendingRepairCount == requestedChunkCount &&
+                currentRegularContract.ScheduledDispatch is { } retainedDispatch &&
+                IsRegularV4FrontierRepairScheduledDispatchMatch(retainedDispatch, queuedRepair, scheduleRepairReplayKind) &&
+                TryGetPendingOrInstalledRegularV4FrontierRepairPressure(
+                    CreateCoordinatorStateLocked(context),
+                    currentRegularContract.Authority.AuthorityId,
+                    out var retainedBinding,
+                    out _) &&
+                retainedBinding.Authority == currentRegularContract.Authority)
+            {
+                retainedReceiverStateSuccessor = currentRegularContract;
+                predecessorRegularContract = retainedPredecessor;
+            }
+            else if (currentRegularContract.Lifecycle.DispatchObserved &&
+                     !string.Equals(currentRegularContract.Authority.RepairKey, repairRequestKey, StringComparison.Ordinal) &&
+                     TryValidateOutboundRegularV4FrontierRepairContractLocked(context, currentRegularContract, out _))
+            {
+                predecessorRegularContract = currentRegularContract;
+            }
+        }
         if (fallbackFrontierContract is null &&
             !hasPendingInitialPressureInstall &&
+            retainedReceiverStateSuccessor is null &&
             !TryAuthorizeRepairReplayLocked(
                 context,
                 queuedRepair.RuntimeOwner,
@@ -15850,7 +15896,8 @@ public sealed partial class SessionFileTransferService
                 context.CurrentTransferLeg?.TransportEpochId,
                 context.CurrentTransferLeg?.BridgeRecoveryGeneration,
                 null,
-                out scheduleRepairDecision))
+                out scheduleRepairDecision,
+                predecessorAuthorityId: predecessorRegularContract?.Authority.AuthorityId))
         {
             if (shouldLogFallbackFrontierRepairProof)
             {
@@ -15934,22 +15981,24 @@ public sealed partial class SessionFileTransferService
                 lastEndExclusive,
                 "attached_installed_contract");
         }
-        else if (scheduleRepairDecision is { } regularScheduleDecision &&
+        else if ((scheduleRepairDecision is not null || retainedReceiverStateSuccessor is not null) &&
             shouldLogRegularV4FrontierRepairProof)
         {
-            var regularContract = CreateRegularV4FrontierRepairContract(
+            var regularContractRejectionReason = "accepted";
+            var regularContract = retainedReceiverStateSuccessor ?? CreateRegularV4FrontierRepairContract(
                 context,
-                regularScheduleDecision,
+                scheduleRepairDecision,
                 repairRequestKey,
                 stats.RemoteNextExpectedChunkIndex,
                 Math.Max(-1, stats.RemoteNextExpectedChunkIndex - 1),
                 requestedChunkCount,
-                regularScheduleDecision.Reason,
+                scheduleRepairDecision!.Value.Reason,
                 "regular_v4_sender_frontier_repair_due",
-                out var regularContractRejectionReason);
+                out regularContractRejectionReason);
             if (regularContract is { } contract)
             {
                 var authority = contract.Authority;
+                contract.PredecessorLifecycleContract = predecessorRegularContract;
                 context.CurrentRegularV4FrontierRepairContract = contract;
                 var pendingQueuedRepair = queuedRepair with { RegularV4RepairContract = contract };
                 if (!TryBindRegularV4FrontierRepairScheduledDispatch(
@@ -15960,19 +16009,56 @@ public sealed partial class SessionFileTransferService
                 {
                     return;
                 }
-                if (!TryInstallRegularV4FrontierRepairPressureLocked(
+                if ((retainedReceiverStateSuccessor is null ||
+                     !IsCoordinatorInstalledRegularV4FrontierRepairPressureCurrent(CreateCoordinatorStateLocked(context), contract)) &&
+                    !TryInstallRegularV4FrontierRepairPressureLocked(
                         context,
                         contract,
-                        predecessorContract: null,
+                        predecessorRegularContract,
                         Math.Max(0, stats.ChunksAcceptedForTransport - stats.RemoteNextExpectedChunkIndex),
                         Math.Max(1, requestedChunkCount),
                         "regular_v4_sender_frontier_repair_due",
-                        "outbound_repair_schedule_initial"))
+                        predecessorRegularContract is null ? "outbound_repair_schedule_initial" : "outbound_repair_schedule_successor"))
                 {
-                    _ = RetainPendingRegularV4FrontierRepairPressureInstallRetry(
-                        context,
-                        contract);
+                    if (IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(context, contract, out _))
+                    {
+                        _ = RetainPendingRegularV4FrontierRepairPressureInstallRetry(context, contract);
+                    }
                     return;
+                }
+                if (!TryValidateOutboundRegularV4FrontierRepairContractLocked(context, contract, out _))
+                {
+                    return;
+                }
+                if (predecessorRegularContract is { } predecessor &&
+                    FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(
+                        CreateCoordinatorStateLocked(context)).RetainedPredecessorBinding is { } retainedPredecessorBinding &&
+                    (retainedPredecessorBinding.Authority != predecessor.Authority ||
+                     !TrySettleRegularV4FrontierRepairContract(
+                        predecessor,
+                        FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+                        predecessor.Authority.PendingRepairCount,
+                        "receiver_state_successor_authorized",
+                        authority.AuthorityId)))
+                {
+                    return;
+                }
+                if (!TryValidateOutboundRegularV4FrontierRepairContractLocked(context, contract, out _))
+                {
+                    return;
+                }
+                context.PendingRegularV4FrontierRepairPressureInstallRetry = null;
+                if (predecessorRegularContract is not null)
+                {
+                    LogFileTransferRegularV4FrontierRepairSuccessorAuthorized(
+                        FileTransferDirection.Outbound,
+                        context.TransferId,
+                        context.SessionId,
+                        predecessorRegularContract.Authority,
+                        authority,
+                        predecessorRegularContract.Authority.PendingRepairCount,
+                        requestedChunkCount,
+                        "receiver_state_successor_authorized");
                 }
                 regularScheduleContractForSettlement = contract;
                 regularScheduleAuthorityForSettlement = authority;
@@ -19999,6 +20085,14 @@ public sealed partial class SessionFileTransferService
             installCommand,
             out var installReceipt))
         {
+            return false;
+        }
+
+        if (!IsRegularV4FrontierRepairPressureInstallScopeCurrentLocked(context, contract, out rejectionReason))
+        {
+            LogRegularV4FrontierRepairPressureInstallScopeRejected(
+                contract, predecessorContract, frontierLagChunks, pendingRepairCount,
+                pressureReason, installBoundary, rejectionReason);
             return false;
         }
 

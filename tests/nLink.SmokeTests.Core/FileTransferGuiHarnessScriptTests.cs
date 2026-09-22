@@ -12241,6 +12241,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ([int]$tracker.Cursor -ne 250002) { throw "cursor mismatch: $($tracker.Cursor)" }
             if ([int]$tracker.MaxBatchLineCount -gt 4096) { throw "batch exceeded bound: $($tracker.MaxBatchLineCount)" }
             if ($tracker.ByTransfer.Count -ne 1) { throw "terminal transfer missing: $($tracker.ByTransfer.Count)" }
+            if ($tracker.ByTransfer['t']['OutboundLine'] -cne $script:lines[250001]) { throw 'selected outbound terminal line was not retained exactly' }
             if ($stopwatch.ElapsedMilliseconds -ge 30000) { throw "projection exceeded 30 seconds: $($stopwatch.ElapsedMilliseconds)" }
             Write-Output "terminal-evidence-production-width-ok elapsed_ms=$($stopwatch.ElapsedMilliseconds)"
             """;

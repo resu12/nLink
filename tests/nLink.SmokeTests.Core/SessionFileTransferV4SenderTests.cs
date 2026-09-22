@@ -609,6 +609,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_file_tuna_v4_no_fallback_frontier_authority";
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
         var context = CreateFileTunaV4OutboundContext(
             transferId,
             remoteNextExpectedChunkIndex: 100,
@@ -648,6 +650,8 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v4_repair_scheduled;", log, StringComparison.Ordinal);
+        Assert.Equal(FileTransferRouteResolver.FileTunaV4Token,
+            Assert.Single(transport.RegularV4PressureInstallReceipts).Authority.RouteToken);
         Assert.Contains("post_rebind_frontier_exclusive=0", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_exact_frontier_repair_enqueued;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", log, StringComparison.Ordinal);
