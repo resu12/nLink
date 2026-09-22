@@ -362,6 +362,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         options = NknTransportOptions.Load();
         identity = NknIdentityStore.LoadOrCreate(options);
         client = new RealNknClientAdapter(identity, options);
+        regularV4PressureAdapter = (RealNknClientAdapter)client;
         tunaAccelerationOptions = BindTunaDialerIdentity(NknTunaAccelerationOptions.Load(), identity, options);
         accelerationLane = CreateAccelerationLane(tunaAccelerationOptions);
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();

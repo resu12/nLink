@@ -359,6 +359,68 @@ public sealed partial class SessionFileTransferV4SenderTests
         Assert.NotNull(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
+    public async Task RegularV4Pressure_PendingInstallRetryGatesTerminalization(bool retryAccepted)
+    {
+        var transferId = $"transfer_regular_v4_pressure_pending_terminal_{retryAccepted}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var installAttempt = 0;
+        transport.RegularV4PressureInstallOverride = pressure => new(
+            Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority),
+            ++installAttempt > 1 && retryAccepted
+                ? FileTransferRegularV4FrontierRepairPressureInstallStatus.Installed
+                : FileTransferRegularV4FrontierRepairPressureInstallStatus.Rejected,
+            "unit_test_pending_terminal_install", 1, pressure.Reason);
+        var context = CreateProjectionInboundContext(transferId);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "pending_terminal");
+        _ = CreateInboundState(service, context, "frontier_stall_repair_due", forceMissingRange: true);
+        var before = CreateCoordinatorStateForTest(context);
+        var pending = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(before).PendingBinding;
+        Assert.NotNull(pending);
+        Assert.Single(transport.RegularV4PressureInstallReceipts);
+        var originalState = GetPrivateProperty<FileTransferTransferState>(context, "State");
+        var originalSession = GetPrivatePropertyValue(context, "DataSession");
+
+        await (Task)typeof(SessionFileTransferService)
+            .GetMethod("TransitionInboundToTerminalAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, FileTransferTransferState.Failed, "unit_test_failure",
+                "unit test failure", false, null, null, CancellationToken.None])!;
+
+        var receipts = transport.RegularV4PressureInstallReceipts.ToArray();
+        Assert.Equal(2, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal(pending.Value.Authority, receipt.Authority));
+        Assert.All(receipts, receipt => Assert.Equal(pending.Value.InstallGeneration, receipt.InstallGeneration));
+        var after = CreateCoordinatorStateForTest(context);
+        var pressureAfter = FileTransferCoordinator.GetRegularV4FrontierRepairPressureSubstate(after);
+        if (retryAccepted)
+        {
+            var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+            Assert.Equal(pending.Value.Authority.AuthorityId, settlement.AuthorityId);
+            Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal, settlement.Outcome);
+            Assert.False(pressureAfter.HasBinding);
+            Assert.True(after.IsTerminal);
+            Assert.Equal(FileTransferTransferState.Failed, service.Snapshot.InboundState);
+            Assert.Null(GetPrivatePropertyValue(context, "CurrentRegularV4FrontierRepairContract"));
+            Assert.Null(GetPrivatePropertyValue(context, "DataSession"));
+        }
+        else
+        {
+            Assert.Empty(transport.RegularV4FrontierRepairSettlements);
+            Assert.Equal(pending, pressureAfter.PendingBinding);
+            Assert.Null(pressureAfter.InstalledBinding);
+            Assert.False(after.IsTerminal);
+            Assert.Equal(before.CurrentRuntimeOwner, after.CurrentRuntimeOwner);
+            Assert.Equal(before.TerminalGeneration, after.TerminalGeneration);
+            Assert.Equal(originalState, GetPrivateProperty<FileTransferTransferState>(context, "State"));
+            Assert.Same(originalSession, GetPrivatePropertyValue(context, "DataSession"));
+        }
+    }
+
     [Fact]
     [Trait("FileTransferRuntimeSuite", "RegularV4FrontierRepairProjection")]
     public void RegularV4Pressure_RouteCommitRetirementRejectionPreservesRegularV4Scope()

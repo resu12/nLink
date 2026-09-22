@@ -161,6 +161,19 @@ The next deterministic investigation should trace inbound finalization through
 Coordinator terminal transition, snapshot publication, app terminal projection
 and writer drain. Preserve failure when any edge is absent.
 
+2026-09-22 follow-up: the original capture also contains an explicit inbound
+terminal-transition rejection at line 12298, immediately after pending
+repair-pressure installation and retirement fail. A fresh constructor
+regression confirms that the default NKN constructor leaves its real pressure
+backend unwired. See
+[the bounded regular-terminal RCA and fix plan](file-transfer-regular-terminal-20260922-rca.md).
+This identifies an earlier missing edge; it does not change the original failed
+verdict or claim that a runtime fix/live validation has completed.
+
+The subsequent one-line constructor wiring fix now passes 15 distinct focused
+offline cases, including the new pending-install/terminal controls. The targeted
+regular-NKN GUI validation is still pending; the original matrix verdict stands.
+
 ## Fix sequence and stop conditions
 
 1. **Blank-line diagnostic fix (completed offline):** implement only the three confirmed input

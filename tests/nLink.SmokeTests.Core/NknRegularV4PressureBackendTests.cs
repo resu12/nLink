@@ -210,6 +210,45 @@ public sealed partial class FileTransferCoordinatorTests
         Assert.True(((IFileTransferRouteTransitionBridge)transport).SupportsFallbackBootstrapCorrelation);
     }
 
+    [Fact]
+    [Trait("FileTransferInfraSuite", "RegularV4PressureBackend")]
+    public void NknPressureBackend_ParameterlessConstructorUsesItsRealClient()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var directory = Path.Combine(CoreSmokeTestsBase.FindRepoRoot(), "artifacts",
+            "regular-terminal-rca-20260922", "constructor", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var keyPath = Path.Combine(directory, "identity.json");
+        using var unsafeMode = CoreSmokeTestsBase.EnableUnsafeDeveloperModeForTests();
+        using var keyOverride = new EnvironmentOverride("NLINK_NKN_KEY_PATH", keyPath);
+        using var identifierOverride = new EnvironmentOverride("NLINK_NKN_IDENTIFIER", "regular-terminal-constructor-test");
+        using var tunaOverride = new EnvironmentOverride("NLINK_NKN_TUNA_ENABLED", "0");
+        using var logOverride = new EnvironmentOverride("NLINK_FILETRANSFER_ACCEPTANCE_LOG_PATH", Path.Combine(directory, "probe.log"));
+        Assert.Equal(keyPath, NknTransportOptions.Load().KeyPath);
+
+        // Construct only: no Connect/Host call, bridge bootstrap or live NKN traffic.
+        using var transport = new NknSignalingTransport();
+        var client = Assert.IsType<RealNknClientAdapter>(typeof(NknSignalingTransport)
+            .GetField("client", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(transport));
+        var backend = typeof(NknSignalingTransport).GetField("regularV4PressureAdapter",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(transport);
+        var staged = StageNknPressure("regular-terminal-constructor-test");
+        var receipt = ((IFileTransferRegularV4FrontierRepairPressureInstallBridge)transport)
+            .InstallRegularV4FrontierRepairPressure(staged.InstallCommand!);
+        File.WriteAllText(Path.Combine(directory, "observation.json"), System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ClientType = client.GetType().Name,
+            BackendType = backend?.GetType().Name,
+            SameClient = ReferenceEquals(client, backend),
+            InstallStatus = receipt.Status.ToString(),
+            receipt.Reason,
+            LiveConnectionStarted = false,
+        }));
+
+        Assert.Equal("current_transfer_not_active", receipt.Reason);
+        Assert.Same(client, backend);
+    }
+
     private static RegularV4FrontierRepairPressureBindingDecision StageNknPressure(string sessionId)
     {
         var route = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
