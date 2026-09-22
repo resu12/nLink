@@ -33341,6 +33341,10 @@ function Test-TunaGuiPeerVisibleFileTunaV4DataPathLine {
         return $false
     }
 
+    if ($Line.IndexOf('filetransfer_tuna_data_path_peer_visible', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return $false
+    }
+
     $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $Line
     if (-not (Test-GuiSmokeFieldEquals -Fields $fields -Name 'event' -Expected 'filetransfer_tuna_data_path_peer_visible')) {
         return $false
