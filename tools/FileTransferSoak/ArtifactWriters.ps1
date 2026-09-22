@@ -36653,6 +36653,19 @@ function Get-FileTransferRegularV4MissingRangePreservationProof {
                 'filetransfer_v4_repair_suppressed',
                 'filetransfer_regular_v4_frontier_repair_projection_retained',
                 'filetransfer_regular_v4_frontier_repair_projection_published')) {
+            $direction = Get-FileTransferEventField -Event $event -Name 'direction' -Default ''
+            if ($direction -notin @('', 'inbound', 'receiver')) {
+                continue
+            }
+            $isProjectionEvidence = $eventName -in @(
+                'filetransfer_regular_v4_frontier_repair_projection_retained',
+                'filetransfer_regular_v4_frontier_repair_projection_published')
+            $sourceAuthorityId = Get-FileTransferEventField -Event $event -Name 'authority_id' -Default ''
+            $hasSourceAuthorityId = -not [string]::IsNullOrWhiteSpace($sourceAuthorityId) -and
+                $sourceAuthorityId -notin @('(none)', 'none')
+            # A sender suppression can carry an outbound authority without a
+            # direction field. Only receiver projection events are self-contained.
+            $hasEmbeddedAuthority = $isProjectionEvidence -and $hasSourceAuthorityId
             $rangeInfo = Get-FileTransferRegularV4RepairProjectionRange -Event $event
             if (-not $rangeInfo.Valid) {
                 continue
@@ -36687,10 +36700,14 @@ function Get-FileTransferRegularV4MissingRangePreservationProof {
                 }
             }
 
-            $sourceAuthorityId = Get-FileTransferEventField -Event $event -Name 'authority_id' -Default ''
-            $hasEmbeddedAuthority = -not [string]::IsNullOrWhiteSpace($sourceAuthorityId) -and
-                $sourceAuthorityId -notin @('(none)', 'none')
             if ($null -eq $matchingAuthority -and -not $hasEmbeddedAuthority) {
+                continue
+            }
+            if (-not $isProjectionEvidence -and $hasSourceAuthorityId -and
+                -not [string]::Equals(
+                    $sourceAuthorityId,
+                    (Get-FileTransferEventField -Event $matchingAuthority -Name 'authority_id' -Default ''),
+                    [System.StringComparison]::Ordinal)) {
                 continue
             }
 
@@ -36722,14 +36739,11 @@ function Get-FileTransferRegularV4MissingRangePreservationProof {
                     ScopeKey = $scopeKey
                     Anchor = $event
                     Authority = $matchingAuthority
-                    ScopeAnchor = if ($hasEmbeddedAuthority -or $eventName -like 'filetransfer_regular_v4_frontier_repair_projection_*') {
+                    ScopeAnchor = if ($isProjectionEvidence) {
                         $event
-                    }
-                    elseif ($null -ne $matchingAuthority) {
-                        $matchingAuthority
                     }
                     else {
-                        $event
+                        $matchingAuthority
                     }
                     LastEvidence = $event
                     Start = $range.Start

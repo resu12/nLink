@@ -4878,6 +4878,146 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         Assert.Equal("fail", verdict["regular_v4_frontier_repair_projection_reauthorization_verdict"]);
     }
 
+    [Theory]
+    [InlineData(false, "", "file_tuna_v4")]
+    [InlineData(true, "", "file_tuna_v4")]
+    [InlineData(false, "outbound", "file_tuna_v4")]
+    [InlineData(true, "outbound", "file_tuna_v4")]
+    [InlineData(false, "", "regular_nkn_v4_fast")]
+    [InlineData(true, "", "regular_nkn_v4_fast")]
+    public async Task AnalyzeRetained_MissingRangeOwnership_SenderSuppressionCannotSeedReceiverProjection(
+        bool compact, string direction, string route)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scope = direction.Length == 0 ? "" : $"direction={direction}; route={route}; protocol_version=4; ";
+        await AssertMissingRangeOwnershipVerdictAsync([
+            LogLine($"event=filetransfer_v4_repair_suppressed; {scope}transfer_id=transfer_ownership; session_id=sess_a; authority_id=sender-repair; repair_request_key=6:3:6:11; reason=current_authority_work_outstanding; first_start_chunk_index=6; last_end_chunk_exclusive=9; requested_chunk_count=3; in_flight=1; decision_reason=exact_projection_idempotent"),
+            MissingRangeOwnershipStateLine(route)
+        ], compact, omitted: false);
+    }
+
+    [Theory]
+    [InlineData(false, "filetransfer_v4_repair_requested")]
+    [InlineData(true, "filetransfer_v4_repair_requested")]
+    [InlineData(false, "filetransfer_v4_repair_suppressed")]
+    [InlineData(true, "filetransfer_v4_repair_suppressed")]
+    public async Task AnalyzeRetained_MissingRangeOwnership_DifferentAuthorityCannotBorrowInboundGrant(
+        bool compact, string eventName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await AssertMissingRangeOwnershipVerdictAsync([
+            LogLine("event=filetransfer_regular_v4_frontier_repair_authority_granted; transfer_id=transfer_ownership; session_id=sess_a; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; authority_id=receiver-repair; start_chunk_index=6; end_chunk_exclusive=9"),
+            LogLine($"event={eventName}; transfer_id=transfer_ownership; session_id=sess_a; authority_id=sender-repair; repair_request_key=6:3:6:11; first_start_chunk_index=6; last_end_chunk_exclusive=9"),
+            MissingRangeOwnershipStateLine("regular_nkn_v4_fast")
+        ], compact, omitted: false);
+    }
+
+    [Theory]
+    [InlineData(false, "")]
+    [InlineData(true, "")]
+    [InlineData(false, "sender")]
+    [InlineData(true, "sender")]
+    public async Task AnalyzeRetained_MissingRangeOwnership_SenderNoiseCannotMaskReceiverOmission(
+        bool compact, string direction)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4ProjectionCandidateFixtureWithoutOmission("transfer_ownership").ToList();
+        var scope = direction.Length == 0 ? "" : $"direction={direction}; ";
+        // The receiver retained 9:3 from its original 9:12 grant. Sender noise
+        // must not widen that projection to 9:11 and hide the empty-state edge.
+        lines.Add(LogLine($"event=filetransfer_v4_repair_suppressed; {scope}transfer_id=transfer_ownership; session_id=sess_a; authority_id=sender-repair; repair_request_key=9:11:9:14; first_start_chunk_index=9; last_end_chunk_exclusive=20; reason=current_authority_work_outstanding"));
+        lines.Add(LogLine("event=filetransfer_v4_state_sent; transfer_id=transfer_ownership; session_id=sess_a; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; epoch=9; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=15; missing_range_count=0; terminal_ready=0"));
+
+        await AssertMissingRangeOwnershipVerdictAsync(lines, compact, omitted: true);
+    }
+
+    [Theory]
+    [InlineData(false, "regular_nkn_v4_fast", true)]
+    [InlineData(true, "regular_nkn_v4_fast", true)]
+    [InlineData(false, "file_tuna_v4", false)]
+    [InlineData(true, "file_tuna_v4", false)]
+    public async Task AnalyzeRetained_MissingRangeOwnership_MatchingAuthorityRetainsInboundScope(
+        bool compact, string stateRoute, bool omitted)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await AssertMissingRangeOwnershipVerdictAsync([
+            LogLine("event=filetransfer_regular_v4_frontier_repair_authority_granted; transfer_id=transfer_ownership; session_id=sess_a; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; authority_id=receiver-repair; start_chunk_index=6; end_chunk_exclusive=9"),
+            LogLine("event=filetransfer_v4_repair_requested; transfer_id=transfer_ownership; session_id=sess_a; authority_id=receiver-repair; repair_request_key=6:3:6:11; first_start_chunk_index=6; last_end_chunk_exclusive=9"),
+            MissingRangeOwnershipStateLine(stateRoute)
+        ], compact, omitted);
+    }
+
+    [Theory]
+    [InlineData(false, "retained", "inbound", true)]
+    [InlineData(true, "retained", "inbound", true)]
+    [InlineData(false, "published", "receiver", true)]
+    [InlineData(true, "published", "receiver", true)]
+    [InlineData(false, "retained", "outbound", false)]
+    [InlineData(true, "retained", "outbound", false)]
+    [InlineData(false, "published", "sender", false)]
+    [InlineData(true, "published", "sender", false)]
+    public async Task AnalyzeRetained_MissingRangeOwnership_EmbeddedProjectionRequiresReceiverRole(
+        bool compact, string kind, string direction, bool omitted)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // Explicit receiver projection evidence must not be blanket-filtered
+        // merely because its route is Tuna; sender-role evidence is different.
+        await AssertMissingRangeOwnershipVerdictAsync([
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_{kind}; transfer_id=transfer_ownership; session_id=sess_a; direction={direction}; route=file_tuna_v4; protocol_version=4; authority_id=projection-repair; projected_ranges=6:3; projected_repair_request_key=6:3:6:11; epoch=17"),
+            MissingRangeOwnershipStateLine("file_tuna_v4")
+        ], compact, omitted);
+    }
+
+    private static string MissingRangeOwnershipStateLine(string route)
+        => LogLine($"event=filetransfer_v4_state_sent; transfer_id=transfer_ownership; session_id=sess_a; direction=inbound; route={route}; protocol_version=4; epoch=18; contiguous_committed_chunk_index=6; durable_received_highest_chunk_index=11; credit_until_chunk_index_exclusive=3121; missing_range_count=0; terminal_ready=0");
+
+    private static async Task AssertMissingRangeOwnershipVerdictAsync(
+        IReadOnlyList<string> lines, bool compact, bool omitted)
+    {
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = compact ? "1" : "0"
+            });
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(omitted ? "1" : "0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+        Assert.Equal(omitted ? "1" : "0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+        Assert.Equal(omitted ? "1" : "0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal(omitted ? "fail" : "none", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        if (omitted)
+        {
+            Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+        }
+        else
+        {
+            Assert.NotEqual("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RegularV4MissingRangeProjectionOmitted_SelectsEarliestEmptyEpoch()
