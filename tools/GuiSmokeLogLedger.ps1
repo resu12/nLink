@@ -1149,6 +1149,77 @@ function Get-GuiSmokeLogLedgerLinesAfterBookmark {
     return @($State.Lines.GetRange($Bookmark, $lineCount - $Bookmark).ToArray())
 }
 
+function Find-GuiSmokeLogLedgerAnyAllAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][object[]]$NormalizedNeedleSets
+    )
+
+    Assert-GuiSmokeLogLedgerHealthy -State $State
+    $lineCount = Get-GuiSmokeLogLedgerLineCount -State $State
+    if ($Bookmark -lt 0 -or $Bookmark -gt $lineCount) {
+        Set-GuiSmokeLogLedgerFailure `
+            -State $State `
+            -Code 'gui_smoke_log_cursor_invalid_bookmark' `
+            -Detail ("bookmark={0}; line_count={1}" -f $Bookmark, $lineCount)
+        Assert-GuiSmokeLogLedgerHealthy -State $State
+    }
+    if ($Bookmark -eq $lineCount) { return $null }
+
+    $stream = $null
+    $reader = $null
+    $firstMatch = $null
+    $matchFound = $false
+    try {
+        if ([string]$State.StorageMode -eq 'AppendOnlyFile') {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.FileStream]::new([string]$State.AppendOnlyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share, 65536, [IO.FileOptions]::SequentialScan)
+            $stream.Position = [long]$State.AppendOnlyLineStartOffsets[$Bookmark]
+            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true, 65536, $true)
+        }
+        else {
+            $lines = $State.Lines.GetRange($Bookmark, $lineCount - $Bookmark).ToArray()
+        }
+
+        for ($lineIndex = $Bookmark; $lineIndex -lt $lineCount; $lineIndex++) {
+            if ($reader) {
+                $line = $reader.ReadLine()
+                if ($null -eq $line) {
+                    Set-GuiSmokeLogLedgerFailure -State $State -Code 'gui_smoke_log_cursor_gap' -Detail ("path={0}; line_index={1}; reason=append_only_range_short_read" -f $State.AppendOnlyPath, $lineIndex)
+                    Assert-GuiSmokeLogLedgerHealthy -State $State
+                }
+            }
+            else {
+                $line = $lines[$lineIndex - $Bookmark]
+            }
+
+            # A matching prefix must not hide a short read or decoder failure in the tail.
+            if ($matchFound) { continue }
+            foreach ($needleSet in $NormalizedNeedleSets) {
+                $needles = @($needleSet)
+                $matched = $true
+                foreach ($needle in $needles) {
+                    if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                        $matched = $false
+                        break
+                    }
+                }
+                if ($matched) {
+                    $firstMatch = $line
+                    $matchFound = $true
+                    break
+                }
+            }
+        }
+        return $firstMatch
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 function Invoke-GuiSmokeLogLedgerRangeVisitor {
     param(
         [Parameter(Mandatory = $true)]$State,

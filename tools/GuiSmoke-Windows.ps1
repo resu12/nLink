@@ -33045,22 +33045,8 @@ function Wait-AppLogContainsAnyAllAfterBookmark {
     }
 
     return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
-        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
-            foreach ($needleSet in $normalizedNeedleSets) {
-                $needles = @($needleSet)
-                $matched = $true
-                foreach ($needle in $needles) {
-                    if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                        $matched = $false
-                        break
-                    }
-                }
-
-                if ($matched) { return $line }
-            }
-        }
-
-        return $null
+        Sync-GuiSmokeAppLogLedger
+        return Find-GuiSmokeLogLedgerAnyAllAfterBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark -NormalizedNeedleSets $normalizedNeedleSets
     }
 }
 
