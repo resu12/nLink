@@ -12,6 +12,131 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferNknSoakAndBaselineTests : FileTransferOpsScriptsTestBase
 {
+    [Theory]
+    [InlineData(4, true)]
+    [InlineData(6, false)]
+    [Trait("Category", "Smoke")]
+    public async Task NknReportingProjection_PreservesObservationsWithoutRouteEvaluation(int protocol, bool terminal)
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        var result = await RunPowerShellScriptTextAsync(
+            """
+            param([string]$RepoRoot, [int]$Protocol, [int]$Terminal)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $RepoRoot 'tools/FileTransferOps/AnalyzerOrchestration.ps1')
+            $lines = @(
+                '[2026-09-22 00:00:00Z] [INFO] [Test] event=nkn_bridge_bulk_send_summary; send_failures=100',
+                '[2026-09-22 00:00:10Z] [INFO] [Test] event=filetransfer_v4_sender_pump_summary; transfer_id=t; batch_frames_sent_total=7',
+                '[2026-09-22 00:00:10Z] [INFO] [Test] event=nkn_bridge_bulk_send_summary; send_failures=3',
+                '[2026-09-22 00:00:10Z] [INFO] [Test] event=screenshare_bridge_media_send_summary; queue_drops=2; send_failures=4',
+                "[2026-09-22 00:00:11Z] [INFO] [Test] event=filetransfer_binary_frame_sent; transfer_id=t; frame_type=filetransfer.chunk_batch.v$Protocol"
+            )
+            foreach ($name in @('filetransfer_chunk_batch_split_for_transport', 'filetransfer_reorder_pressure',
+                'filetransfer_request_timeout_detected', 'filetransfer_chunk_retry_requested',
+                'filetransfer_transport_payload_rejected', 'filetransfer_data_frame_decode_failed', 'filetransfer_message_rejected')) {
+                $lines += "[2026-09-22 00:00:12Z] [INFO] [Test] event=$name; transfer_id=t"
+            }
+            if ($Terminal -eq 1) {
+                $lines += '[2026-09-22 00:00:13Z] [INFO] [Test] event=transfer_terminal; transfer_id=t; direction=inbound; state=Completed'
+            }
+            $sequence = 0
+            $events = @(foreach ($line in $lines) {
+                $sequence++
+                ConvertFrom-FileTransferLogLine -Line $line -FilePath 'fixture.log' -LineNumber $sequence -Sequence $sequence
+            })
+            $script:routeEvaluations = 0
+            function Get-FileTransferRouteConsistency {
+                param($TransferEvents)
+                $script:routeEvaluations++
+                return [pscustomobject]@{}
+            }
+            $full = New-FileTransferRetainedSummary -Events $events -LogFiles @('fixture.log') -AllTransfers
+            if ($script:routeEvaluations -ne 1) { throw 'full control did not evaluate once' }
+            function Get-FileTransferRouteConsistency { throw 'reporting invoked route authority' }
+            $report = New-FileTransferRetainedSummary -Events $events -LogFiles @('fixture.log') -AllTransfers -ReportingOnly
+            foreach ($property in $report.PSObject.Properties) {
+                $expected = ConvertTo-Json -InputObject $full.($property.Name) -Depth 12 -Compress
+                $actual = ConvertTo-Json -InputObject $property.Value -Depth 12 -Compress
+                if ($expected -cne $actual) { throw "report mismatch: $($property.Name)" }
+            }
+            if ($report.BatchSentAsBatchCount -ne 7 -or $report.BatchSplitCount -ne 1 -or
+                $report.RequestTimeoutCount -ne 1 -or $report.RetryRequestedCount -ne 1 -or
+                $report.PayloadRejectedCount -ne 1 -or $report.DataFrameDecodeFailedCount -ne 1 -or
+                $report.MessageRejectedCount -ne 1 -or $report.ReorderEventCount -ne 1 -or
+                $report.HasTerminalEvidence -ne ($Terminal -eq 1) -or
+                -not $report.FrameTypeCounts.ContainsKey("filetransfer.chunk_batch.v$Protocol") -or
+                $report.GlobalEvents.Count -ne 2 -or
+                $report.GlobalEvents[0].Fields['send_failures'] -ne '3' -or
+                $report.GlobalEvents[1].Fields['send_failures'] -ne '4' -or
+                $report.PSObject.Properties.Name -contains 'RouteConsistency') { throw 'report evidence changed' }
+            $empty = New-FileTransferRetainedSummary -Events @() -LogFiles @() -AllTransfers -ReportingOnly
+            if ($empty.HasTerminalEvidence -or $empty.FrameTypeCounts.Count -ne 0 -or
+                $empty.FirstTimestamp -ne '' -or $empty.GlobalEvents.Count -ne 0) { throw 'empty evidence invented' }
+            Write-Output 'reporting-projection-ok'
+            """,
+            [FindRepoRoot(), protocol.ToString(CultureInfo.InvariantCulture), terminal ? "1" : "0"]);
+        Assert.True(result.ExitCode == 0, $"{result.Stdout}\n{result.Stderr}");
+        Assert.Contains("reporting-projection-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("nkn-fast", false)]
+    [InlineData("nkn-fast", true)]
+    [InlineData("nkn-mixed", false)]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferNknSoak_CompactReportMatchesFullReport(string mode, bool progressTimeout)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-nkn-report-contract", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            Dictionary<string, string>? fullReport = null;
+            foreach (var compact in new[] { false, true })
+            {
+                var artifactDir = Path.Combine(tempRoot, compact ? "compact" : "full");
+                var environment = BuildFakeLiveNknEnvironment();
+                environment["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = compact ? "1" : "0";
+                environment["NLINK_FILETRANSFER_NKN_SOAK_FAKE_PROGRESS_TIMEOUT"] = progressTimeout ? "1" : "0";
+                var result = await RunPowerShellFileAsync(
+                    repoRoot,
+                    Path.Combine(repoRoot, "tools", "Run-FileTransferNknSoak.ps1"),
+                    ["-Mode", mode, "-ArtifactDir", artifactDir, "-PayloadSizes", "64KiB",
+                     "-Cycles", "1", "-TimeoutSeconds", "30", "-FailOnGate"],
+                    environment);
+
+                var reportPath = Path.Combine(artifactDir, "filetransfer-live-nkn-summary.txt");
+                Assert.True(File.Exists(reportPath), $"Missing live report (compact={compact}).\n{result.Stdout}\n{result.Stderr}");
+                Assert.Equal(progressTimeout ? 1 : 0, result.ExitCode);
+                var report = ReadArtifactReport(artifactDir, "filetransfer-live-nkn-summary.txt");
+                Assert.Equal(progressTimeout ? "INCONCLUSIVE_PROGRESS_TIMEOUT" : "PASS", report["verdict"]);
+                Assert.Equal(progressTimeout ? "0" : "1", report["cycles_completed"]);
+                Assert.Equal(progressTimeout ? "1" : "0", report["terminal_missing_after_progress_timeout"]);
+                if (fullReport is null)
+                {
+                    fullReport = report;
+                    continue;
+                }
+
+                Assert.Equal(fullReport.Keys.OrderBy(key => key), report.Keys.OrderBy(key => key));
+                foreach (var key in fullReport.Keys.Except(["exe_path", "observed_start_utc", "observed_end_utc"]))
+                {
+                    Assert.True(fullReport[key] == report[key], $"Compact/full mismatch for {key}: {fullReport[key]} != {report[key]}");
+                }
+            }
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task BaselineComparison_ReadsLiveNknSummaryAndFlagsSafeRegression()
@@ -502,9 +627,11 @@ if (-not $result.RegressionFailed) {
         }
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferNknSoak_FakeSafeBaselineRegressionFailsWhenGated()
+    public async Task RunFileTransferNknSoak_FakeSafeBaselineRegressionFailsWhenGated(bool compact)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -525,6 +652,8 @@ if (-not $result.RegressionFailed) {
                 BuildLiveSummaryLines(averageGoodput: 100_000, minimumGoodput: 100_000, bridgeWaiting: 0, protocolVersion: "4", v4BatchRatio: 1.0, v4PayloadFillPercent: 95.0),
                 new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
+            var environment = BuildFakeLiveNknEnvironment(fakeGoodputBytesPerSecond: 1_000);
+            environment["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = compact ? "1" : "0";
             var result = await RunPowerShellFileAsync(
                 repoRoot,
                 Path.Combine(repoRoot, "tools", "Run-FileTransferNknSoak.ps1"),
@@ -537,10 +666,14 @@ if (-not $result.RegressionFailed) {
                     "-SafeBaselineArtifactDir", safeDir,
                     "-FailOnGate"
                 ],
-                BuildFakeLiveNknEnvironment(fakeGoodputBytesPerSecond: 1_000));
+                environment);
 
             Assert.Equal(1, result.ExitCode);
-            AssertRequiredLiveArtifacts(artifactDir);
+            if (!compact)
+            {
+                // Compact analysis intentionally omits the full throughput report set.
+                AssertRequiredLiveArtifacts(artifactDir);
+            }
 
             var verdict = ReadArtifactReport(artifactDir, "filetransfer-operator-verdict.txt");
             Assert.Equal("FAIL_REGRESSION_BUDGET", verdict["verdict"]);

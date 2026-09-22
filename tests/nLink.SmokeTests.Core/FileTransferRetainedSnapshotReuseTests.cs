@@ -221,6 +221,21 @@ public sealed class FileTransferRetainedSnapshotReuseTests : FileTransferOpsScri
                     . ([scriptblock]::Create($compactLineAssignment[0].Extent.Text))
                     Assert-ExactLines @($rawLines[1]) $fullCompactSnapshotLines
                 }
+                else {
+                    $lineAssignment = @($assignments | Where-Object {
+                        $_.Left.Extent.Text -ceq '[string[]]$primaryFullSnapshotLines'
+                    })
+                    $compactLineAssignment = @($assignments | Where-Object {
+                        $_.Left.Extent.Text -ceq '[string[]]$primaryCompactSnapshotLines'
+                    })
+                    if ($lineAssignment.Count -ne 1 -or $compactLineAssignment.Count -ne 1) {
+                        throw 'compact writer primary input selection missing'
+                    }
+                    . ([scriptblock]::Create($lineAssignment[0].Extent.Text))
+                    . ([scriptblock]::Create($compactLineAssignment[0].Extent.Text))
+                    Assert-ExactLines $rawLines $primaryFullSnapshotLines
+                    Assert-ExactLines @($rawLines[1]) $primaryCompactSnapshotLines
+                }
                 $before = $script:EvaluationCalls.Count
                 . ([scriptblock]::Create($full[0].Extent.Text))
                 . ([scriptblock]::Create($compact[0].Extent.Text))

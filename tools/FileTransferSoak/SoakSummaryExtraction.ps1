@@ -1976,7 +1976,8 @@ function New-FileTransferRetainedSummary {
         [object[]]$Events,
         [string[]]$LogFiles,
         [string]$RequestedTransferId = '',
-        [switch]$AllTransfers
+        [switch]$AllTransfers,
+        [switch]$ReportingOnly
     )
 
     $allEvents = @($Events | Sort-Object Sequence)
@@ -2114,6 +2115,27 @@ function New-FileTransferRetainedSummary {
             [Math]::Max(
                 (Get-FileTransferMaxField -Events $v4OutboundEfficiencyEvents -FieldName 'batch_frames_sent_total'),
                 (Get-FileTransferMaxField -Events $chunkBatchTransportSummaryEvents -FieldName 'batch_frames_sent_total')))
+    }
+    # Live NKN reporting needs observations, not another route/gate evaluation.
+    # Reuse the exact full-summary scope, time window and batch-counter fallback.
+    if ($ReportingOnly) {
+        return [pscustomobject]@{
+            AllEvents = @($allEvents)
+            TransferEvents = @($transferEvents)
+            GlobalEvents = @($globalEvents)
+            HasTerminalEvidence = ($terminalEvents.Count -gt 0)
+            FirstTimestamp = $firstTimestamp
+            LastTimestamp = $lastTimestamp
+            FrameTypeCounts = $frameTypeCounts
+            BatchSentAsBatchCount = $batchSentAsBatchCount
+            BatchSplitCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_split_for_transport'
+            ReorderEventCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_reorder_pressure'
+            RequestTimeoutCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_request_timeout_detected'
+            RetryRequestedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_retry_requested'
+            PayloadRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_transport_payload_rejected'
+            DataFrameDecodeFailedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_data_frame_decode_failed'
+            MessageRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_message_rejected'
+        }
     }
     $receiverBufferWriteBatchCommittedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_write_batch_committed'
     if ($receiverBufferWriteBatchCommittedCount -eq 0) {

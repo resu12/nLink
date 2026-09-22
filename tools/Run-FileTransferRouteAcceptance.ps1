@@ -3422,6 +3422,95 @@ function Get-RouteAcceptanceSelectedRouteDetails {
     return $items.ToArray()
 }
 
+function Read-RouteAcceptanceSnapshotParityReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$RouteSummary
+    )
+
+    $report = [ordered]@{ Verdict = 'missing'; FailureReason = 'snapshot_parity_artifact_missing'; FullBoundaryHash = ''; CompactBoundaryHash = '' }
+    $paths = @{}
+    foreach ($kind in @('full', 'compact', 'parity')) {
+        $paths[$kind] = Join-Path $ArtifactDir "filetransfer-coordinator-snapshot-$kind-summary.json"
+        if (-not (Test-Path -LiteralPath $paths[$kind] -PathType Leaf)) { return [pscustomobject]$report }
+    }
+
+    try {
+        $artifacts = @{}
+        foreach ($kind in @('full', 'compact', 'parity')) {
+            $json = Get-Content -LiteralPath $paths[$kind] -Raw -ErrorAction Stop
+            # ConvertFrom-Json can unwrap a one-element array; require object roots.
+            if (-not $json.TrimStart().StartsWith('{', [StringComparison]::Ordinal)) { throw 'snapshot_parity_artifact_invalid' }
+            $artifacts[$kind] = $json | ConvertFrom-Json -ErrorAction Stop
+        }
+        $full = $artifacts.full
+        $compact = $artifacts.compact
+        $parity = $artifacts.parity
+        if ($parity -isnot [pscustomobject] -or $parity.Verdict -isnot [string] -or $parity.Verdict -cnotin @('pass', 'fail') -or
+            $parity.FailureReason -isnot [string]) { throw 'snapshot_parity_artifact_invalid' }
+
+        # Bind recorded output to its companion summaries, without reevaluating
+        # snapshots, boundaries or route authority. Finalization owns attempt identity.
+        foreach ($side in @('Full', 'Compact')) {
+            $summary = if ($side -ceq 'Full') { $full } else { $compact }
+            if ($summary -isnot [pscustomobject]) { throw 'snapshot_parity_artifact_invalid' }
+            foreach ($field in @('Mode', 'BoundaryHash', 'BoundaryCount', 'TransitionCount', 'EffectCount')) {
+                $value = $parity.($side + $field)
+                $summaryValue = $summary.$field
+                if ($field -in @('Mode', 'BoundaryHash')) {
+                    if ($value -isnot [string] -or $summaryValue -isnot [string]) { throw 'snapshot_parity_artifact_invalid' }
+                }
+                elseif (($value -isnot [int] -and $value -isnot [long]) -or
+                    ($summaryValue -isnot [int] -and $summaryValue -isnot [long]) -or
+                    $value -lt 0 -or $summaryValue -lt 0) { throw 'snapshot_parity_artifact_invalid' }
+                if ([string]$value -cne [string]$summaryValue -or
+                    ($parity.Verdict -ceq 'pass' -and [string]$parity.('Full' + $field) -cne [string]$parity.('Compact' + $field))) {
+                    throw 'snapshot_parity_artifact_conflict'
+                }
+            }
+        }
+        if ($parity.Verdict -ceq 'pass' -and
+            ([string]$full.ContractVersion -cne [string]$compact.ContractVersion -or
+                [string]$full.CatalogHash -cne [string]$compact.CatalogHash)) {
+            throw 'snapshot_parity_artifact_conflict'
+        }
+        $routeFields = [ordered]@{
+            Mode = 'mode'; ContractVersion = 'contract_version'; CatalogHash = 'catalog_hash'
+            BoundaryHash = 'boundary_hash'; BoundaryCount = 'boundary_count'
+            TransitionCount = 'transition_count'; EffectCount = 'effect_count'
+        }
+        $matchesPrimary = $false
+        foreach ($summary in @($full, $compact)) {
+            $matches = $true
+            foreach ($field in $routeFields.Keys) {
+                $key = 'coordinator_snapshot_' + $routeFields[$field]
+                if (-not $RouteSummary.ContainsKey($key) -or $null -eq $summary.PSObject.Properties[$field] -or
+                    [string]$RouteSummary[$key] -cne [string]$summary.$field) { $matches = $false }
+            }
+            $matchesPrimary = $matchesPrimary -or $matches
+        }
+        if (-not $matchesPrimary) { throw 'snapshot_parity_artifact_conflict' }
+        $textFields = [ordered]@{
+            Verdict = 'full_compact_parity_verdict'; FailureReason = 'full_compact_parity_failure_reason'
+            FullBoundaryHash = 'full_boundary_hash'; CompactBoundaryHash = 'compact_boundary_hash'
+        }
+        foreach ($field in $textFields.Keys) {
+            $key = 'coordinator_snapshot_' + $textFields[$field]
+            if ($RouteSummary.ContainsKey($key) -and [string]$RouteSummary[$key] -cne [string]$parity.$field) {
+                throw 'snapshot_parity_artifact_conflict'
+            }
+        }
+        foreach ($field in $textFields.Keys) { $report[$field] = [string]$parity.$field }
+    }
+    catch {
+        $report.Verdict = 'invalid'
+        $report.FailureReason = if ($_.Exception.Message -ceq 'snapshot_parity_artifact_conflict') {
+            'snapshot_parity_artifact_conflict'
+        } else { 'snapshot_parity_artifact_invalid' }
+    }
+    return [pscustomobject]$report
+}
+
 function Assert-Phase4RouteSummary {
     param(
         [Parameter(Mandatory = $true)]$Result,
@@ -3480,10 +3569,11 @@ function Assert-Phase4RouteSummary {
     $Result.coordinatorSnapshotFallbackTailYieldFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_fallback_tail_yield_family_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotRegularV4FrontierRepairPressureFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_regular_v4_frontier_repair_pressure_family_legacy_selection_count' -DefaultValue '1')
     $Result.coordinatorSnapshotResponderProbeHandoffFamilyLegacySelectionCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_responder_probe_handoff_family_legacy_selection_count' -DefaultValue '1')
-    $Result.coordinatorSnapshotFullCompactParityVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_verdict' -DefaultValue 'missing'
-    $Result.coordinatorSnapshotFullCompactParityFailureReason = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_compact_parity_failure_reason' -DefaultValue ''
-    $Result.coordinatorSnapshotFullBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_full_boundary_hash' -DefaultValue ''
-    $Result.coordinatorSnapshotCompactBoundaryHash = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'coordinator_snapshot_compact_boundary_hash' -DefaultValue ''
+    $snapshotParityReport = Read-RouteAcceptanceSnapshotParityReport -ArtifactDir $Result.artifactDir -RouteSummary $routeSummary
+    $Result.coordinatorSnapshotFullCompactParityVerdict = $snapshotParityReport.Verdict
+    $Result.coordinatorSnapshotFullCompactParityFailureReason = $snapshotParityReport.FailureReason
+    $Result.coordinatorSnapshotFullBoundaryHash = $snapshotParityReport.FullBoundaryHash
+    $Result.coordinatorSnapshotCompactBoundaryHash = $snapshotParityReport.CompactBoundaryHash
     $Result.fallbackTailBridgeRecoveryGenerationPairingVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_pairing_verdict' -DefaultValue 'none'
     $Result.fallbackTailBridgeRecoveryGenerationMismatchRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_raw_count' -DefaultValue '0')
     $Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_distinct_count' -DefaultValue '0')

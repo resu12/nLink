@@ -12361,7 +12361,8 @@ function Invoke-FileTransferRetainedAnalysis {
         [switch]$AllTransfers,
         [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None',
-        $LocalFailureWitness = $null
+        $LocalFailureWitness = $null,
+        [ref]$NknReportingSummary
     )
 
     $resolvedArtifactDir = $ArtifactDir
@@ -12539,6 +12540,10 @@ function Invoke-FileTransferRetainedAnalysis {
                 StageDiagnostics = $stageDiagnostics
             }
             Write-FileTransferEfficiencySummaryArtifacts @efficiencyArtifactArgs
+            if ($null -ne $NknReportingSummary) {
+                $NknReportingSummary.Value = New-FileTransferRetainedSummary -Events $eventsForArtifacts -LogFiles $logFiles `
+                    -RequestedTransferId $TransferId -AllTransfers:$AllTransfers -ReportingOnly
+            }
             $artifactStopwatch.Stop()
             $stageDiagnostics['artifact_write_ms'] = $artifactStopwatch.ElapsedMilliseconds
             $stageDiagnostics['artifact_write_started'] = 0
@@ -12706,6 +12711,9 @@ function Invoke-FileTransferRetainedAnalysis {
         $stageDiagnostics['total_ms'] = $totalStopwatch.ElapsedMilliseconds
         Write-FileTransferRetainedAnalysisStageDiagnostics -ArtifactDir $resolvedArtifactDir -Diagnostics $stageDiagnostics
 
+        if ($null -ne $NknReportingSummary) {
+            $NknReportingSummary.Value = $summary
+        }
         return [pscustomobject]@{
             ArtifactDir = $resolvedArtifactDir
             Summary = $summary

@@ -28,6 +28,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ScreenShareSoak\ProcessAndBridge.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferOps\AnalyzerOrchestration.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferSoak\BaselineComparison.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferSoak\RetainedAnalysisEvidence.ps1')
 
 function Set-ProcessEnvironmentValue {
     param(
@@ -227,6 +228,20 @@ function Invoke-FileTransferGuiSmokeWithTimeout {
 
     $stdoutPath = Join-Path $ArtifactDir 'gui-smoke-stdout.log'
     $stderrPath = Join-Path $ArtifactDir 'gui-smoke-stderr.log'
+    $statePath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-state.json'
+    $timeoutPath = Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-timeout.json'
+    $requestPath = Join-Path $ArtifactDir 'filetransfer-gui-scenario-deadline-request.json'
+    foreach ($path in @($statePath, $timeoutPath, $requestPath,
+            (Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'),
+            (Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log'))) {
+        if (Test-Path -LiteralPath $path) { throw "Refusing to reuse GUI finalization artifacts: $path" }
+    }
+    $graceSeconds = 120
+    $graceOverride = [string]$env:NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY
+    if (-not [string]::IsNullOrWhiteSpace($graceOverride) -and
+        (-not [int]::TryParse($graceOverride, [ref]$graceSeconds) -or $graceSeconds -lt 1 -or $graceSeconds -gt 120)) {
+        throw 'NLINK_FILETRANSFER_GUI_FINALIZATION_GRACE_SECONDS_TEST_ONLY must be an integer from 1 through 120.'
+    }
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
     $args = @(
@@ -250,41 +265,122 @@ function Invoke-FileTransferGuiSmokeWithTimeout {
             }
         }) -join ' '
 
-    $process = Start-Process `
-        -FilePath 'powershell' `
-        -ArgumentList $argString `
-        -RedirectStandardOutput $stdoutPath `
-        -RedirectStandardError $stderrPath `
-        -NoNewWindow `
-        -PassThru
-
-    $startedUtc = [datetime]::UtcNow
+    $startedUtc = [DateTimeOffset]::UtcNow
     $lastStatusUtc = $startedUtc
-    while (-not $process.HasExited) {
-        $elapsed = [datetime]::UtcNow - $startedUtc
-        if ($elapsed.TotalSeconds -ge $TimeoutSeconds) {
-            $message = "GUI smoke harness exceeded hard timeout (${TimeoutSeconds}s); killing process tree rooted at pid=$($process.Id)."
-            Write-Warning $message
-            Add-Content -LiteralPath $stderrPath -Value $message -Encoding UTF8
-            Stop-FileTransferProcessTree -ProcessId $process.Id
-            Start-Sleep -Milliseconds 500
-            if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath | ForEach-Object { Write-Host $_ } }
-            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Error $_ -ErrorAction Continue } }
-            return 124
-        }
-
-        if ((([datetime]::UtcNow - $lastStatusUtc).TotalSeconds) -ge 30) {
-            Write-Host ("[FileTransfer NKN Soak] GUI smoke still running ({0:N0}s/{1}s)..." -f $elapsed.TotalSeconds, $TimeoutSeconds) -ForegroundColor DarkGray
-            $lastStatusUtc = [datetime]::UtcNow
-        }
-
-        Start-Sleep -Milliseconds 500
-        try { $process.Refresh() } catch {}
+    $scenarioDeadline = $startedUtc.AddSeconds($TimeoutSeconds)
+    $hardDeadline = $scenarioDeadline.AddSeconds($graceSeconds)
+    $runId = [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID
+    $scenarioId = [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID
+    $state = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_gui_evidence_finalization_state'
+        acceptanceRunId = $runId
+        scenarioRunId = $scenarioId
+        artifactDir = [IO.Path]::GetFullPath($ArtifactDir)
+        guiChildProcessId = 0
+        scenarioTimeoutSeconds = $TimeoutSeconds
+        finalizationGraceSeconds = $graceSeconds
+        hardDeadlineSeconds = $TimeoutSeconds + $graceSeconds
+        startedUtc = $startedUtc.ToString('O')
+        scenarioDeadlineUtc = $scenarioDeadline.ToString('O')
+        deadlineUtc = $hardDeadline.ToString('O')
+        lastCompletedStage = 'gui_child_starting'
+        capturePath = ''
+        captureSha256 = ''
+        captureLineCount = 0L
+        timedOut = $false
+        exitCode = $null
+        updatedUtc = $startedUtc.ToString('O')
     }
-
-    if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath | ForEach-Object { Write-Host $_ } }
-    if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Error $_ -ErrorAction Continue } }
-    return [int]$process.ExitCode
+    Write-FileTransferEvidenceAtomicJson -Path $statePath -Value $state
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'powershell'
+    $startInfo.Arguments = $argString
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables['NLINK_FILETRANSFER_EVIDENCE_FINALIZATION_STATE_PATH'] = $statePath
+    $startInfo.EnvironmentVariables['NLINK_FILETRANSFER_GUI_SCENARIO_DEADLINE_REQUEST_PATH'] = $requestPath
+    # Regular capture does not opt in to another caller's private writer custody.
+    foreach ($key in @('NLINK_GUI_WRITER_REQUEST', 'NLINK_GUI_WRITER_REQUEST_ID',
+        'NLINK_GUI_WRITER_RELAY', 'NLINK_GUI_WRITER_RELAY_ID', 'NLINK_GUI_FRONTIER_START_V1',
+        'NLINK_GUI_FRONTIER_RELAY_START_V1', 'NLINK_FILETRANSFER_GUI_TERMINAL_PHASE_DEADLINE_PATH')) {
+        $startInfo.EnvironmentVariables.Remove($key)
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    $timedOut = $false
+    $deadlineRequested = $false
+    try {
+        $started = $process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        while (-not $process.HasExited -or -not $stdoutTask.IsCompleted -or -not $stderrTask.IsCompleted) {
+            $now = [DateTimeOffset]::UtcNow
+            if ($now -ge $scenarioDeadline -and -not $deadlineRequested) {
+                Write-FileTransferEvidenceAtomicJson -Path $requestPath -Value ([ordered]@{
+                    acceptanceRunId = $runId; scenarioRunId = $scenarioId
+                    reason = 'gui_smoke_scenario_deadline_exceeded'; requestedUtc = $now.ToString('O')
+                })
+                $deadlineRequested = $true
+            }
+            if ($now -ge $hardDeadline) {
+                $timedOut = $true
+                Write-FileTransferEvidenceAtomicJson -Path $timeoutPath -Value ([ordered]@{
+                    schemaVersion = 1; event = 'filetransfer_gui_evidence_finalization_timeout'
+                    acceptanceRunId = $runId; scenarioRunId = $scenarioId; artifactDir = $state.artifactDir
+                    permanentlyNonAuthoritative = $true; reason = 'gui_evidence_finalization_hard_deadline_exceeded'
+                    timedOut = $true; exitCode = 124; endedUtc = $now.ToString('O')
+                })
+                Stop-FileTransferProcessTree -ProcessId $process.Id
+                break
+            }
+            if (($now - $lastStatusUtc).TotalSeconds -ge 30) {
+                Write-Host ("[FileTransfer NKN Soak] GUI smoke still running ({0:N0}s/{1}s; finalization grace {2}s)..." -f
+                    ($now - $startedUtc).TotalSeconds, $TimeoutSeconds, $graceSeconds) -ForegroundColor DarkGray
+                $lastStatusUtc = $now
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        $outputCaptured = $stdoutTask.IsCompleted -and $stderrTask.IsCompleted
+        if ($outputCaptured) {
+            $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+            $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+            [IO.File]::WriteAllText($stdoutPath, $stdout, [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($stderrPath, $stderr, [Text.UTF8Encoding]::new($false))
+            Write-Host $stdout
+            if (-not [string]::IsNullOrEmpty($stderr)) { [Console]::Error.WriteLine($stderr) }
+        }
+        $exitCode = if ($timedOut) { 124 } else { [int]$process.ExitCode }
+        # Only update after child exit/output EOF; never race its stage journal.
+        $completedState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        if ([string]$completedState.acceptanceRunId -cne $runId -or
+            [string]$completedState.scenarioRunId -cne $scenarioId -or
+            [string]$completedState.artifactDir -cne [string]$state.artifactDir -or
+            [string]$completedState.startedUtc -cne [string]$state.startedUtc) {
+            throw 'regular_gui_finalization_identity_mismatch'
+        }
+        # A normal child exit cannot restore authority after a recorded timeout.
+        if ([bool]$completedState.timedOut -or (Test-Path -LiteralPath $timeoutPath)) {
+            $timedOut = $true
+            $exitCode = 124
+        }
+        $completedState | Add-Member -NotePropertyName childLastCompletedStage -NotePropertyValue ([string]$completedState.lastCompletedStage) -Force
+        if (-not $timedOut) { $completedState.lastCompletedStage = 'gui_child_exited' }
+        $completedState.guiChildProcessId = $process.Id
+        $completedState.timedOut = $timedOut
+        $completedState.exitCode = $exitCode
+        $completedState.updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        $completedState | Add-Member -NotePropertyName outputCaptureCompleted -NotePropertyValue $outputCaptured -Force
+        Write-FileTransferEvidenceAtomicJson -Path $statePath -Value $completedState
+        return $exitCode
+    }
+    finally {
+        if ($started -and -not $process.HasExited) { Stop-FileTransferProcessTree -ProcessId $process.Id }
+        $process.Dispose()
+    }
 }
 
 function Resolve-FileTransferArtifactDir {
@@ -501,6 +597,8 @@ function Add-FileTransferLiveNknSyntheticEvidence {
         [int]$CyclesRequested = 0
     )
 
+    # The live producer owns sealed capture bytes, even when finalization failed.
+    if (Test-Path -LiteralPath (Join-Path $ArtifactDir 'filetransfer-gui-evidence-finalization-state.json')) { return }
     $logSlicePath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
     if (-not (Test-Path -LiteralPath $logSlicePath -PathType Leaf)) {
         return
@@ -576,6 +674,7 @@ function Write-FileTransferLiveNknSummary {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)]$Analysis,
+        [Parameter(Mandatory = $true)]$ReportingSummary,
         [Parameter(Mandatory = $true)][string]$Mode,
         [Parameter(Mandatory = $true)][string]$ExternalTopologyProfile,
         [Parameter(Mandatory = $true)][string]$PayloadEfficiencyProfile,
@@ -598,21 +697,21 @@ function Write-FileTransferLiveNknSummary {
         $totalPayloadBytes += [int64]$cycle.payload_bytes
     }
 
-    $batchAsBatch = [int64]$Analysis.Summary.BatchSentAsBatchCount
-    $batchSplit = [int64]$Analysis.Summary.BatchSplitCount
+    $batchAsBatch = [int64]$ReportingSummary.BatchSentAsBatchCount
+    $batchSplit = [int64]$ReportingSummary.BatchSplitCount
     $batchDenominator = $batchAsBatch + $batchSplit
-    $v4BatchEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+    $v4BatchEvents = @($ReportingSummary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_chunk_batch_sent_as_batch' -and
             ((Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v6' -or
              (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or
              (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k')
         })
-    $v4SplitEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+    $v4SplitEvents = @($ReportingSummary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_chunk_batch_split_for_transport' -and
             ((Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default '') -eq 'filetransfer.chunk_batch.v6' -or
              (Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4')
         })
-    $v4PayloadShapeEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+    $v4PayloadShapeEvents = @($ReportingSummary.TransferEvents | Where-Object {
             ($_.EventName -eq 'filetransfer_chunk_batch_sent_as_batch' -or $_.EventName -eq 'filetransfer_transport_payload_budget') -and
             ((Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v6' -or
              (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or
@@ -621,17 +720,17 @@ function Write-FileTransferLiveNknSummary {
     $v4BatchDenominator = $v4BatchEvents.Count + $v4SplitEvents.Count
     $v4BatchRatio = if ($v4BatchDenominator -gt 0) { $v4BatchEvents.Count / [double]$v4BatchDenominator } else { 0.0 }
     $dataProtocolVersion = if (
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_negotiated') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_sender_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_receiver_started') -gt 0 -or
-        $Analysis.Summary.FrameTypeCounts.ContainsKey('filetransfer.chunk_batch.v6') -or
-        $Analysis.Summary.FrameTypeCounts.ContainsKey('filetransfer.receiver_state.v6')) {
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v6_negotiated') -gt 0 -or
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v6_sender_started') -gt 0 -or
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v6_receiver_started') -gt 0 -or
+        $ReportingSummary.FrameTypeCounts.ContainsKey('filetransfer.chunk_batch.v6') -or
+        $ReportingSummary.FrameTypeCounts.ContainsKey('filetransfer.receiver_state.v6')) {
         6
     }
     elseif (
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_sender_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_receiver_started') -gt 0 -or
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_sender_started') -gt 0 -or
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_receiver_started') -gt 0 -or
         $v4BatchEvents.Count -gt 0) {
         4
     }
@@ -647,7 +746,7 @@ function Write-FileTransferLiveNknSummary {
         }
     )
     $v4AverageBridgePayloadFillPercent = if ($v4FillValues.Count -gt 0) { ($v4FillValues | Measure-Object -Average).Average } else { 0.0 }
-    $legacyDataProtocolStartedCount = @($Analysis.Summary.TransferEvents | Where-Object {
+    $legacyDataProtocolStartedCount = @($ReportingSummary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_session_opened' -and
             -not [string]::IsNullOrWhiteSpace((Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '')) -and
             (
@@ -659,7 +758,7 @@ function Write-FileTransferLiveNknSummary {
         }).Count
     $unexpectedLegacyDataFrameDuringV4Count = 0
     if ($dataProtocolVersion -eq 6) {
-        $unexpectedLegacyDataFrameDuringV4Count = @($Analysis.Summary.TransferEvents | Where-Object {
+        $unexpectedLegacyDataFrameDuringV4Count = @($ReportingSummary.TransferEvents | Where-Object {
                 ($_.EventName -eq 'filetransfer_binary_frame_sent' -or
                  $_.EventName -eq 'filetransfer_binary_frame_received' -or
                  $_.EventName -eq 'filetransfer_data_frame_dispatched') -and
@@ -688,30 +787,30 @@ function Write-FileTransferLiveNknSummary {
         }
     }
 
-    $bridgeBulkSendFailures = Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_send_summary' -FieldName 'send_failures'
-    $bridgeBulkQueueClears = (Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_send_summary' -FieldName 'queue_clears') +
-        (Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_queue_state' -FieldName 'cleared_since_last')
-    $bridgeBulkSevereCount = @($Analysis.Summary.GlobalEvents | Where-Object {
+    $bridgeBulkSendFailures = Get-FileTransferGlobalSumField -Summary $ReportingSummary -EventName 'nkn_bridge_bulk_send_summary' -FieldName 'send_failures'
+    $bridgeBulkQueueClears = (Get-FileTransferGlobalSumField -Summary $ReportingSummary -EventName 'nkn_bridge_bulk_send_summary' -FieldName 'queue_clears') +
+        (Get-FileTransferGlobalSumField -Summary $ReportingSummary -EventName 'nkn_bridge_bulk_queue_state' -FieldName 'cleared_since_last')
+    $bridgeBulkSevereCount = @($ReportingSummary.GlobalEvents | Where-Object {
             $_.EventName -eq 'nkn_bridge_bulk_queue_state' -and
             (Get-FileTransferEventInt64Field -Event $_ -Name 'severe' -Default 0) -gt 0
         }).Count
-    $bridgeConfig = Get-FileTransferBridgeConfigSnapshot -Summary $Analysis.Summary -ExternalTopologyProfile $ExternalTopologyProfile
+    $bridgeConfig = Get-FileTransferBridgeConfigSnapshot -Summary $ReportingSummary -ExternalTopologyProfile $ExternalTopologyProfile
     if ($bridgeConfig.Status -eq 'unexpected_drift') {
         $effectiveVerdict = 'INVALID_SETUP'
         $effectiveGateStatus = 'fail'
     }
-    $mediaQueueDropCount = Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'screenshare_bridge_media_send_summary' -FieldName 'queue_drops'
-    $mediaSendFailureCount = Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'screenshare_bridge_media_send_summary' -FieldName 'send_failures'
-    $mediaSevereCount = @($Analysis.Summary.GlobalEvents | Where-Object {
+    $mediaQueueDropCount = Get-FileTransferGlobalSumField -Summary $ReportingSummary -EventName 'screenshare_bridge_media_send_summary' -FieldName 'queue_drops'
+    $mediaSendFailureCount = Get-FileTransferGlobalSumField -Summary $ReportingSummary -EventName 'screenshare_bridge_media_send_summary' -FieldName 'send_failures'
+    $mediaSevereCount = @($ReportingSummary.GlobalEvents | Where-Object {
             ($_.EventName -eq 'screenshare_bridge_queue_state' -or $_.EventName -eq 'screenshare_bridge_media_send_summary') -and
             ((Get-FileTransferEventInt64Field -Event $_ -Name 'severe' -Default 0) -gt 0 -or
              (Get-FileTransferEventField -Event $_ -Name 'queue_mode' -Default 'normal') -eq 'severe')
         }).Count
     $v4MixedEnabledEvidenceCount =
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_mixed_screenshare_enabled') +
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_mixed_enabled') +
-        (Get-FileTransferEventFieldValueCount -Events $Analysis.Summary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_mixed_screenshare_enabled') +
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
+        (Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v6_mixed_enabled') +
+        (Get-FileTransferEventFieldValueCount -Events $ReportingSummary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
 
     $summary = [ordered]@{
         artifact_kind = 'live-nkn'
@@ -744,25 +843,25 @@ function Write-FileTransferLiveNknSummary {
         data_protocol_version = $dataProtocolVersion
         v4_batch_ratio = ('{0:F6}' -f $v4BatchRatio)
         v4_average_bridge_payload_fill_percent = ('{0:F3}' -f $v4AverageBridgePayloadFillPercent)
-        v4_state_feedback_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_state_sent'
-        v4_feedback_redundant_success_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_feedback_first_success'
-        v4_feedback_both_failed_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_feedback_both_failed'
-        v4_sender_failed_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_sender_failed'
-        v4_receiver_failed_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_receiver_failed'
+        v4_state_feedback_count = Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_state_sent'
+        v4_feedback_redundant_success_count = Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_feedback_first_success'
+        v4_feedback_both_failed_count = Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_feedback_both_failed'
+        v4_sender_failed_count = Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_sender_failed'
+        v4_receiver_failed_count = Get-FileTransferEventCount -Events $ReportingSummary.TransferEvents -Name 'filetransfer_v4_receiver_failed'
         v4_mixed_enabled_count = $v4MixedEnabledEvidenceCount
         legacy_data_protocol_started_count = $legacyDataProtocolStartedCount
         unexpected_legacy_data_frame_during_v4_count = $unexpectedLegacyDataFrameDuringV4Count
         chunk_batch_sent_as_batch_count = $batchAsBatch
         chunk_batch_split_count = $batchSplit
-        reorder_event_count = $Analysis.Summary.ReorderEventCount
-        request_timeout_count = $Analysis.Summary.RequestTimeoutCount
-        retry_requested_count = $Analysis.Summary.RetryRequestedCount
-        payload_rejected_count = $Analysis.Summary.PayloadRejectedCount
-        decode_failure_count = $Analysis.Summary.DataFrameDecodeFailedCount
-        message_rejected_count = $Analysis.Summary.MessageRejectedCount
+        reorder_event_count = $ReportingSummary.ReorderEventCount
+        request_timeout_count = $ReportingSummary.RequestTimeoutCount
+        retry_requested_count = $ReportingSummary.RetryRequestedCount
+        payload_rejected_count = $ReportingSummary.PayloadRejectedCount
+        decode_failure_count = $ReportingSummary.DataFrameDecodeFailedCount
+        message_rejected_count = $ReportingSummary.MessageRejectedCount
         bridge_bulk_send_failure_count = $bridgeBulkSendFailures
         bridge_bulk_queue_clear_count = $bridgeBulkQueueClears
-        bridge_bulk_queue_waiting_count = Get-FileTransferGlobalEventCountFromSummary -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_queue_waiting'
+        bridge_bulk_queue_waiting_count = Get-FileTransferGlobalEventCountFromSummary -Summary $ReportingSummary -EventName 'nkn_bridge_bulk_queue_waiting'
         bridge_bulk_queue_severe_count = $bridgeBulkSevereCount
         media_queue_drop_count = $mediaQueueDropCount
         media_send_failure_count = $mediaSendFailureCount
@@ -772,9 +871,9 @@ function Write-FileTransferLiveNknSummary {
         last_receiver_next_chunk = $progressTimeout.ReceiverNextChunk
         last_receiver_highest_chunk = $progressTimeout.ReceiverHighestChunk
         last_progress_event_count = $progressTimeout.ProgressEventCount
-        terminal_missing_after_progress_timeout = if ($progressTimeout.Count -gt 0 -and ($requestedMatrixIncomplete -or -not $Analysis.Summary.HasTerminalEvidence)) { 1 } else { 0 }
-        observed_start_utc = $Analysis.Summary.FirstTimestamp
-        observed_end_utc = $Analysis.Summary.LastTimestamp
+        terminal_missing_after_progress_timeout = if ($progressTimeout.Count -gt 0 -and ($requestedMatrixIncomplete -or -not $ReportingSummary.HasTerminalEvidence)) { 1 } else { 0 }
+        observed_start_utc = $ReportingSummary.FirstTimestamp
+        observed_end_utc = $ReportingSummary.LastTimestamp
     }
 
     $txtLines = New-Object System.Collections.Generic.List[string]
@@ -1043,6 +1142,14 @@ function Write-FileTransferNknFakeArtifacts {
 function Clear-FileTransferNknRunArtifacts {
     param([Parameter(Mandatory = $true)][string]$ArtifactDir)
 
+    # Reject reuse before touching any original capture or diagnostics.
+    foreach ($name in @('filetransfer-gui-evidence-finalization-state.json',
+            'filetransfer-gui-evidence-finalization-timeout.json',
+            'filetransfer-gui-scenario-deadline-request.json',
+            'filetransfer-gui-log-ledger.json', 'filetransfer-gui-log-ledger-slice.log')) {
+        $path = Join-Path $ArtifactDir $name
+        if (Test-Path -LiteralPath $path) { throw "Refusing to reuse GUI finalization artifacts: $path" }
+    }
     foreach ($name in @(
             'baseline-comparison.txt',
             'bridge-config-summary.txt',
@@ -1216,7 +1323,8 @@ try {
     }
 
     $logSlicePath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
-    if (-not (Test-Path -LiteralPath $logSlicePath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $logSlicePath -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $resolvedArtifactDir 'filetransfer-gui-evidence-finalization-state.json'))) {
         $fallbackLog = Join-Path $env:LOCALAPPDATA 'nLink\logs\nlink.log'
         if (Test-Path -LiteralPath $fallbackLog -PathType Leaf) {
             Copy-Item -LiteralPath $fallbackLog -Destination $logSlicePath -Force
@@ -1225,6 +1333,7 @@ try {
 
     Add-FileTransferLiveNknSyntheticEvidence -ArtifactDir $resolvedArtifactDir -CyclesRequested $effectiveLiveCycles
 
+    $nknReportingSummary = $null
     if (Test-Path -LiteralPath $logSlicePath -PathType Leaf) {
         $analysis = Invoke-FileTransferRetainedAnalysis `
             -RepoRoot $repoRoot `
@@ -1232,7 +1341,7 @@ try {
             -ArtifactDir $resolvedArtifactDir `
             -TailMinutes 0 `
             -IncludeRawSlices:$IncludeRawSlices `
-            -AllTransfers
+            -AllTransfers -NknReportingSummary ([ref]$nknReportingSummary)
     }
     else {
         Write-Warning "No retained log slice was produced for live NKN file-transfer soak."
@@ -1242,12 +1351,13 @@ try {
             -ArtifactDir $resolvedArtifactDir `
             -TailMinutes 0 `
             -IncludeRawSlices:$IncludeRawSlices `
-            -AllTransfers
+            -AllTransfers -NknReportingSummary ([ref]$nknReportingSummary)
     }
 
     Write-FileTransferLiveNknSummary `
         -ArtifactDir $resolvedArtifactDir `
         -Analysis $analysis `
+        -ReportingSummary $nknReportingSummary `
         -Mode $Mode `
         -ExternalTopologyProfile $ExternalTopologyProfile `
         -PayloadEfficiencyProfile $PayloadEfficiencyProfile `

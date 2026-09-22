@@ -32577,7 +32577,14 @@ function Run-FileTransferNknSoakCore {
     $startupTimeoutMs = Get-FileTransferSoakStartupTimeoutMs
     $progressTimeoutMs = Get-FileTransferSoakProgressTimeoutMs
     $mixedScreenShareWarmupTimeoutMs = Get-FileTransferMixedScreenShareWarmupTimeoutMs
-    $runBookmark = Get-AppLogBookmark
+    $runBookmark = 0
+    $initialLogLedgerSnapshot = [pscustomobject]@{
+        ledgerId = [string]$script:GuiSmokeAppLogLedger.LedgerId
+        bookmark = 0; lineCount = 0; initialGenerationKey = ''; activeGenerationKey = ''
+        generations = @(); initialGenerations = @(); writers = @()
+    }
+    $scenarioFailure = $null
+    $finalizationFailure = $null
 
     $previousScaffold = $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD
     $previousInboundRoot = $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT
@@ -32590,6 +32597,13 @@ function Run-FileTransferNknSoakCore {
         }
 
         Start-HelpeeFlow -Context $Context
+        $runBookmark = Get-AppLogBookmark
+        $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $runBookmark
+        Set-GuiSmokeLogLedgerWriterEvidenceBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $runBookmark
+        if ([string]::IsNullOrWhiteSpace([string]$initialLogLedgerSnapshot.activeGenerationKey) -or
+            @($initialLogLedgerSnapshot.generations).Count -eq 0) {
+            throw 'gui_smoke_log_cursor_initial_generation_missing: helpee startup did not establish an indexable active log generation'
+        }
         Start-HelperFlow -Context $Context
         [void](Connect-HelperAndHelpee -Context $Context)
 
@@ -32613,6 +32627,7 @@ function Run-FileTransferNknSoakCore {
                 -ProgressTimeoutMs $progressTimeoutMs
         }
     }
+    catch { $scenarioFailure = $_ }
     finally {
         if ($shareButton) {
             try {
@@ -32624,22 +32639,38 @@ function Run-FileTransferNknSoakCore {
             }
         }
 
-        Copy-FileTransferLiveLogSlice -ArtifactDir $artifactDir -Bookmark $runBookmark
-        if ($null -eq $previousScaffold) {
-            Remove-Item Env:NLINK_FEATURE_SCREENCAP_SCAFFOLD -ErrorAction SilentlyContinue
+        try {
+            Write-FileTransferGuiLogLedgerEvidence `
+                -ArtifactDir $artifactDir -Bookmark $runBookmark -InitialSnapshot $initialLogLedgerSnapshot `
+                -ProcessOutputDrainAction {
+                    $processesToDrain = @($Context.Processes.ToArray())
+                    $cleanupDiagnostic = $null
+                    Cleanup-ProcessesWithOperationalLogDrain -Processes $processesToDrain -ExePath $Context.ExePath `
+                        -CleanupDiagnostic ([ref]$cleanupDiagnostic)
+                    if ($null -ne $cleanupDiagnostic) {
+                        try {
+                            Write-GuiSmokeAtomicJson -Path (Join-Path $artifactDir 'filetransfer-gui-process-cleanup-diagnostic.json') `
+                                -Value $cleanupDiagnostic
+                        }
+                        catch {} # Optional detail must not replace capture or the scenario failure.
+                    }
+                    return $processesToDrain
+                }
         }
-        else {
-            $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold
-        }
-
-        if ($null -eq $previousInboundRoot) {
-            Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $previousInboundRoot
+        catch { $finalizationFailure = $_ }
+        finally {
+            if ($null -eq $previousScaffold) {
+                Remove-Item Env:NLINK_FEATURE_SCREENCAP_SCAFFOLD -ErrorAction SilentlyContinue
+            }
+            else { $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold }
+            if ($null -eq $previousInboundRoot) {
+                Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
+            }
+            else { $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $previousInboundRoot }
         }
     }
-
+    if ($null -ne $scenarioFailure) { throw $scenarioFailure }
+    if ($null -ne $finalizationFailure) { throw $finalizationFailure }
 }
 
 function Run-ScenarioFileTransferNknSoak {
