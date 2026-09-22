@@ -2070,6 +2070,12 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
         # The admitted stall is the obligation itself, not a later initialization.
         $stall = $Episode.Event
         $recheck = $stall
+        # Current-publication admission includes a caught-up receiver at F-1;
+        # historical repair-progress admission retains its buffered-frontier bound.
+        $minimumHighest = [long]$Episode.Frontier
+        if ($publishedAdmission) { $minimumHighest-- }
+        $stallHighest = 0L
+        if (-not [long]::TryParse((Field $stall 'highest_received_chunk_index'), [ref]$stallHighest)) { return $null }
         if ((Field $stall 'event') -ne 'filetransfer_v6_frontier_request_deferred' -or
             -not (EqualFields $stall $Episode.Progress $scope) -or
             (Field $stall 'route') -ne 'post_tuna_fallback_v6' -or (Field $stall 'protocol_version') -ne '6' -or
@@ -2079,7 +2085,7 @@ function Get-FileTransferFrontierGraceTunaHandoffClosure {
             (Field $stall 'data_session_generation') -cne $Episode.DataSessionGeneration -or
             (Number $stall 'data_session_generation') -le 0 -or (Number $stall 'checkpoint_generation') -lt 0 -or
             (Number $stall 'wake_generation') -le 0 -or
-            (Number $stall 'highest_received_chunk_index') -lt [long]$Episode.Frontier -or
+            $stallHighest -lt $minimumHighest -or
             (Field $stall 'elapsed_ms') -ne '0' -or (Field $stall 'stall_grace_ms') -ne '750' -or
             (UtcTicks $stall 'stall_started_utc') -le 0 -or
             (UtcTicks $stall 'wake_deadline_utc') -ne ((UtcTicks $stall 'stall_started_utc') + 7500000L) -or

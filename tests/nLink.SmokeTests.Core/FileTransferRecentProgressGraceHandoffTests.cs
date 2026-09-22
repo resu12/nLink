@@ -11,6 +11,14 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         => RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity("stall_progress_chain", host);
 
     [Theory]
+    [InlineData("powershell")]
+    [InlineData("pwsh")]
+    [Trait("RetainedFallbackSuite", "FallbackFrontierRepair")]
+    [Trait("OpsSuite", "GuiHarness")]
+    public Task StallGrace_CaughtUpPublishedFrontierRequiresExactTunaHandoff(string host)
+        => RecentProgressGrace_ExactDispatchedRepairTunaRetirement_HasIndexedAndGuiParity("stall_published_caught_up", host);
+
+    [Theory]
     [InlineData("recent_progress", "powershell")]
     [InlineData("stall", "powershell")]
     [InlineData("stall_progress", "powershell")]
@@ -24,6 +32,9 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         var script = """
             param([string]$RepoRoot, [string]$Kind)
             $ErrorActionPreference='Stop'
+            $caughtUp=$Kind -eq 'stall_published_caught_up'
+            if($caughtUp){$Kind='stall_published'}
+            $stallHighest=if($caughtUp){'40'}else{'70'}
             . (Join-Path $RepoRoot 'tools/FileTransferSoak/LogParsing.ps1')
             . (Join-Path $RepoRoot 'tools/FileTransferSoak/ArtifactWriters.ps1')
             . (Join-Path $RepoRoot 'tools/FileTransferSoak/FrontierGraceCorrelationIndex.ps1')
@@ -44,7 +55,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 $f=$scope.Clone(); $f.authority_schema='2'; $f.authority_id=$id; $f.predecessor_authority_id=$predecessor
                 $f.repair_generation=[string]$generation; $f.repair_request_key="frontier:$frontier"; $f.range_fingerprint="range:$frontier"
                 $f.frontier_chunk_index=[string]$frontier; $f.source_kind='ReceiverRequest'; $f.target_transport='regular_nkn'
-                $f.durable_received_highest_chunk_index='80'
+                $f.durable_received_highest_chunk_index=if($caughtUp){[string]($frontier-1)}else{'80'}
                 $f.primary_protocol_repair_request_id="request:$frontier"; $f.primary_request_correlation_id="correlation:$frontier"
                 if($Kind -eq 'stall_published'){$f.range_count='1';$f.requested_chunk_count='1';$f.repair_request_key="fallback-frontier:${frontier}:1:range:$frontier"}
                 return $f
@@ -68,7 +79,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 Add 'filetransfer_v6_fallback_frontier_repair_progress_state_forced' 101 $a @{current_frontier_chunk_index='41';receiver_state_epoch='7';data_session_identity='data';data_session_generation='1';decision_status='Accepted'}
                 Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index='60'}
                 Add 'filetransfer_v6_receiver_state_deferred' 150 $scope @{next_chunk_index='41';highest_received_chunk_index='60';reason='frontier_stalled'}
-                $wake=$scope.Clone(); $wake.frontier_chunk_index='41'; $wake.highest_received_chunk_index='70'
+                $wake=$scope.Clone(); $wake.frontier_chunk_index='41'; $wake.highest_received_chunk_index=$stallHighest
                 $wake.data_session_identity='data'; $wake.data_session_generation='1'
                 Add 'filetransfer_v6_frontier_request_deferred' 1100 $wake @{elapsed_ms='0';stall_grace_ms='750';wake_generation='41';reason='frontier_recent_progress_grace_elapsed';stall_started_utc=$origin.AddMilliseconds(1100).ToString('o');wake_deadline_utc=$origin.AddMilliseconds(1850).ToString('o')}
                 Add 'filetransfer_v6_frontier_recent_progress_grace_recheck_decided' 1101 $wake @{decision_status='rechecked';decision_reason='stall_grace_armed';wake_generation='51';committed_progress_utc=$origin.AddMilliseconds(100).ToString('o');wake_deadline_utc=$origin.AddMilliseconds(1100).ToString('o')}
@@ -120,7 +131,7 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                 'terminal','pause','replacement','conflict','stall_progress_only')
             if($Kind -eq 'stall'){
                 $cases=@($cases|Where-Object {$_ -ne 'missing_stall'}) + @('missing_grant','wrong_predecessor','ambiguous_grant',
-                    'highest_regression','malformed_deadline','moved_deadline','wrong_stall_data','wrong_dispatch_order','unrelated_publication')
+                    'highest_regression','historical_caught_up','malformed_deadline','moved_deadline','wrong_stall_data','wrong_dispatch_order','unrelated_publication')
             }
             if($Kind -eq 'stall_progress'){
                 $cases=@('exact','duplicate','natural_missing_arm','natural_missing_recheck','natural_missing_stall',
@@ -232,7 +243,8 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     'missing_grant' {$events=@($events|Where-Object Sequence -ne 12)}
                     'wrong_predecessor' {$events[11].Fields.predecessor_authority_id='fta2-repair_replay-other'}
                     'ambiguous_grant' {$copy=$events[11].PSObject.Copy();$copy.Fields=$events[11].Fields.Clone();$copy.Fields.log_writer_sequence='32';$copy.Fields.authority_id='fta2-repair_replay-other';$events += $copy}
-                    'highest_regression' {$events[11].Fields.durable_received_highest_chunk_index='69'}
+                    'highest_regression' {$events[11].Fields.durable_received_highest_chunk_index=if($caughtUp){'39'}else{'69'}}
+                    'historical_caught_up' {$events[9].Fields.highest_received_chunk_index='40';$events[11].Fields.durable_received_highest_chunk_index='40'}
                     'malformed_deadline' {$events[9].Fields.wake_deadline_utc='invalid'}
                     'moved_deadline' {$events[9].Fields.wake_deadline_utc=$origin.AddMilliseconds(1800).ToString('o')}
                     'wrong_stall_data' {$events[9].Fields.data_session_identity='other'}
@@ -262,8 +274,8 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     Add 'filetransfer_route_hint_authorized_publication_accepted' -100 $scope @{
                         route_publication_action_kind='RoutePublication';coordinator_decision_reason='accepted';target_route='post_tuna_fallback_v6';
                         target_protocol_version='6';target_transport='regular_nkn';fallback_leg_generation='3';fallback_transport_epoch='1';fallback_bridge_recovery_generation='1'}
-                    Add 'filetransfer_v6_sparse_write_committed' 100 $scope @{contiguous_chunks_committed='1';next_chunk_index='41';highest_received_chunk_index='70'}
-                    Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index='70'}
+                    Add 'filetransfer_v6_sparse_write_committed' 100 $scope @{contiguous_chunks_committed='1';next_chunk_index='41';highest_received_chunk_index=$stallHighest}
+                    Add 'filetransfer_v6_receiver_state_sent' 102 $scope @{epoch='7';contiguous_committed_chunk_index='41';durable_received_highest_chunk_index=$stallHighest}
                     Add 'filetransfer_v6_frontier_stall_grace_recheck_decided' 1864 $candidate.Fields @{
                         decision_status='dispatched';decision_reason='exact_receiver_request_dispatched';authority_effect='none'}
                     $wake=$script:fixtureEvents[3]
@@ -317,6 +329,16 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
                     $admission=Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedIndex -Candidate $candidate
                     if(-not $admission.Admitted -or $admission.Episode.AdmissionKind -cne 'CurrentPublishedSource' -or $null -ne $admission.Episode.HistoricalProgress){throw "$case did not use exact current-publication admission"}
                     if($case -eq 'exact'){
+                        if($caughtUp){
+                            foreach($invalidHighest in @('39','','invalid')){
+                                $badCandidate=$candidate.PSObject.Copy();$badCandidate.Fields=$candidate.Fields.Clone()
+                                $badCandidate.Fields.highest_received_chunk_index=$invalidHighest
+                                $badAdmission=Get-FileTransferStallGracePublishedSourceAdmission -Index $publishedIndex -Candidate $badCandidate
+                                if($badAdmission.Admitted){throw "invalid caught-up highest '$invalidHighest' admitted"}
+                                $forged=$admission.Episode.PSObject.Copy();$forged.Event=$badCandidate;$forged.ScopeEvidence=$badCandidate
+                                if($null -ne (Get-FileTransferStallGraceTunaHandoffClosure -Events $events -Episode $forged -PublishedSourceIndex $publishedIndex)){throw "invalid caught-up highest '$invalidHighest' closed"}
+                            }
+                        }
                         foreach($badSource in @('missing','wrong_scope','wrong_receipt','aba')){
                             $badEvents=@($events|ForEach-Object {$copy=$_.PSObject.Copy();$copy.Fields=$_.Fields.Clone();$copy})
                             $publication=@($badEvents|Where-Object EventName -eq 'filetransfer_route_hint_authorized_publication_accepted')[0]
@@ -414,6 +436,6 @@ public sealed class FileTransferRecentProgressGraceHandoffTests : FileTransferOp
         var result = await RunPowerShellScriptTextAsync(script, [FindRepoRoot(), kind], host);
         Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("pass exact", result.Stdout, StringComparison.Ordinal);
-        Assert.Contains(kind switch { "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(kind switch { "stall_progress" => "pass natural_missing_state", "stall_progress_chain" => "pass natural_chain_gap", "stall_published" or "stall_published_caught_up" => "pass published_unrelated_progress", _ => "pass stall_progress_only" }, result.Stdout, StringComparison.Ordinal);
     }
 }
