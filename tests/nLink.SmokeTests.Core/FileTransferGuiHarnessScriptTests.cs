@@ -10868,7 +10868,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
-    public void RunFileTransferTunaGuiSmoke_LiveMultiToggleUsesRouteEpochSequence()
+    public async Task RunFileTransferTunaGuiSmoke_LiveMultiToggleUsesRouteEpochSequence()
     {
         var repoRoot = FindRepoRoot();
         var wrapperPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
@@ -10887,7 +10887,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("liveRouteEpochs", guiText, StringComparison.Ordinal);
         Assert.Contains("liveRouteEpochRouteChanges", guiText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
-        Assert.Contains("Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $faultAdmissionTracker -AfterBookmark ([int]$faultResult.AdmissionBookmark)", guiText, StringComparison.Ordinal);
+        Assert.Contains("Wait-TunaGuiAuthoritativeFallbackFaultObservation -Tracker $faultAdmissionTracker -AfterBookmark $fallbackProjectionBookmark", guiText, StringComparison.Ordinal);
         Assert.Contains("$fallbackRouteLine = if ($null -ne $fallbackProjection)", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("$fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $stepBookmark -NeedleSets @(", guiText, StringComparison.Ordinal);
         Assert.Contains("@('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6')", guiText, StringComparison.Ordinal);
@@ -10896,6 +10896,30 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.DoesNotContain("$fallbackRouteLine = if ($fallbackStartedLine.IndexOf('route=post_tuna_fallback_v6'", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("$activationRouteLine = if ($activationStartedLine.IndexOf('route=file_tuna_v4'", guiText, StringComparison.Ordinal);
         Assert.Contains("same-transfer strict live-route epoch cycling", guiText, StringComparison.Ordinal);
+
+        var script = $$"""
+            $ErrorActionPreference = 'Stop'
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                '{{guiPath.Replace("'", "''", StringComparison.Ordinal)}}', [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+            $assignments = @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$fallbackProjectionBookmark'
+            }, $true))
+            if ($assignments.Count -ne 1) { throw 'fallback bookmark selection is ambiguous' }
+            $selectBookmark = [scriptblock]::Create($assignments[0].Extent.Text)
+            $faultResult = [pscustomobject]@{ AdmissionBookmark = 42; FaultBookmark = 84 }
+            foreach ($RouteMode in @('live-multi-toggle', 'live-reactivation-second-transfer', 'live-regular-activation-cycle')) {
+                . $selectBookmark
+                $expected = if ($RouteMode -eq 'live-regular-activation-cycle') { -1 } else { 42 }
+                if ($fallbackProjectionBookmark -ne $expected) { throw "fallback bookmark changed for $RouteMode" }
+            }
+            'fallback-projection-bookmark-ok'
+            """;
+        var result = await RunPowerShellScriptTextAsync(script, Array.Empty<string>());
+        Assert.True(result.ExitCode == 0, $"{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("fallback-projection-bookmark-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -38,11 +38,29 @@ function Get-GuiSmokeRouteToTerminalTimingDiagnostic {
     }
     $route = $records[0]
     $terminal = $records[1]
+    $terminalCompleted = $terminal['state'] -eq 'Completed'
+    # Service terminals omit state. Recognize only the canonical completed payload shape,
+    # not the primary tracker's broader reason-substring normalization.
+    if (-not $terminal.ContainsKey('state') -and $terminal['event'] -ceq 'transfer_terminal' -and
+        $terminal['direction'] -ceq 'outbound' -and $terminal['reason'] -ceq 'Transfer complete.' -and
+        $terminal['error_code'] -ceq '(none)') {
+        $fileSize = 0L
+        $transferredBytes = 0L
+        $chunkCount = 0L
+        $transferredChunks = 0L
+        $terminalCompleted =
+            [long]::TryParse($terminal['file_size_bytes'], [ref]$fileSize) -and
+            [long]::TryParse($terminal['bytes_transferred'], [ref]$transferredBytes) -and
+            [long]::TryParse($terminal['chunk_count'], [ref]$chunkCount) -and
+            [long]::TryParse($terminal['chunks_transferred'], [ref]$transferredChunks) -and
+            $PayloadBytes -gt 0 -and $fileSize -eq $PayloadBytes -and $transferredBytes -eq $fileSize -and
+            $chunkCount -gt 0 -and $transferredChunks -eq $chunkCount
+    }
     if ($route['event'] -ne 'filetransfer_route_selected' -or $route['direction'] -ne 'outbound' -or
         ($terminal['event'] -ne 'file_transfer_outbound_terminal' -and
             ($terminal['event'] -ne 'transfer_terminal' -or $terminal['direction'] -ne 'outbound')) -or
         ($terminal.ContainsKey('direction') -and $terminal['direction'] -ne 'outbound') -or
-        $terminal['state'] -ne 'Completed' -or $terminal['error_code'] -ne '(none)') {
+        -not $terminalCompleted -or $terminal['error_code'] -ne '(none)') {
         $result.reason = 'unsupported_selected_evidence'
         return $result
     }

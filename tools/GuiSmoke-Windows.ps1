@@ -35243,6 +35243,11 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
         ("target_transport={0}" -f $TargetTransport),
         'live_route_epoch='
     )
+    # A permissive prefilter only: the existing parser and predicates still decide matches.
+    # Keep spaced/duplicate event fields eligible and keep visiting every line for cursor/deadline checks.
+    $projectionEventPattern = [regex]::new(
+        'event\s*=\s*(?:filetransfer_route_transition_(?:committed|disposition_applied|retained_frame_applied)|filetransfer_route_hint_authorized_publication_accepted|filetransfer_data_path_(?:send|receive)_result|filetransfer_tuna_data_path_peer_visible)\s*(?:;|$)',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)
     $label = if ([string]::IsNullOrWhiteSpace($Description)) { $EventName } else { $Description }
     $requiresAfterLine =
         -not [string]::IsNullOrWhiteSpace($AfterLine) -and
@@ -35446,6 +35451,11 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
                         $ScanState.AfterLineSeen = $true
                     }
 
+                    return $null
+                }
+
+                if ($line.IndexOf($needles[0], [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                    -not $projectionEventPattern.IsMatch($line)) {
                     return $null
                 }
 
@@ -36657,6 +36667,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $setupTimingWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $timingSelectedRouteLine = ''
     $timingRouteObservedElapsedMs = $null
+    $timingFallbackStartedWaitEnteredMs = $null
+    $timingFallbackStartedWaitReturnedMs = $null
+    $timingFallbackRouteWaitEnteredMs = $null
+    $timingFallbackRouteWaitReturnedMs = $null
+    $timingFallbackRecoveredWaitEnteredMs = $null
+    $timingFallbackRecoveredWaitReturnedMs = $null
     $senderWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelperWindow } else { $Context.HelpeeWindow }
     $receiverWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelpeeWindow } else { $Context.HelperWindow }
     $observedEvidenceLines = New-Object System.Collections.Generic.List[string]
@@ -36836,18 +36852,24 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             else {
                 $liveSwitchOffFaultInjected = $true
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_injected; route_mode={1}; fault_mode={2}; receiver_committed_progress_observed={3}; peer_visible_tuna_payload_observed={4}; data_path_proof_missing={5}; committed_bytes={6}; accelerated_payload_bytes={7}; elapsed_ms={8}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $FaultMode, ($(if ($liveSwitchOffReceiverCommittedProgressObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffDataPathProofMissing) { 1 } else { 0 })), $progressResult.CommittedBytes, $progressResult.AcceleratedPayloadBytes, $progressResult.ElapsedMs)) | Out-Null
+                $timingFallbackStartedWaitEnteredMs = $sw.Elapsed.TotalMilliseconds
                 $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch started'
+                $timingFallbackStartedWaitReturnedMs = $sw.Elapsed.TotalMilliseconds
                 $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
                 $fallbackEpochStartedObserved = $true
 
+                $timingFallbackRouteWaitEnteredMs = $sw.Elapsed.TotalMilliseconds
                 $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
                     @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
                     @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
                 ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
+                $timingFallbackRouteWaitReturnedMs = $sw.Elapsed.TotalMilliseconds
                 $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
+                $timingFallbackRecoveredWaitEnteredMs = $sw.Elapsed.TotalMilliseconds
                 $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch recovered' -AfterLine $fallbackStartedLine
+                $timingFallbackRecoveredWaitReturnedMs = $sw.Elapsed.TotalMilliseconds
                 $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
                 $fallbackEpochRecoveredObserved = $true
@@ -37654,6 +37676,25 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             terminalObservedElapsedMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
             # This wait can overlap the transfer; it is not parsing CPU time or pure harness overhead.
             terminalObservationWaitMs = [Math]::Round($sw.Elapsed.TotalMilliseconds - $timingTerminalWaitStartedElapsedMs, 3)
+            # Same monotonic stopwatch and existing wait calls; absent switch-off stages stay null.
+            # These wall-clock intervals include synchronization, scanning and waiting, not just parsing.
+            switchOffFallbackWaits = [ordered]@{
+                started = if ($null -ne $timingFallbackStartedWaitEnteredMs) { [ordered]@{
+                    enteredElapsedMs = [Math]::Round($timingFallbackStartedWaitEnteredMs, 3)
+                    returnedElapsedMs = [Math]::Round($timingFallbackStartedWaitReturnedMs, 3)
+                    durationMs = [Math]::Round($timingFallbackStartedWaitReturnedMs - $timingFallbackStartedWaitEnteredMs, 3)
+                } } else { $null }
+                route = if ($null -ne $timingFallbackRouteWaitEnteredMs) { [ordered]@{
+                    enteredElapsedMs = [Math]::Round($timingFallbackRouteWaitEnteredMs, 3)
+                    returnedElapsedMs = [Math]::Round($timingFallbackRouteWaitReturnedMs, 3)
+                    durationMs = [Math]::Round($timingFallbackRouteWaitReturnedMs - $timingFallbackRouteWaitEnteredMs, 3)
+                } } else { $null }
+                recovered = if ($null -ne $timingFallbackRecoveredWaitEnteredMs) { [ordered]@{
+                    enteredElapsedMs = [Math]::Round($timingFallbackRecoveredWaitEnteredMs, 3)
+                    returnedElapsedMs = [Math]::Round($timingFallbackRecoveredWaitReturnedMs, 3)
+                    durationMs = [Math]::Round($timingFallbackRecoveredWaitReturnedMs - $timingFallbackRecoveredWaitEnteredMs, 3)
+                } } else { $null }
+            }
             routeToTerminal = Get-GuiSmokeRouteToTerminalTimingDiagnostic `
                 -RouteLine $timingSelectedRouteLine -OutboundTerminalLine $terminal.OutboundLine `
                 -ExpectedTransferId $terminal.TransferId -PayloadBytes $PayloadSizeBytes `
