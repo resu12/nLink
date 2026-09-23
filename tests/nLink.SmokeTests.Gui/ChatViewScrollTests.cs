@@ -697,6 +697,87 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
         }, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task ChatView_FileTransferProgress_ReusesPresentationAcrossSnapshotUpdates()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var initial = FileTransferProgressPresentationTests.Item(100);
+            var host = await CreateHostAsync(new TestChatPanelBindings { InboundFileTransfer = initial });
+            try
+            {
+                var progress = host.Window.GetVisualDescendants().OfType<FileTransferProgressView>().Single();
+                var bar = progress.Children.OfType<ProgressBar>().Single();
+                var text = progress.Children.OfType<TextBlock>().Single();
+                var card = host.Window.GetVisualDescendants().OfType<ContentControl>()
+                    .Single(control => ReferenceEquals(control.Content, initial));
+                Assert.Equal("Chat.FileTransfer.ProgressBar", AutomationProperties.GetAutomationId(bar));
+                Assert.Equal("Chat.FileTransfer.ProgressText", AutomationProperties.GetAutomationId(text));
+                Assert.Equal(8d, bar.Height);
+                Assert.Equal(.1, bar.Value, 6);
+                Assert.Equal("100 B / 1000 B", text.Text);
+
+                card.Content = FileTransferProgressPresentationTests.Item(500);
+                host.Window.UpdateLayout();
+                Assert.Same(progress, host.Window.GetVisualDescendants().OfType<FileTransferProgressView>().Single());
+                Assert.InRange(bar.Value, .1, .5);
+                for (var attempt = 0; attempt < 100 && bar.Value != .5; attempt++)
+                {
+                    await Task.Delay(10);
+                    await FlushUiAsync();
+                }
+                Assert.Equal(.5, bar.Value, 6);
+                Assert.Equal("500 B / 1000 B", text.Text);
+
+                card.Content = FileTransferProgressPresentationTests.Item(20) with { TransferId = "next-transfer" };
+                host.Window.UpdateLayout();
+                Assert.Equal(.02, bar.Value, 6);
+                Assert.Equal("20 B / 1000 B", text.Text);
+            }
+            finally
+            {
+                host.Window.Close();
+            }
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ChatView_FileTransferProgress_StopsTimerOnPauseAndDetach()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var host = await CreateHostAsync(new TestChatPanelBindings
+            {
+                InboundFileTransfer = FileTransferProgressPresentationTests.Item(100),
+            });
+            try
+            {
+                var progress = host.Window.GetVisualDescendants().OfType<FileTransferProgressView>().Single();
+                var bar = progress.Children.OfType<ProgressBar>().Single();
+                var timer = (Avalonia.Threading.DispatcherTimer)typeof(FileTransferProgressView)
+                    .GetField("timer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                    .GetValue(progress)!;
+                progress.DataContext = FileTransferProgressPresentationTests.Item(500);
+                Assert.True(timer.IsEnabled);
+                progress.DataContext = FileTransferProgressPresentationTests.Item(500) with { AnimateProgress = false };
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(.5, bar.Value, 6);
+
+                progress.DataContext = FileTransferProgressPresentationTests.Item(800);
+                Assert.True(timer.IsEnabled);
+                host.Window.Content = null;
+                Assert.False(timer.IsEnabled);
+                Assert.Equal(.8, bar.Value, 6);
+            }
+            finally
+            {
+                host.Window.Close();
+            }
+            return true;
+        }, CancellationToken.None);
+    }
+
     private static async Task<ChatViewHost> CreateHostWithMessagesAsync()
     {
         var bindings = new TestChatPanelBindings();

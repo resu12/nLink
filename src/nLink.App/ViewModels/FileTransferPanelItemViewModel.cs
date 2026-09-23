@@ -36,6 +36,12 @@ public sealed record FileTransferPanelItemViewModel(
     IAsyncRelayCommand<string?>? ResumeCommand,
     bool IsTerminal)
 {
+    public string SessionId { get; init; } = string.Empty;
+
+    public long ProgressBytes { get; init; }
+
+    public bool AnimateProgress { get; init; }
+
     public static FileTransferPanelItemViewModel? FromSnapshot(
         FileTransferTransferSnapshot? snapshot,
         IAsyncRelayCommand<string?>? acceptCommand = null,
@@ -50,7 +56,7 @@ public sealed record FileTransferPanelItemViewModel(
         }
 
         var fileSizeText = FormatByteSize(snapshot.FileSizeBytes);
-        var progressText = BuildProgressText(snapshot, fileSizeText);
+        var progressText = FormatProgressText(snapshot.ProgressBytes, snapshot.FileSizeBytes);
         var showProgress = snapshot.State is FileTransferTransferState.AwaitingMetadata
             or FileTransferTransferState.PreparingMetadata
             or FileTransferTransferState.AwaitingStart
@@ -86,7 +92,7 @@ public sealed record FileTransferPanelItemViewModel(
             snapshot.FileName,
             snapshot.FileSizeBytes,
             fileSizeText,
-            BuildVisibleProgressFraction(snapshot),
+            snapshot.ProgressFraction,
             progressText,
             BuildStatusText(snapshot),
             snapshot.SavedFilePath,
@@ -110,7 +116,15 @@ public sealed record FileTransferPanelItemViewModel(
             CancelCommand: showCancel ? cancelCommand : null,
             PauseCommand: showPause ? pauseCommand : null,
             ResumeCommand: showResume ? resumeCommand : null,
-            IsTerminal: snapshot.IsTerminal);
+            IsTerminal: snapshot.IsTerminal)
+        {
+            SessionId = snapshot.SessionId,
+            // Inbound snapshots expose disk-written bytes, including sparse writes;
+            // outbound snapshots expose the receiver's acknowledged copy, never queued sends.
+            ProgressBytes = snapshot.ProgressBytes,
+            AnimateProgress = !effectivePaused && snapshot.State is
+                FileTransferTransferState.Sending or FileTransferTransferState.Receiving,
+        };
     }
 
     private static string BuildStatusText(FileTransferTransferSnapshot snapshot)
@@ -220,44 +234,18 @@ public sealed record FileTransferPanelItemViewModel(
         };
     }
 
-    private static string BuildProgressText(FileTransferTransferSnapshot snapshot, string fileSizeText)
+    internal static string FormatProgressText(long bytes, long fileSizeBytes)
     {
-        if (snapshot.FileSizeBytes <= 0)
+        var fileSizeText = FormatByteSize(fileSizeBytes);
+        if (fileSizeBytes <= 0)
         {
             return fileSizeText;
         }
 
-        if (snapshot.Direction == FileTransferDirection.Outbound)
-        {
-            var sent = FormatByteSize(GetVisibleProgressBytes(snapshot));
-            return string.Create(
-                CultureInfo.InvariantCulture,
-                $"{sent} / {fileSizeText}");
-        }
-
-        var transferred = FormatByteSize(GetVisibleProgressBytes(snapshot));
+        var transferred = FormatByteSize(Math.Clamp(bytes, 0L, fileSizeBytes));
         return string.Create(
             CultureInfo.InvariantCulture,
             $"{transferred} / {fileSizeText}");
-    }
-
-    private static double BuildVisibleProgressFraction(FileTransferTransferSnapshot snapshot)
-    {
-        if (snapshot.FileSizeBytes <= 0)
-        {
-            return 0d;
-        }
-
-        return Math.Clamp((double)GetVisibleProgressBytes(snapshot) / snapshot.FileSizeBytes, 0d, 1d);
-    }
-
-    private static long GetVisibleProgressBytes(FileTransferTransferSnapshot snapshot)
-    {
-        var visible = snapshot.Direction == FileTransferDirection.Inbound
-            ? snapshot.BytesTransferred
-            : snapshot.ProgressBytes;
-
-        return Math.Clamp(visible, 0L, Math.Max(0L, snapshot.FileSizeBytes));
     }
 
     private static string? BuildSavedLocationText(FileTransferTransferSnapshot snapshot)
