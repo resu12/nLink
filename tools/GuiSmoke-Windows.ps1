@@ -32182,7 +32182,24 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
         return Wait-ControlEnabledStateByAutomationId -Window $Window -AutomationId 'Chat.FileTransfer.Accept' -IsEnabled $true -TimeoutMs $TimeoutMs
     }
     catch {
-        $classification = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark $Bookmark -ErrorMessage $_.Exception.Message -RouteMode $RouteMode
+        $acceptFailure = $_
+        try {
+            $requiredClassification = New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'harness_failure_classification' -Reason 'evidence_enrichment_pending' `
+                -RouteMode $RouteMode -ClassificationSource 'classification_pending' `
+                -ClassificationComplete $false
+            $classification = Get-TunaGuiFileTransferSetupFailureClassification `
+                -Bookmark $Bookmark -ErrorMessage $acceptFailure.Exception.Message `
+                -RouteMode $RouteMode -RequireCompletedClassification
+            if (-not (Test-TunaGuiCompletedFailureClassificationResult `
+                    -Classification $classification -RequiredClassification $requiredClassification)) {
+                throw $acceptFailure
+            }
+        }
+        catch {
+            # Optional diagnostic classification must not hide the accept timeout.
+            throw $acceptFailure
+        }
         throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; activation_offer_not_observed={7}; activation_offer_waiting_answer={8}; runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery={9}; bridge_bootstrap_not_ready={10}; activation_offer_sent={11}; activation_offer_received={12}; measured_offer_sent={13}; measured_offer_received={14}; offer_sent={15}; offer_received={16}; terminal_observed={17}; original_error={18}" -f `
             $classification.Phase,
             $classification.Reason,
@@ -32202,7 +32219,7 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
             ($(if ($classification.OfferSent) { 1 } else { 0 })),
             ($(if ($classification.OfferReceived) { 1 } else { 0 })),
             ($(if ($classification.TerminalObserved) { 1 } else { 0 })),
-            $_.Exception.Message)
+            $acceptFailure.Exception.Message)
     }
 }
 
@@ -38003,11 +38020,35 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $secondTransferProofOk = $true
         }
         catch {
+            $secondTransferFailure = $_
             if ($secondSw.IsRunning) {
                 $secondSw.Stop()
             }
 
-            $failureClassification = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark $secondBookmark -ErrorMessage $_.Exception.Message -RouteMode $RouteMode
+            # Snapshot-authoritative success can have no exact failure classifier.
+            # Classification must never replace the original transfer error.
+            $failureClassification = New-TunaGuiFileTransferFailureClassificationResult `
+                -Phase 'harness_failure_classification' `
+                -Reason 'evidence_enrichment_pending' `
+                -RouteMode $RouteMode `
+                -ClassificationSource 'classification_pending' `
+                -ClassificationComplete $false
+            $secondTransferClassificationError = '(none)'
+            try {
+                $candidateClassification = Get-TunaGuiFileTransferSetupFailureClassification `
+                    -Bookmark $secondBookmark `
+                    -ErrorMessage $secondTransferFailure.Exception.Message `
+                    -RouteMode $RouteMode `
+                    -RequireCompletedClassification
+                if (Test-TunaGuiCompletedFailureClassificationResult `
+                        -Classification $candidateClassification `
+                        -RequiredClassification $failureClassification) {
+                    $failureClassification = $candidateClassification
+                }
+            }
+            catch {
+                $secondTransferClassificationError = $_.Exception.Message
+            }
             if ($null -eq $secondTransferPhase) {
                 $secondTransferPhase = [ordered]@{
                     name = 'second_transfer_after_reactivation_file_tuna_v4'
@@ -38033,10 +38074,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
             $secondTransferPhase['setupFailurePhase'] = $failureClassification.Phase
             $secondTransferPhase['setupFailureReason'] = $failureClassification.Reason
-            $secondTransferPhase['error'] = $_.Exception.Message
+            $secondTransferPhase['classificationComplete'] = $failureClassification.ClassificationComplete
+            $secondTransferPhase['classificationSource'] = $failureClassification.ClassificationSource
+            $secondTransferPhase['classificationError'] = $secondTransferClassificationError
+            $secondTransferPhase['error'] = $secondTransferFailure.Exception.Message
             $summary['secondTransfer'] = $secondTransferPhase
             $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
-            throw
+            throw $secondTransferFailure
         }
         finally {
             Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $secondBookmark -FileName 'filetransfer-second-transfer-retained-log-slice.log' -PrefixLines @($secondRouteLine)
