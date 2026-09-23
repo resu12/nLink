@@ -56,8 +56,11 @@ internal sealed class FakeNknAccelerationLane : INknAccelerationLane
 
     public bool TryApplyFailureOrigin(NknAccelerationFailureOrigin origin, Func<bool> apply)
     {
+        BeforeFailureOriginApply?.Invoke();
         lock (failureOriginGate) { return IsFailureOriginCurrentUnsafe(origin) && apply(); }
     }
+
+    public Action? BeforeFailureOriginApply { get; set; }
 
     private bool IsFailureOriginCurrentUnsafe(NknAccelerationFailureOrigin origin)
         => enableFailureOrigins && !disposed && !available && !origin.IsDefault && currentFailureOrigin == origin;

@@ -32,7 +32,7 @@ function Test-FileTransferActivationRetryOperation {
     $t=Get-FileTransferCoordinatorSnapshotObjectProperty $Operation 'routeTransition'
     $p=Get-FileTransferCoordinatorSnapshotObjectProperty $t 'activationRetryBinding'
     if ($null -eq $p) { return $true }
-    if ($Catalog.Version -cne $script:FileTransferCoordinatorActivationRetryCatalogVersion -or
+    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -or
         $Operation.family -cne 'route_transition' -or $t.transitionKind -cne 'PostTunaFallbackV6ToTunaV4' -or
         $t.proofBoundaryKind -cne 'FileTransferTunaActivationTransitionProofBoundary' -or
         -not (Test-FileTransferCheckpointRepairContinuityFields $p $script:FileTransferCoordinatorActivationRetryCatalog.payloadFields)) { return $false }
@@ -47,7 +47,7 @@ function Test-FileTransferActivationRetryOperation {
 function Get-FileTransferActivationRetryEvidence {
     param([AllowEmptyCollection()][object[]]$Boundaries,$Catalog)
     $bindings=@{}; $errors=[System.Collections.Generic.List[string]]::new()
-    if ($Catalog.Version -cne $script:FileTransferCoordinatorActivationRetryCatalogVersion) {
+    if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)) {
         return [pscustomobject]@{ CatalogVersion=$Catalog.Version; Bindings=$bindings; Errors=@() }
     }
     function SameStream($a,$b) {

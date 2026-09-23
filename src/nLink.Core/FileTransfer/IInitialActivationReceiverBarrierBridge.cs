@@ -24,10 +24,12 @@ internal sealed class InitialActivationReceiverBarrierBindingEventArgs(
 internal sealed class InitialActivationReceiverBarrierFailureEventArgs(
     InitialActivationReceiverBarrierAuthority authority,
     InitialActivationReceiverBarrierNegotiation negotiation,
-    InitialActivationReceiverBarrierFailureOrigin origin, string reason) : EventArgs
+    InitialActivationReceiverBarrierFailureOrigin origin, string reason,
+    InitialActivationReceiverBarrierNegotiation? retainedNegotiation = null) : EventArgs
 {
     public InitialActivationReceiverBarrierAuthority Authority { get; } = authority;
     public InitialActivationReceiverBarrierNegotiation Negotiation { get; } = negotiation;
+    public InitialActivationReceiverBarrierNegotiation RetainedNegotiation { get; } = retainedNegotiation ?? negotiation;
     public InitialActivationReceiverBarrierFailureOrigin Origin { get; } = origin;
     public string Reason { get; } = reason;
     public InitialActivationReceiverBarrierDecision? Decision { get; set; }

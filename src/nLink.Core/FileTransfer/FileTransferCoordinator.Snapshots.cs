@@ -283,7 +283,13 @@ internal sealed record FileTransferCoordinatorReceiverBarrierOperationSnapshot(
     string FailureOriginFingerprint,
     ImmutableArray<FileTransferCoordinatorReceiptTransitionSnapshot> Receipts,
     string InvalidatingAdmissionFingerprint,
-    long ReplacementPauseGeneration);
+    long ReplacementPauseGeneration,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    FileTransferCoordinatorReceiverPreAdmissionCloseSnapshot? PreAdmissionClose = null);
+
+internal sealed record FileTransferCoordinatorReceiverPreAdmissionCloseSnapshot(
+    string Mode, string FailureNegotiationFingerprint, string NegotiationWithoutLaunchFingerprint,
+    long BoundLaunchGeneration, long FailureLaunchGeneration);
 
 internal sealed record FileTransferCoordinatorAggregateTransitionSnapshot(
     long BeforeStateGeneration,
@@ -484,6 +490,12 @@ internal static partial class FileTransferCoordinator
         var negotiationFingerprint = CalculateSnapshotFingerprint(operation.Negotiation);
         var admissionFingerprint = operation.Admission is { } admission ? CalculateSnapshotFingerprint(admission) : "(none)";
         var failureFingerprint = operation.CloseCommand is { } command ? CalculateSnapshotFingerprint(command.FailureOrigin) : "(none)";
+        var preAdmission = operation.CloseCommand is { Mode: InitialActivationReceiverBarrierCloseMode.InitialResponderBeforeProbe } beforeProbe
+            ? new FileTransferCoordinatorReceiverPreAdmissionCloseSnapshot(beforeProbe.Mode.ToString(),
+                CalculateSnapshotFingerprint(beforeProbe.Negotiation),
+                CalculateSnapshotFingerprint(beforeProbe.Negotiation with { LaunchGeneration = 0 }),
+                operation.Negotiation.LaunchGeneration, beforeProbe.Negotiation.LaunchGeneration)
+            : null;
         // The data-session object is checked by reference in the raw contract;
         // evidence contains its immutable scoped identity, never the object graph.
         var commandFingerprint = CalculateSnapshotFingerprint(new
@@ -494,6 +506,10 @@ internal static partial class FileTransferCoordinator
             operation.InvalidatingAdmissionFingerprint,
             operation.ReplacementPauseGeneration,
         });
+        if (preAdmission is not null)
+        {
+            commandFingerprint = CalculateSnapshotFingerprint(new { commandFingerprint, preAdmission });
+        }
         var receiptReason = attemptedReason ?? operation.CloseReceipt?.Reason ?? operation.Reason;
         var receiptFingerprint = CalculateSnapshotFingerprint(new { commandFingerprint, status, receiptReason });
         var validated = status is "Accepted" or "Applied" or "Idempotent" or "Invalidated";
@@ -511,7 +527,7 @@ internal static partial class FileTransferCoordinator
                 operation.State == InitialActivationReceiverBarrierState.Closed ? sourceBoundary : CreateStateBoundarySnapshot(state),
                 authority.PauseGeneration,
                 negotiationFingerprint, admissionFingerprint, failureFingerprint, ImmutableArray.Create(receipt),
-                operation.InvalidatingAdmissionFingerprint, operation.ReplacementPauseGeneration));
+                operation.InvalidatingAdmissionFingerprint, operation.ReplacementPauseGeneration, preAdmission));
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

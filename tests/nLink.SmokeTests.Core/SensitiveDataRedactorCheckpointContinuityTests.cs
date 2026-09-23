@@ -61,7 +61,8 @@ public sealed class SensitiveDataRedactorCheckpointContinuityTests
     [Fact]
     public void CheckpointContinuity_ExactProfileAndOmittedPayloadPreserveExistingSnapshotEvidence()
     {
-        foreach (var profile in new[] { "snapshot-authority-v1", "snapshot-authority-v1-receiver-barrier-v1", Profile })
+        foreach (var profile in new[] { "snapshot-authority-v1", "snapshot-authority-v1-receiver-barrier-v1", Profile,
+            Profile + "-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1" })
         {
             var line = $"event=filetransfer_coordinator_snapshot_stream_started; snapshot_catalog_version={profile}; coordinator_instance_id={Token}; initial_state_generation=0";
             Assert.Equal(line, SensitiveDataRedactor.Redact(line));

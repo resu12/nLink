@@ -5,7 +5,11 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferReceiverBarrierCatalogProfileTests : FileTransferOpsScriptsTestBase
 {
+    private const string PreAdmissionProfile = "snapshot-authority-v1-receiver-barrier-v1-checkpoint-repair-continuity-v1-fallback-bootstrap-correlation-v1-fallback-bootstrap-initiation-v1-source-callback-v1-repair-owner-v1-activation-retry-v1-receiver-pre-admission-v1";
+
     [Theory]
+    [InlineData("filetransfer_coordinator_transition_snapshot", PreAdmissionProfile, true)]
+    [InlineData("filetransfer_coordinator_transition_snapshot", PreAdmissionProfile + "-unknown", false)]
     [InlineData("filetransfer_coordinator_transition_snapshot", "snapshot-authority-v1-receiver-barrier-v1", true)]
     [InlineData("filetransfer_coordinator_authority_effect", "snapshot-authority-v1-receiver-barrier-v1", true)]
     [InlineData("unrelated_event", "snapshot-authority-v1-receiver-barrier-v1", false)]
@@ -44,6 +48,7 @@ public sealed class FileTransferReceiverBarrierCatalogProfileTests : FileTransfe
     }
 
     [Theory]
+    [InlineData(PreAdmissionProfile)]
     [InlineData("snapshot-authority-v1")]
     [InlineData("snapshot-authority-v1-receiver-barrier-v1")]
     public async Task ReceiverBarrierCatalog_ExactProfileEvaluatesBothInputPaths(string profileVersion)
@@ -67,6 +72,29 @@ public sealed class FileTransferReceiverBarrierCatalogProfileTests : FileTransfe
             if ($parity.Verdict -cne 'pass') { throw $parity.FailureReason }
             if ((Get-FileTransferCoordinatorEvidenceCatalog).Version -cne $base.Version) { throw 'evaluation changed default catalog' }
             """, profileVersion);
+    }
+
+    [Fact]
+    public async Task ReceiverBarrierCatalog_PreAdmissionExtensionPreservesParent()
+    {
+        if (!OperatingSystem.IsWindows()) { return; }
+        await RunHarnessAsync("""
+            $parent = Get-FileTransferCoordinatorActivationRetryCatalog
+            $before = $parent | ConvertTo-Json -Depth 32 -Compress
+            $extended = Get-FileTransferCoordinatorReceiverPreAdmissionCatalog
+            if ($extended.Hash -cne '17196929ff74bd92c4866ccb8da33de05eb5b22d5436f56488f3a7fd2f4d086b' -or
+                $extended.ParentCatalogHash -cne $parent.Hash -or
+                $parent.Hash -cne '6f8667e92dae781e679bbe6f59fbd4f3d6284cd893ad2f643a9e47a21d451b00' -or
+                (Get-FileTransferCoordinatorActivationRetryCatalog | ConvertTo-Json -Depth 32 -Compress) -cne $before) { throw 'parent profile changed' }
+            $original = $script:FileTransferCoordinatorReceiverPreAdmissionCatalog.mode
+            try {
+                $script:FileTransferCoordinatorReceiverPreAdmissionCatalog.mode = 'Admitted'
+                $rejected = $false
+                try { $null = Get-FileTransferCoordinatorReceiverPreAdmissionCatalog }
+                catch { $rejected = $_.Exception.Message -like 'receiver_pre_admission_catalog_hash_invalid:*' }
+                if (-not $rejected) { throw 'extension schema mutation accepted' }
+            } finally { $script:FileTransferCoordinatorReceiverPreAdmissionCatalog.mode = $original }
+            """);
     }
 
     [Theory]

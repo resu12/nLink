@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'BootstrapCallbackEvidence.ps1')
 . (Join-Path $PSScriptRoot 'RepairOwnerEvidence.ps1')
 . (Join-Path $PSScriptRoot 'ActivationRetryEvidence.ps1')
+. (Join-Path $PSScriptRoot 'ReceiverPreAdmissionEvidence.ps1')
 
 $script:FileTransferCoordinatorSnapshotContractVersion = 1
 $script:FileTransferCoordinatorSnapshotCatalogVersion = 'snapshot-authority-v1'
@@ -535,6 +536,9 @@ function Get-FileTransferCoordinatorEvidenceCatalog {
     [CmdletBinding()]
     param([string]$ProfileVersion = $script:FileTransferCoordinatorSnapshotCatalogVersion)
 
+    if ($ProfileVersion -ceq $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) {
+        return Get-FileTransferCoordinatorReceiverPreAdmissionCatalog
+    }
     if ($ProfileVersion -ceq $script:FileTransferCoordinatorActivationRetryCatalogVersion) {
         return Get-FileTransferCoordinatorActivationRetryCatalog
     }
@@ -1234,6 +1238,9 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
         }
         $payload = $Operation.receiverBarrier
         $fields = @($script:FileTransferCoordinatorReceiverBarrierCatalog.payloadFields.Keys)
+        $preAdmission = Get-FileTransferCoordinatorSnapshotObjectProperty $payload 'preAdmissionClose'
+        if ($null -ne $preAdmission) { $fields += 'preAdmissionClose' }
+        if (-not (Test-FileTransferReceiverPreAdmissionClose $payload $Catalog)) { return $false }
         if (@($payload.PSObject.Properties).Count -ne $fields.Count -or
             @($fields | Where-Object { $payload.PSObject.Properties.Name -cnotcontains $_ }).Count -ne 0 -or
             $payload.role -cne $Operation.operationRole -or
@@ -1290,7 +1297,8 @@ function Test-FileTransferCoordinatorReceiverBarrierOperation {
             $statuses = switch -CaseSensitive ($state) { 'Closed' { @('Applied','Idempotent') }; 'Invalidated' { @('Invalidated') }; default { @('Accepted') } }
             if ($receipt.receiptStatus -cnotin $statuses) { return $false }
             if ($state -ceq 'Bound' -and ($payload.admissionFingerprint -cne '(none)' -or $payload.failureOriginFingerprint -cne '(none)')) { return $false }
-            if ($state -in @('AdmissionAttached','ClosePrepared','Closed') -and
+            if ($null -ne $preAdmission -and $state -cnotin @('ClosePrepared','Closed','Invalidated')) { return $false }
+            if ($state -in @('AdmissionAttached','ClosePrepared','Closed') -and $null -eq $preAdmission -and
                 $payload.admissionFingerprint -cnotmatch '^[0-9a-f]{64}$') { return $false }
             if ($state -ceq 'AdmissionAttached' -and $payload.failureOriginFingerprint -cne '(none)') { return $false }
             if ($state -in @('ClosePrepared','Closed') -and $payload.failureOriginFingerprint -cnotmatch '^[0-9a-f]{64}$') { return $false }
@@ -1508,6 +1516,8 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                     foreach ($field in @('pauseGeneration','negotiationFingerprint','admissionFingerprint','failureOriginFingerprint')) {
                         if ([string]$prior.receiverBarrier.$field -cne [string]$payload.$field) { $failure = $true }
                     }
+                    if ((ConvertTo-Json -InputObject (Get-FileTransferCoordinatorSnapshotObjectProperty $prior.receiverBarrier 'preAdmissionClose') -Compress) -cne
+                        (ConvertTo-Json -InputObject (Get-FileTransferCoordinatorSnapshotObjectProperty $payload 'preAdmissionClose') -Compress)) { $failure = $true }
                     if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $prior.receiverBarrier.sourceBoundary $payload.sourceBoundary)) { $failure = $true }
                     if ($operation.afterState -ceq 'Closed') {
                         if ($prior.afterState -cne 'ClosePrepared' -or $boundary.decisionKind -cne 'CommitInitialActivationReceiverBarrierClose' -or
@@ -1520,7 +1530,9 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                         $prepared = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_source_boundary_invalidated' -and
                             (Test-FileTransferCoordinatorReceiverBarrierRoutePreparation $boundary $payload.sourceBoundary $beforeRecoveryOperations $afterRecoveryOperations)
                         $admissionReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_admission_replaced' -and
-                            $payload.admissionFingerprint -cne '(none)' -and $payload.invalidatingAdmissionFingerprint -cne $payload.admissionFingerprint
+                            ($payload.admissionFingerprint -cne '(none)' -or
+                                $null -ne (Get-FileTransferCoordinatorSnapshotObjectProperty $payload 'preAdmissionClose')) -and
+                            $payload.invalidatingAdmissionFingerprint -cne $payload.admissionFingerprint
                         $pauseReplaced = $operation.receiverBarrier.receipts[0].receiptReason -ceq 'receiver_barrier_pause_replaced' -and
                             [long]$payload.replacementPauseGeneration -gt [long]$payload.pauseGeneration
                         if (($payload.invalidatingAdmissionFingerprint -cne '(none)' -and -not $admissionReplaced) -or
@@ -1536,9 +1548,14 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                 $prior = if ($stream.Known.ContainsKey("$role|$key")) { $stream.Known["$role|$key"] } else { $null }
                 if ($null -eq $prior -or $prior.afterState -cne $operation.beforeState) { $failure = $true }
                 else {
+                    $preAdmissionPrepare = Test-FileTransferReceiverPreAdmissionPreparation $operation $prior $boundary
+                    if (-not $preAdmissionPrepare -and
+                        (ConvertTo-Json -InputObject (Get-FileTransferCoordinatorSnapshotObjectProperty $prior.receiverBarrier 'preAdmissionClose') -Compress) -cne
+                        (ConvertTo-Json -InputObject (Get-FileTransferCoordinatorSnapshotObjectProperty $payload 'preAdmissionClose') -Compress)) { $failure = $true }
                     foreach ($field in @('pauseGeneration','failureOriginFingerprint','invalidatingAdmissionFingerprint','replacementPauseGeneration')) {
                         if ([string]$prior.receiverBarrier.$field -cne [string]$payload.$field -and
-                            -not ($field -ceq 'failureOriginFingerprint' -and $operation.beforeState -ceq 'AdmissionAttached' -and $operation.afterState -ceq 'ClosePrepared')) { $failure = $true }
+                            -not ($field -ceq 'failureOriginFingerprint' -and
+                                ($preAdmissionPrepare -or ($operation.beforeState -ceq 'AdmissionAttached' -and $operation.afterState -ceq 'ClosePrepared')))) { $failure = $true }
                     }
                     if (-not (Test-FileTransferCoordinatorSnapshotBoundaryTupleEqual $prior.receiverBarrier.sourceBoundary $payload.sourceBoundary)) { $failure = $true }
                     $attach = $role -ceq 'receiver_barrier_current' -and $operation.afterState -ceq 'AdmissionAttached' -and $operation.beforeState -cin @('Bound','AdmissionAttached') -and $boundary.decisionKind -ceq 'AttachInitialActivationReceiverBarrierAdmission' -and $boundary.decisionStatus -ceq 'Accepted'
@@ -1547,7 +1564,7 @@ function Get-FileTransferCoordinatorReceiverBarrierFailures {
                     }
                     if ($attach -and $prior.receiverBarrier.admissionFingerprint -cne '(none)' -and
                         $prior.receiverBarrier.admissionFingerprint -cne $payload.admissionFingerprint) { $failure = $true }
-                    $prepare = $role -ceq 'receiver_barrier_current' -and $operation.beforeState -ceq 'AdmissionAttached' -and $operation.afterState -ceq 'ClosePrepared' -and $boundary.decisionKind -ceq 'PrepareInitialActivationReceiverBarrierClose' -and $boundary.decisionStatus -ceq 'Accepted'
+                    $prepare = $preAdmissionPrepare -or ($role -ceq 'receiver_barrier_current' -and $operation.beforeState -ceq 'AdmissionAttached' -and $operation.afterState -ceq 'ClosePrepared' -and $boundary.decisionKind -ceq 'PrepareInitialActivationReceiverBarrierClose' -and $boundary.decisionStatus -ceq 'Accepted')
                     $remove = $operation.afterState -ceq 'None' -and ($role -ceq 'receiver_barrier_terminal' -or $terminalEntry.Count -eq 1)
                     $carry = $operation.beforeState -ceq $operation.afterState
                     if (-not ($attach -or $prepare -or $remove -or $carry)) { $failure = $true }
@@ -10426,7 +10443,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                     $script:FileTransferCoordinatorCheckpointRepairContinuityCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapCorrelationCatalogVersion,
                     $script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion,
-                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)) {
+                    $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)) {
                 $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $profileVersion
             }
         }
@@ -10761,7 +10778,7 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
                         continue
                     }
                     if ((Test-FileTransferCoordinatorBootstrapCallbackMarker $operation) -or
-                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
+                        ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -and $operation.operationRole -ceq 'fallback_bootstrap_source_hold')) {
                         if (-not (Test-FileTransferCoordinatorBootstrapCallbackOperation $envelope $operation $catalog)) {
                             $errors.Add("snapshot_bootstrap_callback_operation_invalid:$($record.LineIndex)")
                             break
@@ -11276,10 +11293,10 @@ function Get-FileTransferCoordinatorSnapshotEvaluation {
     if ((Test-FileTransferCoordinatorBootstrapCorrelationCatalogCapability $catalog.Version) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCorrelationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapInitiationCatalogVersion, $script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapInitiationHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
-    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion) -and $errors.Count -eq 0) {
+    if ($catalog.Version -cin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -and $errors.Count -eq 0) {
         foreach ($error in @(Get-FileTransferBootstrapCallbackHistoryErrors -Boundaries @($boundaries))) { $errors.Add($error) }
     }
 

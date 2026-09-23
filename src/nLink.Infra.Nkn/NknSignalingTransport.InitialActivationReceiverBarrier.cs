@@ -50,7 +50,8 @@ public sealed partial class NknSignalingTransport : IInitialActivationReceiverBa
         BindOrAttachInitialReceiverBarriers(dataSession.SessionId);
     }
 
-    private InitialActivationReceiverBarrierNegotiation? CaptureInitialReceiverNegotiationUnsafe(string sessionId, string transferId)
+    private InitialActivationReceiverBarrierNegotiation? CaptureInitialReceiverNegotiationUnsafe(string sessionId, string transferId,
+        bool includeInvalidatedConvergence = false)
     {
         var transaction = runtimeUnlockTransactionState;
         if (disposed || transaction.SessionId != sessionId || transaction.TransactionGeneration <= 0 ||
@@ -62,7 +63,7 @@ public sealed partial class NknSignalingTransport : IInitialActivationReceiverBa
         if (runtimeUnlockResponderAnswerProbeConvergence is { AuthorityMode: RuntimeUnlockOfferAuthorityMode.InitialActivation } convergence &&
             convergence.SessionId == sessionId && (string.IsNullOrWhiteSpace(convergence.TransferId) || convergence.TransferId == transferId) &&
             convergence.TransactionGeneration == transaction.TransactionGeneration && convergence.OfferGeneration == transaction.OfferGeneration &&
-            convergence.InvalidationReason is null && convergence.PairedRetryBindingReceipt is null)
+            (includeInvalidatedConvergence || convergence.InvalidationReason is null) && convergence.PairedRetryBindingReceipt is null)
         {
             return new(sessionId, transferId, convergence.TransactionGeneration, convergence.OfferGeneration,
                 convergence.PendingAnswerAckGeneration, convergence.Nonce, convergence.PayerDecisionId, convergence.LaunchGeneration,
@@ -162,12 +163,15 @@ public sealed partial class NknSignalingTransport : IInitialActivationReceiverBa
                 var authority = barrier.Authority;
                 if (barrier.Applied is not null || authority.PauseGeneration != fileTransferTunaActivationPauseGeneration ||
                     authority.Source.RuntimeOwner.SessionId != fileTransferTunaActivationPauseSessionId ||
-                    CaptureInitialReceiverNegotiationUnsafe(authority.Source.RuntimeOwner.SessionId, pair.Key) != barrier.Negotiation)
+                    CaptureInitialReceiverNegotiationUnsafe(authority.Source.RuntimeOwner.SessionId, pair.Key) is not { } observed)
                 {
                     continue;
                 }
-                var observation = new InitialActivationReceiverBarrierFailureEventArgs(authority, barrier.Negotiation,
-                    new(origin.LaneInstanceId, origin.ClientGeneration, origin.ProcessRunId, origin.FailureGeneration), args.Reason);
+                // Submit both exact witnesses. Only the coordinator may decide
+                // whether a waiting-launch successor can close this barrier.
+                var observation = new InitialActivationReceiverBarrierFailureEventArgs(authority, observed,
+                    new(origin.LaneInstanceId, origin.ClientGeneration, origin.ProcessRunId, origin.FailureGeneration), args.Reason,
+                    barrier.Negotiation);
                 initialReceiverBarriers[pair.Key] = barrier with { Failure = observation };
                 failures.Add(observation);
             }
@@ -214,7 +218,9 @@ public sealed partial class NknSignalingTransport : IInitialActivationReceiverBa
     private bool IsInitialReceiverBarrierFailureCurrentUnsafe(InitialActivationReceiverBarrierFailureEventArgs observation)
         => !disposed && initialReceiverBarriers.TryGetValue(observation.Authority.Source.RuntimeOwner.TransferId, out var shadow) &&
             shadow.Authority == observation.Authority && ReferenceEquals(shadow.Failure, observation) &&
-            shadow.Negotiation == observation.Negotiation &&
+            shadow.Negotiation == observation.RetainedNegotiation &&
+            CaptureInitialReceiverNegotiationUnsafe(observation.Negotiation.SessionId, observation.Negotiation.TransferId,
+                includeInvalidatedConvergence: true) == observation.Negotiation &&
             fileTransferTunaActivationPauseGeneration == observation.Authority.PauseGeneration &&
             fileTransferTunaActivationPauseSessionId == observation.Negotiation.SessionId &&
             runtimeUnlockTransactionState.TransactionGeneration == observation.Negotiation.TransactionGeneration &&

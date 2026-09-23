@@ -22,10 +22,23 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
     [InlineData("attempt_effect")]
     [InlineData("attempt_mutation")]
     [InlineData("missing_bind")]
+    [InlineData("pre_admission")]
+    [InlineData("pre_admission_zero")]
+    [InlineData("pre_admission_projected")]
+    [InlineData("pre_admission_pwsh")]
+    [InlineData("pre_admission_admission_race")]
+    [InlineData("pre_admission_old_profile")]
+    [InlineData("pre_admission_missing_lineage")]
+    [InlineData("pre_admission_changed_scope")]
+    [InlineData("pre_admission_wrong_mode")]
+    [InlineData("pre_admission_changed_launch")]
+    [InlineData("pre_admission_changed_terminal_witness")]
     public async Task ReceiverBarrierSnapshot_RealCoordinatorEnvelopesRemainStrict(string mutation)
     {
         if (!OperatingSystem.IsWindows()) { return; }
-        var fixture = ((FileTransferCoordinatorState State, InitialActivationReceiverBarrierSource Source,
+        var preAdmission = mutation.StartsWith("pre_admission", StringComparison.Ordinal);
+        var fixture = preAdmission ? FileTransferCoordinatorTests.CreatePreAdmissionReceiverBarrierFixture() :
+            ((FileTransferCoordinatorState State, InitialActivationReceiverBarrierSource Source,
             InitialActivationReceiverBarrierNegotiation Negotiation))typeof(FileTransferCoordinatorTests)
             .GetMethod("CreateReceiverBarrierFixture", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, null)!;
@@ -33,7 +46,32 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
             fixture.State, fixture.Source, 1, fixture.Negotiation);
         Assert.Equal(InitialActivationReceiverBarrierDecisionStatus.Accepted, bound.Status);
         var envelopes = new List<FileTransferCoordinatorTransitionEnvelope> { bound.SnapshotEnvelope! };
-        if (mutation == "automatic_invalidation")
+        if (preAdmission)
+        {
+            var prepared = FileTransferCoordinator.PrepareInitialActivationReceiverBarrierClose(bound.State,
+                bound.Authority!, fixture.Source, 1,
+                fixture.Negotiation with { LaunchGeneration = mutation == "pre_admission_zero" ? 0 : 1 },
+                new(Guid.NewGuid(), 1, "receiver-lane-process", 1));
+            Assert.Equal(InitialActivationReceiverBarrierDecisionStatus.Accepted, prepared.Status);
+            envelopes.Add(prepared.SnapshotEnvelope!);
+            if (mutation == "pre_admission_admission_race")
+            {
+                var admitted = FileTransferCoordinator.Apply(new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.RuntimeUnlockAdmission, prepared.State.RouteSelection,
+                    FileTransferTransportHandoffKind.None, FileTransferTransportKind.Unknown, "test",
+                    FileTransferLegState.Active, true, 0, -1, 0, 0,
+                    RuntimeUnlockAdmissionRequest: new("receiver_barrier_test", "precommit_probe_received", prepared.State.CurrentRuntimeOwner)), prepared.State);
+                envelopes.Add(admitted.SnapshotEnvelope!);
+            }
+            else
+            {
+                var closed = FileTransferCoordinator.CommitInitialActivationReceiverBarrierClose(prepared.State, fixture.Source,
+                    new(prepared.Command!, InitialActivationReceiverBarrierCloseApplyStatus.Applied, "exact_pre_admission_close"));
+                Assert.Equal(InitialActivationReceiverBarrierDecisionStatus.Accepted, closed.Status);
+                envelopes.Add(closed.SnapshotEnvelope!);
+            }
+        }
+        else if (mutation == "automatic_invalidation")
         {
             var replaced = bound.State with { CurrentDataSessionGeneration = 2 };
             envelopes.Add(FileTransferCoordinator.CreateTransitionSnapshot(bound.State, replaced,
@@ -65,8 +103,13 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
         try
         {
             var path = Path.Combine(directory, "coordinator-envelopes.json");
-            await File.WriteAllTextAsync(path, "[" + string.Join(",", envelopes.Select(envelope => envelope.ToCanonicalJson())) + "]", new UTF8Encoding(false));
-            var result = await RunPowerShellScriptTextAsync(Harness, [FindRepoRoot(), path, mutation]);
+            var evidence = mutation is "pre_admission_projected" or "pre_admission_pwsh"
+                ? envelopes.Select(SessionFileTransferService.CreateCoordinatorSnapshotEvidenceForTesting)
+                : envelopes;
+            await File.WriteAllTextAsync(path, "[" + string.Join(",", evidence.Select(envelope => envelope.ToCanonicalJson())) + "]", new UTF8Encoding(false));
+            var result = mutation == "pre_admission_pwsh"
+                ? await RunPowerShellScriptTextAsync(Harness, [FindRepoRoot(), path, mutation], "pwsh")
+                : await RunPowerShellScriptTextAsync(Harness, [FindRepoRoot(), path, mutation]);
             Assert.True(result.ExitCode == 0, $"STDOUT:{result.Stdout}{Environment.NewLine}STDERR:{result.Stderr}");
             Assert.Equal("receiver-barrier-evidence-ok", result.Stdout.Trim());
         }
@@ -311,10 +354,17 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
         . (Join-Path $RepoRoot 'tools/FileTransferOps/CoordinatorSnapshotEvidence.ps1')
         $catalog = Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion 'snapshot-authority-v1-receiver-barrier-v1'
         $parsed = Get-Content -LiteralPath $EnvelopePath -Raw | ConvertFrom-Json
+        if ($Case.StartsWith('pre_admission')) { $catalog = Get-FileTransferCoordinatorReceiverPreAdmissionCatalog }
         $envelopes = @($parsed)
         $closed = @($envelopes[-1].aggregate.operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_terminal' })[0]
         $attempt = @($envelopes[-1].aggregate.operations | Where-Object { $_.operationRole -ceq 'receiver_barrier_attempt' })
         switch -CaseSensitive ($Case) {
+            'pre_admission_old_profile' { $catalog = Get-FileTransferCoordinatorActivationRetryCatalog }
+            'pre_admission_missing_lineage' { $closed.receiverBarrier.PSObject.Properties.Remove('preAdmissionClose') }
+            'pre_admission_changed_scope' { $closed.receiverBarrier.preAdmissionClose.negotiationWithoutLaunchFingerprint = 'a' * 64 }
+            'pre_admission_wrong_mode' { $closed.receiverBarrier.preAdmissionClose.mode = 'Admitted' }
+            'pre_admission_changed_launch' { $closed.receiverBarrier.preAdmissionClose.failureLaunchGeneration = -1 }
+            'pre_admission_changed_terminal_witness' { $closed.receiverBarrier.preAdmissionClose.failureNegotiationFingerprint = 'a' * 64 }
             'frozen_profile' { $catalog = Get-FileTransferCoordinatorEvidenceCatalog }
             'source_protocol' { $closed.receiverBarrier.sourceBoundary.protocolVersion = 6 }
             'receipt_stage' { $closed.receiverBarrier.receipts[0].stage = 'handoff_bind' }
@@ -338,7 +388,7 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
         }
         # Analyzer-only serialization from the genuine Coordinator close receipt;
         # the production callback fixture separately verifies actual effect emission.
-        if ($Case -cnotin @('missing_effect','automatic_invalidation')) {
+        if ($Case -cnotin @('missing_effect','automatic_invalidation','pre_admission_admission_race')) {
             $effectOperation = if ($Case -ceq 'attempt_effect') { $attempt[0] } else { $closed }
             $receipt = $effectOperation.receiverBarrier.receipts[0]
             $source = $effectOperation.receiverBarrier.sourceBoundary
@@ -350,7 +400,7 @@ public sealed class FileTransferReceiverBarrierSnapshotEvidenceTests : FileTrans
         $full = Get-FileTransferCoordinatorSnapshotEvaluation -Lines $lines.ToArray()
         $records = @(for ($i = 0; $i -lt $lines.Count; $i++) { [pscustomobject]@{ Line = $lines[$i]; LineIndex = $i } })
         $compact = Get-FileTransferCoordinatorSnapshotEvaluation -SnapshotRecords $records
-        $expected = if ($Case -cin @('none','automatic_invalidation')) { 'pass' } else { 'fail' }
+        $expected = if ($Case -cin @('none','automatic_invalidation','pre_admission','pre_admission_zero','pre_admission_projected','pre_admission_pwsh','pre_admission_admission_race')) { 'pass' } else { 'fail' }
         if ($full.ArtifactEvidenceVerdict -cne $expected -or $compact.ArtifactEvidenceVerdict -cne $expected) {
             throw "case=$Case; expected=$expected; full=$($full.ArtifactEvidenceFailureReason); compact=$($compact.ArtifactEvidenceFailureReason)"
         }

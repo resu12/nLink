@@ -84,6 +84,10 @@ public sealed partial class SessionFileTransferService
             }
             context = current;
             var state = CreateCoordinatorStateLocked(context);
+            if (state.PersistentState.InitialActivationReceiverBarrier.Current?.Negotiation != args.RetainedNegotiation)
+            {
+                return;
+            }
             var source = FileTransferCoordinator.CreateInitialActivationReceiverBarrierSource(state, context.DataSession!);
             if (source is null)
             {

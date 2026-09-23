@@ -42,7 +42,7 @@ function Test-FileTransferCoordinatorBootstrapCallbackMarker {
 function Test-FileTransferCoordinatorBootstrapCallbackOperation {
     param($Envelope,$Operation,$Catalog)
     try {
-        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)) { return $false }
+        if ($Catalog.Version -cnotin @($script:FileTransferCoordinatorBootstrapCallbackCatalogVersion, $script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)) { return $false }
         $p=$Operation.routeTransition.bootstrapCallbacks
         $fields=$script:FileTransferCoordinatorBootstrapCallbackCatalog.payloadFields
         if (@($p.PSObject.Properties).Count -ne $fields.Count -or $Operation.family -cne 'route_transition') { return $false }

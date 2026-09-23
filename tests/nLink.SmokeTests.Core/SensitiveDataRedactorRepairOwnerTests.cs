@@ -12,6 +12,8 @@ public sealed class SensitiveDataRedactorRepairOwnerTests
     [InlineData("filetransfer_fallback_frontier_repair_contract_settled", "")]
     [InlineData("filetransfer_fallback_frontier_repair_authority_granted", "-activation-retry-v1")]
     [InlineData("filetransfer_fallback_frontier_repair_contract_settled", "-activation-retry-v1")]
+    [InlineData("filetransfer_fallback_frontier_repair_authority_granted", "-activation-retry-v1-receiver-pre-admission-v1")]
+    [InlineData("filetransfer_fallback_frontier_repair_contract_settled", "-activation-retry-v1-receiver-pre-admission-v1")]
     public void RepairOwnerRedaction_PreservesExactProfileAndProjectedReferenceOnly(string eventName, string suffix)
     {
         const string token = "fte1-0123456789abcdef01234567";

@@ -52,6 +52,15 @@ public sealed partial class NknAccelerationTransportTests
     public Task InitialActivationReceiverSidecarFailure_BeforePreparedPublishesCurrentBufferedState()
         => RunInitialActivationReceiverBarrierAsync();
 
+    [Theory]
+    [InlineData("responder_before_launch")]
+    [InlineData("responder_after_launch")]
+    [InlineData("responder_duplicate_eof")]
+    [InlineData("responder_admission_before_apply")]
+    [Trait("FileTransferInfraSuite", "InitialActivationReceiverBarrier")]
+    public Task InitialActivationReceiverSidecarFailure_PreAdmissionPublishesCurrentBufferedState(string control)
+        => RunInitialActivationReceiverBarrierAsync(control);
+
     [Fact]
     [Trait("FileTransferInfraSuite", "InitialActivationReceiverBarrier")]
     public Task InitialActivationReceiverSidecarFailure_SessionOpenedDuringPausePublishesCurrentBufferedState()
@@ -81,9 +90,11 @@ public sealed partial class NknAccelerationTransportTests
 
     private async Task RunInitialActivationReceiverBarrierAsync(string? control = null)
     {
+        var preAdmission = control?.StartsWith("responder_", StringComparison.Ordinal) == true;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var receiverClient = new FakeNknClient("receiver.initial-activation-barrier.address");
-        var senderClient = new FakeNknClient("sender.initial-activation-barrier.address");
+        var identitySuffix = Guid.NewGuid().ToString("N");
+        var receiverClient = new FakeNknClient($"receiver.initial-activation-barrier.{identitySuffix}.address");
+        var senderClient = new FakeNknClient($"sender.initial-activation-barrier.{identitySuffix}.address");
         var lane = new FakeNknAccelerationLane(enableFailureOrigins: true);
         using var transport = new NknSignalingTransport(receiverClient, NknTransportOptions.Load(),
             new NknIdentity("receiver-initial-activation-barrier", receiverClient.Address),
@@ -123,8 +134,21 @@ public sealed partial class NknAccelerationTransportTests
         {
             transport.SeedRuntimeUnlockOfferCriticalSectionForTests(sessionId, "receiver-initial-offer", 17, 11,
                 observedSend: true, observedLane: "nkn", peerReceived: true);
+            if (preAdmission)
+            {
+                SeedInitialReceiverSemanticAck(transport, sessionId, transferId);
+            }
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(transport,
                 "PauseFileTransferDataSessionsForTunaActivationNegotiation", "initial_receiver_test", sessionId, "runtime_unlock")));
+            if (preAdmission && control != "responder_before_launch")
+            {
+                InvokePrivateMethod(transport, "RequestRuntimeUnlockPreCommitProbeLaunch",
+                    sessionId, NknAccelerationLaneKind.File, "runtime_unlock_answer_ack_probe_ready",
+                    GetPrivateField(transport, "runtimeUnlockTransactionState"));
+                var current = Assert.IsType<InitialActivationReceiverBarrierNegotiation>(InvokePrivateMethod(transport,
+                    "CaptureInitialReceiverNegotiationUnsafe", sessionId, transferId));
+                Assert.Equal(1L, current.LaunchGeneration);
+            }
         }
         if (control == "late_open")
         {
@@ -200,14 +224,26 @@ public sealed partial class NknAccelerationTransportTests
             }
             RuntimeUnlockAdmissionDecision RequestAdmission(string reason)
             {
-                lock (serviceGate)
+                // Keep synthetic admission on its own actor stack. The large
+                // fixture state machine is not a production receive dispatcher.
+                var completed = new TaskCompletionSource<RuntimeUnlockAdmissionDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _ = Task.Run(() =>
                 {
-                    var method = typeof(SessionFileTransferService).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-                        .Single(candidate => candidate.Name == "RequestRuntimeUnlockAdmissionLocked" &&
-                            candidate.GetParameters()[0].ParameterType == context.GetType());
-                    return Assert.IsType<RuntimeUnlockAdmissionDecision>(
-                        method.Invoke(null, [context, "precommit_probe_responder", reason, false]));
-                }
+                    try
+                    {
+                        lock (serviceGate)
+                        {
+                            var method = typeof(SessionFileTransferService).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                                .Single(candidate => candidate.Name == "RequestRuntimeUnlockAdmissionLocked" &&
+                                    candidate.GetParameters()[0].ParameterType == context.GetType());
+                            completed.SetResult(Assert.IsType<RuntimeUnlockAdmissionDecision>(
+                                method.Invoke(null, [context, "precommit_probe_responder", reason, false])));
+                        }
+                    }
+                    catch (Exception error) { completed.SetException(error); }
+                });
+                Assert.True(completed.Task.Wait(TimeSpan.FromSeconds(3)));
+                return completed.Task.GetAwaiter().GetResult();
             }
             var original = CaptureState();
             Assert.Equal(FileTransferRoute.RegularNknV4Fast, original.RouteSelection.Route);
@@ -245,12 +281,25 @@ public sealed partial class NknAccelerationTransportTests
             }
             // Exercise the real Coordinator admission path without inventing
             // a sender Prepared transition or a paired fallback receipt.
-            var admission = RequestAdmission("initial_receiver_test");
-            Assert.True(admission.Granted, admission.Reason);
-            Assert.NotNull(admission.AdmissionToken);
+            RuntimeUnlockAdmissionToken? originalAdmission = null;
+            if (!preAdmission)
+            {
+                var admission = RequestAdmission("initial_receiver_test");
+                Assert.True(admission.Granted, admission.Reason);
+                originalAdmission = admission.AdmissionToken;
+                Assert.NotNull(originalAdmission);
+            }
             transport.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
             var admitted = CaptureState();
-            Assert.NotNull(admitted.CurrentRuntimeUnlockAdmission);
+            if (preAdmission)
+            {
+                Assert.Null(admitted.CurrentRuntimeUnlockAdmission);
+                var barrier = Assert.IsType<InitialActivationReceiverBarrierOperation>(
+                    admitted.PersistentState.InitialActivationReceiverBarrier.Current);
+                Assert.Equal(InitialActivationReceiverBarrierState.Bound, barrier.State);
+                Assert.Equal(0L, barrier.Negotiation.LaunchGeneration);
+            }
+            else { Assert.NotNull(admitted.CurrentRuntimeUnlockAdmission); }
             Assert.Equal(original.CurrentRuntimeOwner, admitted.CurrentRuntimeOwner);
             Assert.Equal(original.CurrentRoutePublicationToken, admitted.CurrentRoutePublicationToken);
             Assert.Null(admitted.PersistentState.FileTransferRouteTransition.CurrentOperation);
@@ -281,7 +330,7 @@ public sealed partial class NknAccelerationTransportTests
                     CaptureState().PersistentState.InitialActivationReceiverBarrier.Current);
                 var replacement = RequestAdmission("initial_receiver_admission_replaced");
                 Assert.True(replacement.Granted, replacement.Reason);
-                Assert.True(replacement.AdmissionToken!.Value.AdmissionGeneration > admission.AdmissionToken!.Value.AdmissionGeneration);
+                Assert.True(replacement.AdmissionToken!.Value.AdmissionGeneration > originalAdmission!.Value.AdmissionGeneration);
                 replacementState = CaptureState();
                 Assert.Equal(original.CurrentRuntimeOwner, replacementState.CurrentRuntimeOwner);
                 Assert.Equal(original.CurrentRoutePublicationToken, replacementState.CurrentRoutePublicationToken);
@@ -295,6 +344,20 @@ public sealed partial class NknAccelerationTransportTests
             var logStart = GetOperationalLogLength();
             int CloseEffectCount() => ReadOperationalLogTail(logStart).Split('\n').Count(line =>
                 line.Contains("effect_kind=receiver_barrier_close_applied;", StringComparison.Ordinal));
+            var admissionRaced = false;
+            if (control == "responder_admission_before_apply")
+            {
+                lane.BeforeFailureOriginApply = () =>
+                {
+                    lane.BeforeFailureOriginApply = null;
+                    var pending = CaptureState().PersistentState.InitialActivationReceiverBarrier.Current!;
+                    Assert.Equal(InitialActivationReceiverBarrierState.ClosePrepared, pending.State);
+                    Assert.True(RequestAdmission("receiver_admitted_before_failure_apply").Granted);
+                    Assert.False(pending.Authority.ExecutionFence.IsValid);
+                    Assert.Null(CaptureState().PersistentState.InitialActivationReceiverBarrier.Current);
+                    admissionRaced = true;
+                };
+            }
             if (control is "prior_session_wrong_identity" or "prior_session_wrong_generation")
             {
                 lock (GetPrivateField(transport, "accelerationGate")!)
@@ -313,6 +376,18 @@ public sealed partial class NknAccelerationTransportTests
             lane.SetAvailable(false, "sidecar_tuna_stream_eof");
             Assert.Contains("event=tuna_acceleration_state_changed; available=0; reason=sidecar_tuna_stream_eof",
                 ReadOperationalLogTail(logStart), StringComparison.Ordinal);
+            if (control == "responder_admission_before_apply")
+            {
+                Assert.True(admissionRaced);
+                Assert.True(Assert.IsType<bool>(ContextValue(context, "PullTransportPaused")));
+                Assert.False(dataSession.IsAvailable);
+                Assert.False(otherDataSession.IsAvailable);
+                Assert.DoesNotContain(states, state => state.BytesCommitted >= 68);
+                Assert.Equal(0, CloseEffectCount());
+                Assert.Equal(InitialActivationReceiverBarrierState.Invalidated,
+                    CaptureState().PersistentState.InitialActivationReceiverBarrier.LastTerminal!.State);
+                return;
+            }
             if (control is "prior_session_wrong_identity" or "prior_session_wrong_generation" or "prior_session_replaced")
             {
                 Assert.Null(Assert.Single(failures).Decision);
@@ -362,19 +437,21 @@ public sealed partial class NknAccelerationTransportTests
             await WaitUntilAsync(() => states.Any(state => state.ContiguousCommittedChunkIndex == 17 &&
                 state.DurableReceivedHighestChunkIndex == 16 && state.BytesCommitted == 68), TimeSpan.FromSeconds(3));
             var closed = CaptureState();
+            if (preAdmission) { Assert.Null(closed.CurrentRuntimeUnlockAdmission); }
             Assert.Equal(original.CurrentRuntimeOwner, closed.CurrentRuntimeOwner);
             Assert.Equal(original.CurrentRoutePublicationToken, closed.CurrentRoutePublicationToken);
             Assert.Same(dataSession, ContextValue(context, "DataSession"));
             Assert.Equal(original.CurrentDataSessionIdentity, closed.CurrentDataSessionIdentity);
             Assert.Equal(original.CurrentDataSessionGeneration, closed.CurrentDataSessionGeneration);
             Assert.Null(closed.PersistentState.FileTransferRouteTransition.CurrentOperation);
+            Assert.True(dataSession.IsAvailable);
             Assert.False(otherDataSession.IsAvailable);
             Assert.Equal(sessionId, GetPrivateField(transport, "fileTransferTunaActivationPauseSessionId"));
             Assert.Equal(sharedPauseGeneration, GetPrivateField(transport, "fileTransferTunaActivationPauseGeneration"));
             Assert.NotEqual(FileTransferTransferState.Failed, receiver.Snapshot.Inbound?.State);
             Assert.Equal(InitialActivationReceiverBarrierDecisionStatus.Accepted, Assert.Single(failures).Decision?.Status);
             await WaitUntilAsync(() => CloseEffectCount() == 1, TimeSpan.FromSeconds(3));
-            if (control == "duplicate_eof")
+            if (control is "duplicate_eof" or "responder_duplicate_eof")
             {
                 lane.SetAvailable(false, "sidecar_tuna_stream_eof");
                 Assert.Single(failures);
@@ -395,5 +472,51 @@ public sealed partial class NknAccelerationTransportTests
             await cts.CancelAsync();
             await collectStates;
         }
+    }
+
+    private static void SeedInitialReceiverSemanticAck(NknSignalingTransport transport, string sessionId, string transferId)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var transaction = Assert.IsType<RuntimeUnlockTransactionSnapshot>(GetPrivateField(transport, "runtimeUnlockTransactionState")) with
+        {
+            TransferId = transferId, State = RuntimeUnlockTransactionState.RouteCommitPending,
+            AnswerReceived = true, RouteCommitPending = true, DeadlineUtcMs = now + 60_000,
+            TunaPathLeaseGeneration = 1, TunaPathLeaseListenerRunId = "peer-offer-dialer-1",
+            TunaPathLeaseCurrent = true, TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.ListenerReady,
+        };
+        SetPrivateField(transport, "runtimeUnlockTransactionState", transaction);
+        SetPrivateField(transport, "runtimeUnlockTunaPathLeaseState", new RuntimeUnlockTunaPathLeaseSnapshot(
+            sessionId, transferId, transaction.TransactionGeneration, transaction.OfferGeneration, 1,
+            "peer-offer-dialer-1", 17, RuntimeUnlockTunaPathLeaseState.ListenerReady, now, now, now + 60_000, null, null));
+        var type = typeof(NknSignalingTransport);
+        var mode = Enum.Parse(type.GetNestedType("RuntimeUnlockOfferAuthorityMode", BindingFlags.NonPublic)!, "InitialActivation");
+        const string nonce = "receiver-initial-offer";
+        SetPrivateField(transport, "pendingAccelerationAnswerAckSessionId", sessionId);
+        SetPrivateField(transport, "pendingAccelerationAnswerAckNonce", nonce);
+        SetPrivateField(transport, "pendingAccelerationAnswerAckTrigger", "runtime_unlock");
+        SetPrivateField(transport, "pendingAccelerationAnswerAckLanes", NknAccelerationLaneKind.File);
+        SetPrivateField(transport, "pendingAccelerationAnswerAckPayerDecisionId", 17L);
+        SetPrivateField(transport, "pendingAccelerationAnswerAckGeneration", 6L);
+        SetPrivateField(transport, "pendingAccelerationAnswerAckAuthorityMode", mode);
+        var target = Activator.CreateInstance(type.GetNestedType("AccelerationReplyTargetEvidence", BindingFlags.NonPublic)!,
+            "peer.initial-receiver.address", new string('d', 64), "initial-offer", sessionId, nonce, 17L, 6L, "answer")!;
+        var answer = new Envelope(1, "000000", "initial-answer", MsgType.TransportAccelerationAnswer, [], now, null);
+        var shadow = Activator.CreateInstance(type.GetNestedType("PendingAccelerationReplyShadow", BindingFlags.NonPublic)!,
+            answer, target, sessionId, nonce, 17L, 6L, mode, now + 60_000, 1L, "answer",
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously))!;
+        SetPrivateField(transport, "pendingAccelerationAnswerReplyShadow", shadow);
+        var ack = new TransportAccelerationAnswerAckPayload
+        {
+            SessionId = sessionId, Accepted = true, SupportedLanes = ["file"], Nonce = nonce,
+            SentAtUnixMs = now, ExpiresAtUnixMs = now + 60_000, SidecarProtocolVersion = 1, PayerDecisionId = 17,
+        };
+        object?[] args = [ack, "initial-answer-ack", new string('a', 64), new string('b', 64),
+            NknAccelerationLaneKind.File, mode, 6L, null, null];
+        lock (GetPrivateField(transport, "accelerationGate")!)
+        {
+            Assert.True(Assert.IsType<bool>(type.GetMethod("TryRecordRuntimeUnlockResponderSemanticAnswerAckUnsafe",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(transport, args)));
+        }
+        Assert.Equal("semantic_answer_ack_retained_waiting_for_peer_probe", args[8]);
     }
 }

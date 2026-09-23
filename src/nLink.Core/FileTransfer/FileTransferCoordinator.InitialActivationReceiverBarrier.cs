@@ -5,6 +5,7 @@ namespace NLink.Core.FileTransfer;
 internal enum InitialActivationReceiverBarrierState { Bound, AdmissionAttached, ClosePrepared, Closed, Invalidated }
 internal enum InitialActivationReceiverBarrierDecisionStatus { Accepted, Idempotent, Rejected, Stale, Invalidated }
 internal enum InitialActivationReceiverBarrierCloseApplyStatus { Applied, Idempotent, Rejected, Stale }
+internal enum InitialActivationReceiverBarrierCloseMode { Admitted, InitialResponderBeforeProbe }
 
 internal sealed record InitialActivationReceiverBarrierSource(
     RuntimeOwnerToken RuntimeOwner, RoutePublicationToken RoutePublication,
@@ -80,9 +81,10 @@ internal sealed class InitialActivationReceiverBarrierExecutionFence
 }
 
 internal sealed record InitialActivationReceiverBarrierCloseCommand(
-    InitialActivationReceiverBarrierAuthority Authority, RuntimeUnlockAdmissionToken Admission,
+    InitialActivationReceiverBarrierAuthority Authority, RuntimeUnlockAdmissionToken? Admission,
     InitialActivationReceiverBarrierNegotiation Negotiation,
-    InitialActivationReceiverBarrierFailureOrigin FailureOrigin);
+    InitialActivationReceiverBarrierFailureOrigin FailureOrigin,
+    InitialActivationReceiverBarrierCloseMode Mode = InitialActivationReceiverBarrierCloseMode.Admitted);
 
 internal sealed record InitialActivationReceiverBarrierCloseReceipt(
     InitialActivationReceiverBarrierCloseCommand Command,
@@ -215,19 +217,27 @@ internal static partial class FileTransferCoordinator
         InitialActivationReceiverBarrierNegotiation negotiation, InitialActivationReceiverBarrierFailureOrigin failureOrigin)
     {
         var current = state.PersistentState.InitialActivationReceiverBarrier.Current;
+        var beforeProbe = current is { Admission: null } && state.CurrentRuntimeUnlockAdmission is null &&
+            state.LastRuntimeUnlockAdmissionGeneration == 0 &&
+            (current.State == InitialActivationReceiverBarrierState.Bound ||
+                current is { State: InitialActivationReceiverBarrierState.ClosePrepared,
+                    CloseCommand.Mode: InitialActivationReceiverBarrierCloseMode.InitialResponderBeforeProbe }) &&
+            current.Negotiation == authority.BoundNegotiation &&
+            IsInitialReceiverPreAdmissionFailureNegotiation(currentSource, current.Negotiation, negotiation);
+        var admitted = current is { Admission: { } admission } && state.CurrentRuntimeUnlockAdmission == admission &&
+            current.Negotiation == negotiation &&
+            current.State is InitialActivationReceiverBarrierState.AdmissionAttached or InitialActivationReceiverBarrierState.ClosePrepared;
         InitialActivationReceiverBarrierDecision decision;
         if (!IsInitialActivationReceiverBarrierCurrent(state, authority, currentSource) || current is null ||
-            pauseGeneration != authority.PauseGeneration || current.Negotiation != negotiation ||
-            current.Admission is not { } admission || state.CurrentRuntimeUnlockAdmission != admission ||
-            failureOrigin is null || failureOrigin.IsDefault ||
-            current.State is not (InitialActivationReceiverBarrierState.AdmissionAttached or InitialActivationReceiverBarrierState.ClosePrepared))
+            pauseGeneration != authority.PauseGeneration || (!beforeProbe && !admitted) ||
+            failureOrigin is null || failureOrigin.IsDefault)
         {
             decision = new(state, InitialActivationReceiverBarrierDecisionStatus.Stale,
                 "receiver_barrier_close_scope_not_current", authority);
         }
         else if (current.CloseCommand is { } existing)
         {
-            var exact = existing.FailureOrigin == failureOrigin;
+            var exact = existing.FailureOrigin == failureOrigin && existing.Negotiation == negotiation;
             decision = new(state, exact ? InitialActivationReceiverBarrierDecisionStatus.Idempotent :
                 InitialActivationReceiverBarrierDecisionStatus.Stale,
                 exact ? "receiver_barrier_close_prepare_idempotent" : "receiver_barrier_failure_origin_changed",
@@ -235,7 +245,8 @@ internal static partial class FileTransferCoordinator
         }
         else
         {
-            var command = new InitialActivationReceiverBarrierCloseCommand(authority, admission, negotiation, failureOrigin);
+            var command = new InitialActivationReceiverBarrierCloseCommand(authority, current.Admission, negotiation, failureOrigin,
+                beforeProbe ? InitialActivationReceiverBarrierCloseMode.InitialResponderBeforeProbe : InitialActivationReceiverBarrierCloseMode.Admitted);
             var updated = current with { State = InitialActivationReceiverBarrierState.ClosePrepared,
                 CloseCommand = command, Reason = "receiver_barrier_close_prepared" };
             decision = new(SetInitialActivationReceiverBarrier(state,
@@ -417,6 +428,13 @@ internal static partial class FileTransferCoordinator
             (prior.AnswerMessageId is null || (prior.AnswerMessageId == next.AnswerMessageId && prior.AnswerDeadlineUtcMs == next.AnswerDeadlineUtcMs)) &&
             (prior.Ack is null || prior.Ack == next.Ack) && (prior.PeerProbe is null || prior.PeerProbe == next.PeerProbe);
 
+    private static bool IsInitialReceiverPreAdmissionFailureNegotiation(InitialActivationReceiverBarrierSource source,
+        InitialActivationReceiverBarrierNegotiation bound, InitialActivationReceiverBarrierNegotiation observed)
+        => bound is { LaunchGeneration: 0, PendingAnswerAckGeneration: > 0, TunaPathLeaseGeneration: > 0,
+                AnswerMessageId: not null, Ack: not null, PeerProbe: null } &&
+            IsInitialActivationReceiverBarrierNegotiationValid(source, observed) &&
+            observed with { LaunchGeneration = 0 } == bound;
+
     private static FileTransferCoordinatorState ReconcileInitialActivationReceiverBarrier(FileTransferCoordinatorState state)
     {
         var substate = state.PersistentState.InitialActivationReceiverBarrier;
@@ -425,7 +443,9 @@ internal static partial class FileTransferCoordinator
             return state;
         }
         var sourceCurrent = IsInitialActivationReceiverBarrierSourceCurrent(state, current.Authority.Source);
-        var admissionReplaced = current.Admission is not null && state.CurrentRuntimeUnlockAdmission != current.Admission;
+        var admissionReplaced = (current.Admission is not null ||
+            current.CloseCommand?.Mode == InitialActivationReceiverBarrierCloseMode.InitialResponderBeforeProbe) &&
+            state.CurrentRuntimeUnlockAdmission != current.Admission;
         if (sourceCurrent && !admissionReplaced)
         {
             return state;
