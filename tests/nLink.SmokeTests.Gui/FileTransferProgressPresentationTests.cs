@@ -7,25 +7,42 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferProgressPresentationTests
 {
     [Theory]
-    [InlineData("regular_nkn_v4_fast", 4)]
-    [InlineData("file_tuna_v4", 4)]
-    [InlineData("post_tuna_fallback_v6", 6)]
-    public void Progress_UsesSameWrittenBytesOnBothSides(string route, int protocol)
+    [InlineData("regular_nkn_v4_fast", 4, 710)]
+    [InlineData("file_tuna_v4", 4, 710)]
+    [InlineData("post_tuna_fallback_v6", 6, 100)]
+    public void Progress_UsesReportingProjectionOnBothSides(string route, int protocol, long reportable)
     {
         var received = Snapshot(710, FileTransferDirection.Inbound) with
         {
             BytesTransferred = 100, RouteToken = route, ProtocolVersion = protocol,
+            PeerComparableProgressBytes = reportable,
         };
-        var sent = Snapshot(710, FileTransferDirection.Outbound) with
+        var sent = Snapshot(reportable, FileTransferDirection.Outbound) with
         {
             BytesAcceptedForTransport = 950, RouteToken = route, ProtocolVersion = protocol,
         };
         var inbound = FileTransferPanelItemViewModel.FromSnapshot(received)!;
         var outbound = FileTransferPanelItemViewModel.FromSnapshot(sent)!;
-        Assert.Equal(710, inbound.ProgressBytes);
+        Assert.Equal(reportable, inbound.ProgressBytes);
         Assert.Equal(inbound.ProgressFraction, outbound.ProgressFraction);
         Assert.Equal(inbound.ProgressText, outbound.ProgressText);
         Assert.Equal(100, received.BytesTransferred); // UI must not advance the protocol frontier.
+        Assert.Equal(710, received.ProgressBytes); // Raw sparse-write telemetry is not the display projection.
+    }
+
+    [Theory]
+    [InlineData(-100, 0)]
+    [InlineData(0, 0)]
+    [InlineData(2000, 1000)]
+    public void Progress_ClampsProjectionAndDoesNotReplaceZeroWithSparseBytes(long projection, long expected)
+    {
+        var card = FileTransferPanelItemViewModel.FromSnapshot(Snapshot(710) with
+        {
+            PeerComparableProgressBytes = projection,
+        })!;
+        Assert.Equal(expected, card.ProgressBytes);
+        Assert.Equal((double)expected / 1000, card.ProgressFraction);
+        Assert.Equal(FileTransferPanelItemViewModel.FormatProgressText(expected, 1000), card.ProgressText);
     }
 
     [Fact]
@@ -85,6 +102,27 @@ public sealed class FileTransferProgressPresentationTests
         p.SetTarget(Item(800), 20, true);
         p.Advance(220);
         Assert.Equal(800, p.DisplayedBytes);
+    }
+
+    [Fact]
+    public void Animation_HandoffRetainsOnlyComparableProgressNeverRawSparseWrites()
+    {
+        var p = new FileTransferProgressPresentation();
+        var snapshot = Snapshot(900) with
+        {
+            BytesTransferred = 100, PeerComparableProgressBytes = 100,
+            RouteToken = "file_tuna_v4", ProtocolVersion = 4,
+        };
+        p.SetTarget(FileTransferPanelItemViewModel.FromSnapshot(snapshot), 0, true);
+        snapshot = snapshot with { RouteToken = "post_tuna_fallback_v6", ProtocolVersion = 6 };
+        p.SetTarget(FileTransferPanelItemViewModel.FromSnapshot(snapshot), 10, true);
+        p.Advance(1000);
+        Assert.Equal(100, p.DisplayedBytes);
+        snapshot = snapshot with { BytesTransferred = 400, PeerComparableProgressBytes = 400 };
+        p.SetTarget(FileTransferPanelItemViewModel.FromSnapshot(snapshot), 1100, true);
+        p.Advance(1300);
+        Assert.Equal(400, p.DisplayedBytes);
+        Assert.Equal("400 B / 1000 B", p.Text);
     }
 
     [Theory]

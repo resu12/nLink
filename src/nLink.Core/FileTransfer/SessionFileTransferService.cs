@@ -26635,7 +26635,12 @@ public sealed partial class SessionFileTransferService :
                 IsPeerPaused: PeerPaused,
                 PeerPauseReason: PeerPauseReason,
                 RouteToken: RouteSelection.TelemetryToken,
-                ProtocolVersion: NegotiatedDataProtocolVersion);
+                ProtocolVersion: NegotiatedDataProtocolVersion)
+            {
+                PeerComparableProgressBytes = RouteRuntime.UsesV6RequestPump
+                    ? Math.Clamp(BytesTransferred, 0L, Math.Max(0L, FileSizeBytes))
+                    : ResolveInboundV4StateBytesCommittedLocked(this),
+            };
         }
 
         public void CancelLifetime()

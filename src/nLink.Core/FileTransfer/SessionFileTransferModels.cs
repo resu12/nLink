@@ -218,6 +218,10 @@ public sealed record FileTransferTransferSnapshot(
     internal FileTransferReceiveRecoveryObservationSnapshot?
         ReceiveRecoveryObservation { get; init; }
 
+    // Display-only receiver projection using the active reporting contract, not
+    // proof that a report has reached the peer. Raw progress counters stay intact.
+    public long? PeerComparableProgressBytes { get; init; }
+
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or
             FileTransferTransferState.Declined or

@@ -56,7 +56,9 @@ public sealed record FileTransferPanelItemViewModel(
         }
 
         var fileSizeText = FormatByteSize(snapshot.FileSizeBytes);
-        var progressText = FormatProgressText(snapshot.ProgressBytes, snapshot.FileSizeBytes);
+        var progressBytes = Math.Clamp(snapshot.PeerComparableProgressBytes ?? snapshot.ProgressBytes,
+            0L, Math.Max(0L, snapshot.FileSizeBytes));
+        var progressText = FormatProgressText(progressBytes, snapshot.FileSizeBytes);
         var showProgress = snapshot.State is FileTransferTransferState.AwaitingMetadata
             or FileTransferTransferState.PreparingMetadata
             or FileTransferTransferState.AwaitingStart
@@ -92,7 +94,7 @@ public sealed record FileTransferPanelItemViewModel(
             snapshot.FileName,
             snapshot.FileSizeBytes,
             fileSizeText,
-            snapshot.ProgressFraction,
+            snapshot.FileSizeBytes <= 0 ? 0d : (double)progressBytes / snapshot.FileSizeBytes,
             progressText,
             BuildStatusText(snapshot),
             snapshot.SavedFilePath,
@@ -119,9 +121,8 @@ public sealed record FileTransferPanelItemViewModel(
             IsTerminal: snapshot.IsTerminal)
         {
             SessionId = snapshot.SessionId,
-            // Inbound snapshots expose disk-written bytes, including sparse writes;
-            // outbound snapshots expose the receiver's acknowledged copy, never queued sends.
-            ProgressBytes = snapshot.ProgressBytes,
+            // Match the receiver's reporting basis; the sender still waits for its acknowledgment.
+            ProgressBytes = progressBytes,
             AnimateProgress = !effectivePaused && snapshot.State is
                 FileTransferTransferState.Sending or FileTransferTransferState.Receiving,
         };
