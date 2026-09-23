@@ -15972,6 +15972,8 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_distinct_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_recovered_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_version={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion)) | Out-Null
+    $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_superseded_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_unresolved_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_verdict={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict)) | Out-Null
     $lines.Add(("filetransfer_fallback_frontier_repair_successor_dispatch_missing_raw_count={0}" -f $RecoveryClassification.FileTransferFallbackFrontierRepairSuccessorDispatchMissingRawCount)) | Out-Null
@@ -18193,6 +18195,8 @@ function New-FileTransferStabilityGateSummaryLines {
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_version={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_superseded_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict),
         ("filetransfer_fallback_frontier_repair_successor_dispatch_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRepairSuccessorDispatchMissingRawCount),
@@ -59611,7 +59615,9 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
 function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {
     param(
         [object[]]$Events = @(),
-        [AllowNull()][System.Collections.Generic.HashSet[object]]$OwnedCandidateEvents = $null)
+        [AllowNull()][System.Collections.Generic.HashSet[object]]$OwnedCandidateEvents = $null,
+        [AllowNull()]$SnapshotEvidence = $null,
+        [AllowNull()][object[]]$SupersessionEvents = $null)
 
     [object[]]$ordered = @($Events | Where-Object { $null -ne $_ } |
             Sort-Object Sequence, LineNumber)
@@ -59839,6 +59845,7 @@ function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {
                 Key = $key
                 Event = $deferred
                 Progress = $progressEvent
+                Grant = $grant[0]
                 Writer = $writer
                 Session = $session
                 Transfer = $transfer
@@ -60051,21 +60058,34 @@ function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {
             $recovered = $poison.Count -eq 0 -and $mutation.Count -eq 0
         }
 
+        $supersession = $null
+        $failureReason = ''
+        if (-not $recovered -and $null -ne $SnapshotEvidence -and -not ($incident.PSObject.Properties.Name -contains 'HighestRegressed')) {
+            $sourceEvents = if ($null -ne $SupersessionEvents) { $SupersessionEvents } else { $Events }
+            $supersession = Get-FileTransferRecentProgressSupersessionClosure -Events $sourceEvents -Episode $incident `
+                -SnapshotEvidence $SnapshotEvidence -FailureReason ([ref]$failureReason)
+        }
         $record = [pscustomobject]@{
             Event = $candidate
             Reason = 'post_tuna_fallback_frontier_recent_progress_grace_expired_without_exact_stall_recheck'
             Variant = 'settled_frontier_progress_successor_not_rechecked_after_recent_progress_grace'
             Recovered = $recovered
+            RecoveryEvent = $recoveryEvent
+            ObligationDisposition = if ($recovered) { 'Recovered' } elseif ($null -ne $supersession) { 'Superseded' } else { 'Unresolved' }
+            Supersession = $supersession
+            SupersessionFailureReason = $failureReason
             RawEvents = $rawEvents
         }
         $records.Add($record) | Out-Null
-        if (-not $recovered) { $unresolved.Add($record) | Out-Null }
+        if (-not $recovered -and $null -eq $supersession) { $unresolved.Add($record) | Out-Null }
     }
 
     return [pscustomobject]@{
         RawCount = $rawCount
         DistinctCount = $records.Count
-        RecoveredCount = $records.Count - $unresolved.Count
+        AccountingVersion = 2
+        RecoveredCount = @($records | Where-Object Recovered).Count
+        SupersededCount = @($records | Where-Object ObligationDisposition -CEQ 'Superseded').Count
         UnresolvedCount = $unresolved.Count
         Verdict = if ($unresolved.Count -gt 0) { 'fail' } else { 'pass' }
         CandidateRecords = @($records.ToArray())
@@ -65103,7 +65123,7 @@ function Get-FileTransferRecoveryFailureClassification {
             -Events $events -SnapshotEvidence $coordinatorSnapshotEvaluation
     $fileTransferFallbackFrontierRecentProgressGraceRecheckProof =
         Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation `
-            -Events $events
+            -Events $events -SnapshotEvidence $coordinatorSnapshotEvaluation
     $fileTransferFallbackFrontierRepairSuccessorDispatchMissingProof =
         Get-FileTransferFallbackFrontierRepairSuccessorDispatchMissingCorrelation `
             -Events $events
@@ -70940,6 +70960,8 @@ function Get-FileTransferRecoveryFailureClassification {
         FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RawCount
         FileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.DistinctCount
         FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.RecoveredCount
+        FileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.AccountingVersion
+        FileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.SupersededCount
         FileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.UnresolvedCount
         FileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = $fileTransferFallbackFrontierRecentProgressGraceRecheckProof.Verdict
         FileTransferFallbackFrontierRepairSuccessorDispatchMissingRawCount = $fileTransferFallbackFrontierRepairSuccessorDispatchMissingProof.RawCount
@@ -72067,6 +72089,8 @@ function New-FileTransferInvariantLedgerObject {
         filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount
         filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_distinct_count = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount
         filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_recovered_count = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount
+        filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_version = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion
+        filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_superseded_count = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount
         filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_unresolved_count = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount
         filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_verdict = [string]$recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict
         filetransfer_fallback_frontier_repair_successor_dispatch_missing_raw_count = [string]$recoveryClassification.FileTransferFallbackFrontierRepairSuccessorDispatchMissingRawCount
@@ -72958,6 +72982,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_distinct_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_recovered_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_version={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_superseded_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_unresolved_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_verdict={0}" -f $recoveryClassification.FileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict),
         ("filetransfer_fallback_frontier_repair_successor_dispatch_missing_raw_count={0}" -f $recoveryClassification.FileTransferFallbackFrontierRepairSuccessorDispatchMissingRawCount),

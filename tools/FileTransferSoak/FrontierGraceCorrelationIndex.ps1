@@ -173,6 +173,7 @@ function New-FileTransferFallbackFrontierGraceCorrelationIndex {
     }
     return [pscustomobject]@{
         RelevantEvents = @($relevant | Sort-Object Sequence, LineNumber)
+        SupersessionEvents = $Events
         EventsByTransfer = $eventsByTransfer
         EventsByTransferAndName = $eventsByTransferAndName
         EventsByTransferAndFrontier = $eventsByTransferAndFrontier
@@ -678,7 +679,7 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
         }, {
             [int64]$_.Event.LineNumber
         })
-    [object[]]$superseded = @($records | Where-Object { $Kind -ceq 'stall' -and
+    [object[]]$superseded = @($records | Where-Object {
         $null -ne $_.PSObject.Properties['ObligationDisposition'] -and $_.ObligationDisposition -ceq 'Superseded' -and -not $_.Recovered })
     [object[]]$unresolved = @($records | Where-Object { -not [bool]$_.Recovered -and $_ -notin $superseded })
     $result = [pscustomobject]@{
@@ -692,10 +693,8 @@ function Merge-FileTransferFallbackFrontierGraceCorrelationResults {
         IndexBuildVisitCount = [int64]$Index.IndexBuildVisitCount
         BoundedLookupVisitCount = [int64]$Index.BoundedLookupVisitCount - $LookupStart
     }
-    if ($Kind -ceq 'stall') {
-        $result | Add-Member -NotePropertyName AccountingVersion -NotePropertyValue 2
-        $result | Add-Member -NotePropertyName SupersededCount -NotePropertyValue $superseded.Count
-    }
+    $result | Add-Member -NotePropertyName AccountingVersion -NotePropertyValue 2
+    $result | Add-Member -NotePropertyName SupersededCount -NotePropertyValue $superseded.Count
     return $result
 }
 
@@ -804,7 +803,10 @@ function Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation {
                 $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates -SnapshotEvidence $snapshotInput -SupersessionEvents $Index.RelevantEvents)) | Out-Null
             }
             else {
-                $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates)) | Out-Null
+                $snapshotInput = if ($null -ne $SnapshotEvidence) { $SnapshotEvidence }
+                    else { $Index.__CheckpointRepairContinuitySnapshotEvidence }
+                $results.Add((& $legacy -Events $slice -OwnedCandidateEvents $ownedCandidates `
+                    -SnapshotEvidence $snapshotInput -SupersessionEvents $Index.SupersessionEvents)) | Out-Null
             }
         }
     }
@@ -829,8 +831,9 @@ function Get-FileTransferFallbackFrontierStallGraceRecheckCorrelation {
 function Get-FileTransferFallbackFrontierRecentProgressGraceRecheckCorrelation {
     param(
         [object[]]$Events = @(),
-        [AllowNull()]$Index = $null)
+        [AllowNull()]$Index = $null,
+        [AllowNull()]$SnapshotEvidence = $null)
 
     return Invoke-FileTransferFallbackFrontierGraceIndexedCorrelation `
-        -Kind 'recent_progress' -Events $Events -Index $Index
+        -Kind 'recent_progress' -Events $Events -Index $Index -SnapshotEvidence $SnapshotEvidence
 }

@@ -1892,6 +1892,9 @@ function New-RouteAcceptanceRunResult {
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = 0
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = 0
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount = 0
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = 0
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = 'unavailable'
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount = 0
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount = 0
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = 'none'
         fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = 0
@@ -3761,6 +3764,11 @@ function Assert-Phase4OperatorVerdict {
     }
     $Result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = 'unavailable'
     $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'none'
+    foreach ($name in @('AccountingVersion','RawCount','DistinctCount','RecoveredCount','SupersededCount','UnresolvedCount')) {
+        $Result.('fileTransferFallbackFrontierRecentProgressGraceRecheckMissing' + $name) = 0
+    }
+    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = 'unavailable'
+    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = 'none'
     if (-not (Assert-RouteAcceptanceFileExists -Result $Result -RelativePath 'filetransfer-operator-verdict.txt')) {
         return
     }
@@ -4071,11 +4079,37 @@ function Assert-Phase4OperatorVerdict {
         $Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'fail'
         Add-RouteAcceptanceFailure -Result $Result -Message ('invalid stall-grace accounting: ' + $_.Exception.Message)
     }
-    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count' -DefaultValue '0')
-    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_distinct_count' -DefaultValue '0')
-    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_recovered_count' -DefaultValue '0')
-    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_unresolved_count' -DefaultValue '0')
-    $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_verdict' -DefaultValue 'none'
+    try {
+        $envelopeHardFailureCount = 0
+        if ([string]::IsNullOrWhiteSpace([string]$operator['verdict']) -or
+            [string]$operator['hard_failure_count'] -cnotmatch '^[0-9]+$' -or
+            -not [int]::TryParse([string]$operator['hard_failure_count'], [ref]$envelopeHardFailureCount)) {
+            throw 'recent_progress_grace_accounting_report_envelope_invalid'
+        }
+        $recentAccountingPrefix = 'filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_'
+        $hasRecentAccounting = @('accounting_version','raw_count','distinct_count','recovered_count','superseded_count','unresolved_count','verdict' |
+            Where-Object { $operator.Contains($recentAccountingPrefix + $_) }).Count -gt 0
+        if ($hasRecentAccounting) {
+            if ([string]$operator['retained_analysis_completed'] -eq '0' -or [string]$operator['semantic_failure_domain'] -eq 'unavailable') {
+                throw 'recent_progress_grace_accounting_unavailable_report_contradiction'
+            }
+            $recentAccounting = ConvertFrom-FileTransferRecentProgressGraceAccountingReport -Report $operator
+            $recentVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name ($recentAccountingPrefix + 'verdict') -DefaultValue 'none'
+            if ($recentAccounting.UnresolvedCount -gt 0 -and $recentVerdict -ne 'fail') {
+                throw 'recent_progress_grace_accounting_unresolved_verdict_mismatch'
+            }
+            foreach ($name in @('AccountingVersion','RawCount','DistinctCount','RecoveredCount','SupersededCount','UnresolvedCount')) {
+                $Result.('fileTransferFallbackFrontierRecentProgressGraceRecheckMissing' + $name) = $recentAccounting.$name
+            }
+            $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = $recentVerdict
+            $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = 'valid'
+        }
+    }
+    catch {
+        $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = 'invalid'
+        $Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = 'fail'
+        Add-RouteAcceptanceFailure -Result $Result -Message ('invalid recent-progress-grace accounting: ' + $_.Exception.Message)
+    }
     $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_raw_count' -DefaultValue '0')
     $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_distinct_count' -DefaultValue '0')
     $Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'filetransfer_checkpoint_pending_frontier_request_not_rechecked_after_checkpoint_acceptance_recovered_count' -DefaultValue '0')
@@ -5500,7 +5534,10 @@ function Write-RouteAcceptanceFakePhase4Run {
     if ($terminalBeforeFallbackSwitchOff -and $Scenario.Name -eq 'regular-v4-live-activation-off-on-off-256mb') {
         $operatorPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
         $stallAccountingLines = @(if (Test-Path -LiteralPath $operatorPath -PathType Leaf) {
-            Get-Content -LiteralPath $operatorPath | Where-Object { $_.StartsWith('filetransfer_fallback_frontier_stall_grace_recheck_missing_', [StringComparison]::Ordinal) }
+            Get-Content -LiteralPath $operatorPath | Where-Object {
+                $_.StartsWith('filetransfer_fallback_frontier_stall_grace_recheck_missing_', [StringComparison]::Ordinal) -or
+                $_.StartsWith('filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_', [StringComparison]::Ordinal)
+            }
         })
         $routeSummaryPath = Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt'
         if (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) {
@@ -5527,7 +5564,10 @@ function Write-RouteAcceptanceFakePhase4Run {
         (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'COMBINED_ROUTE_ANALYSIS_CONTAMINATED')) {
         $operatorPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
         $stallAccountingLines = @(if (Test-Path -LiteralPath $operatorPath -PathType Leaf) {
-            Get-Content -LiteralPath $operatorPath | Where-Object { $_.StartsWith('filetransfer_fallback_frontier_stall_grace_recheck_missing_', [StringComparison]::Ordinal) }
+            Get-Content -LiteralPath $operatorPath | Where-Object {
+                $_.StartsWith('filetransfer_fallback_frontier_stall_grace_recheck_missing_', [StringComparison]::Ordinal) -or
+                $_.StartsWith('filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_', [StringComparison]::Ordinal)
+            }
         })
         @(
             'route_consistency_verdict=fail',
@@ -11085,6 +11125,15 @@ function New-RouteAcceptanceSummaryRunDto {
         $stallAvailability = 'invalid'
     }
     $stallAccountingValid = $stallAvailability -ceq 'valid'
+    $recentAvailabilityProperty = $Result.PSObject.Properties['fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability']
+    $recentVersionProperty = $Result.PSObject.Properties['fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion']
+    $recentAvailability = if ($null -eq $recentAvailabilityProperty) { 'unavailable' } else { [string]$recentAvailabilityProperty.Value }
+    if ($recentAvailability -cnotin @('valid','invalid','unavailable') -or
+        ($recentAvailability -ceq 'valid' -and ($null -eq $recentVersionProperty -or [string]$recentVersionProperty.Value -cnotin @('1','2')))) {
+        $allResultFailureLines += 'invalid recent-progress-grace accounting: unsupported availability or policy version in result'
+        $recentAvailability = 'invalid'
+    }
+    $recentAccountingValid = $recentAvailability -ceq 'valid'
     $resultFailureLines = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $allResultFailureLines -Limit 128)
     $efficiencyFailureLine = @($allResultFailureLines | Where-Object {
         $_.IndexOf('efficiency_verdict=fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
@@ -11451,11 +11500,14 @@ function New-RouteAcceptanceSummaryRunDto {
         fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount } else { 0 })
         fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = $(if ($stallAccountingValid) { [int]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount } else { 0 })
         fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $(if ($stallAccountingValid) { [string]$Result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict } elseif ($stallAvailability -eq 'invalid') { 'fail' } else { 'none' })
-        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount
-        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount
-        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount
-        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount = [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount
-        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = [string]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = $(if ($recentAccountingValid) { [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount } else { 0 })
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = $(if ($recentAccountingValid) { [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount } else { 0 })
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount = $(if ($recentAccountingValid) { [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRecoveredCount } else { 0 })
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = $(if ($recentAccountingValid) { [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion } else { 0 })
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = $recentAvailability
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount = $(if ($recentAccountingValid) { [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount } else { 0 })
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount = $(if ($recentAccountingValid) { [int]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingUnresolvedCount } else { 0 })
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = $(if ($recentAccountingValid) { [string]$Result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict } elseif ($recentAvailability -eq 'invalid') { 'fail' } else { 'none' })
         fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRawCount
         fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceDistinctCount
         fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount = [int]$Result.fileTransferCheckpointPendingFrontierRequestNotRecheckedAfterCheckpointAcceptanceRecoveredCount
@@ -12001,7 +12053,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = 0
+    $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = 0
+    $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount = 0
     $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = 0
     $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = 0
     $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount = 0
@@ -12254,6 +12308,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount += [int]$runDto.fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount
         $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount += [int]$runDto.fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount
         $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount += [int]$runDto.fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount
+        $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount += [int]$runDto.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount
         $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount += [int]$runDto.fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount
         $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount += [int]$runDto.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount
         $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount += [int]$runDto.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingDistinctCount
@@ -12662,6 +12717,29 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = 'fail'
     }
 
+    $recentValidRuns = @($runDtos | Where-Object { $_.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability -eq 'valid' })
+    $recentUnavailableRuns = @($runDtos | Where-Object { $_.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability -eq 'unavailable' })
+    $recentInvalidRuns = @($runDtos | Where-Object { $_.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability -eq 'invalid' })
+    $recentAccountingVersions = @($recentValidRuns | ForEach-Object { [int]$_.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion } | Select-Object -Unique)
+    $recentAccountingAvailability = if ($recentInvalidRuns.Count -gt 0 -or $recentAccountingVersions.Count -gt 1) { 'invalid' }
+        elseif ($recentValidRuns.Count -eq 0) { 'unavailable' }
+        elseif ($recentUnavailableRuns.Count -gt 0 -or $runDtos.Count -ne $ExpectedRunCount) { 'partial' }
+        else { 'complete' }
+    $recentAccountingCounterScope = if ($recentAccountingAvailability -eq 'complete') { 'complete' }
+        elseif ($recentValidRuns.Count -gt 0) { 'partial' } else { 'none' }
+    $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = if ($recentAccountingAvailability -eq 'complete') { $recentAccountingVersions[0] } else { 0 }
+    foreach ($result in @($recentUnavailableRuns) + @($recentInvalidRuns)) {
+        $failureLines += ("{0}: {1} recent-progress-grace accounting; per-run accounting excluded from subtotal" -f $result.name, $result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability)
+    }
+    if ($recentAccountingVersions.Count -gt 1) {
+        $failureLines += 'invalid recent-progress-grace accounting aggregation: mixed or unsupported policy versions; per-run results retained'
+    }
+    if ($recentAccountingAvailability -ne 'complete' -and ($ExpectedRunCount -gt 0 -or $runDtos.Count -gt 0)) {
+        $failureLines += ("incomplete recent-progress-grace accounting aggregation: availability={0}; valid={1}; unavailable={2}; invalid={3}; expected={4}; observed={5}" -f
+            $recentAccountingAvailability, $recentValidRuns.Count, $recentUnavailableRuns.Count, $recentInvalidRuns.Count, $ExpectedRunCount, $runDtos.Count)
+        $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingVerdict = 'fail'
+    }
+
     if ($AcceptancePhase -eq 'phase5' -and $script:RouteAcceptanceExecutionMode -ne 'fake') {
         foreach ($result in @($runDtos | Where-Object { [string]$_.acceptanceFailureClass -eq 'incomplete_proof' })) {
             $failureLines += ("{0}: incomplete runtime proof; manifest={1}; provenance={2}; cursor={3}; transfer={4}" -f
@@ -12996,12 +13074,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_version={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_availability={0}" -f $stallAccountingAvailability),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_availability={0}" -f $recentAccountingAvailability),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_counter_scope={0}" -f $stallAccountingCounterScope),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_counter_scope={0}" -f $recentAccountingCounterScope),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_valid_run_count={0}" -f $stallValidRuns.Count),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_valid_run_count={0}" -f $recentValidRuns.Count),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_unavailable_run_count={0}" -f $stallUnavailableRuns.Count),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_unavailable_run_count={0}" -f $recentUnavailableRuns.Count),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_invalid_run_count={0}" -f $stallInvalidRuns.Count),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_invalid_run_count={0}" -f $recentInvalidRuns.Count),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount),
+        ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_superseded_count={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount),
         ("filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={0}" -f $fileTransferFallbackFrontierStallGraceRecheckMissingVerdict),
         ("filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={0}" -f $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount),
@@ -13471,8 +13556,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_distinct_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_recovered_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_version={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion)
+        $textLines += ("{0}.filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_version={1}" -f $prefix, $result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_accounting_availability={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability)
+        $textLines += ("{0}.filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_accounting_availability={1}" -f $prefix, $result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_superseded_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount)
+        $textLines += ("{0}.filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_superseded_count={1}" -f $prefix, $result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_unresolved_count={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount)
         $textLines += ("{0}.filetransfer_fallback_frontier_stall_grace_recheck_missing_verdict={1}" -f $prefix, $result.fileTransferFallbackFrontierStallGraceRecheckMissingVerdict)
         $textLines += ("{0}.filetransfer_fallback_frontier_recent_progress_grace_recheck_missing_raw_count={1}" -f $prefix, $result.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount)
@@ -13926,12 +14014,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount = $fileTransferFallbackFrontierStallGraceRecheckMissingDistinctCount
         fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount = $fileTransferFallbackFrontierStallGraceRecheckMissingRecoveredCount
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion = $fileTransferFallbackFrontierStallGraceRecheckMissingAccountingVersion
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingAvailability = $stallAccountingAvailability
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = $recentAccountingAvailability
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingCounterScope = $stallAccountingCounterScope
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingCounterScope = $recentAccountingCounterScope
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingValidRunCount = $stallValidRuns.Count
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingValidRunCount = $recentValidRuns.Count
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingUnavailableRunCount = $stallUnavailableRuns.Count
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingUnavailableRunCount = $recentUnavailableRuns.Count
         fileTransferFallbackFrontierStallGraceRecheckMissingAccountingInvalidRunCount = $stallInvalidRuns.Count
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingInvalidRunCount = $recentInvalidRuns.Count
         fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount = $fileTransferFallbackFrontierStallGraceRecheckMissingSupersededCount
+        fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingSupersededCount
         fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount = $fileTransferFallbackFrontierStallGraceRecheckMissingUnresolvedCount
         fileTransferFallbackFrontierStallGraceRecheckMissingVerdict = $fileTransferFallbackFrontierStallGraceRecheckMissingVerdict
         fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount = $fileTransferFallbackFrontierRecentProgressGraceRecheckMissingRawCount

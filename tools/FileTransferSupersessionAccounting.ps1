@@ -6,20 +6,48 @@ function Get-FileTransferStallGraceSupersessionClosure {
     param([hashtable]$Index,$Candidate,[ref]$FailureReason,[object[]]$EvidenceEvents = $null)
     try {
         $snapshot=$Index['__CheckpointRepairContinuitySnapshotEvidence']
-        if ($null -eq $snapshot -or $snapshot.Mode -cne 'SnapshotV1Authoritative' -or
-            $snapshot.ArtifactEvidenceVerdict -cne 'pass' -or -not $snapshot.StreamComplete -or
-            $snapshot.CatalogVersion -cne $script:FileTransferCoordinatorActivationRetryCatalogVersion -or
-            $snapshot.CatalogHash -cne $script:FileTransferCoordinatorActivationRetryCatalogHash) { throw 'authoritative_profile_required' }
-        foreach ($family in @('route_runtime','route_transition','runtime_unlock_retry_lifecycle','fallback_tail_yield','responder_probe_handoff')) {
-            if ($family -cnotin $snapshot.AuthoritativeFamilies) { throw 'authoritative_family_missing' }
+        # Preserve the existing stall admission; the shared target proof
+        # below cannot manufacture a settled repair for a recent-progress episode.
+        if ($null -eq $snapshot -or $snapshot.CatalogVersion -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion,
+                $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)) {
+            if ($null -ne $FailureReason) { $FailureReason.Value='authoritative_profile_required' }
+            return $null
         }
         $diagnostic=Get-FileTransferStallGraceUnresolvedDiagnostic $Index $Candidate
-        if ($null -eq $diagnostic -or $diagnostic.Kind -cne 'SourceSuperseded') { throw 'local_source_supersession_unproven' }
-        $boundaries=@($snapshot.Boundaries)
+        if ($null -eq $diagnostic -or $diagnostic.Kind -cne 'SourceSuperseded') {
+            if ($null -ne $FailureReason) { $FailureReason.Value='local_source_supersession_unproven' }
+            return $null
+        }
         if ($null -eq $EvidenceEvents) {
             $EvidenceEvents=@(foreach ($key in $Index.Keys) { if (-not $key.StartsWith('__')) { $Index[$key] } })
         }
-        $localCommit=@($boundaries | Where-Object boundaryId -CEQ $diagnostic.SupersedingTransitionId)
+        $proof=Get-FileTransferCoordinatorTunaSupersessionProof $snapshot $diagnostic.SupersedingTransitionId $FailureReason $EvidenceEvents
+        if ($null -eq $proof) { return $null }
+        return [pscustomobject]@{Kind='SourceSuperseded';ObligationDisposition='Superseded';
+            RepairAuthorityId=$diagnostic.RepairAuthorityId;RepairGeneration=$diagnostic.RepairGeneration;
+            RepairOutcome='SettledStalled';SuccessorOutcome='StaleRejected';PairKey=$proof.PairKey;
+            SourceCommitBoundaryId=$diagnostic.SupersedingTransitionId;RetirementWriterSequence=$diagnostic.RetirementWriterSequence;
+            LocalTarget=$proof.LocalTarget;PeerTarget=$proof.PeerTarget;RetryAuthorityId=$proof.RetryAuthorityId;
+            InstallReceiptFingerprint=$proof.InstallReceiptFingerprint}
+    } catch {
+        if ($null -ne $FailureReason) { $FailureReason.Value=$_.Exception.Message }
+        return $null
+    }
+}
+
+function Get-FileTransferCoordinatorTunaSupersessionProof {
+    param($Snapshot,[string]$LocalCommitId,[ref]$FailureReason,[object[]]$EvidenceEvents)
+    try {
+        if ($null -eq $snapshot -or $snapshot.Mode -cne 'SnapshotV1Authoritative' -or
+            $snapshot.ArtifactEvidenceVerdict -cne 'pass' -or -not $snapshot.StreamComplete -or
+            $snapshot.CatalogVersion -cnotin @($script:FileTransferCoordinatorActivationRetryCatalogVersion,
+                $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion) -or
+            $snapshot.CatalogHash -cne (Get-FileTransferCoordinatorEvidenceCatalog -ProfileVersion $snapshot.CatalogVersion).Hash) { throw 'authoritative_profile_required' }
+        foreach ($family in @('route_runtime','route_transition','runtime_unlock_retry_lifecycle','fallback_tail_yield','responder_probe_handoff')) {
+            if ($family -cnotin $snapshot.AuthoritativeFamilies) { throw 'authoritative_family_missing' }
+        }
+        $boundaries=@($snapshot.Boundaries)
+        $localCommit=@($boundaries | Where-Object boundaryId -CEQ $LocalCommitId)
         if ($localCommit.Count -ne 1) { throw 'local_commit_ambiguous' }
         $localCommit=$localCommit[0]
         function SameStream($a,$b) {
@@ -184,10 +212,7 @@ function Get-FileTransferStallGraceSupersessionClosure {
         }
         $local=TargetProof $localCommit $localPair $localPrepared[0].Boundary
         $peer=TargetProof $peerCommit[0] $peerPair $initiator.PreparedBoundary
-        return [pscustomobject]@{Kind='SourceSuperseded';ObligationDisposition='Superseded';
-            RepairAuthorityId=$diagnostic.RepairAuthorityId;RepairGeneration=$diagnostic.RepairGeneration;
-            RepairOutcome='SettledStalled';SuccessorOutcome='StaleRejected';PairKey=$localPair.PairKey;
-            SourceCommitBoundaryId=$diagnostic.SupersedingTransitionId;RetirementWriterSequence=$diagnostic.RetirementWriterSequence;
+        return [pscustomobject]@{PairKey=$localPair.PairKey;
             LocalTarget=$local;PeerTarget=$peer;RetryAuthorityId=$retry.authorityId;InstallReceiptFingerprint=$retry.receiptFingerprint}
     } catch {
         if ($null -ne $FailureReason) { $FailureReason.Value=$_.Exception.Message }

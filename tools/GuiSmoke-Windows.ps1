@@ -16041,7 +16041,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure {
         param(
-            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+            [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+            [AllowNull()]$SnapshotEvidence = $null
         )
 
         $records = [System.Collections.Generic.List[object]]::new()
@@ -16072,6 +16073,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             }
             $records.Add([pscustomobject]@{
                     Event = $eventName
+                    EventName = $eventName
+                    LineNumber = $visits
                     Sequence = $sequence
                     Timestamp = $timestamp
                     Fields = $fields
@@ -16267,7 +16270,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             if (-not $inProgressGrace -and -not $episodes.ContainsKey($key)) { continue }
             if (-not $episodes.ContainsKey($key)) {
                 $episodes[$key] = [pscustomobject]@{
-                    Event = $deferred; Progress = $predecessor[0]; Writer = $writer; Session = $session
+                    Event = $deferred; Progress = $predecessor[0]; Grant = $grant[0]; Writer = $writer; Session = $session
                     Transfer = $transfer; Frontier = $frontier; Highest = $highest; Due = $due; DueTicks = $dueTicks
                     RequestId = $requestId; CorrelationId = $correlationId
                     DataSessionIdentity = $dataSessionIdentity; DataSessionGeneration = $dataSessionGeneration
@@ -16403,10 +16406,23 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                 $recovered = $null -ne (Get-FileTransferRecentProgressGraceTunaHandoffClosure -Events $records.ToArray() -Episode $episode)
             }
             if ($episode.PSObject.Properties.Name -contains 'HighestRegressed') { $recovered = $false }
+            if (-not $recovered -and $null -ne $SnapshotEvidence -and
+                -not ($episode.PSObject.Properties.Name -contains 'HighestRegressed')) {
+                $why = ''
+                $supersession = Get-FileTransferRecentProgressSupersessionClosure -Events $records.ToArray() -Episode $episode `
+                    -SnapshotEvidence $SnapshotEvidence -FailureReason ([ref]$why)
+                if ($null -ne $supersession) {
+                    $episode | Add-Member -NotePropertyName ObligationDisposition -NotePropertyValue 'Superseded'
+                    continue
+                }
+            }
             if (-not $recovered) { $unresolved.Add($episode) }
         }
         [object[]]$first = @($unresolved | Sort-Object { $_.Event.Sequence } | Select-Object -First 1)
         return [pscustomobject]@{
+            AccountingVersion = 2
+            SupersededCount = @($episodes.Values | Where-Object { $null -ne $_.PSObject.Properties['ObligationDisposition'] -and
+                    $_.ObligationDisposition -ceq 'Superseded' }).Count
             Unresolved = $first.Count -eq 1
             FirstSequence = if ($first.Count -eq 1) { [long]$first[0].Event.Sequence } else { [long]::MaxValue }
             ParsedRecords = $visits
@@ -19753,6 +19769,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             'filetransfer_receive_recovery_operation_invalidated',
             'filetransfer_receive_recovery_operation_issued',
             'filetransfer_route_transition_committed', 'filetransfer_route_transition_prepared',
+            'filetransfer_route_transition_disposition_applied',
             'filetransfer_route_selected', 'filetransfer_live_route_epoch_recovered',
             'filetransfer_route_hint_authorized_publication_accepted',
             'filetransfer_runtime_started', 'filetransfer_runtime_terminalized',
@@ -22703,7 +22720,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             -SnapshotEvidence $coordinatorSnapshotEvaluation
     $fallbackFrontierRecentProgressGraceRecheckFastPath =
         Get-TunaGuiFallbackFrontierRecentProgressGraceRecheckFailure `
-            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())
+            -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray()) `
+            -SnapshotEvidence $coordinatorSnapshotEvaluation
     $fallbackFrontierRepairSuccessorDispatchMissingFastPath =
         Get-TunaGuiFallbackFrontierRepairSuccessorDispatchMissingFailure `
             -Lines ([string[]]$earlyPredicateLines.Checkpoint.ToArray())

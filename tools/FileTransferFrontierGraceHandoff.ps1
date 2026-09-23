@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'FileTransferPublicationEvidence.ps1')
 . (Join-Path $PSScriptRoot 'FileTransferSupersessionAccounting.ps1')
+. (Join-Path $PSScriptRoot 'FileTransferRecentProgressSupersession.ps1')
 
 # Shared by retained indexing and full-log GUI closure checks.
 function Get-FileTransferFallbackFrontierGraceCorrelationEventNames {
@@ -1717,7 +1718,8 @@ function Get-FileTransferStallGraceUnresolvedDiagnostic {
         }
     }
     $cache = $Index['__StallGraceDiagnosticRouteIndex']
-    $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -cin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion, $script:FileTransferCoordinatorActivationRetryCatalogVersion)
+    $exactRepairOwner = (P $cache.Snapshot 'CatalogVersion') -cin @($script:FileTransferCoordinatorRepairOwnerCatalogVersion,
+        $script:FileTransferCoordinatorActivationRetryCatalogVersion, $script:FileTransferCoordinatorReceiverPreAdmissionCatalogVersion)
     $sourcePublication = $null
     function BoundRepair($Event) {
         $binding = Resolve-FileTransferRepairOwnerEvidence $cache.Snapshot $Event

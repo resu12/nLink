@@ -101,6 +101,10 @@ if ($Lane -eq 'Imports') {
 elseif ($Lane -eq 'Summary') {
     function New-ManualRow([string]$Name, [string]$Kind) {
         $row = New-Result $Name
+        # This lane mutates only stall accounting; the independent recent
+        # family has a complete empty report, not an unavailable result.
+        $row.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingVersion = 2
+        $row.fileTransferFallbackFrontierRecentProgressGraceRecheckMissingAccountingAvailability = 'valid'
         if ($Kind -eq 'fatal') { return $row }
         $state = if ($Kind -in @('v1','v2','unsupported','missing-version','nonnumeric-version')) { 'valid' } elseif ($Kind -eq 'unknown') { 'unknown' } else { $Kind }
         $row | Add-Member -NotePropertyName ($f+'AccountingAvailability') -NotePropertyValue $state -Force
